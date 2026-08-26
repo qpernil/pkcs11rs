@@ -315,10 +315,6 @@ pub(crate) fn shared_rsa_pss_parameters(
     })
 }
 
-pub(crate) fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
-    software_key_core::digest::mgf1(digest, seed, length).map_err(|_| CKR_DATA_LEN_RANGE.into())
-}
-
 pub(crate) fn encode_rsa_pss(
     digest: &[u8],
     modulus_size: usize,

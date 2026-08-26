@@ -431,7 +431,7 @@ impl SoftwareTokenStore {
         role: PinRole,
         wrapped: &WrappedMasterKey,
     ) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
-        let wrapping_key = derive_wrapping_key(pin, &wrapped.salt);
+        let wrapping_key = derive_wrapping_key(pin, &wrapped.salt)?;
         let aad = header_aad(&self.name, role, wrapped.generation);
         let plaintext = match decrypt(
             wrapping_key.as_ref(),
@@ -805,7 +805,7 @@ fn sync_directory(_path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn derive_wrapping_key(pin: &[u8], salt: &[u8; SALT_LENGTH]) -> Zeroizing<[u8; 32]> {
+fn derive_wrapping_key(pin: &[u8], salt: &[u8; SALT_LENGTH]) -> Result<Zeroizing<[u8; 32]>, Error> {
     let mut key = Zeroizing::new([0u8; 32]);
     let derived = software_key_core::digest::pbkdf2_hmac(
         software_key_core::digest::HashAlgorithm::Sha256,
@@ -814,9 +814,9 @@ fn derive_wrapping_key(pin: &[u8], salt: &[u8; SALT_LENGTH]) -> Zeroizing<[u8; 3
         KDF_ITERATIONS,
         key.len(),
     )
-    .expect("HMAC accepts every password length");
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     key.copy_from_slice(&derived);
-    key
+    Ok(key)
 }
 
 fn encrypt(
@@ -890,7 +890,7 @@ fn wrap_master_key(
     let mut nonce = [0u8; NONCE_LENGTH];
     getrandom::fill(&mut salt).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     getrandom::fill(&mut nonce).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let wrapping_key = derive_wrapping_key(pin, &salt);
+    let wrapping_key = derive_wrapping_key(pin, &salt)?;
     let wrapped = encrypt(
         wrapping_key.as_ref(),
         &nonce,

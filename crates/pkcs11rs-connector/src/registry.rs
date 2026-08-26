@@ -62,7 +62,7 @@ pub struct TransportError {
 }
 
 impl TransportError {
-    fn device(message: impl Into<String>) -> Self {
+    pub(crate) fn device(message: impl Into<String>) -> Self {
         Self {
             kind: TransportErrorKind::DeviceTransport,
             message: message.into(),
@@ -108,7 +108,7 @@ impl From<pkcs11rs_local_hardware::Error> for TransportError {
     }
 }
 
-trait CommandTransport: Send {
+pub(crate) trait CommandTransport: Send {
     fn command<'a>(
         &'a mut self,
         request: &'a [u8],
@@ -413,6 +413,36 @@ impl DeviceRegistry {
 
     async fn register_unclaimed(&self, id: UsbDeviceId, metadata: DeviceMetadata) {
         self.register(id, DeviceRecord::Unclaimed(metadata)).await;
+    }
+
+    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    pub(crate) async fn register_virtual(
+        &self,
+        serial: String,
+        version: [u8; 3],
+        transport: Box<dyn CommandTransport>,
+    ) -> Result<(), TransportError> {
+        let entry = Arc::new(DeviceEntry {
+            id: None,
+            metadata: DeviceMetadata {
+                serial: serial.clone(),
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiHSM"),
+                usb_version: format!("{}.{}", version[0], version[1]),
+            },
+            transport: Mutex::new(transport),
+        });
+        let mut state = self.state.write().await;
+        if state.records.contains_key(&serial) {
+            return Err(TransportError::device(format!(
+                "duplicate YubiHSM serial {serial}"
+            )));
+        }
+        if state.legacy_serial.is_none() {
+            state.legacy_serial = Some(serial.clone());
+        }
+        state.records.insert(serial, DeviceRecord::Available(entry));
+        Ok(())
     }
 
     fn candidate_metadata(candidate: &YubiHsmUsbCandidate, serial: String) -> DeviceMetadata {

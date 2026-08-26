@@ -2,14 +2,17 @@ mod api;
 mod http_timeout;
 mod registry;
 mod tls;
+#[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+mod virtual_hsm;
 
 use api::{AppState, router};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
 use registry::{DeviceRegistry, spawn_discovery};
 use std::{
-    future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
+    future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc,
+    time::Duration,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -18,6 +21,85 @@ type ServerFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
 const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
+const DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS: u64 = 500;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VirtualYubiHsmSpec {
+    serial: u32,
+    state_directory: PathBuf,
+}
+
+impl FromStr for VirtualYubiHsmSpec {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (serial, state_directory) = value.split_once('=').ok_or_else(|| {
+            String::from("expected SERIAL=STATE_DIRECTORY for an embedded virtual YubiHSM")
+        })?;
+        let serial = serial
+            .parse::<u32>()
+            .map_err(|_| format!("invalid embedded virtual YubiHSM serial {serial:?}"))?;
+        if state_directory.is_empty() {
+            return Err(String::from(
+                "embedded virtual YubiHSM state directory must not be empty",
+            ));
+        }
+        Ok(Self {
+            serial,
+            state_directory: PathBuf::from(state_directory),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum VirtualPersistence {
+    Batched,
+    Immediate,
+}
+
+enum VirtualHsmRuntime {
+    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    Enabled(virtual_hsm::VirtualHsmActors),
+    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    Disabled,
+}
+
+impl VirtualHsmRuntime {
+    async fn start(args: &Args, registry: &DeviceRegistry) -> Result<Self, BoxError> {
+        #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+        {
+            let actors = virtual_hsm::VirtualHsmActors::start(
+                registry,
+                &args.virtual_yubihsms,
+                args.virtual_yubihsm_persistence,
+                Duration::from_millis(args.virtual_yubihsm_batch_delay_ms),
+            )
+            .await?;
+            Ok(Self::Enabled(actors))
+        }
+
+        #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+        {
+            let _ = registry;
+            if !args.virtual_yubihsms.is_empty() {
+                tracing::warn!(
+                    instances = args.virtual_yubihsms.len(),
+                    "ignoring embedded virtual YubiHSM configuration because this connector was built without embedded support"
+                );
+            }
+            Ok(Self::Disabled)
+        }
+    }
+
+    async fn shutdown(self) -> io::Result<()> {
+        match self {
+            #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+            Self::Enabled(actors) => actors.shutdown().await,
+            #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+            Self::Disabled => Ok(()),
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -53,6 +135,22 @@ struct Args {
     /// Maximum number of HTTP requests processed concurrently across all connections.
     #[arg(long, default_value_t = 64)]
     http_max_in_flight_requests: usize,
+
+    /// Discover and serve locally attached physical YubiHSMs. Ignored without embedded support.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    hardware_discovery: bool,
+
+    /// Embedded virtual YubiHSM expressed as SERIAL=STATE_DIRECTORY. Repeat for more devices.
+    #[arg(long = "virtual-yubihsm", value_name = "SERIAL=STATE_DIRECTORY")]
+    virtual_yubihsms: Vec<VirtualYubiHsmSpec>,
+
+    /// Durability policy shared by configured embedded virtual YubiHSMs.
+    #[arg(long, value_enum, default_value = "batched")]
+    virtual_yubihsm_persistence: VirtualPersistence,
+
+    /// Maximum batching delay for embedded virtual YubiHSM persistence.
+    #[arg(long, default_value_t = DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS)]
+    virtual_yubihsm_batch_delay_ms: u64,
 }
 
 #[tokio::main]
@@ -87,7 +185,19 @@ async fn main() -> Result<(), BoxError> {
 
 async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
-    let discovery = spawn_discovery(registry.clone()).await?;
+    let virtual_hsms = VirtualHsmRuntime::start(args, &registry).await?;
+    let discovery = if hardware_discovery_enabled(args) {
+        match spawn_discovery(registry.clone()).await {
+            Ok(discovery) => Some(discovery),
+            Err(error) => {
+                virtual_hsms.shutdown().await?;
+                return Err(error);
+            }
+        }
+    } else {
+        tracing::info!("local YubiHSM hardware discovery disabled");
+        None
+    };
     let app = router(
         AppState {
             registry,
@@ -100,24 +210,49 @@ async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
     let mut server = match connector_server(args, app, handle.clone()) {
         Ok(server) => server,
         Err(error) => {
-            discovery.abort();
+            if let Some(discovery) = &discovery {
+                discovery.abort();
+            }
+            virtual_hsms.shutdown().await?;
             return Err(error);
         }
     };
-    tokio::select! {
-        result = &mut server => {
-            discovery.abort();
-            result?;
-        }
+    let server_result = tokio::select! {
+        result = &mut server => result,
         result = shutdown_signal() => {
-            result?;
-            handle.graceful_shutdown(Some(Duration::from_secs(10)));
-            let result = server.await;
-            discovery.abort();
-            result?;
+            match result {
+                Ok(()) => {
+                    handle.graceful_shutdown(Some(Duration::from_secs(10)));
+                    server.await
+                }
+                Err(error) => Err(error),
+            }
         }
+    };
+    if let Some(discovery) = discovery {
+        discovery.abort();
     }
+    let virtual_result = virtual_hsms.shutdown().await;
+    server_result?;
+    virtual_result?;
     Ok(())
+}
+
+fn hardware_discovery_enabled(args: &Args) -> bool {
+    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    {
+        args.hardware_discovery
+    }
+
+    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    {
+        if !args.hardware_discovery {
+            tracing::warn!(
+                "ignoring disabled hardware discovery because this connector was built without embedded support"
+            );
+        }
+        true
+    }
 }
 
 async fn shutdown_signal() -> io::Result<()> {
@@ -444,6 +579,10 @@ mod tests {
             legacy_serial: None,
             command_timeout_seconds: 30,
             http_max_in_flight_requests: 64,
+            hardware_discovery: true,
+            virtual_yubihsms: Vec::new(),
+            virtual_yubihsm_persistence: VirtualPersistence::Batched,
+            virtual_yubihsm_batch_delay_ms: DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS,
         };
         assert!(validate_args(&args).is_err());
     }
@@ -453,6 +592,90 @@ mod tests {
         let args = Args::try_parse_from(["pkcs11rs-connector"]).unwrap();
         assert_eq!(args.command_timeout_seconds, 60);
         assert_eq!(args.http_max_in_flight_requests, 64);
+        assert!(args.hardware_discovery);
+        assert_eq!(
+            args.virtual_yubihsm_persistence,
+            VirtualPersistence::Batched
+        );
+        assert_eq!(
+            args.virtual_yubihsm_batch_delay_ms,
+            DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS
+        );
+    }
+
+    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    #[test]
+    fn embedded_connector_can_disable_local_hardware_discovery() {
+        let args = Args::try_parse_from([
+            "pkcs11rs-connector",
+            "--hardware-discovery",
+            "false",
+            "--virtual-yubihsm",
+            "12345678=/var/lib/pkcs11rs/virtual",
+        ])
+        .unwrap();
+        assert!(!args.hardware_discovery);
+        assert!(!hardware_discovery_enabled(&args));
+        assert_eq!(args.virtual_yubihsms.len(), 1);
+    }
+
+    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[test]
+    fn physical_only_connector_ignores_disabled_hardware_discovery() {
+        let args =
+            Args::try_parse_from(["pkcs11rs-connector", "--hardware-discovery", "false"]).unwrap();
+        assert!(!args.hardware_discovery);
+        assert!(hardware_discovery_enabled(&args));
+    }
+
+    #[test]
+    fn embedded_configuration_is_accepted_independently_of_compile_time_support() {
+        let args = Args::try_parse_from([
+            "pkcs11rs-connector",
+            "--virtual-yubihsm",
+            "12345678=/var/lib/pkcs11rs/first",
+            "--virtual-yubihsm",
+            "87654321=/var/lib/pkcs11rs/second",
+            "--virtual-yubihsm-persistence",
+            "immediate",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.virtual_yubihsms,
+            vec![
+                VirtualYubiHsmSpec {
+                    serial: 12_345_678,
+                    state_directory: PathBuf::from("/var/lib/pkcs11rs/first"),
+                },
+                VirtualYubiHsmSpec {
+                    serial: 87_654_321,
+                    state_directory: PathBuf::from("/var/lib/pkcs11rs/second"),
+                },
+            ]
+        );
+        assert_eq!(
+            args.virtual_yubihsm_persistence,
+            VirtualPersistence::Immediate
+        );
+    }
+
+    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[tokio::test]
+    async fn connector_without_embedded_support_ignores_virtual_configuration() {
+        let args = Args::try_parse_from([
+            "pkcs11rs-connector",
+            "--virtual-yubihsm",
+            "12345678=relative-path-that-is-not-validated",
+            "--virtual-yubihsm",
+            "12345678=duplicate-that-is-also-ignored",
+        ])
+        .unwrap();
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        assert!(matches!(
+            VirtualHsmRuntime::start(&args, &registry).await.unwrap(),
+            VirtualHsmRuntime::Disabled
+        ));
+        assert!(registry.list().await.is_empty());
     }
 
     #[tokio::test]

@@ -47,10 +47,10 @@ const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
 
 fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
-    software_key_core::digest::HashAlgorithm::Sha256
-        .digest(data.as_ref())
-        .try_into()
-        .expect("SHA-256 output is 32 bytes")
+    let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(data.as_ref());
+    let mut output = [0; 32];
+    output.copy_from_slice(&digest);
+    output
 }
 
 fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
@@ -60,10 +60,10 @@ fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
     for part in parts {
         context.update(part);
     }
-    context
-        .finalize()
-        .try_into()
-        .expect("SHA-256 output is 32 bytes")
+    let digest = context.finalize();
+    let mut output = [0; 32];
+    output.copy_from_slice(&digest);
+    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

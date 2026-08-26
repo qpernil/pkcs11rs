@@ -330,6 +330,13 @@ fn canonical_device_spki(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(canonical)
 }
 
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(data);
+    let mut output = [0; 32];
+    output.copy_from_slice(&digest);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,10 +563,4 @@ mod tests {
     fn embedded_yubico_intermediate_is_signed_by_embedded_root() {
         crate::certificate_chain::verify_signed_by(YUBICO_INTERMEDIATE, YUBICO_ROOT).unwrap();
     }
-}
-fn sha256(data: &[u8]) -> [u8; 32] {
-    software_key_core::digest::HashAlgorithm::Sha256
-        .digest(data)
-        .try_into()
-        .expect("SHA-256 output is 32 bytes")
 }
