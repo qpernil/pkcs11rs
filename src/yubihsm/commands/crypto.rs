@@ -3,6 +3,36 @@ use crate::{CKR_DATA_LEN_RANGE, error::Error};
 use zeroize::Zeroizing;
 
 impl Command {
+    pub(crate) fn derive_ecdh_kdf(
+        key_id: u16,
+        hash: u8,
+        output_length: usize,
+        public_data: &[u8],
+        prefix_data: &[u8],
+        shared_data: &[u8],
+    ) -> Result<Self, Error> {
+        let output_length = u16::try_from(output_length).map_err(|_| CKR_DATA_LEN_RANGE)?;
+        let public_length = u16::try_from(public_data.len()).map_err(|_| CKR_DATA_LEN_RANGE)?;
+        let prefix_length = u16::try_from(prefix_data.len()).map_err(|_| CKR_DATA_LEN_RANGE)?;
+        let shared_length = u16::try_from(shared_data.len()).map_err(|_| CKR_DATA_LEN_RANGE)?;
+        let mut data = Vec::with_capacity(
+            11_usize
+                .saturating_add(public_data.len())
+                .saturating_add(prefix_data.len())
+                .saturating_add(shared_data.len()),
+        );
+        data.extend_from_slice(&key_id.to_be_bytes());
+        data.push(hash);
+        data.extend_from_slice(&output_length.to_be_bytes());
+        data.extend_from_slice(&public_length.to_be_bytes());
+        data.extend_from_slice(&prefix_length.to_be_bytes());
+        data.extend_from_slice(&shared_length.to_be_bytes());
+        data.extend_from_slice(public_data);
+        data.extend_from_slice(prefix_data);
+        data.extend_from_slice(shared_data);
+        Self::from_vec(CommandCode::DeriveEcdhKdf, data)
+    }
+
     pub(crate) fn key_data(code: CommandCode, key_id: u16, value: &[u8]) -> Result<Self, Error> {
         ensure_code(
             code,

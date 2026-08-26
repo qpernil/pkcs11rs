@@ -78,6 +78,7 @@ pub(crate) enum CommandCode {
     PutRsaWrappedKey = 0x75,
     ExportRsaWrapped = 0x76,
     ImportRsaWrapped = 0x77,
+    DeriveEcdhKdf = 0x78,
 }
 
 pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
@@ -144,6 +145,7 @@ pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::PutRsaWrappedKey,
     CommandCode::ExportRsaWrapped,
     CommandCode::ImportRsaWrapped,
+    CommandCode::DeriveEcdhKdf,
 ];
 
 impl TryFrom<u8> for CommandCode {

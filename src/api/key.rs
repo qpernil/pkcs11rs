@@ -1765,32 +1765,73 @@ fn derive_key(
     }
     if mechanism.mechanism != CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
         && mechanism.mechanism != CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
+        && mechanism.mechanism != CKM_PKCS11RS_PREFIXED_ECDH_DERIVE
     {
         return Err(CKR_MECHANISM_INVALID.into());
     }
-    if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
-    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR) }?;
-    let kdf = ecdh_kdf(parameters.kdf)?;
-    let shared_data = unsafe {
-        from_raw_parts(
-            parameters.pSharedData as *const u8,
-            parameters.ulSharedDataLen as usize,
-        )
-    }
-    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
-    if matches!(kdf, EcdhKdf::Null)
-        && (!parameters.pSharedData.is_null() || !shared_data.is_empty())
-    {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
-    let public_data = unsafe {
-        from_raw_parts(
-            parameters.pPublicData as *const u8,
-            parameters.ulPublicDataLen as usize,
-        )
-    }?;
+    let protected = mechanism.mechanism == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE;
+    let (kdf, shared_data, public_data, prefix_data) = if protected {
+        if mechanism.ulParameterLen as usize
+            != std::mem::size_of::<CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
+        {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        let parameters = unsafe {
+            _as_ref(mechanism.pParameter as *const CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS)
+        }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+        let kdf = ecdh_kdf(parameters.kdf)?;
+        if matches!(kdf, EcdhKdf::Null) {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        let shared_data = unsafe {
+            from_raw_parts(
+                parameters.pSharedData as *const u8,
+                parameters.ulSharedDataLen as usize,
+            )
+        }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+        let public_data = unsafe {
+            from_raw_parts(
+                parameters.pPublicData as *const u8,
+                parameters.ulPublicDataLen as usize,
+            )
+        }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+        let prefix_data = unsafe {
+            from_raw_parts(
+                parameters.pPrefixData as *const u8,
+                parameters.ulPrefixDataLen as usize,
+            )
+        }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+        (kdf, shared_data, public_data, prefix_data)
+    } else {
+        if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        let parameters = unsafe { _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR) }?;
+        let kdf = ecdh_kdf(parameters.kdf)?;
+        let shared_data = unsafe {
+            from_raw_parts(
+                parameters.pSharedData as *const u8,
+                parameters.ulSharedDataLen as usize,
+            )
+        }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+        if matches!(kdf, EcdhKdf::Null)
+            && (!parameters.pSharedData.is_null() || !shared_data.is_empty())
+        {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        let public_data = unsafe {
+            from_raw_parts(
+                parameters.pPublicData as *const u8,
+                parameters.ulPublicDataLen as usize,
+            )
+        }?;
+        (kdf, shared_data, public_data, &[][..])
+    };
     let public_data = der_octet_string_value(public_data).unwrap_or(public_data);
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
@@ -1827,6 +1868,7 @@ fn derive_key(
             YubiHsm {
                 id: u16,
                 algorithm: u8,
+                capabilities: [u8; 8],
             },
         }
         let source = match &object.material {
@@ -1856,12 +1898,16 @@ fn derive_key(
                 algorithm: *algorithm,
                 pin_policy: *pin_policy,
             },
-            KeyMaterial::YubiHsm { id, algorithm, .. }
-                if is_yubihsm_ec(*algorithm) || is_yubihsm_x25519(*algorithm) =>
-            {
+            KeyMaterial::YubiHsm {
+                id,
+                algorithm,
+                capabilities,
+                ..
+            } if is_yubihsm_ec(*algorithm) || is_yubihsm_x25519(*algorithm) => {
                 DeriveSource::YubiHsm {
                     id: *id,
                     algorithm: *algorithm,
+                    capabilities: *capabilities,
                 }
             }
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
@@ -1879,6 +1925,16 @@ fn derive_key(
         if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE && source_is_x25519
         {
             return Err(CKR_MECHANISM_INVALID.into());
+        }
+        match &source {
+            DeriveSource::YubiHsm { capabilities, .. } => {
+                let capability = if protected { 0x38 } else { 0x0b };
+                if !yubihsm_capability(capabilities, capability) {
+                    return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+                }
+            }
+            _ if protected => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
+            _ => {}
         }
         match &source {
             DeriveSource::Piv {
@@ -1942,6 +1998,11 @@ fn derive_key(
             derived_secret_object(templ, expected_length, maximum_length, software_secret)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
+        let kdf_selector = if protected {
+            Some(ecdh_kdf_hash_selector(kdf)?)
+        } else {
+            None
+        };
         let mut derived = match source {
             DeriveSource::Software(key) => software_ecdh(key.as_ref(), public_data)?,
             DeriveSource::Piv {
@@ -1964,13 +2025,30 @@ fn derive_key(
                 public_data,
                 pin_policy,
             )?),
+            DeriveSource::YubiHsm { id, .. } if protected => {
+                Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
+                    &YubiHsmCommand::derive_ecdh_kdf(
+                        id,
+                        kdf_selector.ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                        requested_length,
+                        public_data,
+                        prefix_data,
+                        shared_data,
+                    )?,
+                )?)
+            }
             DeriveSource::YubiHsm { id, .. } => {
                 Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
                     &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
                 )?)
             }
         };
-        if derived.len() != expected_length {
+        let expected_result_length = if protected {
+            requested_length
+        } else {
+            expected_length
+        };
+        if derived.len() != expected_result_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
         match kdf {
@@ -1981,7 +2059,9 @@ fn derive_key(
                 derived.truncate(requested_length);
             }
             EcdhKdf::X963(digest) => {
-                derived = x963_kdf(digest, &derived, shared_data, requested_length)?;
+                if !protected {
+                    derived = x963_kdf(digest, &derived, shared_data, requested_length)?;
+                }
             }
         }
         derived_object.material = if software_secret {
@@ -2189,6 +2269,21 @@ fn ecdh_kdf(kdf: CK_EC_KDF_TYPE) -> Result<EcdhKdf, Error> {
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
     Ok(EcdhKdf::X963(digest))
+}
+
+fn ecdh_kdf_hash_selector(kdf: EcdhKdf) -> Result<u8, Error> {
+    match kdf {
+        EcdhKdf::X963(MessageDigest::Sha1) => Ok(1),
+        EcdhKdf::X963(MessageDigest::Sha224) => Ok(2),
+        EcdhKdf::X963(MessageDigest::Sha256) => Ok(3),
+        EcdhKdf::X963(MessageDigest::Sha384) => Ok(4),
+        EcdhKdf::X963(MessageDigest::Sha512) => Ok(5),
+        EcdhKdf::X963(MessageDigest::Sha3_224) => Ok(6),
+        EcdhKdf::X963(MessageDigest::Sha3_256) => Ok(7),
+        EcdhKdf::X963(MessageDigest::Sha3_384) => Ok(8),
+        EcdhKdf::X963(MessageDigest::Sha3_512) => Ok(9),
+        EcdhKdf::Null => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
 }
 
 pub(crate) fn x963_kdf(

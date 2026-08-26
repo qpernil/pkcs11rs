@@ -32,6 +32,8 @@ The header declares the pkcs11rs vendor range and the identifiers used by:
   `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`;
 - [FIDO2 one-shot assertions](fido2.md), through
   `CKM_PKCS11RS_FIDO_ASSERTION` and `CKA_PKCS11RS_FIDO_RP_ID`;
+- [protected prefixed ECDH derivation](prefixed-ecdh-derive.md), through
+  `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE`;
 - [experimental previewSign](preview-sign.md), through its key-pair generation,
   derivation, signing, registration-key type, and metadata attributes; and
 - Yubico AES-CCM and RSA wrapping adaptations used by

@@ -2685,6 +2685,20 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
     assert!(!synthetic_public.wrap);
     assert!(!synthetic_public.unwrap);
     assert!(synthetic_public.extractable);
+
+    for algorithm in [crate::YUBIHSM_ALGO_EC_P256, crate::YUBIHSM_ALGO_X25519] {
+        let capabilities = crate::yubihsm_capabilities(&[0x38]);
+        let attributes = crate::yubihsm_capabilities_to_attributes(
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            algorithm,
+            &capabilities,
+        );
+        assert!(attributes.derive);
+        assert_eq!(
+            crate::yubihsm_asymmetric_allowed_mechanisms(algorithm, &capabilities),
+            Some(vec![crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE])
+        );
+    }
 }
 
 #[test]
@@ -5579,7 +5593,291 @@ fn yubihsm_x25519_derive_returns_readable_session_object() {
         Some(&crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY),
         Some(&crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY),
         Some(&crate::yubihsm::tests::RFC7748_SHARED_SECRET),
+        false,
     );
+}
+
+#[test]
+fn yubihsm_x25519_prefixed_derive_is_atomic_and_matches_x963() {
+    yubihsm_x25519_two_way_derive(
+        7,
+        8,
+        Some(&crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY),
+        Some(&crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY),
+        Some(&crate::yubihsm::tests::RFC7748_SHARED_SECRET),
+        true,
+    );
+}
+
+#[test]
+fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const SOURCE_SLOT_ID: CK_SLOT_ID = 99;
+    let (source_slot, source_commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SOURCE_SLOT_ID, source_slot);
+    let mut source_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SOURCE_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut source_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            source_session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut ec_parameters: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    let mut key_id = 40_u16.to_be_bytes();
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_TRUE as CK_BBOOL;
+    let mut allowed = [crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE];
+    let mut public_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            pValue: ec_parameters.as_mut_ptr().cast(),
+            ulValueLen: ec_parameters.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: key_id.as_mut_ptr().cast(),
+            ulValueLen: key_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut private_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: key_id.as_mut_ptr().cast(),
+            ulValueLen: key_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut derive as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+            pValue: allowed.as_mut_ptr().cast(),
+            ulValueLen: std::mem::size_of_val(&allowed) as CK_ULONG,
+        },
+    ];
+    let mut generate = CK_MECHANISM {
+        mechanism: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut source_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut source_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            source_session,
+            &mut generate,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut source_public,
+            &mut source_private,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut source_point_attribute = CK_ATTRIBUTE {
+        type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(
+            source_session,
+            source_public,
+            &mut source_point_attribute,
+            1,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut source_point = vec![0; source_point_attribute.ulValueLen as usize];
+    source_point_attribute.pValue = source_point.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(
+            source_session,
+            source_public,
+            &mut source_point_attribute,
+            1,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&source_point[..3], &[0x04, 0x41, 0x04]);
+    let source_public_coordinates = &source_point[3..];
+    assert_eq!(source_public_coordinates.len(), 64);
+
+    const TARGET_AUTHKEY_ID: u16 = 40;
+    let target = std::rc::Rc::new(crate::yubihsm::tests::ProtocolPeer::new());
+    let (mut provisioning_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+        target.as_ref(),
+        2,
+        b"password",
+        None,
+        None,
+    )
+    .unwrap();
+    let target_authkey_parameters = crate::yubihsm::DelegatedObjectParameters {
+        object: crate::YubiHsmObjectParameters {
+            id: TARGET_AUTHKEY_ID,
+            label: "PKCS11 protected ECDH",
+            domains: u16::MAX,
+            capabilities: crate::yubihsm_capabilities(&[0x13]),
+            algorithm: crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+        },
+        delegated_capabilities: [0; 8],
+    };
+    let provision_authkey = crate::YubiHsmCommand::put_delegated_object(
+        crate::YubiHsmCommandCode::PutAuthenticationKey,
+        &target_authkey_parameters,
+        source_public_coordinates,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::parse_yubihsm_object_id(
+            &provisioning_session
+                .send_command(target.as_ref(), &provision_authkey)
+                .unwrap(),
+        )
+        .unwrap(),
+        TARGET_AUTHKEY_ID
+    );
+    provisioning_session
+        .send_command(target.as_ref(), &crate::YubiHsmCommand::close_session())
+        .unwrap();
+
+    let host_ephemeral =
+        crate::SoftwareSigningKey::generate(crate::SoftwareSigningAlgorithm::EcdsaP256Sha256)
+            .unwrap();
+    let crate::SoftwarePublicKey::Ec {
+        uncompressed: host_ephemeral_public,
+        ..
+    } = host_ephemeral.public_key()
+    else {
+        unreachable!()
+    };
+    let handshake = crate::YubiHsmSecureSession::begin_asymmetric(
+        target.as_ref(),
+        TARGET_AUTHKEY_ID,
+        &host_ephemeral_public,
+    )
+    .unwrap();
+    let device_ephemeral_public = &handshake.context[65..];
+    let ephemeral_secret = software_key_core::software_key_agreement::derive_with_signing_key(
+        &host_ephemeral,
+        device_ephemeral_public,
+    )
+    .unwrap();
+    let mut target_device_public = target.device_public_key().unwrap();
+    let mut prefix = ephemeral_secret.to_vec();
+    let mut shared_data = [0x3c, 0x88, 0x10];
+    let mut parameters = crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+        kdf: CKD_SHA256_KDF as CK_EC_KDF_TYPE,
+        ulSharedDataLen: shared_data.len() as CK_ULONG,
+        pSharedData: shared_data.as_mut_ptr(),
+        ulPublicDataLen: target_device_public.len() as CK_ULONG,
+        pPublicData: target_device_public.as_mut_ptr(),
+        ulPrefixDataLen: prefix.len() as CK_ULONG,
+        pPrefixData: prefix.as_mut_ptr(),
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+        pParameter: (&mut parameters as *mut crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
+            as CK_ULONG,
+    };
+    let mut output_length = 64 as CK_ULONG;
+    let mut derived_template = CK_ATTRIBUTE {
+        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut output_length as *mut CK_ULONG).cast(),
+        ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    };
+    let mut derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            source_session,
+            &mut mechanism,
+            source_private,
+            &mut derived_template,
+            1,
+            &mut derived_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut session_keys = [0u8; 64];
+    let mut value = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: session_keys.as_mut_ptr().cast(),
+        ulValueLen: session_keys.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(source_session, derived_key, &mut value, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value.ulValueLen as usize, session_keys.len());
+
+    let mut receipt_input = device_ephemeral_public.to_vec();
+    receipt_input.extend_from_slice(&host_ephemeral_public);
+    assert_eq!(
+        crate::secure_channel_crypto::aes_cmac(&session_keys[..16], &receipt_input)
+            .unwrap()
+            .as_slice(),
+        handshake.receipt
+    );
+    let mut target_session = crate::YubiHsmSecureSession::complete_asymmetric_with_session_keys(
+        handshake,
+        zeroize::Zeroizing::new(session_keys[16..32].try_into().unwrap()),
+        zeroize::Zeroizing::new(session_keys[32..48].try_into().unwrap()),
+        zeroize::Zeroizing::new(session_keys[48..64].try_into().unwrap()),
+    );
+    assert_eq!(
+        target_session
+            .send_command(
+                target.as_ref(),
+                &crate::YubiHsmCommand::get_pseudo_random(16)
+            )
+            .unwrap()
+            .len(),
+        16
+    );
+    assert!(
+        source_commands
+            .borrow()
+            .iter()
+            .any(|(command, _)| *command == crate::yubihsm::CommandCode::DeriveEcdhKdf as u8)
+    );
+
+    finalize_for_test();
 }
 
 #[test]
@@ -5662,7 +5960,7 @@ fn piv_native_identity_changes_with_object_contents() {
 
 #[test]
 fn yubihsm_x25519_random_keys_derive_both_directions() {
-    yubihsm_x25519_two_way_derive(9, 10, None, None, None);
+    yubihsm_x25519_two_way_derive(9, 10, None, None, None, false);
 }
 
 fn yubihsm_x25519_two_way_derive(
@@ -5671,6 +5969,7 @@ fn yubihsm_x25519_two_way_derive(
     expected_first_public: Option<&[u8; 32]>,
     expected_second_public: Option<&[u8; 32]>,
     expected_shared: Option<&[u8; 32]>,
+    protected: bool,
 ) {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -5729,7 +6028,8 @@ fn yubihsm_x25519_two_way_derive(
                 ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
             },
         ];
-        let mut private_template = [
+        let mut allowed_mechanisms = [crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE];
+        let mut private_template = vec![
             CK_ATTRIBUTE {
                 type_: CKA_ID as CK_ATTRIBUTE_TYPE,
                 pValue: key_id.as_mut_ptr().cast(),
@@ -5746,6 +6046,13 @@ fn yubihsm_x25519_two_way_derive(
                 ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
             },
         ];
+        if protected {
+            private_template.push(CK_ATTRIBUTE {
+                type_: CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+                pValue: allowed_mechanisms.as_mut_ptr().cast(),
+                ulValueLen: std::mem::size_of_val(&allowed_mechanisms) as CK_ULONG,
+            });
+        }
         let mut public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
         let mut private_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
         let mut mechanism = CK_MECHANISM {
@@ -5825,6 +6132,8 @@ fn yubihsm_x25519_two_way_derive(
     if let Some(expected) = expected_second_public {
         assert_eq!(&public_data[2..], expected);
     }
+    let mut prefix = [0x11; 32];
+    let mut shared_data = [0x3c, 0x88, 0x10];
     let mut parameters = CK_ECDH1_DERIVE_PARAMS {
         kdf: CKD_NULL as CK_EC_KDF_TYPE,
         pSharedData: ::std::ptr::null_mut(),
@@ -5832,11 +6141,79 @@ fn yubihsm_x25519_two_way_derive(
         pPublicData: public_data.as_mut_ptr(),
         ulPublicDataLen: public_data.len() as CK_ULONG,
     };
-    let mut mechanism = CK_MECHANISM {
-        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-        pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
-        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    let mut protected_parameters = crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+        kdf: CKD_SHA256_KDF as CK_EC_KDF_TYPE,
+        ulSharedDataLen: shared_data.len() as CK_ULONG,
+        pSharedData: shared_data.as_mut_ptr(),
+        ulPublicDataLen: public_data.len() as CK_ULONG,
+        pPublicData: public_data.as_mut_ptr(),
+        ulPrefixDataLen: prefix.len() as CK_ULONG,
+        pPrefixData: prefix.as_mut_ptr(),
     };
+    let mut mechanism = if protected {
+        CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            pParameter: (&mut protected_parameters
+                as *mut crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS)
+                .cast(),
+            ulParameterLen: std::mem::size_of::<crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
+                as CK_ULONG,
+        }
+    } else {
+        CK_MECHANISM {
+            mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+        }
+    };
+    if protected {
+        let mut null_parameters = crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+            kdf: CKD_NULL as CK_EC_KDF_TYPE,
+            ulSharedDataLen: shared_data.len() as CK_ULONG,
+            pSharedData: shared_data.as_mut_ptr(),
+            ulPublicDataLen: public_data.len() as CK_ULONG,
+            pPublicData: public_data.as_mut_ptr(),
+            ulPrefixDataLen: prefix.len() as CK_ULONG,
+            pPrefixData: prefix.as_mut_ptr(),
+        };
+        let mut null_mechanism = CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            pParameter: (&mut null_parameters
+                as *mut crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS)
+                .cast(),
+            ulParameterLen: std::mem::size_of::<crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
+                as CK_ULONG,
+        };
+        let mut invalid = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DeriveKey(
+                session,
+                &mut null_mechanism,
+                private_handle,
+                ::std::ptr::null_mut(),
+                0,
+                &mut invalid,
+            ),
+            CKR_MECHANISM_PARAM_INVALID as CK_RV
+        );
+
+        let mut raw_mechanism = CK_MECHANISM {
+            mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+        };
+        assert_eq!(
+            crate::api::C_DeriveKey(
+                session,
+                &mut raw_mechanism,
+                private_handle,
+                ::std::ptr::null_mut(),
+                0,
+                &mut invalid,
+            ),
+            CKR_MECHANISM_INVALID as CK_RV
+        );
+    }
     let mut token_object = CK_TRUE as CK_BBOOL;
     let mut token_template = CK_ATTRIBUTE {
         type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -5963,10 +6340,30 @@ fn yubihsm_x25519_two_way_derive(
         pPublicData: reverse_public_data.as_mut_ptr(),
         ulPublicDataLen: reverse_public_data.len() as CK_ULONG,
     };
-    let mut reverse_mechanism = CK_MECHANISM {
-        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-        pParameter: (&mut reverse_parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
-        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    let mut reverse_protected_parameters = crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+        kdf: CKD_SHA256_KDF as CK_EC_KDF_TYPE,
+        ulSharedDataLen: shared_data.len() as CK_ULONG,
+        pSharedData: shared_data.as_mut_ptr(),
+        ulPublicDataLen: reverse_public_data.len() as CK_ULONG,
+        pPublicData: reverse_public_data.as_mut_ptr(),
+        ulPrefixDataLen: prefix.len() as CK_ULONG,
+        pPrefixData: prefix.as_mut_ptr(),
+    };
+    let mut reverse_mechanism = if protected {
+        CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            pParameter: (&mut reverse_protected_parameters
+                as *mut crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS)
+                .cast(),
+            ulParameterLen: std::mem::size_of::<crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
+                as CK_ULONG,
+        }
+    } else {
+        CK_MECHANISM {
+            mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            pParameter: (&mut reverse_parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+        }
     };
     let mut reverse_derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
@@ -5997,14 +6394,29 @@ fn yubihsm_x25519_two_way_derive(
     );
     assert_eq!(value, reverse_value);
     if let Some(expected) = expected_shared {
-        assert_eq!(&value, expected);
+        if protected {
+            let mut prefixed = prefix.to_vec();
+            prefixed.extend_from_slice(expected);
+            let expected = software_key_core::digest::x963_kdf(
+                software_key_core::digest::HashAlgorithm::Sha256,
+                &prefixed,
+                &shared_data,
+                value.len(),
+            )
+            .unwrap();
+            assert_eq!(value.as_slice(), expected.as_slice());
+        } else {
+            assert_eq!(&value, expected);
+        }
     }
-    assert!(
-        commands
-            .borrow()
-            .iter()
-            .any(|(command, _)| { *command == crate::yubihsm::CommandCode::DeriveEcdh as u8 })
-    );
+    assert!(commands.borrow().iter().any(|(command, _)| {
+        *command
+            == if protected {
+                crate::yubihsm::CommandCode::DeriveEcdhKdf as u8
+            } else {
+                crate::yubihsm::CommandCode::DeriveEcdh as u8
+            }
+    }));
 
     finalize_for_test();
 }

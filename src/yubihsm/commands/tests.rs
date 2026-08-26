@@ -81,6 +81,7 @@ fn all_sample_commands() -> Vec<Command> {
         Command::sign_pss(1, 32, 32, &[0; 32]).unwrap(),
         Command::key_data(CommandCode::SignEcdsa, 1, &[0; 32]).unwrap(),
         Command::key_data(CommandCode::DeriveEcdh, 1, &[0; 65]).unwrap(),
+        Command::derive_ecdh_kdf(1, 3, 64, &[0; 65], &[0; 32], &[0x3c, 0x88, 0x10]).unwrap(),
         Command::delete_object(1, 2),
         Command::decrypt_oaep(1, 32, &[0; 256], &[0; 32]).unwrap(),
         Command::generate_object(CommandCode::GenerateHmacKey, &object("hmac-gen")).unwrap(),
@@ -170,7 +171,7 @@ fn device_info_page_zero_uses_the_legacy_empty_request() {
 #[test]
 fn every_official_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
-    assert_eq!(commands.len(), 63);
+    assert_eq!(commands.len(), 64);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
     assert_eq!(
         commands
@@ -188,7 +189,7 @@ fn every_official_command_code_has_a_sample_request() {
             .filter(|command| (**command as u8) >= 0x40)
             .map(|command| *command as u8)
             .collect::<Vec<_>>(),
-        (0x40..=0x77).collect::<Vec<_>>()
+        (0x40..=0x78).collect::<Vec<_>>()
     );
 }
 
@@ -255,6 +256,21 @@ fn crypto_commands_match_wire_vectors() {
             .unwrap()
             .data(),
         [0x12, 0x34, 0x56, 0x78, 0x09, 0xaa, 0xbb]
+    );
+    assert_eq!(
+        Command::derive_ecdh_kdf(
+            0x1234,
+            3,
+            64,
+            &[0x04, 0xaa, 0xbb],
+            &[0xcc, 0xdd],
+            &[0x3c, 0x88, 0x10],
+        )
+        .unwrap()
+        .data(),
+        [
+            0x12, 0x34, 3, 0, 64, 0, 3, 0, 2, 0, 3, 0x04, 0xaa, 0xbb, 0xcc, 0xdd, 0x3c, 0x88, 0x10,
+        ]
     );
 }
 
