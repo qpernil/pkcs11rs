@@ -2,7 +2,7 @@ import PKCS11RS
 import UIKit
 
 private let connectorURLKey = "PKCS11RSConnectorURL"
-private let fallbackConnectorURL = "http://192.168.1.90:12345"
+private let fallbackConnectorURL = "http://plankan-9.duckdns.org:12345"
 private let initialSlotListCapacity = 10
 private let objectFindBatchCapacity = 64
 private let objectAttributeBufferCapacity = 1024
