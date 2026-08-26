@@ -12,7 +12,7 @@ use der::{
 };
 use minicbor::{Decoder, Encoder};
 use pkcs8::{
-    DecodePrivateKey, EncodePrivateKey, EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
+    EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
     pkcs5::pbes2,
     spki::{AlgorithmIdentifierOwned, AlgorithmIdentifierRef, ObjectIdentifier},
 };
@@ -807,7 +807,15 @@ fn sync_directory(_path: &Path) -> Result<(), Error> {
 
 fn derive_wrapping_key(pin: &[u8], salt: &[u8; SALT_LENGTH]) -> Zeroizing<[u8; 32]> {
     let mut key = Zeroizing::new([0u8; 32]);
-    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pin, salt, KDF_ITERATIONS, key.as_mut());
+    let derived = software_key_core::digest::pbkdf2_hmac(
+        software_key_core::digest::HashAlgorithm::Sha256,
+        pin,
+        salt,
+        KDF_ITERATIONS,
+        key.len(),
+    )
+    .expect("HMAC accepts every password length");
+    key.copy_from_slice(&derived);
     key
 }
 
@@ -1820,18 +1828,11 @@ pub(crate) fn material_to_pkcs8(
         SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(key)) => {
             key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
         }
-        SoftwarePrivateKeyMaterial::MlKem512(key) => key
-            .to_pkcs8_der()
-            .ok()
-            .map(|encoded| encoded.as_bytes().to_vec()),
-        SoftwarePrivateKeyMaterial::MlKem768(key) => key
-            .to_pkcs8_der()
-            .ok()
-            .map(|encoded| encoded.as_bytes().to_vec()),
-        SoftwarePrivateKeyMaterial::MlKem1024(key) => key
-            .to_pkcs8_der()
-            .ok()
-            .map(|encoded| encoded.as_bytes().to_vec()),
+        SoftwarePrivateKeyMaterial::MlKem512(key)
+        | SoftwarePrivateKeyMaterial::MlKem768(key)
+        | SoftwarePrivateKeyMaterial::MlKem1024(key) => {
+            key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
+        }
         _ => None,
     };
     if let Some(document) = post_quantum {
@@ -1937,25 +1938,34 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlKem512)
-            .map_err(|_| Error::from(CKR_DATA_INVALID));
+        return software_key_core::post_quantum::MlKemPrivateKey::from_pkcs8_der(
+            software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+            encoded,
+        )
+        .map(SoftwarePrivateKeyMaterial::MlKem512)
+        .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_KEM_768_OID {
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlKem768)
-            .map_err(|_| Error::from(CKR_DATA_INVALID));
+        return software_key_core::post_quantum::MlKemPrivateKey::from_pkcs8_der(
+            software_key_core::post_quantum::MlKemParameterSet::MlKem768,
+            encoded,
+        )
+        .map(SoftwarePrivateKeyMaterial::MlKem768)
+        .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_KEM_1024_OID {
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_kem::DecapsulationKey::<ml_kem::MlKem1024>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlKem1024)
-            .map_err(|_| Error::from(CKR_DATA_INVALID));
+        return software_key_core::post_quantum::MlKemPrivateKey::from_pkcs8_der(
+            software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+            encoded,
+        )
+        .map(SoftwarePrivateKeyMaterial::MlKem1024)
+        .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1") {
         if info.algorithm.parameters != Some(AnyRef::NULL) {
@@ -2207,15 +2217,24 @@ mod tests {
                 SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
                 vec![7; 32],
             ),
-            SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(
-                ml_kem::Seed::from([7; 64]),
-            )),
-            SoftwarePrivateKeyMaterial::MlKem768(ml_kem::DecapsulationKey::from_seed(
-                ml_kem::Seed::from([7; 64]),
-            )),
-            SoftwarePrivateKeyMaterial::MlKem1024(ml_kem::DecapsulationKey::from_seed(
-                ml_kem::Seed::from([7; 64]),
-            )),
+            SoftwarePrivateKeyMaterial::MlKem512(
+                software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+                    [7; 64],
+                ),
+            ),
+            SoftwarePrivateKeyMaterial::MlKem768(
+                software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem768,
+                    [7; 64],
+                ),
+            ),
+            SoftwarePrivateKeyMaterial::MlKem1024(
+                software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+                    [7; 64],
+                ),
+            ),
         ];
         for material in materials {
             let encoded = material_to_pkcs8(&material).unwrap();
@@ -2251,7 +2270,10 @@ mod tests {
     fn persistent_ml_kem_private_key_preserves_decapsulation_policy() {
         let master_key = [0x3c; MASTER_KEY_LENGTH];
         let mut original = object(SoftwarePrivateKeyMaterial::MlKem512(
-            ml_kem::DecapsulationKey::from_seed(ml_kem::Seed::from([0x21; 64])),
+            software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+                software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+                [0x21; 64],
+            ),
         ));
         original.sign = false;
         original.derive = false;

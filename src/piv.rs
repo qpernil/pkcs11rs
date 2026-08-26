@@ -6,8 +6,6 @@ use crate::{
     CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
     CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector, ResponseApdu, error::Error,
 };
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-use des::TdesEde3;
 use flate2::{Compression, read::GzDecoder, read::ZlibDecoder, write::GzEncoder};
 use std::io::{Read, Write};
 use subtle::ConstantTimeEq;
@@ -1244,14 +1242,11 @@ fn crypt_management_block(
     if algorithm != ManagementAlgorithm::TripleDes {
         return aes_ecb(key, input, direction);
     }
-    let cipher = TdesEde3::new_from_slice(key).map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-    let mut block = des::cipher::Block::<TdesEde3>::default();
-    block.copy_from_slice(input);
-    match direction {
-        Direction::Encrypt => cipher.encrypt_block(&mut block),
-        Direction::Decrypt => cipher.decrypt_block(&mut block),
-    }
-    Ok(block.to_vec())
+    let result = match direction {
+        Direction::Encrypt => software_key_core::software_symmetric::encrypt_tdes_ecb(key, input),
+        Direction::Decrypt => software_key_core::software_symmetric::decrypt_tdes_ecb(key, input),
+    };
+    result.map_err(|_| CKR_DATA_LEN_RANGE.into())
 }
 
 fn require_success(status: u16) -> Result<(), Error> {

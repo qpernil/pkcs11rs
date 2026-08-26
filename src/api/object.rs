@@ -1502,38 +1502,38 @@ fn build_imported_key_material(
             if seed.is_some() == expanded.is_some() {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
-            macro_rules! decode {
-                ($params:ty, $variant:ident) => {{
-                    let key = if let Some(seed) = seed {
-                        let seed = ml_kem::Seed::try_from(seed.as_slice())
-                            .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                        ml_kem::DecapsulationKey::<$params>::from_seed(seed)
-                    } else {
-                        #[allow(deprecated)]
-                        {
-                            let expanded = ml_kem::ExpandedDecapsulationKey::<$params>::try_from(
-                                expanded.as_deref().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
-                            )
-                            .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                            ml_kem::ExpandedKeyEncoding::from_expanded_bytes(&expanded)
-                                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
-                        }
-                    };
-                    SoftwarePrivateKeyMaterial::$variant(key)
-                }};
-            }
-            let material = match parameter_set {
-                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    decode!(ml_kem::MlKem512, MlKem512)
-                }
-                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    decode!(ml_kem::MlKem768, MlKem768)
-                }
-                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    decode!(ml_kem::MlKem1024, MlKem1024)
-                }
+            let (shared_parameter_set, wrap): (
+                software_key_core::post_quantum::MlKemParameterSet,
+                fn(software_key_core::post_quantum::MlKemPrivateKey) -> SoftwarePrivateKeyMaterial,
+            ) = match parameter_set {
+                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => (
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+                    SoftwarePrivateKeyMaterial::MlKem512,
+                ),
+                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => (
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem768,
+                    SoftwarePrivateKeyMaterial::MlKem768,
+                ),
+                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => (
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+                    SoftwarePrivateKeyMaterial::MlKem1024,
+                ),
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
+            let key = if let Some(seed) = seed {
+                software_key_core::post_quantum::MlKemPrivateKey::from_seed_slice(
+                    shared_parameter_set,
+                    &seed,
+                )
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?
+            } else {
+                software_key_core::post_quantum::MlKemPrivateKey::from_expanded_private_key(
+                    shared_parameter_set,
+                    expanded.as_deref().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+                )
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+            };
+            let material = wrap(key);
             KeyMaterial::SoftwarePrivate(material)
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),

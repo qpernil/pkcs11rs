@@ -7,7 +7,7 @@ use crate::backed_object::projected_public_key_material;
 use crate::*;
 use software_key_core::post_quantum::{MlDsaError, MlDsaParameterSet, verify_ml_dsa};
 use software_key_core::rsa_signing::{
-    RsaSignatureError, rsa_verify_pkcs1v15_digest, rsa_verify_pkcs1v15_payload,
+    RsaConstructionError, rsa_verify_pkcs1v15_digest, rsa_verify_pkcs1v15_payload,
     rsa_verify_pss_digest, rsa_verify_raw,
 };
 
@@ -468,16 +468,16 @@ fn verify_rsa_signature(
     result.map_err(shared_rsa_verification_error)
 }
 
-fn shared_rsa_verification_error(error: RsaSignatureError) -> Error {
+fn shared_rsa_verification_error(error: RsaConstructionError) -> Error {
     match error {
-        RsaSignatureError::InputTooLong | RsaSignatureError::InvalidDigestLength => {
+        RsaConstructionError::InputTooLong | RsaConstructionError::InvalidDigestLength => {
             CKR_DATA_LEN_RANGE.into()
         }
-        RsaSignatureError::InvalidKey => CKR_KEY_TYPE_INCONSISTENT.into(),
-        RsaSignatureError::InvalidSignature | RsaSignatureError::InputOutOfRange => {
+        RsaConstructionError::InvalidKey => CKR_KEY_TYPE_INCONSISTENT.into(),
+        RsaConstructionError::InvalidSignature | RsaConstructionError::InputOutOfRange => {
             CKR_SIGNATURE_INVALID.into()
         }
-        RsaSignatureError::RandomnessUnavailable | RsaSignatureError::OperationFailed => {
+        RsaConstructionError::RandomnessUnavailable | RsaConstructionError::OperationFailed => {
             CKR_FUNCTION_FAILED.into()
         }
     }

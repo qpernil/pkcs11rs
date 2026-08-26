@@ -7,7 +7,6 @@
 
 use crate::storage::{ContentReference, StorageError};
 use minicbor::{Decoder, Encoder, data::Type};
-use sha2::{Digest, Sha256};
 use std::fmt;
 
 mod arkg;
@@ -182,7 +181,10 @@ impl PreviewSignRegistration {
         }
         let make_credential_response = make_credential_response.into();
         let material = parse_make_credential_response(&make_credential_response)?;
-        let expected_rp_id_hash: [u8; 32] = Sha256::digest(rp_id.as_bytes()).into();
+        let expected_rp_id_hash: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+            .digest(rp_id.as_bytes())
+            .try_into()
+            .map_err(|_| PreviewSignError::Malformed("invalid RP ID hash"))?;
         if material.credential.rp_id_hash != expected_rp_id_hash
             || material.signing_key.rp_id_hash != expected_rp_id_hash
         {
@@ -1144,7 +1146,8 @@ mod tests {
         aaguid: [u8; 16],
         signature_counter: u32,
     ) -> Vec<u8> {
-        let mut data = Sha256::digest(TEST_RP_ID.as_bytes()).to_vec();
+        let mut data =
+            software_key_core::digest::HashAlgorithm::Sha256.digest(TEST_RP_ID.as_bytes());
         data.push(0xc1);
         data.extend_from_slice(&signature_counter.to_be_bytes());
         data.extend_from_slice(&aaguid);

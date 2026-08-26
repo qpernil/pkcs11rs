@@ -6,7 +6,6 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, TrustAnchor, UnixTime},
     sign::CertifiedKey,
 };
-use sha2::{Digest, Sha256};
 use spki::DecodePublicKey;
 use std::{collections::HashSet, path::Path};
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
@@ -181,7 +180,10 @@ pub(crate) fn validate(
 fn reject_duplicates(certificates: &[Vec<u8>]) -> Result<(), String> {
     let mut fingerprints = HashSet::new();
     for (index, certificate) in certificates.iter().enumerate() {
-        let fingerprint: [u8; 32] = Sha256::digest(certificate).into();
+        let fingerprint: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+            .digest(certificate)
+            .try_into()
+            .expect("SHA-256 has a 32-byte output");
         if !fingerprints.insert(fingerprint) {
             return Err(format!("certificate {} is a duplicate", index + 1));
         }

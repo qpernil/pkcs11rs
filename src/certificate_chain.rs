@@ -6,7 +6,6 @@ use der::{
 };
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
@@ -95,7 +94,7 @@ impl ParsedCertificate {
                 .issuer()
                 .to_der()
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
-            fingerprint: Sha256::digest(&canonical).into(),
+            fingerprint: sha256_fingerprint(&canonical),
             not_before: certificate
                 .tbs_certificate()
                 .validity()
@@ -199,7 +198,7 @@ impl CertificateTrust {
             .map(|certificate| certificate.fingerprint)
             .collect::<Vec<_>>();
         fingerprints.sort_unstable();
-        let fingerprint = Sha256::digest(fingerprints.concat()).into();
+        let fingerprint = sha256_fingerprint(&fingerprints.concat());
         Ok(Self {
             trust_anchors,
             local_intermediates,
@@ -227,13 +226,13 @@ impl CertificateTrust {
         let mut fingerprints = self.root_fingerprints.clone();
         let mut intermediates = Vec::new();
         for certificate in &self.local_intermediates {
-            let fingerprint: Fingerprint = Sha256::digest(certificate.as_ref()).into();
+            let fingerprint = sha256_fingerprint(certificate.as_ref());
             if fingerprints.insert(fingerprint) {
                 intermediates.push(certificate.clone());
             }
         }
         for certificate in &certificates[..certificates.len() - 1] {
-            let fingerprint: Fingerprint = Sha256::digest(certificate).into();
+            let fingerprint = sha256_fingerprint(certificate);
             if fingerprints.insert(fingerprint) {
                 intermediates.push(CertificateDer::from(certificate.clone()));
             }
@@ -513,7 +512,7 @@ mod tests {
     }
 
     fn sha256(certificate: &Certificate) -> Vec<u8> {
-        Sha256::digest(certificate.to_der().unwrap()).to_vec()
+        sha256_fingerprint(&certificate.to_der().unwrap()).to_vec()
     }
 
     fn encode_hex(bytes: &[u8]) -> String {
@@ -776,4 +775,10 @@ mod tests {
             crate::certificate_builder::p256_public_point(leaf_key.verifying_key())
         );
     }
+}
+fn sha256_fingerprint(data: &[u8]) -> Fingerprint {
+    software_key_core::digest::HashAlgorithm::Sha256
+        .digest(data)
+        .try_into()
+        .expect("SHA-256 output is 32 bytes")
 }

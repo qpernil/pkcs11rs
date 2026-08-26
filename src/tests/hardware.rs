@@ -1716,7 +1716,6 @@ mod hardware_provisioning {
 mod fido2_hardware {
     use super::*;
     use crate::Connector;
-    use sha2::Digest;
     use std::collections::BTreeMap;
     use std::ffi::CString;
     use std::rc::Rc;
@@ -2714,8 +2713,10 @@ mod fido2_hardware {
             ),
             CKR_OK as CK_RV
         );
-        let client_data_hash: [u8; 32] =
-            sha2::Sha256::digest(b"pkcs11rs FIDO2 hardware assertion").into();
+        let client_data_hash: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+            .digest(b"pkcs11rs FIDO2 hardware assertion")
+            .try_into()
+            .unwrap();
         let mut response_len = 0;
         assert_eq!(
             crate::api::C_Sign(
@@ -3025,7 +3026,10 @@ mod fido2_hardware {
 
         let mut sign = CK_TRUE as CK_BBOOL;
         let mut verify = CK_TRUE as CK_BBOOL;
-        let digest: [u8; 32] = sha2::Sha256::digest(b"pkcs11rs previewSign hardware cycle").into();
+        let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+            .digest(b"pkcs11rs previewSign hardware cycle")
+            .try_into()
+            .unwrap();
         let mut derived_encodings = Vec::new();
         let mut public_points = Vec::new();
         let mut signatures = Vec::new();

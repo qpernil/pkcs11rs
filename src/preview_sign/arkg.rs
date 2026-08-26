@@ -531,7 +531,6 @@ pub(super) fn validate_derived_key_record(
 mod tests {
     use super::*;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
-    use sha2::{Digest, Sha256};
     use signature::hazmat::{PrehashSigner, PrehashVerifier};
     use software_key_core::arkg::{ArkgP256Error, arkg_p256_derive_private};
 
@@ -816,7 +815,10 @@ mod tests {
             derived.public_key_sec1()
         );
 
-        let digest: [u8; 32] = Sha256::digest(b"pkcs11rs previewSign mock").into();
+        let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+            .digest(b"pkcs11rs previewSign mock")
+            .try_into()
+            .unwrap();
         let signature = authenticator
             .sign_digest(derived.signing_arguments_cbor(), &digest)
             .unwrap();
@@ -833,7 +835,10 @@ mod tests {
 
         for context in contexts {
             let derived = seed.derive(context).unwrap();
-            let digest: [u8; 32] = Sha256::digest(context).into();
+            let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+                .digest(context)
+                .try_into()
+                .unwrap();
             let signature = authenticator
                 .sign_digest(derived.signing_arguments_cbor(), &digest)
                 .unwrap();

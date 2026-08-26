@@ -757,12 +757,12 @@ const ABI_YUBIHSM_RFC3394_AES_KEY_ID: u16 = 15;
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_hmac_sha256(data: &[u8]) -> Result<Vec<u8>, Error> {
-    use hmac::{Hmac, KeyInit, Mac};
-
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&[0x0b; 20])
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    mac.update(data);
-    Ok(mac.finalize().into_bytes().to_vec())
+    software_key_core::digest::hmac(
+        software_key_core::digest::HashAlgorithm::Sha256,
+        &[0x0b; 20],
+        data,
+    )
+    .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 #[cfg(feature = "abi-tests")]

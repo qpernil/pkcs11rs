@@ -14,7 +14,6 @@
 //! configuration and restore their canonical backed objects automatically.
 
 use minicbor::{Decoder, Encoder};
-use sha3::{Digest, Sha3_256};
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -56,7 +55,7 @@ impl ContentHashAlgorithm {
 
     fn digest(self, object: &[u8]) -> Vec<u8> {
         match self {
-            Self::Sha3_256 => Sha3_256::digest(object).to_vec(),
+            Self::Sha3_256 => software_key_core::digest::HashAlgorithm::Sha3_256.digest(object),
         }
     }
 

@@ -2,15 +2,15 @@ use super::*;
 
 #[test]
 fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
-    use ml_kem::kem::KeyExport;
-
-    let key =
-        ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_seed(ml_kem::Seed::from([0x5a; 64]));
+    let key = software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+        software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+        [0x5a; 64],
+    );
     let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_ML_KEM as CK_KEY_TYPE;
     let mut parameter_set = CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE;
     let mut encapsulate = CK_TRUE as CK_BBOOL;
-    let mut public_value = key.encapsulation_key().to_bytes().to_vec();
+    let mut public_value = key.public_key();
     let public_template = [
         scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
@@ -43,8 +43,7 @@ fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
         crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem512(_))
     ));
 
-    #[allow(deprecated)]
-    let mut expanded = ml_kem::ExpandedKeyEncoding::to_expanded_bytes(&key).to_vec();
+    let mut expanded = key.expanded_private_key().to_vec();
     let expanded_template = [
         scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),

@@ -375,43 +375,35 @@ pub(crate) fn software_hmac(
     mechanism: CK_MECHANISM_TYPE,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    macro_rules! calculate {
-        ($digest:ty) => {{
-            use hmac::{Hmac, Mac};
-            let mut mac = <Hmac<$digest> as hmac::digest::KeyInit>::new_from_slice(key)
-                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-            mac.update(data);
-            Ok(mac.finalize().into_bytes().to_vec())
-        }};
-    }
-    match mechanism {
+    let digest = match mechanism {
         x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
             || x == CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE =>
         {
-            calculate!(sha1::Sha1)
+            MessageDigest::Sha1
         }
         x if x == CKM_SHA224_HMAC as CK_MECHANISM_TYPE
             || x == CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE =>
         {
-            calculate!(sha2::Sha224)
+            MessageDigest::Sha224
         }
         x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
             || x == CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE =>
         {
-            calculate!(sha2::Sha256)
+            MessageDigest::Sha256
         }
         x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
             || x == CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE =>
         {
-            calculate!(sha2::Sha384)
+            MessageDigest::Sha384
         }
         x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
             || x == CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE =>
         {
-            calculate!(sha2::Sha512)
+            MessageDigest::Sha512
         }
-        _ => Err(CKR_MECHANISM_INVALID.into()),
-    }
+        _ => return Err(CKR_MECHANISM_INVALID.into()),
+    };
+    software_key_core::digest::hmac(digest, key, data).map_err(|_| CKR_KEY_SIZE_RANGE.into())
 }
 
 pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
@@ -449,21 +441,23 @@ pub(crate) fn aes_gmac_parameters(
     Ok(Some(parameters))
 }
 
-fn aes_cmac_with_encryptor(
+fn cmac_with_encryptor(
     data: &[u8],
     encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 ) -> Result<Vec<u8>, Error> {
-    use software_key_core::software_symmetric::{AesBlockModeError, aes_cmac_with};
+    use software_key_core::software_symmetric::{BlockCipherModeError, cmac_with};
 
-    aes_cmac_with(data, encrypt)
-        .map(|mac| mac.to_vec())
-        .map_err(|error| match error {
-            AesBlockModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
-            AesBlockModeError::EncryptBlocks(error) => error,
-            AesBlockModeError::InvalidCounterBits | AesBlockModeError::InputTooLong => {
-                unreachable!("AES-CMAC cannot produce a counter error")
-            }
-        })
+    cmac_with(AES_CMAC_LENGTH, data, encrypt).map_err(|error| match error {
+        BlockCipherModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        BlockCipherModeError::BlockOperation(error) => error,
+        BlockCipherModeError::InvalidBlockSize
+        | BlockCipherModeError::InvalidIvLength
+        | BlockCipherModeError::InvalidDataLength
+        | BlockCipherModeError::InvalidCounterBits
+        | BlockCipherModeError::InputTooLong => {
+            unreachable!("AES-CMAC cannot produce a counter error")
+        }
+    })
 }
 
 pub(crate) fn yubihsm_aes_cmac(
@@ -472,7 +466,7 @@ pub(crate) fn yubihsm_aes_cmac(
     key_id: u16,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    aes_cmac_with_encryptor(data, |block| {
+    cmac_with_encryptor(data, |block| {
         yubihsm_encrypt_ecb_blocks(ctx, session_handle, key_id, block)
     })
 }
@@ -492,7 +486,7 @@ pub(crate) fn yubihsm_aes_gmac(
 }
 
 pub(crate) fn software_aes_cmac(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
-    aes_cmac_with_encryptor(data, |block| software_crypt_ecb_blocks(key, block, true))
+    cmac_with_encryptor(data, |block| software_crypt_ecb_blocks(key, block, true))
 }
 
 pub(crate) fn software_aes_gmac(
