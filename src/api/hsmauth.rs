@@ -139,7 +139,7 @@ ffi_entry_point! {
         map((|| {
             let derivation_password = hsmauth_utf8(derivation_password, derivation_password_len)?;
             let key = crate::yubico_kdf::yubico_password_p256_key(derivation_password.as_bytes())?;
-            let private_key = Zeroizing::new(key.to_bytes());
+            let private_key = key.serialized().map_err(|_| CKR_FUNCTION_FAILED)?;
             hsmauth_put_asymmetric(
                 session_handle,
                 label,

@@ -4,11 +4,12 @@ use crate::{
     secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc},
 };
 use minicbor::{Decoder, Encoder, data::Type};
-use p256::{
-    PublicKey, SecretKey,
-    ecdh::diffie_hellman,
-    ecdsa::{Signature, VerifyingKey, signature::Verifier},
-    elliptic_curve::sec1::ToSec1Point,
+use software_key_core::{
+    software_key_agreement::derive_with_signing_key,
+    software_signing::{
+        EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+        ecdsa_signature_from_der,
+    },
 };
 use std::{rc::Rc, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
@@ -1027,15 +1028,9 @@ fn parse_cose_key(decoder: &mut Decoder<'_>) -> Result<CoseKey, CtapError> {
     })
 }
 
-fn random_p256_secret() -> Result<SecretKey, CtapError> {
-    loop {
-        let mut bytes = Zeroizing::new([0u8; 32]);
-        getrandom::fill(bytes.as_mut())
-            .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))?;
-        if let Ok(secret) = SecretKey::from_slice(bytes.as_ref()) {
-            return Ok(secret);
-        }
-    }
+fn random_p256_secret() -> Result<SoftwareSigningKey, CtapError> {
+    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+        .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))
 }
 
 fn encapsulate(
@@ -1046,11 +1041,20 @@ fn encapsulate(
     encoded[0] = 0x04;
     encoded[1..33].copy_from_slice(&authenticator_key.x);
     encoded[33..].copy_from_slice(&authenticator_key.y);
-    let peer = PublicKey::from_sec1_bytes(&encoded)
-        .map_err(|_| CtapError::Malformed("invalid authenticator key agreement point"))?;
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: encoded.to_vec(),
+    }
+    .validate()
+    .map_err(|_| CtapError::Malformed("invalid authenticator key agreement point"))?;
     let secret = random_p256_secret()?;
-    let public = secret.public_key().to_sec1_point(false);
-    let public = public.as_bytes();
+    let SoftwarePublicKey::Ec {
+        uncompressed: public,
+        ..
+    } = secret.public_key()
+    else {
+        return Err(CtapError::Transport(CKR_DEVICE_ERROR.into()));
+    };
     let platform_key = CoseKey {
         x: public[1..33]
             .try_into()
@@ -1059,8 +1063,9 @@ fn encapsulate(
             .try_into()
             .map_err(|_| CtapError::Malformed("invalid platform y coordinate"))?,
     };
-    let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
-    let shared = protocol.derive_shared_secret(z.raw_secret_bytes().as_ref())?;
+    let z = derive_with_signing_key(&secret, &encoded)
+        .map_err(|_| CtapError::Malformed("invalid authenticator key agreement point"))?;
+    let shared = protocol.derive_shared_secret(&z)?;
     Ok((platform_key, shared))
 }
 
@@ -1527,7 +1532,7 @@ fn verify_make_credential_response(
 struct AttestedCredential {
     credential_id: Vec<u8>,
     aaguid: [u8; 16],
-    public_key: VerifyingKey,
+    public_key: SoftwarePublicKey,
 }
 
 fn parse_attested_credential_data(
@@ -1571,7 +1576,7 @@ fn parse_attested_credential_data(
 fn parse_attested_credential_public_key(
     data: &[u8],
     has_extensions: bool,
-) -> Result<VerifyingKey, CtapError> {
+) -> Result<SoftwarePublicKey, CtapError> {
     let mut decoder = Decoder::new(data);
     let count = definite_map(&mut decoder)?;
     let mut key_type = None;
@@ -1609,7 +1614,12 @@ fn parse_attested_credential_public_key(
     point[0] = 0x04;
     point[1..33].copy_from_slice(&x);
     point[33..].copy_from_slice(&y);
-    let public_key = VerifyingKey::from_sec1_bytes(&point)
+    let public_key = SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.to_vec(),
+    };
+    public_key
+        .validate()
         .map_err(|_| CtapError::Malformed("invalid credential public key"))?;
     if has_extensions {
         let entries = definite_map(&mut decoder)?;
@@ -1635,7 +1645,7 @@ fn verify_packed_attestation(
     statement: &[u8],
     authenticator_data: &[u8],
     client_data_hash: &[u8; 32],
-    credential_public_key: &VerifyingKey,
+    credential_public_key: &SoftwarePublicKey,
     credential_aaguid: &[u8; 16],
 ) -> Result<(FidoAttestationTrust, usize), CtapError> {
     let mut decoder = Decoder::new(statement);
@@ -1676,8 +1686,9 @@ fn verify_packed_attestation(
             "unsupported packed attestation algorithm",
         ));
     }
-    let signature = Signature::from_der(
+    let signature = ecdsa_signature_from_der(
         &signature.ok_or(CtapError::Malformed("missing packed attestation signature"))?,
+        32,
     )
     .map_err(|_| CtapError::Malformed("invalid packed attestation signature"))?;
     let mut signed = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
@@ -1686,7 +1697,11 @@ fn verify_packed_attestation(
 
     let Some(certificates) = certificates else {
         credential_public_key
-            .verify(&signed, &signature)
+            .verify_message(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &signed,
+                &signature,
+            )
             .map_err(|_| CtapError::Malformed("invalid self attestation signature"))?;
         return Ok((FidoAttestationTrust::SelfAttestation, 0));
     };
@@ -1703,10 +1718,16 @@ fn verify_packed_attestation(
     }
     let (_, _, point) = crate::certificate_chain::public_key_parts(leaf)
         .map_err(|_| CtapError::Malformed("invalid attestation certificate"))?;
-    let attestation_public_key = VerifyingKey::from_sec1_bytes(&point)
-        .map_err(|_| CtapError::Malformed("unsupported attestation certificate public key"))?;
+    let attestation_public_key = SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point,
+    };
     attestation_public_key
-        .verify(&signed, &signature)
+        .verify_message(
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            &signed,
+            &signature,
+        )
         .map_err(|_| CtapError::Malformed("invalid packed attestation signature"))?;
 
     let count = certificates.len();
@@ -2048,7 +2069,10 @@ fn parse_credential_descriptor(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, Cta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::{SigningKey, signature::Signer};
+    use p256::{
+        SecretKey,
+        ecdsa::{Signature, SigningKey, signature::Signer},
+    };
     use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Debug)]

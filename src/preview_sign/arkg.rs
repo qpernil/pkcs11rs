@@ -3,12 +3,12 @@
 use super::{PreviewSignDerivedKeyRecord, PreviewSignError, PreviewSignRegistration};
 use crate::storage::ContentReference;
 use minicbor::{Decoder, Encoder};
-use p256::PublicKey;
 use software_key_core::arkg::{
     ARKG_P256_MAX_CONTEXT_LENGTH as MAX_CONTEXT_LENGTH, ARKG_P256_MIN_IKM_LENGTH as MIN_IKM_LENGTH,
     ARKG_P256_POINT_LENGTH as P256_POINT_LENGTH, ARKG_P256_TICKET_LENGTH as ARKG_TICKET_LENGTH,
     arkg_p256_derive_public,
 };
+use software_key_core::software_signing::{EcCurve, SoftwarePublicKey};
 use zeroize::Zeroizing;
 /// Experimental COSE algorithm identifier for ESP256-split with ARKG-P256.
 pub const ARKG_P256_ESP256_ALGORITHM: i64 = -65_539;
@@ -28,8 +28,8 @@ const COSE_P256_CURVE: i64 = 1;
 /// point. It contains no private key material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArkgP256PublicSeed {
-    blinding_public_key: PublicKey,
-    kem_public_key: PublicKey,
+    blinding_public_key: [u8; P256_POINT_LENGTH],
+    kem_public_key: [u8; P256_POINT_LENGTH],
 }
 
 impl ArkgP256PublicSeed {
@@ -154,12 +154,12 @@ impl ArkgP256PublicSeed {
 
     /// Return the SEC1-uncompressed key-blinding public point.
     pub fn blinding_public_key_sec1(&self) -> Box<[u8]> {
-        self.blinding_public_key.to_sec1_bytes()
+        self.blinding_public_key.as_slice().into()
     }
 
     /// Return the SEC1-uncompressed KEM public point.
     pub fn kem_public_key_sec1(&self) -> Box<[u8]> {
-        self.kem_public_key.to_sec1_bytes()
+        self.kem_public_key.as_slice().into()
     }
 }
 
@@ -251,7 +251,9 @@ impl PreviewSignRegistration {
     }
 }
 
-fn parse_ec2_public_key(decoder: &mut Decoder<'_>) -> Result<PublicKey, PreviewSignError> {
+fn parse_ec2_public_key(
+    decoder: &mut Decoder<'_>,
+) -> Result<[u8; P256_POINT_LENGTH], PreviewSignError> {
     let count = decoder
         .map()?
         .ok_or(PreviewSignError::Malformed(
@@ -299,8 +301,9 @@ fn parse_ec2_public_key(decoder: &mut Decoder<'_>) -> Result<PublicKey, PreviewS
     point[0] = 0x04;
     point[1..33].copy_from_slice(&x);
     point[33..].copy_from_slice(&y);
-    PublicKey::from_sec1_bytes(&point)
-        .map_err(|_| PreviewSignError::Malformed("ARKG component is not on the P-256 curve"))
+    validate_p256_point(&point)
+        .map_err(|_| PreviewSignError::Malformed("ARKG component is not on the P-256 curve"))?;
+    Ok(point)
 }
 
 fn copy_coordinate(input: &[u8]) -> Result<[u8; 32], PreviewSignError> {
@@ -320,8 +323,8 @@ fn derive_public_key(
     context: &[u8],
 ) -> Result<ArkgP256DerivedKey, PreviewSignError> {
     let derived = arkg_p256_derive_public(
-        &seed.blinding_public_key.to_sec1_bytes(),
-        &seed.kem_public_key.to_sec1_bytes(),
+        &seed.blinding_public_key,
+        &seed.kem_public_key,
         input_keying_material,
         context,
     )
@@ -438,7 +441,7 @@ fn validate_verification_key(encoded: &[u8]) -> Result<(), PreviewSignError> {
     public_key[0] = 4;
     public_key[1..33].copy_from_slice(&x);
     public_key[33..].copy_from_slice(&y);
-    PublicKey::from_sec1_bytes(&public_key).map_err(|_| {
+    validate_p256_point(&public_key).map_err(|_| {
         PreviewSignError::Malformed("derived verification key is not on the P-256 curve")
     })?;
     if encode_verification_key(&public_key)? != encoded {
@@ -493,7 +496,7 @@ fn validate_signing_arguments(encoded: &[u8]) -> Result<(), PreviewSignError> {
             "derived signing context is too long",
         ));
     }
-    PublicKey::from_sec1_bytes(&ticket[16..])
+    validate_p256_point(&ticket[16..])
         .map_err(|_| PreviewSignError::Malformed("invalid derived signing ticket point"))?;
     if encode_signing_arguments(&ticket, &context)? != encoded {
         return Err(PreviewSignError::Malformed(
@@ -501,6 +504,15 @@ fn validate_signing_arguments(encoded: &[u8]) -> Result<(), PreviewSignError> {
         ));
     }
     Ok(())
+}
+
+fn validate_p256_point(point: &[u8]) -> Result<(), ()> {
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.to_vec(),
+    }
+    .validate()
+    .map_err(|_| ())
 }
 
 pub(super) fn validate_derived_key_record(
@@ -530,7 +542,10 @@ pub(super) fn validate_derived_key_record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use p256::{
+        PublicKey,
+        ecdsa::{Signature, SigningKey, VerifyingKey},
+    };
     use signature::hazmat::{PrehashSigner, PrehashVerifier};
     use software_key_core::arkg::{ArkgP256Error, arkg_p256_derive_private};
 

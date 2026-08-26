@@ -11,12 +11,11 @@ use crate::{
         pad_iso7816 as pad, scp03_kdf, unpad_iso7816 as unpad,
     },
 };
-use p256::{
-    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
-    ecdh::diffie_hellman,
-    elliptic_curve::{Generate, sec1::ToSec1Point},
+use software_key_core::{
+    secure_channel::x963_kdf_sha256,
+    software_key_agreement::derive_with_signing_key,
+    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
 };
-use software_key_core::secure_channel::x963_kdf_sha256;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -752,7 +751,7 @@ impl SecureSession {
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Option<(Self, DirectAuthenticationMaterial)>, Error> {
-        let host_ephemeral_key = P256SecretKey::generate();
+        let host_ephemeral_key = p256_secret_key()?;
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
 
         let handshake = match Self::begin_asymmetric(connector, authkey_id, &host_ephemeral_public)
@@ -801,7 +800,7 @@ impl SecureSession {
         authkey_id: u16,
         static_secret: &[u8; P256_PRIVATE_KEY_LENGTH],
     ) -> Result<Self, Error> {
-        let host_ephemeral_key = P256SecretKey::generate();
+        let host_ephemeral_key = p256_secret_key()?;
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
         let handshake = Self::begin_asymmetric(connector, authkey_id, &host_ephemeral_public)?;
         Self::complete_asymmetric_with_static_secret(
@@ -817,15 +816,15 @@ impl SecureSession {
     fn complete_asymmetric_with_static_secret(
         connector: &dyn Connector,
         handshake: AsymmetricHandshake,
-        host_ephemeral_key: &P256SecretKey,
+        host_ephemeral_key: &SoftwareSigningKey,
         host_ephemeral_public: &[u8; P256_PUBLIC_KEY_LENGTH],
         static_secret: &[u8; P256_PRIVATE_KEY_LENGTH],
         receipt_error: crate::CK_RV,
     ) -> Result<Self, Error> {
         let keys = (|| {
             let device_ephemeral_public = &handshake.context[P256_PUBLIC_KEY_LENGTH..];
-            let device_ephemeral_key = parse_p256_public_key(device_ephemeral_public)?;
-            let ephemeral_secret = p256_ecdh(host_ephemeral_key, &device_ephemeral_key)?;
+            parse_p256_public_key(device_ephemeral_public)?;
+            let ephemeral_secret = p256_ecdh(host_ephemeral_key, device_ephemeral_public)?;
             let session_keys = x963_session_keys(&ephemeral_secret, static_secret)?;
 
             let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
@@ -985,28 +984,42 @@ impl SecureSession {
     }
 }
 
-fn p256_public_key(key: &P256SecretKey) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
-    key.public_key()
-        .to_sec1_point(false)
-        .as_bytes()
-        .try_into()
+fn p256_secret_key() -> Result<SoftwareSigningKey, Error> {
+    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
         .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-fn parse_p256_public_key(encoded: &[u8]) -> Result<P256PublicKey, Error> {
+fn p256_public_key(key: &SoftwareSigningKey) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
+    let SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed,
+    } = key.public_key()
+    else {
+        return Err(CKR_DEVICE_ERROR.into());
+    };
+    uncompressed.try_into().map_err(|_| CKR_DEVICE_ERROR.into())
+}
+
+fn parse_p256_public_key(encoded: &[u8]) -> Result<(), Error> {
     if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != 0x04 {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    P256PublicKey::from_sec1_bytes(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: encoded.to_vec(),
+    }
+    .validate()
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 
 fn trusted_device_public_key(
     connector: &dyn Connector,
     trust_prefix: Option<&std::ffi::OsStr>,
-) -> Result<P256PublicKey, Error> {
+) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
     let encoded = device_public_key_bytes(connector)?;
     trust::validate_device_public_key(&encoded, trust_prefix)?;
-    parse_p256_public_key(&encoded)
+    parse_p256_public_key(&encoded)?;
+    Ok(encoded)
 }
 
 pub(crate) fn validate_device_public_key_with_prefix(
@@ -1027,12 +1040,8 @@ pub(crate) fn device_public_key_bytes(
     encoded.try_into().map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-fn p256_ecdh(private: &P256SecretKey, public: &P256PublicKey) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let secret = Zeroizing::new(
-        diffie_hellman(private.to_nonzero_scalar(), public.as_affine())
-            .raw_secret_bytes()
-            .to_vec(),
-    );
+fn p256_ecdh(private: &SoftwareSigningKey, public: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let secret = derive_with_signing_key(private, public).map_err(|_| CKR_DEVICE_ERROR)?;
     if secret.len() != P256_PRIVATE_KEY_LENGTH {
         return Err(CKR_DEVICE_ERROR.into());
     }

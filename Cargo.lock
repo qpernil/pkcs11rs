@@ -667,7 +667,6 @@ dependencies = [
  "const-oid 0.10.2",
  "der_derive",
  "flagset",
- "pem-rfc7468",
  "zeroize",
 ]
 
@@ -781,7 +780,6 @@ dependencies = [
  "group",
  "hkdf",
  "hybrid-array",
- "pem-rfc7468",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
  "sec1",
@@ -1603,15 +1601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pem-rfc7468"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1643,7 +1632,6 @@ dependencies = [
  "const-oid 0.10.2",
  "der 0.8.1",
  "ed25519-dalek",
- "elliptic-curve",
  "flate2",
  "getrandom 0.4.3",
  "hidapi",
@@ -2727,9 +2715,9 @@ dependencies = [
  "const-oid 0.10.2",
  "der 0.8.1",
  "getrandom 0.4.3",
- "p256",
  "rsa",
  "serde",
+ "signature 3.0.0",
  "software-key-core",
  "spki 0.8.0",
  "subtle",
@@ -2743,7 +2731,6 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "minicbor",
- "p256",
  "software-key-core",
  "subtle",
  "zeroize",

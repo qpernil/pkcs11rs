@@ -718,9 +718,12 @@ fn validate_public_key(public_key: &[u8]) -> Result<(), Error> {
     if public_key.len() != P256_PUBLIC_KEY_LENGTH || public_key[0] != 0x04 {
         return Err(CKR_DATA_INVALID.into());
     }
-    p256::PublicKey::from_sec1_bytes(public_key)
-        .map(|_| ())
-        .map_err(|_| Error::from(CKR_DATA_INVALID))
+    software_key_core::software_signing::SoftwarePublicKey::Ec {
+        curve: software_key_core::software_signing::EcCurve::P256,
+        uncompressed: public_key.to_vec(),
+    }
+    .validate()
+    .map_err(|_| Error::from(CKR_DATA_INVALID))
 }
 
 fn encode_tlv(tag: u8, value: &[u8]) -> Result<Vec<u8>, Error> {
