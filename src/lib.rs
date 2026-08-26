@@ -229,6 +229,7 @@ mod yubihsm_algorithm {
     pub(super) const YUBIHSM_ALGO_AES_CBC: u8 = 54;
     pub(super) const YUBIHSM_ALGO_AES_KWP: u8 = 55;
     pub(super) const YUBIHSM_ALGO_X25519: u8 = 56;
+    pub(super) const YUBIHSM_ALGO_ECDH_KDF: u8 = 57;
 }
 use yubihsm_algorithm::*;
 
@@ -284,6 +285,21 @@ pub const CKM_PKCS11RS_PROJECT_PUBLIC_KEY: CK_MECHANISM_TYPE =
 /// Return one exact CTAP GetAssertion response for a resident FIDO credential.
 pub const CKM_PKCS11RS_FIDO_ASSERTION: CK_MECHANISM_TYPE =
     CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0005;
+/// Atomically prefix an ECDH secret and apply a mandatory ANSI X9.63 KDF.
+pub const CKM_PKCS11RS_PREFIXED_ECDH_DERIVE: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0006;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+    pub kdf: CK_EC_KDF_TYPE,
+    pub ulSharedDataLen: CK_ULONG,
+    pub pSharedData: CK_BYTE_PTR,
+    pub ulPublicDataLen: CK_ULONG,
+    pub pPublicData: CK_BYTE_PTR,
+    pub ulPrefixDataLen: CK_ULONG,
+    pub pPrefixData: CK_BYTE_PTR,
+}
 /// Key type used by the importable previewSign registration object.
 pub const CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0001;
@@ -340,6 +356,15 @@ fn yubihsm_capability(capabilities: &[u8; 8], bit: usize) -> bool {
     capabilities[7 - bit / 8] & (1 << (bit % 8)) != 0
 }
 
+fn set_yubihsm_capability(capabilities: &mut [u8; 8], bit: usize, enabled: bool) {
+    let mask = 1 << (bit % 8);
+    if enabled {
+        capabilities[7 - bit / 8] |= mask;
+    } else {
+        capabilities[7 - bit / 8] &= !mask;
+    }
+}
+
 fn yubihsm_capabilities(bits: &[usize]) -> [u8; 8] {
     let mut capabilities = [0; 8];
     for bit in bits {
@@ -380,9 +405,11 @@ fn yubihsm_capabilities_to_attributes(
                 attributes.sign = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
                 attributes.sign = yubihsm_capability(capabilities, 0x07);
-                attributes.derive = yubihsm_capability(capabilities, 0x0b);
+                attributes.derive = yubihsm_capability(capabilities, 0x0b)
+                    || yubihsm_capability(capabilities, 0x38);
             } else if is_yubihsm_x25519(algorithm) {
-                attributes.derive = yubihsm_capability(capabilities, 0x0b);
+                attributes.derive = yubihsm_capability(capabilities, 0x0b)
+                    || yubihsm_capability(capabilities, 0x38);
             }
         }
         YUBIHSM_PUBLIC_KEY => {
@@ -430,6 +457,28 @@ fn yubihsm_capabilities_to_attributes(
         _ => {}
     }
     attributes
+}
+
+fn yubihsm_asymmetric_allowed_mechanisms(
+    algorithm: u8,
+    capabilities: &[u8; 8],
+) -> Option<Vec<CK_MECHANISM_TYPE>> {
+    if !(is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm))
+        || !yubihsm_capability(capabilities, 0x38)
+    {
+        return None;
+    }
+    let mut mechanisms = vec![CKM_PKCS11RS_PREFIXED_ECDH_DERIVE];
+    if yubihsm_capability(capabilities, 0x0b) {
+        mechanisms.push(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE);
+    }
+    if is_yubihsm_ec(algorithm) && yubihsm_capability(capabilities, 0x07) {
+        mechanisms.push(CKM_ECDSA as CK_MECHANISM_TYPE);
+        mechanisms.extend(crate::mechanism::HASHED_ECDSA_MECHANISMS);
+    }
+    mechanisms.sort_unstable();
+    mechanisms.dedup();
+    Some(mechanisms)
 }
 
 fn yubihsm_attributes_to_capabilities(

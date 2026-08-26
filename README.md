@@ -59,6 +59,11 @@ the proposed standard semantics and current implementation boundary. YubiHSM
 RSA wrap keys add an explicit native-public-wrap case; its complete
 `C_GenerateKeyPair`, `C_CreateObject`, and `C_DeriveKey` template matrices are
 documented under [RSA public wrap keys](docs/yubihsm-auth.md#rsa-public-wrap-keys).
+The vendor
+[`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE`](docs/prefixed-ecdh-derive.md) mechanism
+keeps a reusable static ECDH agreement inside a supporting YubiHSM while
+deriving session-specific key material. The current compatibility object and
+the future persistent, chainable generic-secret design are documented there.
 
 ## PKCS #11 3.2 profiles
 

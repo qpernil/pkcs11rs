@@ -1,22 +1,22 @@
 use crate::pkcs11::*;
 use crate::{
-    CKM_PKCS11RS_FIDO_ASSERTION, CKM_PKCS11RS_PREVIEW_SIGN, CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
-    CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN, CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
-    CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP, Error, SlotContext, TokenObject,
-    YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_AES128,
-    YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES192_CCM_WRAP,
-    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP, YUBIHSM_ALGO_EC_BP256,
-    YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512, YUBIHSM_ALGO_EC_ECDSA_SHA1,
-    YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384, YUBIHSM_ALGO_EC_ECDSA_SHA512,
-    YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P384,
-    YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256,
-    YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_RSA_OAEP_SHA1,
-    YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384, YUBIHSM_ALGO_RSA_OAEP_SHA512,
-    YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1, YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-    YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512, YUBIHSM_ALGO_RSA_PSS_SHA1,
-    YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384, YUBIHSM_ALGO_RSA_PSS_SHA512,
-    YUBIHSM_ALGO_X25519, as_mut, map, with_slot_context_mut,
+    CKM_PKCS11RS_FIDO_ASSERTION, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE, CKM_PKCS11RS_PREVIEW_SIGN,
+    CKM_PKCS11RS_PREVIEW_SIGN_DERIVE, CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+    CKM_PKCS11RS_PROJECT_PUBLIC_KEY, CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP, Error,
+    SlotContext, TokenObject, YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP,
+    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
+    YUBIHSM_ALGO_AES192_CCM_WRAP, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP,
+    YUBIHSM_ALGO_EC_BP256, YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512,
+    YUBIHSM_ALGO_EC_ECDSA_SHA1, YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384,
+    YUBIHSM_ALGO_EC_ECDSA_SHA512, YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256,
+    YUBIHSM_ALGO_EC_P384, YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ECDH_KDF, YUBIHSM_ALGO_ED25519,
+    YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256, YUBIHSM_ALGO_HMAC_SHA384,
+    YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096,
+    YUBIHSM_ALGO_RSA_OAEP_SHA1, YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384,
+    YUBIHSM_ALGO_RSA_OAEP_SHA512, YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+    YUBIHSM_ALGO_RSA_PKCS1_SHA256, YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512,
+    YUBIHSM_ALGO_RSA_PSS_SHA1, YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384,
+    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_X25519, as_mut, map, with_slot_context_mut,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +169,7 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_PKCS11RS_PREVIEW_SIGN,
         CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
         CKM_PKCS11RS_FIDO_ASSERTION,
+        CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
     )
 }
 
@@ -546,7 +547,7 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
     mechanisms
 }
 
-pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [
+pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 31] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -615,6 +616,12 @@ pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [
     },
     MechanismDetails {
         type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        min_key_size: 224,
+        max_key_size: 521,
+        flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
         min_key_size: 224,
         max_key_size: 521,
         flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
@@ -826,7 +833,11 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 {
                     &ed25519_sizes
                 }
-                y if y == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => &derive_sizes,
+                y if y == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
+                    || y == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE =>
+                {
+                    &derive_sizes
+                }
                 y if y == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
                     || y == CKM_AES_ECB as CK_MECHANISM_TYPE
                     || y == CKM_AES_CBC as CK_MECHANISM_TYPE
@@ -902,6 +913,9 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_x25519,
                 x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_ed25519,
                 x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => has_ec || has_x25519,
+                x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => {
+                    algorithms.contains(&YUBIHSM_ALGO_ECDH_KDF) && (has_ec || has_x25519)
+                }
                 x if x == CKM_EDDSA as CK_MECHANISM_TYPE => has_ed25519,
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => any(&[
                     YUBIHSM_ALGO_AES128,
@@ -1163,7 +1177,32 @@ mod name_tests {
             mechanism_name(CKM_PKCS11RS_FIDO_ASSERTION).and_then(|name| name.to_str().ok()),
             Some("CKM_PKCS11RS_FIDO_ASSERTION")
         );
+        assert_eq!(
+            mechanism_name(CKM_PKCS11RS_PREFIXED_ECDH_DERIVE).and_then(|name| name.to_str().ok()),
+            Some("CKM_PKCS11RS_PREFIXED_ECDH_DERIVE")
+        );
         assert_eq!(mechanism_name(CK_ULONG::MAX), None);
+    }
+
+    #[test]
+    fn protected_ecdh_is_advertised_only_by_the_extension_and_includes_x25519() {
+        assert!(
+            yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_X25519])
+                .iter()
+                .all(|details| details.type_ != CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
+        );
+        let mechanisms = yubihsm_mechanisms(&[
+            YUBIHSM_ALGO_EC_P256,
+            YUBIHSM_ALGO_X25519,
+            YUBIHSM_ALGO_ECDH_KDF,
+        ]);
+        let details = mechanisms
+            .iter()
+            .find(|details| details.type_ == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
+            .unwrap();
+        assert_eq!(details.min_key_size, 255);
+        assert_eq!(details.max_key_size, 256);
+        assert_eq!(details.flags, (CKF_HW | CKF_DERIVE) as CK_FLAGS);
     }
 
     #[test]

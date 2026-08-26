@@ -3528,7 +3528,10 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         key_gen_mechanism: generated
             .then(|| yubihsm_key_generation_mechanism(info.algorithm))
             .flatten(),
-        allowed_mechanisms: None,
+        allowed_mechanisms: yubihsm_asymmetric_allowed_mechanisms(
+            info.algorithm,
+            &info.capabilities,
+        ),
         wrap_with_trusted: false,
         policy_templates: crate::KeyPolicyTemplates::default(),
         creator_session: None,

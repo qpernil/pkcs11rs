@@ -172,7 +172,7 @@ fn encode_metadata_item(encoded: &mut Vec<u8>, tag: u8, value: &[u8]) {
 }
 
 impl ProtocolPeer {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut x25519_private_keys = HashMap::new();
         x25519_private_keys.insert(7, RFC7748_ALICE_PRIVATE_KEY);
         x25519_private_keys.insert(8, RFC7748_BOB_PRIVATE_KEY);
@@ -316,6 +316,11 @@ impl ProtocolPeer {
     fn use_asymmetric_authentication(&self, authkey_id: u16) {
         self.asymmetric_authkeys.borrow_mut().insert(authkey_id);
         self.provision_authentication_key(authkey_id, true).unwrap();
+    }
+
+    pub(crate) fn device_public_key(&self) -> Result<Vec<u8>, Error> {
+        let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
+        Ok(p256_public_key(&private)?.to_vec())
     }
 
     fn use_symmetric_authentication(&self, authkey_id: u16) {
@@ -557,6 +562,9 @@ impl ProtocolPeer {
                 self.inner_commands
                     .borrow_mut()
                     .push((inner.command, inner.data.clone()));
+                if inner.command == CommandCode::PutAuthenticationKey as u8 {
+                    return None;
+                }
                 let result = (|| -> Result<(u8, Vec<u8>), Error> {
                     let (response_command, response_data) = match inner.command {
                         value if value == CommandCode::GetStorageInfo as u8 => {
@@ -682,9 +690,10 @@ impl ProtocolPeer {
                                 .get(&id)
                                 .map(|(info, _)| info.algorithm);
                             if algorithm == Some(YUBIHSM_ALGO_EC_P256) {
-                                let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
+                                let private =
+                                    crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
                                 let mut response = vec![YUBIHSM_ALGO_EC_P256];
-                                response.extend_from_slice(&p256_public_key(&private)?);
+                                response.extend_from_slice(&p256_public_key(&private)?[1..]);
                                 (inner.command | RESPONSE_BIT, response)
                             } else if let Some(private_key) =
                                 self.x25519_private_keys.borrow().get(&id)
@@ -1142,6 +1151,64 @@ impl ProtocolPeer {
                                 (inner.command | RESPONSE_BIT, vec![0x42; 32])
                             }
                         }
+                        value if value == CommandCode::DeriveEcdhKdf as u8 => {
+                            if inner.data.len() < 11 {
+                                return Err(CKR_DATA_LEN_RANGE.into());
+                            }
+                            let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                            let output_length =
+                                u16::from_be_bytes(inner.data[3..5].try_into().unwrap()) as usize;
+                            let public_length =
+                                u16::from_be_bytes(inner.data[5..7].try_into().unwrap()) as usize;
+                            let prefix_length =
+                                u16::from_be_bytes(inner.data[7..9].try_into().unwrap()) as usize;
+                            let shared_length =
+                                u16::from_be_bytes(inner.data[9..11].try_into().unwrap()) as usize;
+                            if inner.data.len()
+                                != 11 + public_length + prefix_length + shared_length
+                            {
+                                return Err(CKR_DATA_LEN_RANGE.into());
+                            }
+                            let public_end = 11 + public_length;
+                            let prefix_end = public_end + prefix_length;
+                            let secret = if public_length == 32 {
+                                self.x25519_derive(id, &inner.data[11..public_end])?
+                            } else {
+                                let private =
+                                    crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
+                                software_key_core::software_key_agreement::derive_with_signing_key(
+                                    &private,
+                                    &inner.data[11..public_end],
+                                )
+                                .map_err(|_| Error::from(CKR_DATA_INVALID))?
+                                .to_vec()
+                            };
+                            let mut prefixed = zeroize::Zeroizing::new(Vec::with_capacity(
+                                prefix_length + secret.len(),
+                            ));
+                            prefixed.extend_from_slice(&inner.data[public_end..prefix_end]);
+                            prefixed.extend_from_slice(&secret);
+                            let hash = match inner.data[2] {
+                                1 => software_key_core::digest::HashAlgorithm::Sha1,
+                                2 => software_key_core::digest::HashAlgorithm::Sha224,
+                                3 => software_key_core::digest::HashAlgorithm::Sha256,
+                                4 => software_key_core::digest::HashAlgorithm::Sha384,
+                                5 => software_key_core::digest::HashAlgorithm::Sha512,
+                                6 => software_key_core::digest::HashAlgorithm::Sha3_224,
+                                7 => software_key_core::digest::HashAlgorithm::Sha3_256,
+                                8 => software_key_core::digest::HashAlgorithm::Sha3_384,
+                                9 => software_key_core::digest::HashAlgorithm::Sha3_512,
+                                _ => return Err(CKR_DATA_INVALID.into()),
+                            };
+                            let derived = software_key_core::digest::x963_kdf(
+                                hash,
+                                &prefixed,
+                                &inner.data[prefix_end..],
+                                output_length,
+                            )
+                            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+                            (inner.command | RESPONSE_BIT, derived.to_vec())
+                        }
                         value
                             if value == CommandCode::EncryptEcb as u8
                                 || value == CommandCode::DecryptEcb as u8 =>
@@ -1250,7 +1317,7 @@ pub(crate) fn make_yubihsm_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -5315,6 +5382,7 @@ fn every_authenticated_command_crosses_the_secure_transport() {
                     | CommandCode::ListObjects
                     | CommandCode::GetObjectInfo
                     | CommandCode::GetPublicKey
+                    | CommandCode::PutAuthenticationKey
                     | CommandCode::GenerateAsymmetricKey
                     | CommandCode::GenerateWrapKey
                     | CommandCode::PutAsymmetricKey
@@ -5327,6 +5395,7 @@ fn every_authenticated_command_crosses_the_secure_transport() {
                     | CommandCode::ImportRsaWrapped
                     | CommandCode::SignPkcs1
                     | CommandCode::DecryptPkcs1
+                    | CommandCode::DeriveEcdhKdf
                     | CommandCode::WrapData
                     | CommandCode::UnwrapData
                     | CommandCode::DecryptEcb

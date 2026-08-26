@@ -1009,11 +1009,32 @@ pub(super) fn yubihsm_object_parameters(
         unwrap: object.can_unwrap(),
         extractable: object.extractable,
     };
+    let mut capabilities = yubihsm_attributes_to_capabilities(object_type, algorithm, attributes);
+    if object_type == YUBIHSM_ASYMMETRIC_KEY
+        && object.derive
+        && (is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm))
+    {
+        let (raw, protected) =
+            object
+                .allowed_mechanisms
+                .as_ref()
+                .map_or((true, false), |allowed| {
+                    (
+                        allowed.contains(&(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE)),
+                        allowed.contains(&CKM_PKCS11RS_PREFIXED_ECDH_DERIVE),
+                    )
+                });
+        if !raw && !protected {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        set_yubihsm_capability(&mut capabilities, 0x0b, raw);
+        set_yubihsm_capability(&mut capabilities, 0x38, protected);
+    }
     Ok(YubiHsmObjectParameters {
         id: yubihsm_id(&object.id)?,
         label: &object.label,
         domains: 0xffff,
-        capabilities: yubihsm_attributes_to_capabilities(object_type, algorithm, attributes),
+        capabilities,
         algorithm,
     })
 }
