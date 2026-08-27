@@ -118,6 +118,11 @@ fn run_worker(
             }
             WorkerRequest::EndOperation { reply } => {
                 active_session = None;
+                // A retained TKSmartCard can keep the physical token reserved by
+                // this process even after endSession. Resolve it again for the
+                // next operation so other apps can use the same smart card.
+                card = None;
+                card_generation = None;
                 operation_active = false;
                 let _ = reply.try_send(());
             }
