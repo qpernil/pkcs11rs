@@ -832,6 +832,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_request_limit_sheds_load_and_keeps_the_http2_connection_usable() {
+        let _network_guard = crate::NETWORK_TEST_LOCK.lock().await;
         let entered = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let app = Router::new()

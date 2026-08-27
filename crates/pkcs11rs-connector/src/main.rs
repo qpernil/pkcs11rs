@@ -18,6 +18,9 @@ use std::{
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ServerFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
+#[cfg(test)]
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
 const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
@@ -462,22 +465,26 @@ mod tests {
         (listener, address)
     }
 
-    fn spawn_http_server(
+    async fn spawn_http_server(
         app: axum::Router,
     ) -> (
         SocketAddr,
         axum_server::Handle<SocketAddr>,
         JoinHandle<std::io::Result<()>>,
     ) {
-        let (listener, address) = listener();
+        let requested_address = "127.0.0.1:0".parse().unwrap();
         let handle = axum_server::Handle::new();
         let server_handle = handle.clone();
         let server = tokio::spawn(async move {
-            axum_server::from_tcp(listener)?
+            axum_server::bind(requested_address)
                 .handle(server_handle)
                 .serve(app.into_make_service())
                 .await
         });
+        let address = handle
+            .listening()
+            .await
+            .expect("HTTP server failed to bind");
         (address, handle, server)
     }
 
@@ -680,6 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_device_api_works_over_http2_when_a_device_appears() {
+        let _network_guard = NETWORK_TEST_LOCK.lock().await;
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry
             .insert_test_response("11111111", b"other device")
@@ -691,7 +699,7 @@ mod tests {
             },
             64,
         );
-        let (address, handle, server) = spawn_http_server(app);
+        let (address, handle, server) = spawn_http_server(app).await;
 
         registry
             .insert_test_response("22222222", b"second device")
@@ -724,6 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_server_can_drop_stale_connections_and_rebind_the_same_address() {
+        let _network_guard = NETWORK_TEST_LOCK.lock().await;
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("12345678").await;
         let app = router(
@@ -733,7 +742,7 @@ mod tests {
             },
             64,
         );
-        let (address, first_handle, first_server) = spawn_http_server(app.clone());
+        let (address, first_handle, first_server) = spawn_http_server(app.clone()).await;
 
         let stream = TcpStream::connect(address).await.unwrap();
         let (_, body) = send_http2(
@@ -747,6 +756,13 @@ mod tests {
 
         first_handle.shutdown();
         first_server.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while first_handle.connection_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first server connections did not close after shutdown");
 
         let second_handle = axum_server::Handle::new();
         let server_handle = second_handle.clone();
@@ -774,6 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_device_api_works_over_https2_at_startup() {
+        let _network_guard = NETWORK_TEST_LOCK.lock().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry
