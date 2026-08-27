@@ -35,17 +35,6 @@ private struct HsmAuthCredential {
     let algorithm: CK_ULONG
     let retries: CK_ULONG
     let touchRequired: Bool
-    let publicKey: [UInt8]?
-
-    func username(authenticationKeyID: [UInt8]) -> String? {
-        guard authenticationKeyID.count == 2 else {
-            return nil
-        }
-        let identifier = authenticationKeyID.map {
-            String(format: "%02X", $0)
-        }.joined()
-        return ":\(identifier)\(label)@\(source)"
-    }
 
     var algorithmName: String {
         switch algorithm {
@@ -66,18 +55,11 @@ private struct HsmAuthCredential {
 private struct ObjectInspection {
     let description: String
     let credential: HsmAuthCredential?
-    let publicKey: PublicKeyIdentity?
-}
-
-private struct PublicKeyIdentity {
-    let id: [UInt8]
-    let ecPoint: [UInt8]
 }
 
 private struct ObjectInventory {
     var lines: [String]
     let credentials: [HsmAuthCredential]
-    let publicKeys: [PublicKeyIdentity]
 }
 
 private struct SlotInventory {
@@ -285,8 +267,7 @@ private func objectDescription(
             source: source,
             algorithm: hsmAuthAlgorithm,
             retries: hsmAuthRetries,
-            touchRequired: hsmAuthTouchRequired != CK_BBOOL(CK_FALSE),
-            publicKey: nil
+            touchRequired: hsmAuthTouchRequired != CK_BBOOL(CK_FALSE)
         )
     } else {
         nil
@@ -296,28 +277,9 @@ private func objectDescription(
         parts.append("retries=\(credential.retries)")
         parts.append("touch=\(credential.touchRequired)")
     }
-    let publicKey: PublicKeyIdentity? = if attributes[0].ulValueLen
-        == CK_ULONG(MemoryLayout<CK_OBJECT_CLASS>.size),
-        attributes[3].ulValueLen == CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size),
-        objectClass == CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
-        keyType == CK_KEY_TYPE(CKK_EC),
-        let objectIdentifier,
-        let length = availableLength(
-            attributes[7],
-            capacity: objectAttributeBufferCapacity
-        ), length > 0
-    {
-        PublicKeyIdentity(
-            id: objectIdentifier,
-            ecPoint: Array(ecPoint.prefix(length))
-        )
-    } else {
-        nil
-    }
     return ObjectInspection(
         description: parts.joined(separator: ", "),
-        credential: credential,
-        publicKey: publicKey
+        credential: credential
     )
 }
 
@@ -373,23 +335,10 @@ private func objectInventory(
     if let failure {
         lines.append("  \(failure)")
     }
-    let publicKeys = inspections.compactMap(\.publicKey)
-    let credentials = inspections.compactMap(\.credential).map { credential in
-        HsmAuthCredential(
-            label: credential.label,
-            source: credential.source,
-            algorithm: credential.algorithm,
-            retries: credential.retries,
-            touchRequired: credential.touchRequired,
-            publicKey: publicKeys.first {
-                $0.id == Array(credential.label.utf8)
-            }?.ecPoint
-        )
-    }
+    let credentials = inspections.compactMap(\.credential)
     return ObjectInventory(
         lines: lines,
-        credentials: credentials,
-        publicKeys: publicKeys
+        credentials: credentials
     )
 }
 
@@ -1106,7 +1055,7 @@ private func softwareObjectInventory(
         let initialize = initializeSoftwareToken(slot: slot)
         guard initialize == CKR_OK else {
             lines.append("  C_InitToken failed: \(initialize)")
-            return ObjectInventory(lines: lines, credentials: [], publicKeys: [])
+            return ObjectInventory(lines: lines, credentials: [])
         }
         lines.append("  initialized persistent token")
     }
@@ -1121,7 +1070,7 @@ private func softwareObjectInventory(
     )
     guard open == CKR_OK else {
         lines.append("  C_OpenSession failed: \(open)")
-        return ObjectInventory(lines: lines, credentials: [], publicKeys: [])
+        return ObjectInventory(lines: lines, credentials: [])
     }
 
     var failure: String?
@@ -1373,8 +1322,7 @@ private func softwareObjectInventory(
     var inventory = if let failure {
         ObjectInventory(
             lines: ["", "Objects: skipped after \(failure)"],
-            credentials: [],
-            publicKeys: []
+            credentials: []
         )
     } else {
         objectInventory(session: session, title: "Objects (authenticated software session)")
@@ -1411,8 +1359,7 @@ private func publicObjectInventory(
     guard openResult == CKR_OK else {
         return ObjectInventory(
             lines: ["", "Objects: C_OpenSession failed: \(openResult)"],
-            credentials: [],
-            publicKeys: []
+            credentials: []
         )
     }
 
@@ -1429,15 +1376,9 @@ private func publicObjectInventory(
 }
 
 private func authenticatedObjectInventory(
-    slot: CK_SLOT_ID,
-    credential: HsmAuthCredential,
-    authenticationKeyID: [UInt8]
+    slot: CK_SLOT_ID
 ) -> [String] {
-    guard let usernameValue = credential.username(
-        authenticationKeyID: authenticationKeyID
-    ) else {
-        return ["", "YubiHSM Auth login: invalid Authentication Key CKA_ID"]
-    }
+    let usernameValue = ":*"
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
         slot,
@@ -1689,39 +1630,14 @@ private final class ModuleInspector {
         } else {
             lines.append(contentsOf: credentials.map { "  \($0.description)" })
         }
-        let selectedCredential = credentials.first
-        if let selectedCredential {
-            lines.append("Selected credential: \(selectedCredential.description)")
-            lines.append("Authentication key: match by public CKA_EC_POINT")
-        }
-
         for inventory in slotInventories {
             lines.append("")
             lines.append("Slot \(inventory.slot): \(inventory.description)")
             lines.append("Token: \(inventory.tokenLabel)")
             lines.append("Serial: \(inventory.serial)")
             lines.append(contentsOf: inventory.objects.lines)
-            if inventory.isYubiHsm, let selectedCredential {
-                let matches = selectedCredential.publicKey.map { credentialPublicKey in
-                    inventory.objects.publicKeys.filter {
-                        $0.ecPoint == credentialPublicKey
-                            && $0.id.count == 2
-                    }
-                } ?? []
-                if matches.count == 1 {
-                    lines.append(
-                        "Matched Authentication Key ID: \(hexString(matches[0].id[...]))"
-                    )
-                    lines.append(contentsOf: authenticatedObjectInventory(
-                        slot: inventory.slot,
-                        credential: selectedCredential,
-                        authenticationKeyID: matches[0].id
-                    ))
-                } else {
-                    lines.append(
-                        "YubiHSM Auth public-key matches: \(matches.count); login skipped"
-                    )
-                }
+            if inventory.isYubiHsm {
+                lines.append(contentsOf: authenticatedObjectInventory(slot: inventory.slot))
             }
         }
 

@@ -76,23 +76,13 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return [storage subdataWithRange:NSMakeRange(0, (NSUInteger)attribute.ulValueLen)];
 }
 
-@interface PKCS11RSPublicKeyIdentity : NSObject
-@property(nonatomic, copy) NSData *identifier;
-@property(nonatomic, copy) NSData *ecPoint;
-@end
-
-@implementation PKCS11RSPublicKeyIdentity
-@end
-
 @interface PKCS11RSHsmAuthCredential : NSObject
 @property(nonatomic, copy) NSString *label;
 @property(nonatomic, copy) NSString *source;
 @property(nonatomic) CK_ULONG algorithm;
 @property(nonatomic) CK_ULONG retries;
 @property(nonatomic) BOOL touchRequired;
-@property(nonatomic, copy, nullable) NSData *publicKey;
 - (NSString *)algorithmName;
-- (nullable NSString *)usernameWithAuthenticationKeyID:(NSData *)identifier;
 @end
 
 @implementation PKCS11RSHsmAuthCredential
@@ -106,15 +96,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         default:
             return [NSString stringWithFormat:@"algorithm %lu", (unsigned long)self.algorithm];
     }
-}
-
-- (NSString *)usernameWithAuthenticationKeyID:(NSData *)identifier {
-    if (identifier.length != 2) {
-        return nil;
-    }
-    const unsigned char *bytes = identifier.bytes;
-    return [NSString stringWithFormat:@":%02X%02X%@@%@",
-                                      bytes[0], bytes[1], self.label, self.source];
 }
 
 - (NSString *)description {
@@ -132,7 +113,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
 @interface PKCS11RSObjectInspection : NSObject
 @property(nonatomic, copy) NSString *line;
 @property(nonatomic, strong, nullable) PKCS11RSHsmAuthCredential *credential;
-@property(nonatomic, strong, nullable) PKCS11RSPublicKeyIdentity *publicKey;
 @end
 
 
@@ -143,7 +123,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
 @interface PKCS11RSObjectInventory : NSObject
 @property(nonatomic, copy) NSArray<NSString *> *lines;
 @property(nonatomic, copy) NSArray<PKCS11RSHsmAuthCredential *> *credentials;
-@property(nonatomic, copy) NSArray<PKCS11RSPublicKeyIdentity *> *publicKeys;
 @end
 
 
@@ -421,16 +400,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                     credential.touchRequired ? @"true" : @"false"]];
     }
 
-    NSData *ecPoint = PKCS11RSAttributeData(attributes[7], ecPointStorage);
-    if (attributes[0].ulValueLen == sizeof(objectClass) &&
-        attributes[3].ulValueLen == sizeof(keyType) &&
-        objectClass == CKO_PUBLIC_KEY && keyType == CKK_EC &&
-        identifier.length > 0 && ecPoint.length > 0) {
-        PKCS11RSPublicKeyIdentity *publicKey = [[PKCS11RSPublicKeyIdentity alloc] init];
-        publicKey.identifier = identifier;
-        publicKey.ecPoint = ecPoint;
-        inspection.publicKey = publicKey;
-    }
     inspection.line = [parts componentsJoinedByString:@", "];
     return inspection;
 }
@@ -476,7 +445,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] initWithObjects:
         @"", [NSString stringWithFormat:@"%@: %lu", title, (unsigned long)objects.count], nil];
     NSMutableArray<PKCS11RSHsmAuthCredential *> *credentials = [[NSMutableArray alloc] init];
-    NSMutableArray<PKCS11RSPublicKeyIdentity *> *publicKeys = [[NSMutableArray alloc] init];
     for (NSNumber *object in objects) {
         PKCS11RSObjectInspection *inspection =
             [self inspectObject:(CK_OBJECT_HANDLE)object.unsignedLongValue
@@ -486,28 +454,14 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         if (inspection.credential != nil) {
             [credentials addObject:inspection.credential];
         }
-        if (inspection.publicKey != nil) {
-            [publicKeys addObject:inspection.publicKey];
-        }
     }
     if (failure != nil) {
         [lines addObject:[NSString stringWithFormat:@"  %@", failure]];
     }
 
-    for (PKCS11RSHsmAuthCredential *credential in credentials) {
-        NSData *labelIdentifier = [credential.label dataUsingEncoding:NSUTF8StringEncoding];
-        for (PKCS11RSPublicKeyIdentity *publicKey in publicKeys) {
-            if ([publicKey.identifier isEqualToData:labelIdentifier]) {
-                credential.publicKey = publicKey.ecPoint;
-                break;
-            }
-        }
-    }
-
     PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
     inventory.lines = lines;
     inventory.credentials = credentials;
-    inventory.publicKeys = publicKeys;
     return inventory;
 }
 
@@ -938,7 +892,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
             inventory.lines = prefix;
             inventory.credentials = @[];
-            inventory.publicKeys = @[];
             return inventory;
         }
         [prefix addObject:@"  initialized persistent token"];
@@ -956,7 +909,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
         inventory.lines = prefix;
         inventory.credentials = @[];
-        inventory.publicKeys = @[];
         return inventory;
     }
 
@@ -1231,7 +1183,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             [NSString stringWithFormat:@"Objects: skipped after %@", failure],
         ];
         inventory.credentials = @[];
-        inventory.publicKeys = @[];
         [prefix addObject:[NSString stringWithFormat:@"  %@", failure]];
     }
 
@@ -1265,7 +1216,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                        PKCS11RSReturnValue(result)],
         ];
         inventory.credentials = @[];
-        inventory.publicKeys = @[];
         return inventory;
     }
     PKCS11RSObjectInventory *inventory = [self objectInventoryForSession:session
@@ -1280,13 +1230,8 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return inventory;
 }
 
-- (NSArray<NSString *> *)authenticatedInventoryForSlot:(CK_SLOT_ID)slot
-                                             credential:(PKCS11RSHsmAuthCredential *)credential
-                                    authenticationKeyID:(NSData *)identifier {
-    NSString *username = [credential usernameWithAuthenticationKeyID:identifier];
-    if (username == nil) {
-        return @[@"", @"YubiHSM Auth login skipped: invalid Authentication Key CKA_ID"];
-    }
+- (NSArray<NSString *> *)authenticatedInventoryForSlot:(CK_SLOT_ID)slot {
+    NSString *username = @":*";
 
     CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
     CK_RV result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
@@ -1469,12 +1414,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             [report appendFormat:@"  %@\n", credential.description];
         }
     }
-    PKCS11RSHsmAuthCredential *selectedCredential = credentials.firstObject;
-    if (selectedCredential != nil) {
-        [report appendFormat:@"Selected credential: %@\n", selectedCredential.description];
-        [report appendString:@"Authentication key: match by public CKA_EC_POINT\n"];
-    }
-
     for (PKCS11RSSlotInventory *inventory in slotInventories) {
         [report appendFormat:@"\nSlot %lu: %@\n",
                              (unsigned long)inventory.slot,
@@ -1485,31 +1424,11 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             [report appendFormat:@"%@\n", line];
         }
 
-        if (inventory.yubiHsm && selectedCredential != nil) {
-            NSMutableArray<PKCS11RSPublicKeyIdentity *> *matches = [[NSMutableArray alloc] init];
-            if (selectedCredential.publicKey != nil) {
-                for (PKCS11RSPublicKeyIdentity *publicKey in inventory.objects.publicKeys) {
-                    if (publicKey.identifier.length == 2 &&
-                        [publicKey.ecPoint isEqualToData:selectedCredential.publicKey]) {
-                        [matches addObject:publicKey];
-                    }
-                }
-            }
-            [report appendFormat:@"YubiHSM Auth public-key matches: %lu\n",
-                                 (unsigned long)matches.count];
-            if (matches.count == 1) {
-                PKCS11RSPublicKeyIdentity *match = matches.firstObject;
-                [report appendFormat:@"Matched Authentication Key ID: %@\n",
-                                     PKCS11RSHex(match.identifier)];
-                NSArray<NSString *> *authenticated =
-                    [self authenticatedInventoryForSlot:inventory.slot
-                                             credential:selectedCredential
-                                    authenticationKeyID:match.identifier];
-                for (NSString *line in authenticated) {
-                    [report appendFormat:@"%@\n", line];
-                }
-            } else {
-                [report appendString:@"YubiHSM Auth login skipped: match is missing or ambiguous\n"];
+        if (inventory.yubiHsm) {
+            NSArray<NSString *> *authenticated =
+                [self authenticatedInventoryForSlot:inventory.slot];
+            for (NSString *line in authenticated) {
+                [report appendFormat:@"%@\n", line];
             }
         }
     }
