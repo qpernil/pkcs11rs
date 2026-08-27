@@ -9,14 +9,12 @@ difference is the client language and its direct Objective-C representation of
 the same C structures, buffers, sessions, and lifecycle.
 
 The inventory also exercises YubiHSM Auth authentication. It discovers the
-credential metadata and public key through ordinary PKCS #11 objects, compares
-the credential's `CKA_EC_POINT` with the public objects exposed on each YubiHSM
-slot, and accepts only an unambiguous match whose `CKA_ID` is two bytes. That ID
-is used in the explicit `C_LoginUser` selector `:<id><label>@<source>` with the
-prototype credential password `password`. A successful login produces a
-second authenticated object inventory before the app logs out. A missing or
-ambiguous public-key match is reported and skips login rather than invoking
-hidden backend selection.
+credential metadata through ordinary PKCS #11 objects, then calls
+`C_LoginUser` with the wildcard selector `:*` and the prototype credential
+password `password` for each YubiHSM. pkcs11rs compares available asymmetric
+credential public points with that HSM's public projections and tries matching
+credential/Authentication Key pairs until one authenticates. A successful
+login produces a second authenticated object inventory before the app logs out.
 
 All synchronous PKCS #11 work runs on one serial background queue. The example
 uses the same initialization configuration as the Swift UIKit smoke app:
@@ -57,19 +55,18 @@ output templates request a 32-byte `CKK_GENERIC_SECRET` with `CKA_TOKEN` false,
 explicitly, and closing the session cleans them up on an earlier failure. Only
 the three keypairs are persisted.
 
-The `public_discovery` prototype credential is required for the matching flow:
+The `public_discovery` prototype credential is required for wildcard matching:
 it lets pkcs11rs expose the public companion objects on a YubiHSM before the
-ordinary PKCS #11 user login. It does not perform the cross-slot match; the
-Objective-C client does that explicitly with standard object and login APIs.
+ordinary PKCS #11 user login. The Objective-C client itself does not implement
+credential-to-HSM matching.
 Do not ship or commit a production discovery credential in application source.
 
 The configuration requests `debug` logging. pkcs11rs writes discovery, object,
 matching-related PKCS #11 calls, and `C_LoginUser` outcomes to Apple Unified
 Logging under subsystem `com.nilssoncrypto.pkcs11rs`; Rust tracing targets are
 the log categories. View these records in Xcode's console or the macOS Console
-app with the device selected. The app's text report separately displays the
-selected credential, match count, Authentication Key ID, login result, and
-authenticated inventory.
+app with the device selected. The app's text report displays the credentials,
+login result, and authenticated inventory.
 
 The app initializes and displays module information at launch without listing
 slots. The first tap on **Refresh** calls `C_GetSlotList` and presents Apple's

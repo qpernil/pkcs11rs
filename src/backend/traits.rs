@@ -186,16 +186,27 @@ pub(crate) trait Slot {
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
+    fn login_user(
+        &mut self,
+        _slot_id: CK_SLOT_ID,
+        _username: &[u8],
+        _pin: &[u8],
+        _token_objects: &[TokenObject],
+    ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn login_user_uses_token_objects(&self, _username: &[u8]) -> bool {
+        false
     }
     fn supports_login_user(&self) -> bool {
         false
     }
     fn login_user_without_pin(
         &mut self,
+        _slot_id: CK_SLOT_ID,
         _username: &[u8],
         _pinentry: &pinentry::Pinentry,
+        _token_objects: &[TokenObject],
     ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }

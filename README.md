@@ -539,11 +539,13 @@ providers, are discovered before this YubiHSM discovery pass.
 
 For an asymmetric YubiHSM Auth credential, a provisioner can also persist its
 public point as an ordinary `CKO_PUBLIC_KEY` on each matching YubiHSM, using
-the Authentication Key ID as `CKA_ID`. A client can compare `CKA_EC_POINT`
-across the credential and YubiHSM slots, obtain the explicit target ID, and
-then use the normal named `C_LoginUser` form. pkcs11rs performs the selected
-login but deliberately does not hide this cross-slot matching policy inside
-the provider.
+the Authentication Key ID as `CKA_ID`. A `C_LoginUser` caller can use `:*` to
+ask pkcs11rs to match these public points and try the resulting asymmetric
+credential/Authentication Key pairs for that target YubiHSM until one
+authenticates. Optional label and source constraints use
+`:*<label>[@<source>]`. This form requires successful public discovery and
+fails when there is no match or no candidate authenticates. The normal explicit
+`:AAAA<label>[@<source>]` form remains available.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.

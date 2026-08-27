@@ -300,12 +300,18 @@ YubiHSM authentication-key ID, optional applet credential and source, and
 password separately; public-discovery runtime state is held by the target
 YubiHSM slot, not globally.
 
-Cross-slot selection remains explicit client policy. A provisioner may persist
-an asymmetric credential's public point as an ordinary public object on each
-matching YubiHSM, with the Authentication Key ID in `CKA_ID`. Clients can then
-match public points through standard object searches and construct a named
-login selector. The backend resolves and uses that selector but does not infer
-an Authentication Key ID from another slot.
+An asymmetric credential's public point may be persisted as an ordinary public
+object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
+The optional `C_LoginUser` wildcard selector asks the target YubiHSM slot to
+compare those public projections with available asymmetric YubiHSM Auth
+credentials. The comparison uses the slot context's merged public token-object
+view, including generic persisted objects as well as backend-native objects.
+Each matching projection supplies an Authentication Key ID, and the candidates
+are tried in discovery order until one authenticates. Duplicate projections for
+the same credential are therefore valid candidates rather than an ambiguity.
+No match returns `CKR_USER_TYPE_INVALID`; rejection after an actual credential
+attempt returns the authentication error. This resolution depends on successful
+public discovery and does not change explicit selector behavior.
 
 ## Companion multi-device connector
 

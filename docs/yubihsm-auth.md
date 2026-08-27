@@ -125,15 +125,18 @@ standalone `CKO_PUBLIC_KEY`, with its `CKA_ID` set to the Authentication Key
 object ID. Generic YubiHSM object persistence stores that public object in an
 internal opaque record, and public discovery exposes it before user login.
 
-A client can therefore compare the credential and YubiHSM-slot
-`CKA_EC_POINT` values through ordinary `C_FindObjects*` and
-`C_GetAttributeValue` calls, then use the matching public object's `CKA_ID` as
-the explicit Authentication Key ID in `C_LoginUser`. The stored object records
-the relationship established by provisioning; the subsequent authenticated
-session is the final cryptographic verification. pkcs11rs does not perform
-hidden cross-slot matching. If a future YubiHSM firmware version makes the
-Authentication Key public half readable, a native public projection can
-replace the companion without changing the client search.
+The ordinary PKCS #11 objects let clients compare the credential and
+YubiHSM-slot `CKA_EC_POINT` values themselves. Alternatively, the `C_LoginUser`
+wildcard selector `:*` performs that same comparison inside pkcs11rs for the
+target slot. It considers only available asymmetric P-256 YubiHSM Auth
+credentials and two-byte `CKA_ID` public projections. It tries matching
+credential/projection pairs in discovery order until one authenticates, so the
+same credential may legitimately project more than one target Authentication
+Key ID. The stored object records the relationship established by provisioning;
+the subsequent authenticated session is the final cryptographic verification.
+If a future YubiHSM firmware version makes the Authentication Key public half
+readable, a native public projection can replace the companion without changing
+the matching model.
 
 ## Public object discovery
 
@@ -507,6 +510,24 @@ separately with `C_LoginUser`:
 | --- | --- | --- |
 | Direct authentication key | `AAAA` | Password |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
+| Unique matching asymmetric credential | `:*[<label>][@<source>]` | Credential password |
+
+The wildcard form is available only through `C_LoginUser`, whose session
+identifies the target YubiHSM slot. It requires successful public discovery on
+that slot. pkcs11rs compares each eligible credential's long-term public point
+with the slot's persisted public projections; the matching projection's
+two-byte `CKA_ID` supplies the Authentication Key ID. `:*` applies no label or
+source constraint, while `:*asymmetric@87654321` and `:*@87654321` narrow the
+candidate credentials. Matching pairs are tried in discovery order and the
+first successful authentication wins. Multiple projections of the same
+credential under different Authentication Key IDs are therefore supported.
+Zero matches returns `CKR_USER_TYPE_INVALID`, because no credential identity was
+resolved and no password was tried. If matching candidates exist but every
+authentication attempt rejects the supplied password, the call returns
+`CKR_PIN_INCORRECT`.
+Explicit selectors and packed `C_Login` behavior are unchanged. Wildcards are
+not accepted as public discovery credentials because that would make discovery
+circular.
 
 Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
 password through pinentry while retaining the username as the authentication

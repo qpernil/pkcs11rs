@@ -550,12 +550,29 @@ fn login_user(
         }
         let username = unsafe { from_raw_parts(username, username_len as usize) }?;
         let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        let token_objects = if ctx
+            .get_slot(slot_id)?
+            .login_user_uses_token_objects(username.as_bytes())
+        {
+            ctx.resolved_objects()?
+                .into_iter()
+                .map(|(_, object)| object)
+                .filter(|object| object.token && !object.private)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, LoginRole::User, |slot| {
                 if let Some(pin) = pin {
-                    return slot.login_user(username.as_bytes(), pin);
+                    return slot.login_user(slot_id, username.as_bytes(), pin, &token_objects);
                 }
-                slot.login_user_without_pin(username.as_bytes(), pinentry.as_ref())
+                slot.login_user_without_pin(
+                    slot_id,
+                    username.as_bytes(),
+                    pinentry.as_ref(),
+                    &token_objects,
+                )
             })
         })
     })

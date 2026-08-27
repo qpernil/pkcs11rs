@@ -1708,7 +1708,7 @@ mod tests {
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
         ));
         assert!(matches!(
-            slot.login_user(b"alice", b"new-PIN"),
+            slot.login_user(0, b"alice", b"new-PIN", &[]),
             Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
         ));
         assert!(matches!(
