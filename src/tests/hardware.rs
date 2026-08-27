@@ -26,6 +26,10 @@ mod hardware_provisioning {
     const SCP11B_KVN_ENV: &str = "PKCS11RS_TEST_SCP11B_KVN";
     const RSA_WRAP_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_RSA_WRAP";
     const X25519_INTEROP_ENABLE_ENV: &str = "PKCS11RS_TEST_X25519_INTEROP";
+    const REPLACE_YUBIHSM_ADMIN_ENABLE_ENV: &str = "PKCS11RS_TEST_REPLACE_YUBIHSM_ADMIN";
+    const RESUME_YUBIHSM_ADMIN_ENV: &str = "PKCS11RS_TEST_RESUME_YUBIHSM_ADMIN";
+    const DELETE_OLD_YUBIHSM_ADMIN_ENV: &str = "PKCS11RS_TEST_DELETE_OLD_YUBIHSM_ADMIN";
+    const RECREATE_YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_TEST_RECREATE_YUBIHSM_DISCOVERY";
     const DEFAULT_MANAGEMENT_KEY: &str = "00000000000000000000000000000000";
     const DEFAULT_PIV_MANAGEMENT_KEY: &str = "010203040506070801020304050607080102030405060708";
     const DEFAULT_PIV_PIN: &str = "123456";
@@ -1333,6 +1337,416 @@ mod hardware_provisioning {
             default_label: DEFAULT_TOUCH_LABEL,
             touch_required: true,
         });
+    }
+
+    #[test]
+    #[ignore = "creates and verifies replacement administrator keys on live YubiHSMs"]
+    fn replaces_yubihsm_administrator_keys() {
+        if std::env::var(REPLACE_YUBIHSM_ADMIN_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!(
+                "skipped administrator replacement; set {REPLACE_YUBIHSM_ADMIN_ENABLE_ENV}=1 to enable it"
+            );
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let old_id = hex_u16(
+            "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
+            &environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
+        );
+        let old_password = crate::Zeroizing::new(environment(
+            "PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD",
+            DEFAULT_ADMIN_PASSWORD,
+        ));
+        let new_id_text = std::env::var("PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_ID")
+            .expect("PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_ID is required");
+        let new_id = hex_u16("PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_ID", &new_id_text);
+        assert_ne!(new_id, old_id, "replacement ID must differ from the old ID");
+        let new_password = crate::Zeroizing::new(
+            std::env::var("PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_PASSWORD")
+                .expect("PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_PASSWORD is required"),
+        );
+        assert!(
+            (8..=64).contains(&new_password.len()),
+            "replacement password must be 8..=64 bytes"
+        );
+        let label = environment(
+            "PKCS11RS_TEST_YUBIHSM_NEW_ADMIN_LABEL",
+            "pkcs11rs administrator",
+        );
+        assert!(
+            !label.is_empty() && label.len() <= 40,
+            "label must be 1..=40 bytes"
+        );
+        let static_keys = crate::yubico_password_kdf(new_password.as_bytes())
+            .expect("failed to derive the replacement authentication keys");
+        let recreate_discovery =
+            std::env::var(RECREATE_YUBIHSM_DISCOVERY_ENV).as_deref() == Ok("1");
+        let resume = std::env::var(RESUME_YUBIHSM_ADMIN_ENV).as_deref() == Ok("1");
+        let discovery_password = crate::Zeroizing::new(environment(
+            "PKCS11RS_TEST_YUBIHSM_DISCOVERY_PASSWORD",
+            DEFAULT_ADMIN_PASSWORD,
+        ));
+        assert!(
+            (8..=64).contains(&discovery_password.len()),
+            "discovery password must be 8..=64 bytes"
+        );
+        let discovery_static_keys = crate::yubico_password_kdf(discovery_password.as_bytes())
+            .expect("failed to derive the discovery authentication keys");
+
+        let configuration = all_yubihsm_configuration();
+        let context = crate::ModuleContext::new_with_configuration(configuration)
+            .expect("failed to create hardware context");
+        context.init().unwrap();
+        context.refresh_discovery().unwrap();
+        let mut yubihsms = context
+            .slot_contexts
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|child| child.lock().ok()?.slot.yubihsm_provisioning_connector())
+            .collect::<Vec<_>>();
+        assert!(!yubihsms.is_empty(), "no YubiHSM was discovered");
+        yubihsms.sort_by_key(|connector| connector.name());
+        for pair in yubihsms.windows(2) {
+            assert_ne!(pair[0].name(), pair[1].name(), "duplicate YubiHSM endpoint");
+        }
+        if let Ok(expected) = std::env::var("PKCS11RS_TEST_EXPECTED_YUBIHSM_COUNT") {
+            assert_eq!(
+                yubihsms.len(),
+                expected
+                    .parse::<usize>()
+                    .expect("PKCS11RS_TEST_EXPECTED_YUBIHSM_COUNT must be an unsigned integer"),
+                "unexpected number of YubiHSM targets"
+            );
+        }
+
+        if !resume {
+            for yubihsm in &yubihsms {
+                let target = yubihsm.name();
+                let (mut session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                    yubihsm.as_ref(),
+                    old_id,
+                    old_password.as_bytes(),
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("failed to authenticate to YubiHSM {target:?} with the old administrator: {error:?}")
+                });
+                let provisioned = (|| -> Result<crate::YubiHsmObjectInfo, crate::Error> {
+                    let existing = session.send_command(
+                        yubihsm.as_ref(),
+                        &crate::YubiHsmCommand::list_objects(&[
+                            crate::yubihsm::ObjectFilter::Id(new_id),
+                            crate::yubihsm::ObjectFilter::Type(crate::YUBIHSM_AUTHENTICATION_KEY),
+                        ])?,
+                    )?;
+                    assert!(
+                        crate::parse_yubihsm_object_list(&existing)?.is_empty(),
+                        "YubiHSM {target:?} authentication-key ID {new_id:04x} is already occupied"
+                    );
+                    let old_info = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_object_info(
+                                old_id,
+                                crate::YUBIHSM_AUTHENTICATION_KEY,
+                            ),
+                        )
+                        .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))?;
+                    assert_eq!(
+                        old_info.domains,
+                        u16::MAX,
+                        "old administrator lacks all domains"
+                    );
+                    let parameters = crate::yubihsm::DelegatedObjectParameters {
+                        object: crate::YubiHsmObjectParameters {
+                            id: new_id,
+                            label: &label,
+                            domains: u16::MAX,
+                            capabilities: old_info.capabilities,
+                            algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                        },
+                        delegated_capabilities: old_info.delegated_capabilities,
+                    };
+                    let installed_id = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::put_delegated_object(
+                                crate::YubiHsmCommandCode::PutAuthenticationKey,
+                                &parameters,
+                                static_keys.as_slice(),
+                            )?,
+                        )
+                        .and_then(|response| crate::parse_yubihsm_object_id(&response))?;
+                    assert_eq!(installed_id, new_id);
+                    session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_object_info(
+                                new_id,
+                                crate::YUBIHSM_AUTHENTICATION_KEY,
+                            ),
+                        )
+                        .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))
+                })();
+                let close =
+                    session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
+                let info = provisioned.unwrap_or_else(|error| {
+                    panic!(
+                        "failed to provision administrator {new_id:04x} on {target:?}: {error:?}"
+                    )
+                });
+                close.unwrap_or_else(|error| {
+                    panic!("failed to close provisioning session on {target:?}: {error:?}")
+                });
+                assert_eq!(info.domains, u16::MAX);
+                eprintln!("created replacement administrator {new_id:04x} on {target:?}");
+            }
+        }
+
+        for yubihsm in &yubihsms {
+            let target = yubihsm.name();
+            let (mut session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                yubihsm.as_ref(),
+                new_id,
+                new_password.as_bytes(),
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| {
+                panic!("replacement administrator {new_id:04x} failed on {target:?}: {error:?}")
+            });
+            session
+                .send_command(
+                    yubihsm.as_ref(),
+                    &crate::YubiHsmCommand::get_pseudo_random(16),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("replacement administrator {new_id:04x} lacks expected access on {target:?}: {error:?}")
+                });
+            session
+                .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())
+                .unwrap_or_else(|error| {
+                    panic!("failed to close verification session on {target:?}: {error:?}")
+                });
+            eprintln!("verified replacement administrator {new_id:04x} on {target:?}");
+        }
+
+        if std::env::var(DELETE_OLD_YUBIHSM_ADMIN_ENV).as_deref() == Ok("1") {
+            for yubihsm in &yubihsms {
+                let target = yubihsm.name();
+                let (mut session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                    yubihsm.as_ref(),
+                    new_id,
+                    new_password.as_bytes(),
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("replacement administrator {new_id:04x} failed before deletion on {target:?}: {error:?}")
+                });
+                let deletion = session.send_command(
+                    yubihsm.as_ref(),
+                    &crate::YubiHsmCommand::delete_object(
+                        old_id,
+                        crate::YUBIHSM_AUTHENTICATION_KEY,
+                    ),
+                );
+                deletion.unwrap_or_else(|error| {
+                    panic!(
+                        "failed to delete old administrator {old_id:04x} on {target:?}: {error:?}"
+                    )
+                });
+                let remaining = session
+                    .send_command(
+                        yubihsm.as_ref(),
+                        &crate::YubiHsmCommand::list_objects(&[
+                            crate::yubihsm::ObjectFilter::Id(old_id),
+                            crate::yubihsm::ObjectFilter::Type(crate::YUBIHSM_AUTHENTICATION_KEY),
+                        ])
+                        .unwrap(),
+                    )
+                    .and_then(|response| crate::parse_yubihsm_object_list(&response))
+                    .unwrap_or_else(|error| {
+                        panic!("failed to verify deletion on {target:?}: {error:?}")
+                    });
+                assert!(
+                    remaining.is_empty(),
+                    "old administrator still exists on {target:?}"
+                );
+                if recreate_discovery {
+                    let parameters = crate::yubihsm::DelegatedObjectParameters {
+                        object: crate::YubiHsmObjectParameters {
+                            id: old_id,
+                            label: "pkcs11rs public discovery",
+                            domains: u16::MAX,
+                            capabilities: crate::yubihsm_capabilities(&[0x00]),
+                            algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                        },
+                        delegated_capabilities: [0; 8],
+                    };
+                    let installed_id = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::put_delegated_object(
+                                crate::YubiHsmCommandCode::PutAuthenticationKey,
+                                &parameters,
+                                discovery_static_keys.as_slice(),
+                            )
+                            .unwrap(),
+                        )
+                        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+                        .unwrap_or_else(|error| {
+                            panic!("failed to recreate discovery key {old_id:04x} on {target:?}: {error:?}")
+                        });
+                    assert_eq!(installed_id, old_id);
+                    let info = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_object_info(
+                                old_id,
+                                crate::YUBIHSM_AUTHENTICATION_KEY,
+                            ),
+                        )
+                        .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "failed to inspect recreated discovery key on {target:?}: {error:?}"
+                            )
+                        });
+                    assert_eq!(info.domains, u16::MAX);
+                    assert_eq!(info.capabilities, crate::yubihsm_capabilities(&[0x00]));
+                    assert_eq!(info.delegated_capabilities, [0; 8]);
+                }
+                session
+                    .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())
+                    .unwrap_or_else(|error| {
+                        panic!("failed to close deletion session on {target:?}: {error:?}")
+                    });
+                eprintln!("deleted old administrator {old_id:04x} from {target:?}");
+            }
+        }
+
+        if recreate_discovery {
+            for yubihsm in &yubihsms {
+                let target = yubihsm.name();
+                let (mut session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                    yubihsm.as_ref(),
+                    old_id,
+                    discovery_password.as_bytes(),
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("recreated discovery key {old_id:04x} failed on {target:?}: {error:?}")
+                });
+                let objects = session
+                    .send_command(
+                        yubihsm.as_ref(),
+                        &crate::YubiHsmCommand::list_objects(&[]).unwrap(),
+                    )
+                    .and_then(|response| crate::parse_yubihsm_object_list(&response))
+                    .unwrap_or_else(|error| {
+                        panic!("discovery key could not list objects on {target:?}: {error:?}")
+                    });
+                assert!(!objects.is_empty(), "YubiHSM {target:?} has no objects");
+
+                let mut authentication_public_key_read = false;
+                for object in objects
+                    .iter()
+                    .filter(|object| object.object_type == crate::YUBIHSM_AUTHENTICATION_KEY)
+                {
+                    let info = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_object_info(
+                                object.id,
+                                object.object_type,
+                            ),
+                        )
+                        .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))
+                        .unwrap_or_else(|error| {
+                            panic!("discovery key could not inspect an authentication key on {target:?}: {error:?}")
+                    });
+                    if info.algorithm == crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION {
+                        if let Ok(encoded) = session.send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_public_key(
+                                object.id,
+                                Some(object.object_type),
+                            ),
+                        ) {
+                            assert!(!encoded.is_empty());
+                            authentication_public_key_read = true;
+                        }
+                        break;
+                    }
+                }
+                if !authentication_public_key_read {
+                    eprintln!(
+                        "YubiHSM {target:?} firmware rejected Get Public Key for its asymmetric authentication object"
+                    );
+                }
+
+                if let Some(asymmetric) = objects
+                    .iter()
+                    .find(|object| object.object_type == crate::YUBIHSM_ASYMMETRIC_KEY)
+                {
+                    let encoded = session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_public_key(
+                                asymmetric.id,
+                                Some(asymmetric.object_type),
+                            ),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!("discovery key could not read an asymmetric public key on {target:?}: {error:?}")
+                        });
+                    assert!(!encoded.is_empty());
+                }
+
+                if let Some(opaque) = objects
+                    .iter()
+                    .find(|object| object.object_type == crate::YUBIHSM_OPAQUE)
+                {
+                    session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_object(
+                                crate::YubiHsmCommandCode::GetOpaque,
+                                opaque.id,
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "discovery key could not read opaque object on {target:?}: {error:?}"
+                            )
+                        });
+                }
+                assert!(
+                    session
+                        .send_command(
+                            yubihsm.as_ref(),
+                            &crate::YubiHsmCommand::get_pseudo_random(1),
+                        )
+                        .is_err(),
+                    "discovery key unexpectedly generated random data on {target:?}"
+                );
+                session
+                    .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())
+                    .unwrap_or_else(|error| {
+                        panic!("failed to close discovery verification session on {target:?}: {error:?}")
+                    });
+                eprintln!("verified restricted discovery key {old_id:04x} on {target:?}");
+            }
+        }
+
+        drop(context);
     }
 
     struct HsmAuthProvisioningCase {
