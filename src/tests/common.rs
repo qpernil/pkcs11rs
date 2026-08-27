@@ -667,7 +667,10 @@ fn repeated_slot_list_with_valid_card_handle_is_apdu_free() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
+        initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": false}
+        })),
         CKR_OK as CK_RV
     );
 
