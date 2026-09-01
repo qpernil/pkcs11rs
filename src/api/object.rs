@@ -1471,7 +1471,7 @@ fn build_imported_key_material(
                 let scalar =
                     padded_private_scalar(&value, ec_parameters(curve)?.coordinate_length)?;
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::from_serialized_for_kind(shared_key_kind(curve), &scalar)
+                    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(curve), &scalar)
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
@@ -1521,22 +1521,16 @@ fn build_imported_key_material(
             if seed.is_some() == expanded.is_some() {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
-            let (shared_parameter_set, wrap): (
-                software_key_core::post_quantum::MlKemParameterSet,
-                fn(software_key_core::post_quantum::MlKemPrivateKey) -> SoftwarePrivateKeyMaterial,
-            ) = match parameter_set {
-                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => (
-                    software_key_core::post_quantum::MlKemParameterSet::MlKem512,
-                    SoftwarePrivateKeyMaterial::MlKem512,
-                ),
-                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => (
-                    software_key_core::post_quantum::MlKemParameterSet::MlKem768,
-                    SoftwarePrivateKeyMaterial::MlKem768,
-                ),
-                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => (
-                    software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
-                    SoftwarePrivateKeyMaterial::MlKem1024,
-                ),
+            let shared_parameter_set = match parameter_set {
+                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem512
+                }
+                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem768
+                }
+                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    software_key_core::post_quantum::MlKemParameterSet::MlKem1024
+                }
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             let key = if let Some(seed) = seed {
@@ -1552,7 +1546,7 @@ fn build_imported_key_material(
                 )
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
             };
-            let material = wrap(key);
+            let material = SoftwarePrivateKeyMaterial::MlKem(key);
             KeyMaterial::SoftwarePrivate(material)
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),

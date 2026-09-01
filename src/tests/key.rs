@@ -2159,7 +2159,7 @@ fn software_session_key_pairs_cover_every_supported_curve() {
         ),
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::ec_curve_parameters(crate::EcCurve::K256).to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::Secp256k1).to_vec(),
             CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
         ),
         (
@@ -2235,7 +2235,7 @@ fn software_session_ecdh_covers_every_supported_curve() {
         ),
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::ec_curve_parameters(crate::EcCurve::K256).to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::Secp256k1).to_vec(),
         ),
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,

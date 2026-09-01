@@ -1081,7 +1081,7 @@ fn software_generate_key_pair(
             let curve = ec_curve_from_parameters(&parameters)
                 .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
             let material = SoftwarePrivateKeyMaterial::Signing(
-                SoftwareSigningKey::generate_for_kind(shared_key_kind(curve))
+                SoftwareSigningKey::generate_for_kind(KeyKind::Ec(curve))
                     .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
             );
             (CKK_EC as CK_KEY_TYPE, material)
@@ -1149,7 +1149,7 @@ fn software_generate_key_pair(
             .map_err(Error::from)?;
             let material = match parameter_set {
                 x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem512(
+                    SoftwarePrivateKeyMaterial::MlKem(
                         software_key_core::post_quantum::MlKemPrivateKey::generate(
                             software_key_core::post_quantum::MlKemParameterSet::MlKem512,
                         )
@@ -1157,7 +1157,7 @@ fn software_generate_key_pair(
                     )
                 }
                 x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem768(
+                    SoftwarePrivateKeyMaterial::MlKem(
                         software_key_core::post_quantum::MlKemPrivateKey::generate(
                             software_key_core::post_quantum::MlKemParameterSet::MlKem768,
                         )
@@ -1165,7 +1165,7 @@ fn software_generate_key_pair(
                     )
                 }
                 x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem1024(
+                    SoftwarePrivateKeyMaterial::MlKem(
                         software_key_core::post_quantum::MlKemPrivateKey::generate(
                             software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
                         )
