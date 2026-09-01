@@ -253,11 +253,10 @@ ffi_entry_point! {
                 None => Ok(CKR_OK as CK_RV),
             }
         });
-        if removed {
-            if let Err(error) = unregister_session_slot_in_context(context, session_handle) {
+        if removed
+            && let Err(error) = unregister_session_slot_in_context(context, session_handle) {
                 return error.into();
             }
-        }
         match result {
             Ok(rv) => rv,
             Err(error) => error.into(),
@@ -345,11 +344,11 @@ fn get_session_info(
             (session.slotID(), session.flags())
         };
         ctx.reconcile_login_state(slot_id);
-        if ctx.is_slot_logged_in(slot_id) || ctx.get_slot(slot_id)?.backend_session_is_active() {
-            if let Err(error) = ctx._get_session(session_handle)?.1.get_session_info() {
-                ctx.reconcile_login_state(slot_id);
-                return Err(error);
-            }
+        if (ctx.is_slot_logged_in(slot_id) || ctx.get_slot(slot_id)?.backend_session_is_active())
+            && let Err(error) = ctx._get_session(session_handle)?.1.get_session_info()
+        {
+            ctx.reconcile_login_state(slot_id);
+            return Err(error);
         }
         ctx.reconcile_login_state(slot_id);
         info.slotID = slot_id;
@@ -402,12 +401,12 @@ fn login_role(
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
     ctx.login_role = Some(role);
-    if ctx.get_slot(slot_id)?.refresh_token_objects_after_login() {
-        if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
-            let _ = ctx._get_slot_mut(slot_id)?.logout();
-            ctx.clear_login_state(slot_id);
-            return Err(error);
-        }
+    if ctx.get_slot(slot_id)?.refresh_token_objects_after_login()
+        && let Err(error) = ctx.refresh_slot_token_objects(slot_id)
+    {
+        let _ = ctx._get_slot_mut(slot_id)?.logout();
+        ctx.clear_login_state(slot_id);
+        return Err(error);
     }
     Ok(())
 }

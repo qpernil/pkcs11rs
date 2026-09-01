@@ -679,7 +679,7 @@ pub(crate) fn password_to_key(password: &[u8]) -> Result<Zeroizing<[u8; 16]>, Er
     }
 
     let mut key = Zeroizing::new([0; MANAGEMENT_KEY_LENGTH]);
-    for (index, encoded) in password.chunks_exact(2).enumerate() {
+    for (index, encoded) in password.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(encoded[0]).ok_or(CKR_PIN_INVALID)?;
         let low = hex_nibble(encoded[1]).ok_or(CKR_PIN_INVALID)?;
         key[index] = high << 4 | low;

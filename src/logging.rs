@@ -153,18 +153,18 @@ pub(crate) fn ffi_call(function: &'static str, operation: impl FnOnce() -> CK_RV
         }
         result
     });
-    if dispatch.is_none() {
-        if let Some(initialized_dispatch) = module_dispatch() {
-            with_dispatch(Some(&initialized_dispatch), || {
-                tracing::debug!(
-                    target: "pkcs11rs::ffi",
-                    function,
-                    return_value = result,
-                    elapsed_us = started.elapsed().as_micros() as u64,
-                    "PKCS #11 call returned"
-                );
-            });
-        }
+    if dispatch.is_none()
+        && let Some(initialized_dispatch) = module_dispatch()
+    {
+        with_dispatch(Some(&initialized_dispatch), || {
+            tracing::debug!(
+                target: "pkcs11rs::ffi",
+                function,
+                return_value = result,
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "PKCS #11 call returned"
+            );
+        });
     }
     result
 }

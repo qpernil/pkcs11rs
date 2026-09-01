@@ -1915,10 +1915,9 @@ impl YubiHsmSlot {
             if let KeyMaterial::YubiHsm {
                 object_type, value, ..
             } = &mut object.material
+                && *object_type == YUBIHSM_OPAQUE
             {
-                if *object_type == YUBIHSM_OPAQUE {
-                    *value = cached.clone();
-                }
+                *value = cached.clone();
             }
         }
         Ok(())
@@ -2082,10 +2081,10 @@ impl YubiHsmSlot {
             .object_generations
             .try_borrow_mut()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        if let Some((sequence, generation)) = generations.get(&key) {
-            if *sequence == info.sequence {
-                return Ok(*generation);
-            }
+        if let Some((sequence, generation)) = generations.get(&key)
+            && *sequence == info.sequence
+        {
+            return Ok(*generation);
         }
         let generation = self.next_object_generation.get();
         self.next_object_generation
@@ -3305,20 +3304,18 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
             result,
             Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as CK_RV
         );
-        if expired {
-            if let Some(recipe) = reauthentication.as_ref() {
-                log!(
-                    2,
-                    "YubiHSM secure session expired on {}; recreating it once",
-                    connector.name()
-                );
-                match recipe.authenticate(connector) {
-                    Ok(mut replacement) => {
-                        result = replacement.send_command(connector, command);
-                        session = replacement;
-                    }
-                    Err(error) => result = Err(error),
+        if expired && let Some(recipe) = reauthentication.as_ref() {
+            log!(
+                2,
+                "YubiHSM secure session expired on {}; recreating it once",
+                connector.name()
+            );
+            match recipe.authenticate(connector) {
+                Ok(mut replacement) => {
+                    result = replacement.send_command(connector, command);
+                    session = replacement;
                 }
+                Err(error) => result = Err(error),
             }
         }
         if session.is_valid() {

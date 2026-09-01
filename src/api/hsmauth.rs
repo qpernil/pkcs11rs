@@ -306,14 +306,14 @@ fn hsmauth_mutation(
             }
         };
         ctx.reconcile_login_state(slot_id);
-        if ctx.login_role(slot_id).is_some() {
-            if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
-                log!(
-                    2,
-                    "YubiHSM Auth object refresh after administration failed: {:?}",
-                    error
-                );
-            }
+        if ctx.login_role(slot_id).is_some()
+            && let Err(error) = ctx.refresh_slot_token_objects(slot_id)
+        {
+            log!(
+                2,
+                "YubiHSM Auth object refresh after administration failed: {:?}",
+                error
+            );
         }
         Ok(value)
     })

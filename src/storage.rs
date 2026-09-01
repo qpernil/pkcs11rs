@@ -542,12 +542,14 @@ fn encode_lower_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_lower_hex(encoded: &str) -> Result<Vec<u8>, StorageError> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return Err(StorageError::InvalidReference);
     }
     encoded
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = lower_hex_value(pair[0])?;
             let low = lower_hex_value(pair[1])?;

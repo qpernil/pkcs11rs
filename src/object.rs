@@ -2346,7 +2346,9 @@ fn semantic_native_value(
             if crate::is_multiple_of(bytes.len(), std::mem::size_of::<CK_MECHANISM_TYPE>()) =>
         {
             let values = bytes
-                .chunks_exact(std::mem::size_of::<CK_MECHANISM_TYPE>())
+                .as_chunks::<{ std::mem::size_of::<CK_MECHANISM_TYPE>() }>()
+                .0
+                .iter()
                 .map(|bytes| {
                     let mut encoded = [0; std::mem::size_of::<CK_MECHANISM_TYPE>()];
                     encoded.copy_from_slice(bytes);

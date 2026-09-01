@@ -565,7 +565,7 @@ pub fn ensure_complete_write(actual: usize, expected: usize) -> Result<(), Error
 }
 
 pub fn needs_zero_length_packet(length: usize, packet_size: usize) -> bool {
-    packet_size != 0 && length % packet_size == 0
+    packet_size != 0 && length.is_multiple_of(packet_size)
 }
 
 pub fn usb_bcd_version(raw: u16) -> (u8, u8) {

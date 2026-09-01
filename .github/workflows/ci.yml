@@ -83,8 +83,8 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
-      - name: Install Rust 1.85
-        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Install native dependencies
         run: |

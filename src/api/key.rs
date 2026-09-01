@@ -717,10 +717,9 @@ pub(crate) fn openpgp_generate_key_pair_parameters(
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
             if let Some(exponent) =
                 template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+                && read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1]
             {
-                if read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1] {
-                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-                }
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
             match bits {
                 2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa {
@@ -869,10 +868,9 @@ fn piv_generate_key_pair_parameters(
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
             if let Some(exponent) =
                 template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+                && read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1]
             {
-                if read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1] {
-                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-                }
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
             let algorithm = match bits {
                 1024 => piv::Algorithm::Rsa1024,
@@ -1060,10 +1058,9 @@ fn software_generate_key_pair(
             }
             if let Some(exponent) =
                 template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+                && read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01]
             {
-                if read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01] {
-                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-                }
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
             (
                 CKK_RSA as CK_KEY_TYPE,
@@ -1291,10 +1288,9 @@ pub(crate) fn yubihsm_generate_key_pair_command(
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
             if let Some(exponent) =
                 template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+                && read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01]
             {
-                if read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01] {
-                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-                }
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
             let algorithm = match bits {
                 2048 => YUBIHSM_ALGO_RSA_2048,

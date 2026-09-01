@@ -1355,15 +1355,15 @@ impl DeviceOperationLifecycle for PcscLifecycle {
         if kind == crate::device::DeviceOperationKind::Hid {
             return;
         }
-        if let Ok(worker) = self.worker() {
-            if let Err(error) = worker.end_operation() {
-                tracing::debug!(
-                    target: "pkcs11rs::transport",
-                    reader = %self.reader.to_string_lossy(),
-                    ?error,
-                    "failed to end PC/SC transaction"
-                );
-            }
+        if let Ok(worker) = self.worker()
+            && let Err(error) = worker.end_operation()
+        {
+            tracing::debug!(
+                target: "pkcs11rs::transport",
+                reader = %self.reader.to_string_lossy(),
+                ?error,
+                "failed to end PC/SC transaction"
+            );
         }
         if let Some(reader_state) = self.reader_state.upgrade() {
             reader_state.end_transaction();
@@ -1441,15 +1441,15 @@ impl Connector for PcscConnector {
         self.worker()?.begin_operation()
     }
     fn end_transport_operation(&self) {
-        if let Ok(worker) = self.worker() {
-            if let Err(error) = worker.end_operation() {
-                tracing::debug!(
-                    target: "pkcs11rs::transport",
-                    reader = %self.reader.to_string_lossy(),
-                    ?error,
-                    "failed to end PC/SC transport operation"
-                );
-            }
+        if let Ok(worker) = self.worker()
+            && let Err(error) = worker.end_operation()
+        {
+            tracing::debug!(
+                target: "pkcs11rs::transport",
+                reader = %self.reader.to_string_lossy(),
+                ?error,
+                "failed to end PC/SC transport operation"
+            );
         }
     }
     fn transmit<'a>(
@@ -1745,13 +1745,13 @@ fn refresh_pcsc_card(
     reader: &std::ffi::CStr,
     connection_epoch: &mut u64,
 ) -> Result<PcscRefresh, pcsc::Error> {
-    if let Some(current) = card.as_ref() {
-        if current.status2_owned().is_ok() {
-            return Ok(PcscRefresh {
-                apdu_capabilities: detect_pcsc_apdu_capabilities(current),
-                connection_epoch: *connection_epoch,
-            });
-        }
+    if let Some(current) = card.as_ref()
+        && current.status2_owned().is_ok()
+    {
+        return Ok(PcscRefresh {
+            apdu_capabilities: detect_pcsc_apdu_capabilities(current),
+            connection_epoch: *connection_epoch,
+        });
     }
 
     *card = None;
@@ -2080,12 +2080,12 @@ impl HttpConnectorEndpoint {
     }
 
     pub(crate) fn mark_disconnected(&self) {
-        if let Ok(mut current) = self.state.agent.write() {
-            if current.take().is_some() {
-                self.state
-                    .connection_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
+        if let Ok(mut current) = self.state.agent.write()
+            && current.take().is_some()
+        {
+            self.state
+                .connection_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -2322,13 +2322,13 @@ impl HttpConnector {
     }
 
     pub(crate) fn mark_discovery_absent(&self) {
-        if let Ok(mut current) = self.state.current.write() {
-            if current.present {
-                current.present = false;
-                self.state
-                    .connection_epoch
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
+        if let Ok(mut current) = self.state.current.write()
+            && current.present
+        {
+            current.present = false;
+            self.state
+                .connection_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
