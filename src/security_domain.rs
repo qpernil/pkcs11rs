@@ -773,7 +773,9 @@ fn parse_key_information(encoded: &[u8]) -> Result<Vec<KeyInfo>, Error> {
                 return Err(CKR_DATA_INVALID.into());
             }
             let components = tlv.value[2..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|component| KeyComponent {
                     key_type: component[0],
                     length: component[1],
@@ -798,7 +800,9 @@ fn parse_ca_identifiers(
     if tlvs.len() % 2 != 0 {
         return Err(CKR_DATA_INVALID.into());
     }
-    tlvs.chunks_exact(2)
+    tlvs.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let key_ref = &pair[1];
             if key_ref.tag != 0x83 || key_ref.value.len() != 2 {
@@ -1470,7 +1474,9 @@ mod tests {
             .bytes()
             .filter(|byte| !byte.is_ascii_whitespace())
             .collect::<Vec<_>>()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
     }

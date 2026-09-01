@@ -1304,11 +1304,11 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
             algorithm_attributes.push((key_ref, value.to_vec()));
         }
     }
-    if let Some(value) = field_value(&discretionary, KeyRef::Attestation.algorithm_tag()) {
-        if let Ok(algorithm) = parse_algorithm(value) {
-            algorithms.push((KeyRef::Attestation, algorithm));
-            algorithm_attributes.push((KeyRef::Attestation, value.to_vec()));
-        }
+    if let Some(value) = field_value(&discretionary, KeyRef::Attestation.algorithm_tag())
+        && let Ok(algorithm) = parse_algorithm(value)
+    {
+        algorithms.push((KeyRef::Attestation, algorithm));
+        algorithm_attributes.push((KeyRef::Attestation, value.to_vec()));
     }
     let key_statuses = field_value(&discretionary, DataObject::KeyInformation.tag().into())
         .map(parse_key_information)
@@ -1334,7 +1334,9 @@ fn parse_key_information(encoded: &[u8]) -> Result<Vec<(KeyRef, KeyStatus)>, Err
         return Err(CKR_DATA_INVALID.into());
     }
     encoded
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|entry| {
             let key_ref = match entry[0] {
                 0x01 => KeyRef::Signature,

@@ -1022,7 +1022,7 @@ mod tests {
         // request, so every invalidated transport must pass through reopen.
         for (device, entry) in entries.iter().enumerate() {
             let mut sentinel = u64::MAX - device as u64;
-            while sentinel % 29 == 0 {
+            while sentinel.is_multiple_of(29) {
                 sentinel -= DEVICES as u64;
             }
             assert_eq!(

@@ -548,7 +548,7 @@ fn software_aes_cbc(
     }
     let mut output = Vec::with_capacity(input.len());
     let mut previous = *iv;
-    for input_block in input.chunks_exact(AES_BLOCK_LENGTH) {
+    for input_block in input.as_chunks::<AES_BLOCK_LENGTH>().0 {
         if encrypting {
             let block = Zeroizing::new(
                 input_block
@@ -1097,15 +1097,13 @@ fn crypt(
             result.to_vec()
         } else {
             let result = (|| -> Result<Vec<u8>, Error> {
-                if encrypting {
-                    if let Some(public_key) = rsa_public_key_material(&operation.key)? {
-                        return rsa_public_encrypt(
-                            &public_key,
-                            operation.mechanism,
-                            operation.oaep.as_ref(),
-                            input,
-                        );
-                    }
+                if encrypting && let Some(public_key) = rsa_public_key_material(&operation.key)? {
+                    return rsa_public_encrypt(
+                        &public_key,
+                        operation.mechanism,
+                        operation.oaep.as_ref(),
+                        input,
+                    );
                 }
                 match &operation.key {
                     KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(

@@ -1542,10 +1542,10 @@ impl SlotContext {
 
     pub(crate) fn remove_object_handle(&mut self, handle: CK_OBJECT_HANDLE) {
         self.backed_object_handles.remove(&handle);
-        if let Some(object) = self.memory_objects.remove(&handle) {
-            if !object.token {
-                self.backed_object_references.remove(&object.unique_id);
-            }
+        if let Some(object) = self.memory_objects.remove(&handle)
+            && !object.token
+        {
+            self.backed_object_references.remove(&object.unique_id);
         }
         self.token_object_handles.remove(&handle);
         for session in self.sessions.values_mut() {
@@ -2257,12 +2257,12 @@ impl ModuleContext {
                         "CCID serial-owned device refresh failed"
                     );
                 }
-                if connector.is_present() {
-                    if let CcidInventoryKey::Serial(key) = key {
-                        ccid_devices
-                            .entry(key.clone())
-                            .or_insert_with(|| connector.reader_state().device.clone());
-                    }
+                if connector.is_present()
+                    && let CcidInventoryKey::Serial(key) = key
+                {
+                    ccid_devices
+                        .entry(key.clone())
+                        .or_insert_with(|| connector.reader_state().device.clone());
                 }
             } else if let Some(presence) = &entry.inventory_presence {
                 presence.store(true, std::sync::atomic::Ordering::Release);
@@ -2593,10 +2593,10 @@ impl ModuleContext {
                         continue;
                     }
                     FidoDuplicateResolution::PreferHid(ccid_slot_id) => {
-                        if let Some(registration) = ccid_fido_slots.get(&key) {
-                            if let Some(route) = &registration.endpoint {
-                                route.prefer(endpoint);
-                            }
+                        if let Some(registration) = ccid_fido_slots.get(&key)
+                            && let Some(route) = &registration.endpoint
+                        {
+                            route.prefer(endpoint);
                         }
                         tracing::debug!(
                             target: "pkcs11rs::discovery",

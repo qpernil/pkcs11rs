@@ -1659,13 +1659,14 @@ fn encode_stored_private_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<
     // PKCS #9 friendlyName is BMPString and limited to 255 characters.
     // The private pkcs11rs attribute remains authoritative for labels which
     // cannot be represented there.
-    if !attributes.label.is_empty() && attributes.label.chars().count() <= 255 {
-        if let Ok(label) = BmpString::from_utf8(&attributes.label) {
-            pkcs8_attributes.push(one_value_attribute(
-                oid_value(FRIENDLY_NAME_OID)?,
-                Any::encode_from(&label).map_err(|_| CKR_DATA_INVALID)?,
-            )?);
-        }
+    if !attributes.label.is_empty()
+        && attributes.label.chars().count() <= 255
+        && let Ok(label) = BmpString::from_utf8(&attributes.label)
+    {
+        pkcs8_attributes.push(one_value_attribute(
+            oid_value(FRIENDLY_NAME_OID)?,
+            Any::encode_from(&label).map_err(|_| CKR_DATA_INVALID)?,
+        )?);
     }
     pkcs8_attributes.push(one_value_attribute(
         oid_value(LOCAL_KEY_ID_OID)?,
@@ -1859,10 +1860,10 @@ pub(crate) fn material_to_pkcs8(
         let scalar = Zeroizing::new(material.private_value().ok_or(CKR_DATA_INVALID)?);
         return ec_pkcs8(curve, scalar.as_ref());
     }
-    if let SoftwarePrivateKeyMaterial::Signing(key) = material {
-        if matches!(key.key_kind(), KeyKind::Edwards(_)) {
-            return key.to_pkcs8_der().map_err(|_| CKR_DATA_INVALID.into());
-        }
+    if let SoftwarePrivateKeyMaterial::Signing(key) = material
+        && matches!(key.key_kind(), KeyKind::Edwards(_))
+    {
+        return key.to_pkcs8_der().map_err(|_| CKR_DATA_INVALID.into());
     }
     let (oid, value) = match material {
         SoftwarePrivateKeyMaterial::Montgomery(key) => (

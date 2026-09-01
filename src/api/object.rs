@@ -122,12 +122,12 @@ fn create_object(
             .transpose()
             .map_err(Error::from)?
             .unwrap_or(false);
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
-            if let Some(imported) = preview_sign_import_object(templ)? {
-                validate_new_object_access(&imported, flags, logged_in)?;
-                *object_handle = ctx.store_backed_object(session_handle, imported)?;
-                return Ok(());
-            }
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2
+            && let Some(imported) = preview_sign_import_object(templ)?
+        {
+            validate_new_object_access(&imported, flags, logged_in)?;
+            *object_handle = ctx.store_backed_object(session_handle, imported)?;
+            return Ok(());
         }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv)
             && token
@@ -2042,25 +2042,21 @@ fn object_attribute_value(
         value,
         ..
     } = &object.material
+        && is_certificate_attribute(attribute_type)
     {
-        if is_certificate_attribute(attribute_type) {
-            let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
-            return Ok(piv_certificate_attribute(&payload, attribute_type));
-        }
+        let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
+        return Ok(piv_certificate_attribute(&payload, attribute_type));
     }
-    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE {
-        if let KeyMaterial::YubiHsm {
+    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+        && let KeyMaterial::YubiHsm {
             id,
             object_type,
             value,
             ..
         } = &object.material
-        {
-            if matches!(*object_type, YUBIHSM_OPAQUE | crate::YUBIHSM_TEMPLATE) {
-                return yubihsm_object_value(ctx, session_handle, *id, *object_type, value)
-                    .map(Some);
-            }
-        }
+        && matches!(*object_type, YUBIHSM_OPAQUE | crate::YUBIHSM_TEMPLATE)
+    {
+        return yubihsm_object_value(ctx, session_handle, *id, *object_type, value).map(Some);
     }
     if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
         && ctx.is_native_token_object_handle(object_handle)

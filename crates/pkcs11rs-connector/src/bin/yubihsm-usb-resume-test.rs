@@ -280,10 +280,10 @@ async fn wait_for_resume(extra_gap: Duration) -> Duration {
     loop {
         tokio::time::sleep(RESUME_CHECK_INTERVAL).await;
         let now = std::time::SystemTime::now();
-        if let Ok(gap) = now.duration_since(last_check) {
-            if gap > RESUME_CHECK_INTERVAL + extra_gap {
-                return gap;
-            }
+        if let Ok(gap) = now.duration_since(last_check)
+            && gap > RESUME_CHECK_INTERVAL + extra_gap
+        {
+            return gap;
         }
         last_check = now;
     }

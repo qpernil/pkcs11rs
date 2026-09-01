@@ -617,15 +617,15 @@ impl Slot for PivSlot {
             let certificate_algorithm = certificate
                 .as_deref()
                 .and_then(piv_algorithm_from_certificate);
-            if let (Some(algorithm), Some(value)) = (certificate_algorithm, certificate.clone()) {
-                if piv_algorithm_supported(self.version, algorithm) {
-                    self.certificates.push(PivCertificate {
-                        slot,
-                        algorithm,
-                        value,
-                        attestation: slot == piv::Slot::Attestation,
-                    });
-                }
+            if let (Some(algorithm), Some(value)) = (certificate_algorithm, certificate.clone())
+                && piv_algorithm_supported(self.version, algorithm)
+            {
+                self.certificates.push(PivCertificate {
+                    slot,
+                    algorithm,
+                    value,
+                    attestation: slot == piv::Slot::Attestation,
+                });
             }
             if slot == piv::Slot::Attestation {
                 continue;

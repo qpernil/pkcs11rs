@@ -698,10 +698,10 @@ fn find_der_extension(input: &[u8], oid: &[u8]) -> Result<Option<Vec<u8>>, Error
                 if let Some(value) = scan(input, content, next, oid)? {
                     return Ok(Some(value));
                 }
-            } else if tag & 0x20 != 0 {
-                if let Some(value) = scan(input, content, next, oid)? {
-                    return Ok(Some(value));
-                }
+            } else if tag & 0x20 != 0
+                && let Some(value) = scan(input, content, next, oid)?
+            {
+                return Ok(Some(value));
             }
             offset = next;
         }

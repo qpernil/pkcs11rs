@@ -2,7 +2,7 @@
 name = "pkcs11rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 description = "PKCS #11 provider for YubiKey CCID and FIDO HID applications and YubiHSM devices"
 readme = "README.md"
 repository = "https://github.com/qpernil/pkcs11rs"

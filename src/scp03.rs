@@ -462,7 +462,9 @@ pub(crate) fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
     }
     compact
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
             u8::from_str_radix(pair, 16).map_err(|_| CKR_ARGUMENTS_BAD.into())

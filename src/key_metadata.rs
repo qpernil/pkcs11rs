@@ -463,13 +463,13 @@ fn validate_attribute_type(
     if expected != actual {
         return Err(KeyMetadataError::InvalidAttributeType(attribute));
     }
-    if let KeyAttributeValue::Mechanisms(mechanisms) = value {
-        if mechanisms.len() > MAX_ATTRIBUTES || mechanisms.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(KeyMetadataError::Malformed(
-                "mechanism list is not sorted and unique",
-            ));
-        }
+    if let KeyAttributeValue::Mechanisms(mechanisms) = value
+        && (mechanisms.len() > MAX_ATTRIBUTES
+            || mechanisms.windows(2).any(|pair| pair[0] >= pair[1]))
+    {
+        return Err(KeyMetadataError::Malformed(
+            "mechanism list is not sorted and unique",
+        ));
     }
     Ok(())
 }

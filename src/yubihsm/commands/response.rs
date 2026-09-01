@@ -78,7 +78,9 @@ pub(crate) fn parse_object_list(data: &[u8]) -> Result<Vec<ObjectEntry>, Error> 
     if !crate::is_multiple_of(data.len(), 4) || data.len() / 4 > MAX_OBJECT_COUNT {
         return Err(CKR_DATA_INVALID.into());
     }
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .map(|item| {
             Ok(ObjectEntry {
                 id: read_u16(item, 0)?,
@@ -120,7 +122,9 @@ impl LogEntries {
             return Err(CKR_DATA_INVALID.into());
         }
         let entries = data[HEADER_LENGTH..]
-            .chunks_exact(ENTRY_LENGTH)
+            .as_chunks::<ENTRY_LENGTH>()
+            .0
+            .iter()
             .map(|entry| {
                 Ok(LogEntry {
                     number: read_u16(entry, 0)?,
