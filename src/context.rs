@@ -3497,7 +3497,7 @@ mod discovery_tests {
                 .map(|serial| serde_json::json!({
                     "serial": serial,
                     "usb_version": "2.5",
-                    "status": "available"
+                    "status": "claimed"
                 }))
                 .collect::<Vec<_>>()
         }))

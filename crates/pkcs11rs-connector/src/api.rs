@@ -462,10 +462,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let response_body = String::from_utf8(body(response).await).unwrap();
         assert!(response_body.contains(
-            r#"{"serial":"12345678","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"available"}"#
+            r#"{"serial":"12345678","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"claimed","transport":{"kind":"embedded","connection_generation":1}}"#
         ));
         assert!(response_body.contains(
-            r#"{"serial":"87654321","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"unclaimed"}"#
+            r#"{"serial":"87654321","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"unclaimed","transport":{"kind":"usb","connection_generation":1}}"#
         ));
 
         let response = app

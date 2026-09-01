@@ -353,9 +353,12 @@ POST /v1/devices/{serial}/commands
 
 PKCS11RS uses this API directly. Each URL in `PKCS11RS_YUBIHSM_URLS`
 identifies one connector service, and each device returned with status
-`available` becomes an independent PKCS #11 slot. Enumerated devices that the
+`claimed` becomes an independent PKCS #11 slot. Enumerated devices that the
 connector did not claim remain visible as `unclaimed` and are ignored by the
-client. PKCS11RS does not use the legacy single-device endpoints.
+client. Each v1 inventory entry also reports whether its transport is `usb` or
+`embedded` and a process-local connection generation. Those fields support
+passive diagnostics; PKCS11RS does not use them for slot identity. PKCS11RS
+does not use the legacy single-device endpoints.
 
 System sleep pauses the connector without rebuilding its HTTP listener, USB
 watcher, registry, or claimed YubiHSM handles. A two-minute macOS sleep test
@@ -363,6 +366,22 @@ confirmed that the original claimed handle and a complete release/reacquire
 sequence both answered a cleartext `DeviceInfo` command immediately after
 wake. YubiHSM secure sessions remain subject to the device's independent
 30-second inactivity timeout and must be authenticated again after expiry.
+
+A `virtual-yubihsm` USB gadget on a separate Linux host provides a reproducible
+disconnect test for a connector running on macOS. Reload the gadget service
+with `systemctl reload usb-gadget-supervisor@virtual-yubihsm.service` while the
+Mac connector is idle or has a command in flight. The unit's `ExecReload`
+signals only the supervisor `MAINPID`: that PID remains stable while the
+supervisor unbinds USB and replaces the worker process. Do not use a generic
+`systemctl kill` whose default target can include the complete service cgroup.
+The host-side test must observe actual detach and attach events instead of
+assuming a fixed interval between them.
+
+If detach interrupts a command, the connector returns a device-transport error,
+does not replay the request, and reopens only for a later request. The original
+command has an uncertain outcome: for example, interrupted key generation may
+still have created its object. A test must inspect and clean up that outcome
+after reconnecting with a new authenticated session.
 
 Command request and response bodies are native YubiHSM frames with
 `application/octet-stream`. Each device has an independent asynchronous access
