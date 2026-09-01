@@ -194,6 +194,9 @@ after login or restore. `KeyKind` controls generation/import and
 digest choices are no longer used to identify a stored key. PKCS#8, EC scalars,
 Ed25519 seeds, and ML seeds are persistence/export DTOs only; parsing,
 validation, expansion, and RSA CRT precomputation happen once at the boundary.
+PKCS11RS uses the shared `SoftwarePrivateKey` union and `EcCurve` identity
+directly; only PKCS #11 public projections, attributes, and error mapping remain
+provider-specific adapters.
 
 ```sh
 cargo build --locked

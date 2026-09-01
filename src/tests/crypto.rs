@@ -1492,7 +1492,7 @@ fn ecdsa_verifier_supports_every_advertised_prime_curve() {
         crate::EcCurve::P256,
         crate::EcCurve::P384,
         crate::EcCurve::P521,
-        crate::EcCurve::K256,
+        crate::EcCurve::Secp256k1,
         crate::EcCurve::BrainpoolP256,
         crate::EcCurve::BrainpoolP384,
         crate::EcCurve::BrainpoolP512,

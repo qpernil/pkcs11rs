@@ -1,9 +1,9 @@
 use crate::{
     CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
     CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyKind, KeyMaterial, MlDsaParameterSet,
-    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwareSigningKey, SoftwareX25519Key,
-    TokenObject, ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
-    shared_key_kind,
+    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwarePrivateKeyMaterialExt, SoftwareSigningKey,
+    SoftwareX25519Key, TokenObject, ec_curve_from_parameters, ec_curve_parameters,
+    secure_channel_crypto,
 };
 use der::{
     Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
@@ -1830,9 +1830,7 @@ pub(crate) fn material_to_pkcs8(
         SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(key)) => {
             key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
         }
-        SoftwarePrivateKeyMaterial::MlKem512(key)
-        | SoftwarePrivateKeyMaterial::MlKem768(key)
-        | SoftwarePrivateKeyMaterial::MlKem1024(key) => {
+        SoftwarePrivateKeyMaterial::MlKem(key) => {
             key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
         }
         _ => None,
@@ -1944,7 +1942,7 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
             software_key_core::post_quantum::MlKemParameterSet::MlKem512,
             encoded,
         )
-        .map(SoftwarePrivateKeyMaterial::MlKem512)
+        .map(SoftwarePrivateKeyMaterial::MlKem)
         .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_KEM_768_OID {
@@ -1955,7 +1953,7 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
             software_key_core::post_quantum::MlKemParameterSet::MlKem768,
             encoded,
         )
-        .map(SoftwarePrivateKeyMaterial::MlKem768)
+        .map(SoftwarePrivateKeyMaterial::MlKem)
         .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_KEM_1024_OID {
@@ -1966,7 +1964,7 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
             software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
             encoded,
         )
-        .map(SoftwarePrivateKeyMaterial::MlKem1024)
+        .map(SoftwarePrivateKeyMaterial::MlKem)
         .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1") {
@@ -2034,7 +2032,7 @@ fn material_from_ec_scalar(
     curve: EcCurve,
     scalar: &[u8],
 ) -> Result<SoftwarePrivateKeyMaterial, Error> {
-    SoftwareSigningKey::from_serialized_for_kind(shared_key_kind(curve), scalar)
+    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(curve), scalar)
         .map(SoftwarePrivateKeyMaterial::Signing)
         .map_err(|_| CKR_DATA_INVALID.into())
 }
@@ -2210,19 +2208,19 @@ mod tests {
                 SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa87),
                 vec![7; 32],
             ),
-            SoftwarePrivateKeyMaterial::MlKem512(
+            SoftwarePrivateKeyMaterial::MlKem(
                 software_key_core::post_quantum::MlKemPrivateKey::from_seed(
                     software_key_core::post_quantum::MlKemParameterSet::MlKem512,
                     [7; 64],
                 ),
             ),
-            SoftwarePrivateKeyMaterial::MlKem768(
+            SoftwarePrivateKeyMaterial::MlKem(
                 software_key_core::post_quantum::MlKemPrivateKey::from_seed(
                     software_key_core::post_quantum::MlKemParameterSet::MlKem768,
                     [7; 64],
                 ),
             ),
-            SoftwarePrivateKeyMaterial::MlKem1024(
+            SoftwarePrivateKeyMaterial::MlKem(
                 software_key_core::post_quantum::MlKemPrivateKey::from_seed(
                     software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
                     [7; 64],
@@ -2262,7 +2260,7 @@ mod tests {
     #[test]
     fn persistent_ml_kem_private_key_preserves_decapsulation_policy() {
         let master_key = [0x3c; MASTER_KEY_LENGTH];
-        let mut original = object(SoftwarePrivateKeyMaterial::MlKem512(
+        let mut original = object(SoftwarePrivateKeyMaterial::MlKem(
             software_key_core::post_quantum::MlKemPrivateKey::from_seed(
                 software_key_core::post_quantum::MlKemParameterSet::MlKem512,
                 [0x21; 64],
@@ -2281,7 +2279,7 @@ mod tests {
         assert_eq!(decoded.allowed_mechanisms, original.allowed_mechanisms);
         assert!(matches!(
             decoded.material,
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::MlKem512(_))
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::MlKem(_))
         ));
     }
 

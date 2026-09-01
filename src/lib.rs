@@ -24,7 +24,7 @@ pub(crate) use software_key_core::software_signing::SignatureScheme;
 pub(crate) use software_key_core::{
     post_quantum::{MlDsaParameterSet, MlDsaPrivateKey},
     software_key_agreement::SoftwareX25519Key,
-    software_signing::{KeyKind, SoftwarePublicKey, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::{
     cell::{Cell, RefCell},

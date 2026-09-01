@@ -3,8 +3,8 @@ use software_key_core::rsa_signing::{
     RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
 };
 use software_key_core::software_signing::{
-    EcCurve as SharedEcCurve, SignatureScheme as SharedSigningAlgorithm,
-    SoftwarePublicKey as SharedPublicKey, SoftwareSigningError,
+    SignatureScheme as SharedSigningAlgorithm, SoftwarePublicKey as SharedPublicKey,
+    SoftwareSigningError,
 };
 
 pub(crate) fn openpgp_sign_mechanism_supported(
@@ -339,25 +339,13 @@ pub(crate) fn encode_rsa_pss(
         })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum EcCurve {
-    P224,
-    P256,
-    P384,
-    P521,
-    K256,
-    BrainpoolP256,
-    BrainpoolP384,
-    BrainpoolP512,
-}
-
 pub(crate) fn ec_curve_parameters(curve: EcCurve) -> &'static [u8] {
     match curve {
         EcCurve::P224 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21],
         EcCurve::P256 => &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
         EcCurve::P384 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
         EcCurve::P521 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
-        EcCurve::K256 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
+        EcCurve::Secp256k1 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
         EcCurve::BrainpoolP256 => &[
             0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07,
         ],
@@ -433,7 +421,7 @@ pub(crate) fn ec_parameters(curve: EcCurve) -> Result<EcParameters, Error> {
             "01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA51868783BF2F966B7FCC0148F709A5D03BB5C9B8899C47AEBB6FB71E91386409",
             66,
         ),
-        EcCurve::K256 => (
+        EcCurve::Secp256k1 => (
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F",
             "0",
             "7",
@@ -589,29 +577,8 @@ pub(crate) fn ec_multiply(
     result
 }
 
-fn shared_ec_profile(curve: EcCurve) -> (SharedEcCurve, SharedSigningAlgorithm) {
-    match curve {
-        EcCurve::P224 => (SharedEcCurve::P224, SharedSigningAlgorithm::EcdsaP224Sha224),
-        EcCurve::P256 => (SharedEcCurve::P256, SharedSigningAlgorithm::EcdsaP256Sha256),
-        EcCurve::P384 => (SharedEcCurve::P384, SharedSigningAlgorithm::EcdsaP384Sha384),
-        EcCurve::P521 => (SharedEcCurve::P521, SharedSigningAlgorithm::EcdsaP521Sha512),
-        EcCurve::K256 => (
-            SharedEcCurve::Secp256k1,
-            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
-        ),
-        EcCurve::BrainpoolP256 => (
-            SharedEcCurve::BrainpoolP256,
-            SharedSigningAlgorithm::EcdsaBrainpoolP256Sha256,
-        ),
-        EcCurve::BrainpoolP384 => (
-            SharedEcCurve::BrainpoolP384,
-            SharedSigningAlgorithm::EcdsaBrainpoolP384Sha384,
-        ),
-        EcCurve::BrainpoolP512 => (
-            SharedEcCurve::BrainpoolP512,
-            SharedSigningAlgorithm::EcdsaBrainpoolP512Sha512,
-        ),
-    }
+fn shared_ec_profile(curve: EcCurve) -> (EcCurve, SharedSigningAlgorithm) {
+    (curve, curve.signature_scheme())
 }
 
 pub(crate) fn verify_ecdsa(
@@ -659,7 +626,7 @@ pub(crate) fn ec_curve_from_parameters(parameters: &[u8]) -> Result<EcCurve, Err
         EcCurve::P256,
         EcCurve::P384,
         EcCurve::P521,
-        EcCurve::K256,
+        EcCurve::Secp256k1,
         EcCurve::BrainpoolP256,
         EcCurve::BrainpoolP384,
         EcCurve::BrainpoolP512,

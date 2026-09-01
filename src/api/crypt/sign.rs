@@ -82,9 +82,7 @@ fn software_sign_mechanism_supported(
             }
         },
         SoftwarePrivateKeyMaterial::X25519(_) => false,
-        SoftwarePrivateKeyMaterial::MlKem512(_)
-        | SoftwarePrivateKeyMaterial::MlKem768(_)
-        | SoftwarePrivateKeyMaterial::MlKem1024(_) => false,
+        SoftwarePrivateKeyMaterial::MlKem(_) => false,
     }
 }
 
@@ -94,29 +92,10 @@ fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, 
             KeyKind::Rsa { .. } => key.rsa_size().map_err(|_| CKR_KEY_TYPE_INCONSISTENT.into()),
             KeyKind::Ed25519 => Ok(64),
             KeyKind::MlDsa(parameter_set) => Ok(parameter_set.signature_length()),
-            KeyKind::Ec(curve) => Ok(ec_parameters(match curve {
-                software_key_core::software_signing::EcCurve::P224 => EcCurve::P224,
-                software_key_core::software_signing::EcCurve::P256 => EcCurve::P256,
-                software_key_core::software_signing::EcCurve::P384 => EcCurve::P384,
-                software_key_core::software_signing::EcCurve::P521 => EcCurve::P521,
-                software_key_core::software_signing::EcCurve::Secp256k1 => EcCurve::K256,
-                software_key_core::software_signing::EcCurve::BrainpoolP256 => {
-                    EcCurve::BrainpoolP256
-                }
-                software_key_core::software_signing::EcCurve::BrainpoolP384 => {
-                    EcCurve::BrainpoolP384
-                }
-                software_key_core::software_signing::EcCurve::BrainpoolP512 => {
-                    EcCurve::BrainpoolP512
-                }
-            })?
-            .coordinate_length
-                * 2),
+            KeyKind::Ec(curve) => Ok(ec_parameters(curve)?.coordinate_length * 2),
         },
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        SoftwarePrivateKeyMaterial::MlKem512(_)
-        | SoftwarePrivateKeyMaterial::MlKem768(_)
-        | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::MlKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
@@ -175,7 +154,7 @@ fn software_sign(
             let KeyKind::Ec(curve) = key.key_kind() else {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             };
-            let algorithm = shared_signing_algorithm(local_ec_curve(curve));
+            let algorithm = curve.signature_scheme();
             key.sign_prehash(algorithm, &digest()?)
                 .map(|signature| signature.into_bytes())
                 .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
@@ -185,9 +164,7 @@ fn software_sign(
             shared_ml_dsa_sign(key, ml_dsa, data)
         }
         SoftwarePrivateKeyMaterial::Signing(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        SoftwarePrivateKeyMaterial::MlKem512(_)
-        | SoftwarePrivateKeyMaterial::MlKem768(_)
-        | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::MlKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 

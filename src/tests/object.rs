@@ -1,4 +1,5 @@
 use super::*;
+use crate::SoftwarePrivateKeyMaterialExt;
 
 #[test]
 fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
@@ -40,7 +41,7 @@ fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
     assert!(private.decapsulate);
     assert!(matches!(
         private.material,
-        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem512(_))
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem(_))
     ));
 
     let mut expanded = key.expanded_private_key().to_vec();
@@ -55,7 +56,7 @@ fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
         crate::parse_create_object_template(&expanded_template)
             .unwrap()
             .material,
-        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem512(_))
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem(_))
     ));
 }
 
@@ -1670,7 +1671,7 @@ fn software_ec_private_imports_use_curve_specific_material() {
         crate::EcCurve::P256,
         crate::EcCurve::P384,
         crate::EcCurve::P521,
-        crate::EcCurve::K256,
+        crate::EcCurve::Secp256k1,
         crate::EcCurve::BrainpoolP256,
         crate::EcCurve::BrainpoolP384,
         crate::EcCurve::BrainpoolP512,

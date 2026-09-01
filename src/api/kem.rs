@@ -218,9 +218,7 @@ fn ml_kem_decapsulate(
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     match private {
-        SoftwarePrivateKeyMaterial::MlKem512(key)
-        | SoftwarePrivateKeyMaterial::MlKem768(key)
-        | SoftwarePrivateKeyMaterial::MlKem1024(key) => key
+        SoftwarePrivateKeyMaterial::MlKem(key) => key
             .decapsulate(ciphertext)
             .map_err(|_| CKR_ENCRYPTED_DATA_LEN_RANGE.into()),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
