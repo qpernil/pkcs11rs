@@ -14,7 +14,7 @@ use crate::{
 use software_key_core::{
     secure_channel::x963_kdf_sha256,
     software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -985,8 +985,10 @@ impl SecureSession {
 }
 
 fn p256_secret_key() -> Result<SoftwareSigningKey, Error> {
-    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
-        .map_err(|_| CKR_DEVICE_ERROR.into())
+    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(
+        software_key_core::software_signing::EcCurve::P256,
+    ))
+    .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 fn p256_public_key(key: &SoftwareSigningKey) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {

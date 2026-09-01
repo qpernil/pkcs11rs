@@ -25,8 +25,8 @@ use software_key_core::{
     },
     software_key_agreement::SoftwareX25519Key,
     software_signing::{
-        EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey, SoftwareSigningAlgorithm,
-        SoftwareSigningKey, SoftwareSigningKeyKind,
+        EcCurve as SharedEcCurve, KeyKind, SignatureScheme, SoftwarePublicKey as SharedPublicKey,
+        SoftwareSigningKey,
     },
 };
 use std::{cell::RefCell, rc::Rc, slice};
@@ -116,21 +116,19 @@ impl SoftwarePrivateKeyMaterial {
         let Self::Signing(key) = self else {
             return None;
         };
-        match key.kind() {
-            SoftwareSigningKeyKind::Ec(curve) => Some(local_ec_curve(curve)),
-            SoftwareSigningKeyKind::Ed25519
-            | SoftwareSigningKeyKind::Rsa
-            | SoftwareSigningKeyKind::MlDsa(_) => None,
+        match key.key_kind() {
+            KeyKind::Ec(curve) => Some(local_ec_curve(curve)),
+            KeyKind::Ed25519 | KeyKind::Rsa { .. } | KeyKind::MlDsa(_) => None,
         }
     }
 
     pub(crate) fn key_type(&self) -> CK_KEY_TYPE {
         match self {
-            Self::Signing(key) => match key.kind() {
-                SoftwareSigningKeyKind::Ec(_) => CKK_EC as CK_KEY_TYPE,
-                SoftwareSigningKeyKind::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
-                SoftwareSigningKeyKind::Rsa => CKK_RSA as CK_KEY_TYPE,
-                SoftwareSigningKeyKind::MlDsa(_) => CKK_ML_DSA as CK_KEY_TYPE,
+            Self::Signing(key) => match key.key_kind() {
+                KeyKind::Ec(_) => CKK_EC as CK_KEY_TYPE,
+                KeyKind::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+                KeyKind::Rsa { .. } => CKK_RSA as CK_KEY_TYPE,
+                KeyKind::MlDsa(_) => CKK_ML_DSA as CK_KEY_TYPE,
             },
             Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             Self::MlKem512(_) | Self::MlKem768(_) | Self::MlKem1024(_) => CKK_ML_KEM as CK_KEY_TYPE,
@@ -232,17 +230,30 @@ pub(crate) fn local_ec_curve(curve: SharedEcCurve) -> crate::EcCurve {
     }
 }
 
-pub(crate) fn shared_signing_algorithm(curve: crate::EcCurve) -> SoftwareSigningAlgorithm {
+pub(crate) fn shared_signing_algorithm(curve: crate::EcCurve) -> SignatureScheme {
     match curve {
-        crate::EcCurve::P224 => SoftwareSigningAlgorithm::EcdsaP224Sha224,
-        crate::EcCurve::P256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
-        crate::EcCurve::P384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
-        crate::EcCurve::P521 => SoftwareSigningAlgorithm::EcdsaP521Sha512,
-        crate::EcCurve::K256 => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
-        crate::EcCurve::BrainpoolP256 => SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
-        crate::EcCurve::BrainpoolP384 => SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
-        crate::EcCurve::BrainpoolP512 => SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+        crate::EcCurve::P224 => SignatureScheme::EcdsaP224Sha224,
+        crate::EcCurve::P256 => SignatureScheme::EcdsaP256Sha256,
+        crate::EcCurve::P384 => SignatureScheme::EcdsaP384Sha384,
+        crate::EcCurve::P521 => SignatureScheme::EcdsaP521Sha512,
+        crate::EcCurve::K256 => SignatureScheme::EcdsaSecp256k1Sha256,
+        crate::EcCurve::BrainpoolP256 => SignatureScheme::EcdsaBrainpoolP256Sha256,
+        crate::EcCurve::BrainpoolP384 => SignatureScheme::EcdsaBrainpoolP384Sha384,
+        crate::EcCurve::BrainpoolP512 => SignatureScheme::EcdsaBrainpoolP512Sha512,
     }
+}
+
+pub(crate) fn shared_key_kind(curve: crate::EcCurve) -> KeyKind {
+    KeyKind::Ec(match curve {
+        crate::EcCurve::P224 => SharedEcCurve::P224,
+        crate::EcCurve::P256 => SharedEcCurve::P256,
+        crate::EcCurve::P384 => SharedEcCurve::P384,
+        crate::EcCurve::P521 => SharedEcCurve::P521,
+        crate::EcCurve::K256 => SharedEcCurve::Secp256k1,
+        crate::EcCurve::BrainpoolP256 => SharedEcCurve::BrainpoolP256,
+        crate::EcCurve::BrainpoolP384 => SharedEcCurve::BrainpoolP384,
+        crate::EcCurve::BrainpoolP512 => SharedEcCurve::BrainpoolP512,
+    })
 }
 
 fn local_ml_dsa_parameter_set(parameter_set: MlDsaParameterSet) -> CK_ML_DSA_PARAMETER_SET_TYPE {
@@ -2667,7 +2678,7 @@ mod post_quantum_tests {
                 .unwrap();
         let material = SoftwarePrivateKeyMaterial::Signing(
             SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+                SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44),
                 &seed,
             )
             .unwrap(),

@@ -3,8 +3,8 @@ use software_key_core::rsa_signing::{
     RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
 };
 use software_key_core::software_signing::{
-    EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey,
-    SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningError,
+    EcCurve as SharedEcCurve, SignatureScheme as SharedSigningAlgorithm,
+    SoftwarePublicKey as SharedPublicKey, SoftwareSigningError,
 };
 
 pub(crate) fn openpgp_sign_mechanism_supported(
