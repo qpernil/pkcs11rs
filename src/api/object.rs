@@ -658,12 +658,12 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             }
             let mut scalar = vec![0; length - private.len()];
             scalar.extend_from_slice(&private);
-            let signing_algorithm = if algorithm == piv::Algorithm::EccP256 {
-                SoftwareSigningAlgorithm::EcdsaP256Sha256
+            let key_kind = if algorithm == piv::Algorithm::EccP256 {
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P256)
             } else {
-                SoftwareSigningAlgorithm::EcdsaP384Sha384
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P384)
             };
-            let public = match SoftwareSigningKey::from_serialized(signing_algorithm, &scalar)
+            let public = match SoftwareSigningKey::from_serialized_for_kind(key_kind, &scalar)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
                 .public_key()
             {
@@ -675,16 +675,14 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let public = match SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::Ed25519,
-                &private,
-            )
-            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
-            .public_key()
-            {
-                SoftwarePublicKey::Ed25519(public) => public.to_vec(),
-                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
-            };
+            let public =
+                match SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &private)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+                    .public_key()
+                {
+                    SoftwarePublicKey::Ed25519(public) => public.to_vec(),
+                    _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+                };
             (
                 piv::Algorithm::Ed25519,
                 0x07,
@@ -1473,7 +1471,7 @@ fn build_imported_key_material(
                 let scalar =
                     padded_private_scalar(&value, ec_parameters(curve)?.coordinate_length)?;
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::from_serialized(shared_signing_algorithm(curve), &scalar)
+                    SoftwareSigningKey::from_serialized_for_kind(shared_key_kind(curve), &scalar)
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
@@ -1490,7 +1488,7 @@ fn build_imported_key_material(
                     .try_into()
                     .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &value)
+                    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &value)
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             } else {

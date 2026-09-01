@@ -1,9 +1,9 @@
 use crate::{
     CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyMaterial, MlDsaParameterSet,
-    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwareSigningAlgorithm, SoftwareSigningKey,
-    SoftwareX25519Key, TokenObject, ec_curve_from_parameters, ec_curve_parameters,
-    secure_channel_crypto, shared_signing_algorithm,
+    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyKind, KeyMaterial, MlDsaParameterSet,
+    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwareSigningKey, SoftwareX25519Key,
+    TokenObject, ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
+    shared_key_kind,
 };
 use der::{
     Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
@@ -31,6 +31,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+use crate::SignatureScheme;
 use crate::key_metadata::cryptoki_ulong_to_u64;
 use crate::storage::{ContentReference, LocalStorageProvider, StorageError, StorageProvider};
 
@@ -2006,7 +2008,7 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         return Err(CKR_DATA_INVALID.into());
     }
     if info.algorithm.oid == ED25519_OID {
-        return SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &value)
+        return SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &value)
             .map(SoftwarePrivateKeyMaterial::Signing)
             .map_err(|_| CKR_DATA_INVALID.into());
     }
@@ -2032,7 +2034,7 @@ fn material_from_ec_scalar(
     curve: EcCurve,
     scalar: &[u8],
 ) -> Result<SoftwarePrivateKeyMaterial, Error> {
-    SoftwareSigningKey::from_serialized(shared_signing_algorithm(curve), scalar)
+    SoftwareSigningKey::from_serialized_for_kind(shared_key_kind(curve), scalar)
         .map(SoftwarePrivateKeyMaterial::Signing)
         .map_err(|_| CKR_DATA_INVALID.into())
 }
@@ -2184,37 +2186,28 @@ mod tests {
         };
         let materials = vec![
             SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(Box::new(rsa))),
-            signing(SoftwareSigningAlgorithm::EcdsaP224Sha224, scalar(28)),
-            signing(SoftwareSigningAlgorithm::EcdsaP256Sha256, scalar(32)),
-            signing(SoftwareSigningAlgorithm::EcdsaP384Sha384, scalar(48)),
-            signing(SoftwareSigningAlgorithm::EcdsaP521Sha512, scalar(66)),
-            signing(SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, scalar(32)),
-            signing(
-                SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
-                scalar(32),
-            ),
-            signing(
-                SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
-                scalar(48),
-            ),
-            signing(
-                SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
-                scalar(64),
-            ),
-            signing(SoftwareSigningAlgorithm::Ed25519, vec![7; 32]),
+            signing(SignatureScheme::EcdsaP224Sha224, scalar(28)),
+            signing(SignatureScheme::EcdsaP256Sha256, scalar(32)),
+            signing(SignatureScheme::EcdsaP384Sha384, scalar(48)),
+            signing(SignatureScheme::EcdsaP521Sha512, scalar(66)),
+            signing(SignatureScheme::EcdsaSecp256k1Sha256, scalar(32)),
+            signing(SignatureScheme::EcdsaBrainpoolP256Sha256, scalar(32)),
+            signing(SignatureScheme::EcdsaBrainpoolP384Sha384, scalar(48)),
+            signing(SignatureScheme::EcdsaBrainpoolP512Sha512, scalar(64)),
+            signing(SignatureScheme::Ed25519, vec![7; 32]),
             SoftwarePrivateKeyMaterial::X25519(
                 SoftwareX25519Key::from_serialized(&[7; 32]).unwrap(),
             ),
             signing(
-                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+                SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44),
                 vec![7; 32],
             ),
             signing(
-                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
+                SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa65),
                 vec![7; 32],
             ),
             signing(
-                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
+                SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa87),
                 vec![7; 32],
             ),
             SoftwarePrivateKeyMaterial::MlKem512(
@@ -2381,8 +2374,8 @@ mod tests {
     #[test]
     fn exported_encrypted_private_key_info_round_trips_attributed_pkcs8() {
         let material = SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningKey::from_serialized_for_kind(
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P256),
                 &scalar(32),
             )
             .unwrap(),
@@ -2468,8 +2461,8 @@ mod tests {
         assert_ne!(user_public.as_ref(), key.as_ref());
 
         let material = SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningKey::from_serialized_for_kind(
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P256),
                 &scalar(32),
             )
             .unwrap(),
@@ -2656,8 +2649,8 @@ mod tests {
     #[test]
     fn pkcs8_attributes_preserve_non_bmp_labels_and_reject_conflicts() {
         let material = SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningKey::from_serialized_for_kind(
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P256),
                 &scalar(32),
             )
             .unwrap(),
@@ -2678,8 +2671,8 @@ mod tests {
         assert_eq!(decoded.id, non_bmp.id);
 
         let material = SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::from_serialized(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            SoftwareSigningKey::from_serialized_for_kind(
+                KeyKind::Ec(software_key_core::software_signing::EcCurve::P256),
                 &scalar(32),
             )
             .unwrap(),

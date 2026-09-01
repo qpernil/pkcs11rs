@@ -63,8 +63,11 @@ const RFC3394_AES_128_KEY: [u8; 16] = [
 ];
 
 fn test_private_key(encoded: &[u8]) -> Result<SoftwareSigningKey, Error> {
-    SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::EcdsaP256Sha256, encoded)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+    SoftwareSigningKey::from_serialized_for_kind(
+        KeyKind::Ec(software_key_core::software_signing::EcCurve::P256),
+        encoded,
+    )
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 const RFC7748_ALICE_PRIVATE_KEY: [u8; 32] = [
     0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
@@ -235,14 +238,14 @@ impl ProtocolPeer {
             (
                 YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
                 VirtualAuthenticationKeyMaterial::Asymmetric(public[1..].to_vec()),
-                64,
+                72,
             )
         } else {
             let keys = crate::yubico_kdf::yubico_password_kdf(PASSWORD)?;
             (
                 YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
                 VirtualAuthenticationKeyMaterial::Symmetric(keys.to_vec()),
-                32,
+                40,
             )
         };
         self.device

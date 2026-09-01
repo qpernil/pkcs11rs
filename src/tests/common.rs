@@ -5780,8 +5780,7 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
         .unwrap();
 
     let host_ephemeral =
-        crate::SoftwareSigningKey::generate(crate::SoftwareSigningAlgorithm::EcdsaP256Sha256)
-            .unwrap();
+        crate::SoftwareSigningKey::generate(crate::SignatureScheme::EcdsaP256Sha256).unwrap();
     let crate::SoftwarePublicKey::Ec {
         uncompressed: host_ephemeral_public,
         ..

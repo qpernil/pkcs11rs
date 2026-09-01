@@ -188,6 +188,13 @@ works/
 └── virtual-yubihsm/
 ```
 
+Software private-key objects retain the typed `software-key-core` runtime key
+after login or restore. `KeyKind` controls generation/import and
+`SignatureScheme` controls an individual signing operation, so RSA padding or
+digest choices are no longer used to identify a stored key. PKCS#8, EC scalars,
+Ed25519 seeds, and ML seeds are persistence/export DTOs only; parsing,
+validation, expansion, and RSA CRT precomputation happen once at the boundary.
+
 ```sh
 cargo build --locked
 ```

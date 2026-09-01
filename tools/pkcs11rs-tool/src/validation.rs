@@ -6,7 +6,7 @@ use rustls::{
     sign::CertifiedKey,
 };
 use software_key_core::software_signing::{
-    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+    EcCurve, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
 };
 use std::{collections::HashSet, path::Path};
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
@@ -297,11 +297,9 @@ fn validate_decrypted_key(
     require_p256: bool,
 ) -> Result<(), String> {
     if require_p256 {
-        let private_key = SoftwareSigningKey::from_pkcs8_der(
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            decrypted,
-        )
-        .map_err(|_| "SCP11 OCE private key is not a P-256 PKCS #8 key".to_owned())?;
+        let private_key =
+            SoftwareSigningKey::from_pkcs8_der(SignatureScheme::EcdsaP256Sha256, decrypted)
+                .map_err(|_| "SCP11 OCE private key is not a P-256 PKCS #8 key".to_owned())?;
         let certificate = Certificate::from_der(&certificates[0])
             .map_err(|error| format!("parse leaf certificate: {error}"))?;
         let certificate_key = p256_public_point(&certificate)?;

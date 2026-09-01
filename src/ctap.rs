@@ -7,7 +7,7 @@ use minicbor::{Decoder, Encoder, data::Type};
 use software_key_core::{
     software_key_agreement::derive_with_signing_key,
     software_signing::{
-        EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+        EcCurve, KeyKind, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
         ecdsa_signature_from_der,
     },
 };
@@ -1029,8 +1029,10 @@ fn parse_cose_key(decoder: &mut Decoder<'_>) -> Result<CoseKey, CtapError> {
 }
 
 fn random_p256_secret() -> Result<SoftwareSigningKey, CtapError> {
-    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
-        .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))
+    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(
+        software_key_core::software_signing::EcCurve::P256,
+    ))
+    .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))
 }
 
 fn encapsulate(
@@ -1697,11 +1699,7 @@ fn verify_packed_attestation(
 
     let Some(certificates) = certificates else {
         credential_public_key
-            .verify_message(
-                SoftwareSigningAlgorithm::EcdsaP256Sha256,
-                &signed,
-                &signature,
-            )
+            .verify_message(SignatureScheme::EcdsaP256Sha256, &signed, &signature)
             .map_err(|_| CtapError::Malformed("invalid self attestation signature"))?;
         return Ok((FidoAttestationTrust::SelfAttestation, 0));
     };
@@ -1723,11 +1721,7 @@ fn verify_packed_attestation(
         uncompressed: point,
     };
     attestation_public_key
-        .verify_message(
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            &signed,
-            &signature,
-        )
+        .verify_message(SignatureScheme::EcdsaP256Sha256, &signed, &signature)
         .map_err(|_| CtapError::Malformed("invalid packed attestation signature"))?;
 
     let count = certificates.len();

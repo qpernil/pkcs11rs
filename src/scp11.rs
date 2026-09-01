@@ -7,7 +7,7 @@ use crate::{
 };
 use software_key_core::{
     software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
+    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::fs;
 use subtle::ConstantTimeEq;
@@ -319,11 +319,9 @@ impl Scp11aHostCredentials {
             pinentry,
             "Unlock the SCP11 OCE private key",
         )?;
-        let private_key = SoftwareSigningKey::from_pkcs8_der(
-            SoftwareSigningAlgorithm::EcdsaP256Sha256,
-            &encoded_key,
-        )
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let private_key =
+            SoftwareSigningKey::from_pkcs8_der_for_kind(KeyKind::Ec(EcCurve::P256), &encoded_key)
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
 
         let certificate_bundle = fs::read(&configuration.certificate_bundle)
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
@@ -365,8 +363,10 @@ fn card_public_key_from_certificates(
 }
 
 fn p256_key() -> Result<SoftwareSigningKey, Error> {
-    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
-        .map_err(|_| CKR_DEVICE_ERROR.into())
+    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(
+        software_key_core::software_signing::EcCurve::P256,
+    ))
+    .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 fn encode_private_public_point(key: &SoftwareSigningKey) -> Result<Vec<u8>, Error> {

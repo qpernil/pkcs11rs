@@ -1068,8 +1068,10 @@ fn software_generate_key_pair(
             (
                 CKK_RSA as CK_KEY_TYPE,
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::generate_rsa(bits as usize)
-                        .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?,
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Rsa {
+                        modulus_bits: bits as usize,
+                    })
+                    .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?,
                 ),
             )
         }
@@ -1079,7 +1081,7 @@ fn software_generate_key_pair(
             let curve = ec_curve_from_parameters(&parameters)
                 .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
             let material = SoftwarePrivateKeyMaterial::Signing(
-                SoftwareSigningKey::generate(shared_signing_algorithm(curve))
+                SoftwareSigningKey::generate_for_kind(shared_key_kind(curve))
                     .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
             );
             (CKK_EC as CK_KEY_TYPE, material)
@@ -1095,7 +1097,7 @@ fn software_generate_key_pair(
             (
                 CKK_EC_EDWARDS as CK_KEY_TYPE,
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::Ed25519)
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Ed25519)
                         .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
                 ),
             )
@@ -1134,7 +1136,7 @@ fn software_generate_key_pair(
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             let material = SoftwarePrivateKeyMaterial::Signing(
-                SoftwareSigningKey::generate(SoftwareSigningAlgorithm::MlDsa(parameter_set))
+                SoftwareSigningKey::generate_for_kind(KeyKind::MlDsa(parameter_set))
                     .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
             );
             (CKK_ML_DSA as CK_KEY_TYPE, material)
