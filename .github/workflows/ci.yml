@@ -15,7 +15,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -75,7 +78,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@1.85.0
@@ -106,7 +112,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git virtual-yubihsm
 
       - name: Check workspace advisories and licenses
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -130,7 +139,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -220,7 +232,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Install Linux native dependencies
         if: matrix.platform == 'linux'
@@ -250,7 +265,10 @@ jobs:
       - name: Check out first-party dependencies
         run: |
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -260,7 +278,7 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
-      - name: Build and load PKCS #11 DLL
+      - name: Build and exercise PKCS #11 DLL through its exported ABI
         run: |
           cargo build --locked
           cargo xtask load-shared-library
