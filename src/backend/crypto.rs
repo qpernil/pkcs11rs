@@ -3,7 +3,7 @@ use software_key_core::rsa_signing::{
     RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
 };
 use software_key_core::software_signing::{
-    SignatureScheme as SharedSigningAlgorithm, SoftwarePublicKey as SharedPublicKey,
+    EdwardsCurve, SignatureScheme as SharedSigningAlgorithm, SoftwarePublicKey as SharedPublicKey,
     SoftwareSigningError,
 };
 
@@ -358,6 +358,48 @@ pub(crate) fn ec_curve_parameters(curve: EcCurve) -> &'static [u8] {
     }
 }
 
+pub(crate) fn edwards_curve_parameters(curve: EdwardsCurve) -> &'static [u8] {
+    match curve {
+        EdwardsCurve::Ed25519 => &[0x06, 0x03, 0x2b, 0x65, 0x70],
+        EdwardsCurve::Ed448 => &[0x06, 0x03, 0x2b, 0x65, 0x71],
+    }
+}
+
+pub(crate) fn edwards_curve_from_parameters(parameters: &[u8]) -> Result<EdwardsCurve, Error> {
+    if parameters == edwards_curve_parameters(EdwardsCurve::Ed25519)
+        || parameters == piv_ec_parameters(piv::Algorithm::Ed25519).unwrap_or_default()
+        || parameters == openpgp::Curve::Ed25519.oid()
+    {
+        return Ok(EdwardsCurve::Ed25519);
+    }
+    if parameters == edwards_curve_parameters(EdwardsCurve::Ed448) {
+        return Ok(EdwardsCurve::Ed448);
+    }
+    Err(CKR_KEY_TYPE_INCONSISTENT.into())
+}
+
+pub(crate) fn montgomery_curve_parameters(curve: MontgomeryCurve) -> &'static [u8] {
+    match curve {
+        MontgomeryCurve::X25519 => &[0x06, 0x03, 0x2b, 0x65, 0x6e],
+        MontgomeryCurve::X448 => &[0x06, 0x03, 0x2b, 0x65, 0x6f],
+    }
+}
+
+pub(crate) fn montgomery_curve_from_parameters(
+    parameters: &[u8],
+) -> Result<MontgomeryCurve, Error> {
+    if parameters == montgomery_curve_parameters(MontgomeryCurve::X25519)
+        || parameters == piv_ec_parameters(piv::Algorithm::X25519).unwrap_or_default()
+        || parameters == openpgp::Curve::X25519.oid()
+    {
+        return Ok(MontgomeryCurve::X25519);
+    }
+    if parameters == montgomery_curve_parameters(MontgomeryCurve::X448) {
+        return Ok(MontgomeryCurve::X448);
+    }
+    Err(CKR_KEY_TYPE_INCONSISTENT.into())
+}
+
 pub(crate) struct EcParameters {
     #[cfg(test)]
     pub(crate) p: BigUint,
@@ -636,20 +678,22 @@ pub(crate) fn ec_curve_from_parameters(parameters: &[u8]) -> Result<EcCurve, Err
     .ok_or(CKR_KEY_TYPE_INCONSISTENT.into())
 }
 
-pub(crate) fn verify_ed25519(
+pub(crate) fn verify_edwards(
+    curve: EdwardsCurve,
     public_key: &[u8],
     data: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    if public_key.len() != 32 || signature.len() != 64 {
+    if public_key.len() != curve.public_key_length() || signature.len() != curve.signature_length()
+    {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
-    let key_bytes: [u8; 32] = public_key
-        .try_into()
-        .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-    SharedPublicKey::Ed25519(key_bytes)
-        .verify_message(SharedSigningAlgorithm::Ed25519, data, signature)
-        .map_err(shared_verification_error)
+    SharedPublicKey::Edwards {
+        curve,
+        public_key: public_key.to_vec(),
+    }
+    .verify_message(curve.signature_scheme(), data, signature)
+    .map_err(shared_verification_error)
 }
 
 fn shared_verification_error(error: SoftwareSigningError) -> Error {

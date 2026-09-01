@@ -11,10 +11,12 @@ use crate::{
     CKA_YUBICO_TOUCH_POLICY, Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm,
     OpenPgpClient, OpenPgpKeyRef, PivClient, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
     YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState,
-    der_octet_string, hash, is_yubihsm_ec, is_yubihsm_rsa, is_yubihsm_x25519,
-    openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
-    piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
-    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters,
+    der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
+    is_yubihsm_rsa, is_yubihsm_x25519, montgomery_curve_from_parameters,
+    montgomery_curve_parameters, openpgp_signature_requires_context_specific_login,
+    piv_algorithm_from_certificate, piv_effective_pin_policy, piv_public_key_from_certificate,
+    send_yubihsm_secure_command, yubihsm_capabilities_to_attributes, yubihsm_capability,
+    yubihsm_ec_parameters,
 };
 use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
 #[cfg(test)]
@@ -107,7 +109,7 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
         };
         match key.key_kind() {
             KeyKind::Ec(curve) => Some(curve),
-            KeyKind::Ed25519 | KeyKind::Rsa { .. } | KeyKind::MlDsa(_) => None,
+            KeyKind::Edwards(_) | KeyKind::Rsa { .. } | KeyKind::MlDsa(_) => None,
         }
     }
 
@@ -115,11 +117,11 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
         match self {
             Self::Signing(key) => match key.key_kind() {
                 KeyKind::Ec(_) => CKK_EC as CK_KEY_TYPE,
-                KeyKind::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+                KeyKind::Edwards(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
                 KeyKind::Rsa { .. } => CKK_RSA as CK_KEY_TYPE,
                 KeyKind::MlDsa(_) => CKK_ML_DSA as CK_KEY_TYPE,
             },
-            Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            Self::Montgomery(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             Self::MlKem(_) => CKK_ML_KEM as CK_KEY_TYPE,
         }
     }
@@ -137,11 +139,9 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
                         .ok_or(CKR_DATA_INVALID)?
                         .to_vec(),
                 }),
-                SharedPublicKey::Ed25519(public_key) => Ok(PublicKeyMaterial::Ec {
-                    parameters: crate::piv_ec_parameters(piv::Algorithm::Ed25519)
-                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                        .to_vec(),
-                    public_key: public_key.to_vec(),
+                SharedPublicKey::Edwards { curve, public_key } => Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::edwards_curve_parameters(curve).to_vec(),
+                    public_key,
                 }),
                 SharedPublicKey::MlDsa {
                     parameter_set,
@@ -158,11 +158,9 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
                     .map_err(|_| Error::from(CKR_DATA_INVALID))?,
                 )),
             },
-            Self::X25519(key) => Ok(PublicKeyMaterial::Ec {
-                parameters: crate::piv_ec_parameters(piv::Algorithm::X25519)
-                    .ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                    .to_vec(),
-                public_key: key.public_key().to_vec(),
+            Self::Montgomery(key) => Ok(PublicKeyMaterial::Ec {
+                parameters: crate::montgomery_curve_parameters(key.curve()).to_vec(),
+                public_key: key.public_key(),
             }),
             Self::MlKem(key) => Ok(PublicKeyMaterial::MlKem {
                 parameter_set: local_ml_kem_parameter_set(key.parameter_set()),
@@ -174,7 +172,7 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
     fn private_value(&self) -> Option<Vec<u8>> {
         match self {
             Self::Signing(key) => key.private_value().map(|value| value.to_vec()),
-            Self::X25519(key) => Some(key.serialized().to_vec()),
+            Self::Montgomery(key) => Some(key.serialized().to_vec()),
             Self::MlKem(key) => Some(key.expanded_private_key().to_vec()),
         }
     }
@@ -985,10 +983,14 @@ pub(crate) fn ec_public_key_info(
             algorithm.extend_from_slice(parameters?);
             der_tlv(0x30, &algorithm)
         }
-        x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70]),
-        x if x == CKK_EC_MONTGOMERY as CK_KEY_TYPE => {
-            der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x6e])
-        }
+        x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => der_tlv(
+            0x30,
+            edwards_curve_parameters(edwards_curve_from_parameters(parameters?).ok()?),
+        ),
+        x if x == CKK_EC_MONTGOMERY as CK_KEY_TYPE => der_tlv(
+            0x30,
+            montgomery_curve_parameters(montgomery_curve_from_parameters(parameters?).ok()?),
+        ),
         _ => return None,
     };
     let mut subject_public_key = vec![0];

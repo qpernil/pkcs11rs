@@ -336,11 +336,15 @@ fn verify(
                 data,
                 signature,
             ),
-            KeyMaterial::Public(PublicKeyMaterial::Ec { public_key, .. })
-                if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE =>
-            {
-                verify_ed25519(public_key, data, signature)
-            }
+            KeyMaterial::Public(PublicKeyMaterial::Ec {
+                parameters,
+                public_key,
+            }) if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE => verify_edwards(
+                edwards_curve_from_parameters(parameters)?,
+                public_key,
+                data,
+                signature,
+            ),
             KeyMaterial::Public(PublicKeyMaterial::Ec {
                 parameters,
                 public_key,

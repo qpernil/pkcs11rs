@@ -675,14 +675,19 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let public =
-                match SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &private)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
-                    .public_key()
-                {
-                    SoftwarePublicKey::Ed25519(public) => public.to_vec(),
-                    _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
-                };
+            let public = match SoftwareSigningKey::from_serialized_for_kind(
+                KeyKind::Edwards(EdwardsCurve::Ed25519),
+                &private,
+            )
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+            .public_key()
+            {
+                SoftwarePublicKey::Edwards {
+                    curve: EdwardsCurve::Ed25519,
+                    public_key,
+                } => public_key,
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            };
             (
                 piv::Algorithm::Ed25519,
                 0x07,
@@ -692,7 +697,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let key = SoftwareX25519Key::from_serialized(&private)
+            let key = SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, &private)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             (
                 piv::Algorithm::X25519,
@@ -1475,37 +1480,27 @@ fn build_imported_key_material(
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
-                if parameters.as_slice()
-                    != piv_ec_parameters(piv::Algorithm::Ed25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                {
-                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
-                }
-                if value.len() != 32 {
+                let curve = edwards_curve_from_parameters(&parameters)
+                    .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
+                if value.len() != curve.private_key_length() {
                     return Err(CKR_KEY_SIZE_RANGE.into());
                 }
-                let value: [u8; 32] = value
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &value)
+                    SoftwareSigningKey::from_serialized_for_kind(KeyKind::Edwards(curve), &value)
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             } else {
-                if parameters.as_slice()
-                    != piv_ec_parameters(piv::Algorithm::X25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                {
-                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
-                }
-                if value.len() != 32 {
+                let curve = montgomery_curve_from_parameters(&parameters)
+                    .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
+                let expected_length = match curve {
+                    MontgomeryCurve::X25519 => 32,
+                    MontgomeryCurve::X448 => 56,
+                };
+                if value.len() != expected_length {
                     return Err(CKR_KEY_SIZE_RANGE.into());
                 }
-                let value: [u8; 32] = value
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                SoftwarePrivateKeyMaterial::X25519(
-                    SoftwareX25519Key::from_serialized(&value)
+                SoftwarePrivateKeyMaterial::Montgomery(
+                    SoftwareMontgomeryKey::from_serialized(curve, &value)
                         .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                 )
             };

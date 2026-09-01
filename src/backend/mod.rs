@@ -21,11 +21,13 @@ pub(crate) use ccid::{
 pub(crate) use ccid_provider::{CcidProvider, CcidReader};
 pub(crate) use crypto::{
     digest_for_hash_mechanism, ec_curve_from_parameters, ec_curve_parameters, ec_parameters,
-    ecdsa_der_to_raw, encode_rsa_pss, openpgp_ec_coordinate_length, openpgp_ec_params,
-    openpgp_sign_mechanism_supported, openpgp_signature, piv_digest_info, piv_hash_mechanism,
-    piv_is_hashed_ecdsa, piv_is_hashed_rsa_pkcs, piv_is_pss_mechanism, pss_hash_mechanism,
-    rsa_pkcs1_encrypt, rsa_private_operation, rsa_public_operation, shared_rsa_hash_algorithm,
-    shared_rsa_pss_parameters, validate_ec_public_point, verify_ecdsa, verify_ed25519,
+    ecdsa_der_to_raw, edwards_curve_from_parameters, edwards_curve_parameters, encode_rsa_pss,
+    montgomery_curve_from_parameters, montgomery_curve_parameters, openpgp_ec_coordinate_length,
+    openpgp_ec_params, openpgp_sign_mechanism_supported, openpgp_signature, piv_digest_info,
+    piv_hash_mechanism, piv_is_hashed_ecdsa, piv_is_hashed_rsa_pkcs, piv_is_pss_mechanism,
+    pss_hash_mechanism, rsa_pkcs1_encrypt, rsa_private_operation, rsa_public_operation,
+    shared_rsa_hash_algorithm, shared_rsa_pss_parameters, validate_ec_public_point, verify_ecdsa,
+    verify_edwards,
 };
 #[cfg(test)]
 pub(crate) use crypto::{mgf_digest, rsa_pkcs1_sign, verify_rsa_pss};

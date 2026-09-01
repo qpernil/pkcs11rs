@@ -2179,9 +2179,12 @@ fn software_session_key_pairs_cover_every_supported_curve() {
         ),
         (
             CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::Ed25519)
-                .unwrap()
-                .to_vec(),
+            crate::edwards_curve_parameters(crate::EdwardsCurve::Ed25519).to_vec(),
+            CKM_EDDSA as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::edwards_curve_parameters(crate::EdwardsCurve::Ed448).to_vec(),
             CKM_EDDSA as CK_MECHANISM_TYPE,
         ),
         (
@@ -2251,9 +2254,11 @@ fn software_session_ecdh_covers_every_supported_curve() {
         ),
         (
             CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::X25519)
-                .unwrap()
-                .to_vec(),
+            crate::montgomery_curve_parameters(crate::MontgomeryCurve::X25519).to_vec(),
+        ),
+        (
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::montgomery_curve_parameters(crate::MontgomeryCurve::X448).to_vec(),
         ),
     ] {
         let (first_public, first_private) =

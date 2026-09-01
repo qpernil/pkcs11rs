@@ -154,10 +154,10 @@ impl VirtualHsmActors {
     pub(crate) async fn shutdown(mut self) -> io::Result<()> {
         let mut first_error = None;
         while let Some(actor) = self.actors.pop() {
-            if let Err(error) = actor.shutdown().await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            if let Err(error) = actor.shutdown().await {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
         }
         match first_error {
