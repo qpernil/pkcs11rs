@@ -115,7 +115,7 @@ the entry completes with a transport error if the USB transfer fails; a newly
 attached device receives a new entry even when it has the same serial. Duplicate
 simultaneously attached serials are rejected rather than routed ambiguously.
 Every identifiable device appears in `/v1/devices`; devices the connector
-successfully claimed are `available`, while devices owned elsewhere are
+successfully claimed are `claimed`, while devices owned elsewhere are
 `unclaimed`.
 
 System suspend pauses the process but does not trigger connector
@@ -157,13 +157,13 @@ Ownership behavior has also been verified with two physical YubiHSMs:
 
 1. `yubihsm-shell` claimed one HSM through local USB before the connector
    started.
-2. The connector left that HSM unmanaged while managing the other available
+2. The connector left that HSM unmanaged while managing the other claimed
    HSM.
 3. `yubihsm-shell` was stopped, making its HSM claimable without generating a
    physical hot-plug event. It remained `unclaimed` because the connector does
    not rescan or retry claims while a device stays attached.
 4. Physically reconnecting it generated a new hot-plug event and allowed the
-   connector to claim and advertise it as `available`.
+   connector to claim and advertise it as `claimed`.
 
 YubiHSM secure sessions are separate from USB transport state. The device
 expires a secure session after 30 seconds without a session command and then
@@ -265,33 +265,49 @@ GET /v1/devices
       "manufacturer": "Yubico",
       "product": "YubiHSM",
       "usb_version": "2.5",
-      "status": "available"
+      "status": "claimed",
+      "transport": {
+        "kind": "usb",
+        "connection_generation": 3
+      }
     },
     {
       "serial": "87654321",
       "manufacturer": "Yubico",
       "product": "YubiHSM",
       "usb_version": "2.5",
-      "status": "unclaimed"
+      "status": "unclaimed",
+      "transport": {
+        "kind": "usb",
+        "connection_generation": 1
+      }
     }
   ]
 }
 ```
 
 The inventory contains every identifiable YubiHSM seen by USB enumeration.
-`available` means that the connector owns the device interface and can execute
+`claimed` means that the connector owns the device interface and can execute
 commands. `unclaimed` means that the device is physically present but was not
 claimed by this connector, for example because another process owns it. This
 makes the endpoint useful as remote USB inventory even when some attached
 devices cannot be used through this connector. An unclaimed device is left
 alone until it is physically detached and reattached; sleep/wake does not retry
-the claim. Clients create slots only for `available` devices and
+the claim. Clients create slots only for `claimed` devices and
 ignore all other, including unknown future, status values.
+
+`transport.kind` is `usb` for enumerated hardware and `embedded` for a virtual
+HSM hosted in the connector. `connection_generation` starts at one and
+increases whenever the same serial is newly registered during the connector
+process lifetime. It makes detach, replacement, and re-enumeration visible
+without exposing an operating-system-specific USB identifier or sending a
+command to the HSM. It is diagnostic only; routing and PKCS #11 slot identity
+continue to use the serial number.
 
 `GET /v1/devices/{serial}` returns one entry or `404 Not Found`.
 
 PKCS11RS consumes this API exclusively for remote YubiHSM access. One
-configured connector URL is discovered into one PKCS #11 slot per available
+configured connector URL is discovered into one PKCS #11 slot per claimed
 serial, and every slot sends commands only to its serial-specific endpoint.
 
 ### Execute a command

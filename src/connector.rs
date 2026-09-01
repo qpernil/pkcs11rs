@@ -1867,7 +1867,7 @@ struct HttpConnectorDeviceList {
 
 impl HttpConnectorDevice {
     fn identity(&self) -> Result<YubiHsmConnectorStatus, Error> {
-        if self.serial.is_empty() || self.status != "available" {
+        if self.serial.is_empty() || self.status != "claimed" {
             return Err(CKR_DEVICE_REMOVED.into());
         }
         let components = self
@@ -2445,7 +2445,7 @@ impl HttpConnector {
         let mut serials = HashSet::with_capacity(devices.devices.len());
         let mut identities = Vec::with_capacity(devices.devices.len());
         for device in devices.devices {
-            if device.status != "available" {
+            if device.status != "claimed" {
                 continue;
             }
             let identity = device.identity()?;
@@ -2883,7 +2883,7 @@ mod tests {
     #[test]
     fn parses_multi_device_connector_identity() {
         let device: HttpConnectorDevice = serde_json::from_slice(
-            br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
+            br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2896,9 +2896,10 @@ mod tests {
     fn rejects_unavailable_or_malformed_multi_device_identity() {
         for encoded in [
             br#"{"serial":"12345678","usb_version":"2.5","status":"busy"}"#.as_slice(),
-            br#"{"serial":"","usb_version":"2.5","status":"available"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2","status":"available"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2.x","status":"available"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#.as_slice(),
+            br#"{"serial":"","usb_version":"2.5","status":"claimed"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2","status":"claimed"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2.x","status":"claimed"}"#.as_slice(),
         ] {
             let device: HttpConnectorDevice = serde_json::from_slice(encoded).unwrap();
             assert!(device.identity().is_err());
@@ -2915,7 +2916,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"available"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"12345678","usb_version":"2.4","status":"available"}]}"#,
+                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"claimed"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"12345678","usb_version":"2.4","status":"claimed"}]}"#,
                 true,
             );
         });
@@ -2937,6 +2938,29 @@ mod tests {
     }
 
     #[test]
+    fn discovery_does_not_accept_available_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
+            write_http_response(
+                &mut connection,
+                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                true,
+            );
+        });
+
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let connectors =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
+        assert!(connectors.is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
     fn repeated_http_discovery_reuses_the_endpoint_connection_pool() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -2950,7 +2974,7 @@ mod tests {
                 assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
                 write_http_response(
                     &mut connection,
-                    br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                    br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
                     close,
                 );
             }
@@ -2977,7 +3001,7 @@ mod tests {
                 .map(|serial| serde_json::json!({
                     "serial": serial,
                     "usb_version": "2.5",
-                    "status": "available"
+                    "status": "claimed"
                 }))
                 .collect::<Vec<_>>()
         }))
@@ -3250,7 +3274,7 @@ mod tests {
             );
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
                 true,
             );
         });
@@ -3312,7 +3336,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
                 false,
             );
 
@@ -3320,7 +3344,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
+                br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
                 false,
             );
 
@@ -3328,7 +3352,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
+                br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
                 false,
             );
 
@@ -3380,19 +3404,19 @@ mod tests {
             for (index, (path, identity)) in [
                 (
                     b"GET /v1/devices HTTP/1.1\r\n".as_slice(),
-                    br#"{"devices":[{"serial":"11111111","usb_version":"2.5","status":"available"}]}"#.as_slice(),
+                    br#"{"devices":[{"serial":"11111111","usb_version":"2.5","status":"claimed"}]}"#.as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.5","status":"available"}"#.as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.5","status":"claimed"}"#.as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.5","status":"available"}"#.as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.5","status":"claimed"}"#.as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.6","status":"available"}"#.as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.6","status":"claimed"}"#.as_slice(),
                 ),
             ]
             .into_iter()

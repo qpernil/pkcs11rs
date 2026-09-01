@@ -15,8 +15,22 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStatus {
-    Available,
+    Claimed,
     Unclaimed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTransportKind {
+    Usb,
+    #[cfg(any(test, all(feature = "embedded-virtual-yubihsm", unix)))]
+    Embedded,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DeviceTransportView {
+    pub kind: DeviceTransportKind,
+    pub connection_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -26,6 +40,7 @@ pub struct DeviceView {
     pub product: String,
     pub usb_version: String,
     pub status: DeviceStatus,
+    pub transport: DeviceTransportView,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,13 +52,14 @@ struct DeviceMetadata {
 }
 
 impl DeviceMetadata {
-    fn view(&self, status: DeviceStatus) -> DeviceView {
+    fn view(&self, status: DeviceStatus, transport: DeviceTransportView) -> DeviceView {
         DeviceView {
             serial: self.serial.clone(),
             manufacturer: self.manufacturer.clone(),
             product: self.product.clone(),
             usb_version: self.usb_version.clone(),
             status,
+            transport,
         }
     }
 }
@@ -264,12 +280,14 @@ impl CommandTransportFactory for UsbTransportFactory {
 pub struct DeviceEntry {
     id: Option<UsbDeviceId>,
     metadata: DeviceMetadata,
-    transport: Mutex<Box<dyn CommandTransport>>,
+    device_transport: DeviceTransportView,
+    command_transport: Mutex<Box<dyn CommandTransport>>,
 }
 
 impl DeviceEntry {
     pub fn view(&self) -> DeviceView {
-        self.metadata.view(DeviceStatus::Available)
+        self.metadata
+            .view(DeviceStatus::Claimed, self.device_transport.clone())
     }
 
     pub fn usb_device_id(&self) -> Option<String> {
@@ -277,7 +295,7 @@ impl DeviceEntry {
     }
 
     pub async fn command(&self, request: &[u8]) -> (Result<Vec<u8>, TransportError>, Duration) {
-        let mut transport = self.transport.lock().await;
+        let mut transport = self.command_transport.lock().await;
         let started_at = Instant::now();
         let result = transport.command(request).await;
         (result, started_at.elapsed())
@@ -285,29 +303,35 @@ impl DeviceEntry {
 }
 
 enum DeviceRecord {
-    Available(Arc<DeviceEntry>),
-    Unclaimed(DeviceMetadata),
+    Claimed(Arc<DeviceEntry>),
+    Unclaimed {
+        metadata: DeviceMetadata,
+        transport: DeviceTransportView,
+    },
 }
 
 impl DeviceRecord {
     fn metadata(&self) -> &DeviceMetadata {
         match self {
-            Self::Available(entry) => &entry.metadata,
-            Self::Unclaimed(metadata) => metadata,
+            Self::Claimed(entry) => &entry.metadata,
+            Self::Unclaimed { metadata, .. } => metadata,
         }
     }
 
     fn view(&self) -> DeviceView {
         match self {
-            Self::Available(entry) => entry.view(),
-            Self::Unclaimed(metadata) => metadata.view(DeviceStatus::Unclaimed),
+            Self::Claimed(entry) => entry.view(),
+            Self::Unclaimed {
+                metadata,
+                transport,
+            } => metadata.view(DeviceStatus::Unclaimed, transport.clone()),
         }
     }
 
-    fn available(&self) -> Option<&Arc<DeviceEntry>> {
+    fn claimed(&self) -> Option<&Arc<DeviceEntry>> {
         match self {
-            Self::Available(entry) => Some(entry),
-            Self::Unclaimed(_) => None,
+            Self::Claimed(entry) => Some(entry),
+            Self::Unclaimed { .. } => None,
         }
     }
 }
@@ -316,6 +340,7 @@ impl DeviceRecord {
 struct RegistryState {
     records: HashMap<String, DeviceRecord>,
     serial_by_id: HashMap<UsbDeviceId, String>,
+    connection_generations: HashMap<String, u64>,
     legacy_serial: Option<String>,
 }
 
@@ -366,7 +391,7 @@ impl DeviceRegistry {
             .await
             .records
             .get(serial)
-            .and_then(DeviceRecord::available)
+            .and_then(DeviceRecord::claimed)
             .cloned()
     }
 
@@ -379,7 +404,7 @@ impl DeviceRegistry {
             return state
                 .records
                 .get(serial)
-                .and_then(DeviceRecord::available)
+                .and_then(DeviceRecord::claimed)
                 .cloned()
                 .ok_or(LegacySelectionError::NoDevice);
         }
@@ -387,13 +412,23 @@ impl DeviceRegistry {
             .legacy_serial
             .as_deref()
             .and_then(|serial| state.records.get(serial))
-            .and_then(DeviceRecord::available)
+            .and_then(DeviceRecord::claimed)
             .cloned()
             .ok_or(LegacySelectionError::NoDevice)
     }
 
     async fn contains_id(&self, id: UsbDeviceId) -> bool {
         self.state.read().await.serial_by_id.contains_key(&id)
+    }
+
+    async fn next_connection_generation(&self, serial: &str) -> u64 {
+        let mut state = self.state.write().await;
+        let generation = state
+            .connection_generations
+            .entry(serial.to_owned())
+            .or_default();
+        *generation = generation.saturating_add(1);
+        *generation
     }
 
     async fn register(&self, id: UsbDeviceId, record: DeviceRecord) -> bool {
@@ -404,7 +439,7 @@ impl DeviceRegistry {
             return false;
         }
         state.serial_by_id.insert(id, serial.clone());
-        if record.available().is_some() && state.legacy_serial.is_none() {
+        if record.claimed().is_some() && state.legacy_serial.is_none() {
             state.legacy_serial = Some(serial.clone());
         }
         state.records.insert(serial, record);
@@ -412,7 +447,18 @@ impl DeviceRegistry {
     }
 
     async fn register_unclaimed(&self, id: UsbDeviceId, metadata: DeviceMetadata) {
-        self.register(id, DeviceRecord::Unclaimed(metadata)).await;
+        let connection_generation = self.next_connection_generation(&metadata.serial).await;
+        self.register(
+            id,
+            DeviceRecord::Unclaimed {
+                metadata,
+                transport: DeviceTransportView {
+                    kind: DeviceTransportKind::Usb,
+                    connection_generation,
+                },
+            },
+        )
+        .await;
     }
 
     #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
@@ -422,6 +468,17 @@ impl DeviceRegistry {
         version: [u8; 3],
         transport: Box<dyn CommandTransport>,
     ) -> Result<(), TransportError> {
+        let mut state = self.state.write().await;
+        if state.records.contains_key(&serial) {
+            return Err(TransportError::device(format!(
+                "duplicate YubiHSM serial {serial}"
+            )));
+        }
+        let connection_generation = state
+            .connection_generations
+            .entry(serial.clone())
+            .or_default();
+        *connection_generation = connection_generation.saturating_add(1);
         let entry = Arc::new(DeviceEntry {
             id: None,
             metadata: DeviceMetadata {
@@ -430,18 +487,16 @@ impl DeviceRegistry {
                 product: String::from("YubiHSM"),
                 usb_version: format!("{}.{}", version[0], version[1]),
             },
-            transport: Mutex::new(transport),
+            device_transport: DeviceTransportView {
+                kind: DeviceTransportKind::Embedded,
+                connection_generation: *connection_generation,
+            },
+            command_transport: Mutex::new(transport),
         });
-        let mut state = self.state.write().await;
-        if state.records.contains_key(&serial) {
-            return Err(TransportError::device(format!(
-                "duplicate YubiHSM serial {serial}"
-            )));
-        }
         if state.legacy_serial.is_none() {
             state.legacy_serial = Some(serial.clone());
         }
-        state.records.insert(serial, DeviceRecord::Available(entry));
+        state.records.insert(serial, DeviceRecord::Claimed(entry));
         Ok(())
     }
 
@@ -497,10 +552,15 @@ impl DeviceRegistry {
             product: device.product().to_owned(),
             usb_version: format!("{}.{}", version.0, version.1),
         };
+        let connection_generation = self.next_connection_generation(&serial).await;
         let entry = Arc::new(DeviceEntry {
             id: Some(id),
             metadata,
-            transport: Mutex::new(Box::new(RecoverableCommandTransport::new(
+            device_transport: DeviceTransportView {
+                kind: DeviceTransportKind::Usb,
+                connection_generation,
+            },
+            command_transport: Mutex::new(Box::new(RecoverableCommandTransport::new(
                 Box::new(UsbConnectedTransport {
                     device,
                     timeout: self.command_timeout,
@@ -512,7 +572,7 @@ impl DeviceRegistry {
                 }),
             ))),
         });
-        if self.register(id, DeviceRecord::Available(entry)).await {
+        if self.register(id, DeviceRecord::Claimed(entry)).await {
             tracing::info!(%serial, ?id, "YubiHSM attached");
         }
     }
@@ -525,7 +585,7 @@ impl DeviceRegistry {
         let managed = state
             .records
             .get(&serial)
-            .and_then(DeviceRecord::available)
+            .and_then(DeviceRecord::claimed)
             .is_some_and(|entry| entry.id == Some(id));
         state.records.remove(&serial);
         tracing::info!(%serial, ?id, managed, "YubiHSM detached");
@@ -533,6 +593,7 @@ impl DeviceRegistry {
 
     #[cfg(test)]
     async fn insert_test(&self, serial: &str, transport: Box<dyn CommandTransport>) {
+        let connection_generation = self.next_connection_generation(serial).await;
         let entry = Arc::new(DeviceEntry {
             id: None,
             metadata: DeviceMetadata {
@@ -541,7 +602,11 @@ impl DeviceRegistry {
                 product: String::from("YubiHSM"),
                 usb_version: String::from("2.0"),
             },
-            transport: Mutex::new(transport),
+            device_transport: DeviceTransportView {
+                kind: DeviceTransportKind::Embedded,
+                connection_generation,
+            },
+            command_transport: Mutex::new(transport),
         });
         let mut state = self.state.write().await;
         if state.legacy_serial.is_none() {
@@ -549,19 +614,26 @@ impl DeviceRegistry {
         }
         state
             .records
-            .insert(serial.to_owned(), DeviceRecord::Available(entry));
+            .insert(serial.to_owned(), DeviceRecord::Claimed(entry));
     }
 
     #[cfg(test)]
     pub(crate) async fn insert_test_unclaimed(&self, serial: &str) {
+        let connection_generation = self.next_connection_generation(serial).await;
         self.state.write().await.records.insert(
             serial.to_owned(),
-            DeviceRecord::Unclaimed(DeviceMetadata {
-                serial: serial.to_owned(),
-                manufacturer: String::from("Test"),
-                product: String::from("YubiHSM"),
-                usb_version: String::from("2.0"),
-            }),
+            DeviceRecord::Unclaimed {
+                metadata: DeviceMetadata {
+                    serial: serial.to_owned(),
+                    manufacturer: String::from("Test"),
+                    product: String::from("YubiHSM"),
+                    usb_version: String::from("2.0"),
+                },
+                transport: DeviceTransportView {
+                    kind: DeviceTransportKind::Usb,
+                    connection_generation,
+                },
+            },
         );
     }
 
@@ -844,6 +916,23 @@ mod tests {
             registry.select_legacy(None).await.unwrap().view().serial,
             "22222222"
         );
+    }
+
+    #[tokio::test]
+    async fn connection_generation_increases_when_a_serial_is_registered_again() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        registry.insert_test_unclaimed("12345678").await;
+        let first = registry.view("12345678").await.unwrap();
+        assert_eq!(first.status, DeviceStatus::Unclaimed);
+        assert_eq!(first.transport.kind, DeviceTransportKind::Usb);
+        assert_eq!(first.transport.connection_generation, 1);
+
+        registry.remove_test("12345678").await;
+        registry.insert_test_echo("12345678").await;
+        let second = registry.view("12345678").await.unwrap();
+        assert_eq!(second.status, DeviceStatus::Claimed);
+        assert_eq!(second.transport.kind, DeviceTransportKind::Embedded);
+        assert_eq!(second.transport.connection_generation, 2);
     }
 
     struct ConcurrencyProbe {
