@@ -1707,21 +1707,41 @@ fn software_ec_private_imports_use_curve_specific_material() {
         ));
     }
 
-    for (key_type, algorithm) in [
+    for (key_type, parameters, value_length, expected_edwards, expected_montgomery) in [
         (
             CKK_EC_EDWARDS as CK_KEY_TYPE,
-            crate::piv::Algorithm::Ed25519,
+            crate::edwards_curve_parameters(crate::EdwardsCurve::Ed25519).to_vec(),
+            32,
+            Some(crate::EdwardsCurve::Ed25519),
+            None,
+        ),
+        (
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+            crate::edwards_curve_parameters(crate::EdwardsCurve::Ed448).to_vec(),
+            57,
+            Some(crate::EdwardsCurve::Ed448),
+            None,
         ),
         (
             CKK_EC_MONTGOMERY as CK_KEY_TYPE,
-            crate::piv::Algorithm::X25519,
+            crate::montgomery_curve_parameters(crate::MontgomeryCurve::X25519).to_vec(),
+            32,
+            None,
+            Some(crate::MontgomeryCurve::X25519),
+        ),
+        (
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            crate::montgomery_curve_parameters(crate::MontgomeryCurve::X448).to_vec(),
+            56,
+            None,
+            Some(crate::MontgomeryCurve::X448),
         ),
     ] {
         let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
         let mut key_type = key_type;
-        let mut parameters = crate::piv_ec_parameters(algorithm).unwrap().to_vec();
-        let mut value = vec![0; 32];
-        value[31] = 1;
+        let mut parameters = parameters;
+        let mut value = vec![0; value_length];
+        value[value_length - 1] = 1;
         let template = [
             scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
             scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
@@ -1731,28 +1751,24 @@ fn software_ec_private_imports_use_curve_specific_material() {
         let object = crate::parse_create_object_template(&template).unwrap();
         assert_eq!(object.key_type, key_type);
         assert!(!object.token);
-        assert!(matches!(
-            (&object.material, algorithm),
-            (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
-                    crate::SoftwareSigningKey::P256(_)
-                )),
-                crate::piv::Algorithm::EccP256
-            ) | (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
-                    crate::SoftwareSigningKey::P384(_)
-                )),
-                crate::piv::Algorithm::EccP384
-            ) | (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
-                    crate::SoftwareSigningKey::Ed25519(_)
-                )),
-                crate::piv::Algorithm::Ed25519
-            ) | (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::X25519(_)),
-                crate::piv::Algorithm::X25519
-            )
-        ));
+        match &object.material {
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                key,
+            )) => {
+                assert_eq!(
+                    key.key_kind(),
+                    crate::KeyKind::Edwards(expected_edwards.unwrap())
+                );
+                assert!(expected_montgomery.is_none());
+            }
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Montgomery(
+                key,
+            )) => {
+                assert_eq!(key.curve(), expected_montgomery.unwrap());
+                assert!(expected_edwards.is_none());
+            }
+            _ => panic!("unexpected imported software key family"),
+        }
         assert!(object.projected_public_key().is_ok());
     }
 }

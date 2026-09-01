@@ -1089,15 +1089,12 @@ fn software_generate_key_pair(
         x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             let parameters =
                 required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            if parameters.as_slice()
-                != piv_ec_parameters(piv::Algorithm::Ed25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-            {
-                return Err(CKR_CURVE_NOT_SUPPORTED.into());
-            }
+            let curve = edwards_curve_from_parameters(&parameters)
+                .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
             (
                 CKK_EC_EDWARDS as CK_KEY_TYPE,
                 SoftwarePrivateKeyMaterial::Signing(
-                    SoftwareSigningKey::generate_for_kind(KeyKind::Ed25519)
+                    SoftwareSigningKey::generate_for_kind(KeyKind::Edwards(curve))
                         .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
                 ),
             )
@@ -1105,15 +1102,13 @@ fn software_generate_key_pair(
         x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             let parameters =
                 required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            if parameters.as_slice()
-                != piv_ec_parameters(piv::Algorithm::X25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-            {
-                return Err(CKR_CURVE_NOT_SUPPORTED.into());
-            }
+            let curve = montgomery_curve_from_parameters(&parameters)
+                .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
             (
                 CKK_EC_MONTGOMERY as CK_KEY_TYPE,
-                SoftwarePrivateKeyMaterial::X25519(
-                    SoftwareX25519Key::generate().map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                SoftwarePrivateKeyMaterial::Montgomery(
+                    SoftwareMontgomeryKey::generate(curve)
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
                 ),
             )
         }
@@ -1574,7 +1569,7 @@ fn software_ecdh(
     match key {
         SoftwarePrivateKeyMaterial::Signing(key) => derive_with_signing_key(key, public_data)
             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
-        SoftwarePrivateKeyMaterial::X25519(key) => key
+        SoftwarePrivateKeyMaterial::Montgomery(key) => key
             .derive(public_data)
             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
@@ -1876,7 +1871,7 @@ fn derive_key(
         let source = match &object.material {
             KeyMaterial::SoftwarePrivate(key)
                 if key.weierstrass_curve().is_some()
-                    || matches!(key, SoftwarePrivateKeyMaterial::X25519(_)) =>
+                    || matches!(key, SoftwarePrivateKeyMaterial::Montgomery(_)) =>
             {
                 DeriveSource::Software(Box::new(key.clone()))
             }
@@ -1914,9 +1909,9 @@ fn derive_key(
             }
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
-        let source_is_x25519 = match &source {
+        let source_is_montgomery = match &source {
             DeriveSource::Software(key) => {
-                matches!(key.as_ref(), SoftwarePrivateKeyMaterial::X25519(_))
+                matches!(key.as_ref(), SoftwarePrivateKeyMaterial::Montgomery(_))
             }
             DeriveSource::Piv { algorithm, .. } => *algorithm == piv::Algorithm::X25519,
             DeriveSource::OpenPgp { algorithm, .. } => {
@@ -1924,7 +1919,8 @@ fn derive_key(
             }
             DeriveSource::YubiHsm { algorithm, .. } => is_yubihsm_x25519(*algorithm),
         };
-        if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE && source_is_x25519
+        if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
+            && source_is_montgomery
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
@@ -1951,7 +1947,10 @@ fn derive_key(
         }
         let (expected_length, expected_public_length, requires_uncompressed) = match &source {
             DeriveSource::Software(key) => match key.as_ref() {
-                SoftwarePrivateKeyMaterial::X25519(_) => (32, 32, false),
+                SoftwarePrivateKeyMaterial::Montgomery(key) => match key.curve() {
+                    MontgomeryCurve::X25519 => (32, 32, false),
+                    MontgomeryCurve::X448 => (56, 56, false),
+                },
                 key => {
                     let coordinate_length =
                         ec_parameters(key.weierstrass_curve().ok_or(CKR_KEY_TYPE_INCONSISTENT)?)?

@@ -303,7 +303,7 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
     mechanisms.push(MechanismDetails {
         type_: CKM_EDDSA as CK_MECHANISM_TYPE,
         min_key_size: 255,
-        max_key_size: 255,
+        max_key_size: 448,
         flags: CKF_VERIFY as CK_FLAGS,
     });
     mechanisms.push(MechanismDetails {
@@ -348,13 +348,13 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         MechanismDetails {
             type_: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             min_key_size: 255,
-            max_key_size: 255,
+            max_key_size: 448,
             flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
         },
         MechanismDetails {
             type_: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             min_key_size: 255,
-            max_key_size: 255,
+            max_key_size: 448,
             flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
         },
         MechanismDetails {
@@ -396,7 +396,7 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         MechanismDetails {
             type_: CKM_EDDSA as CK_MECHANISM_TYPE,
             min_key_size: 255,
-            max_key_size: 255,
+            max_key_size: 448,
             flags: CKF_SIGN as CK_FLAGS,
         },
     ];

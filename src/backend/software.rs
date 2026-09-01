@@ -567,11 +567,11 @@ mod tests {
                 {
                     (
                         255,
-                        255,
+                        448,
                         CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME,
                     )
                 }
-                x if x == CKM_EDDSA as CK_MECHANISM_TYPE => (255, 255, CKF_SIGN | CKF_VERIFY),
+                x if x == CKM_EDDSA as CK_MECHANISM_TYPE => (255, 448, CKF_SIGN | CKF_VERIFY),
                 x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
                     (1312, 2592, CKF_GENERATE_KEY_PAIR)
                 }

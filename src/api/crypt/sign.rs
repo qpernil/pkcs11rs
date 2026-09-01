@@ -7,10 +7,7 @@ use super::{
     },
 };
 use crate::*;
-use software_key_core::{
-    post_quantum::{MlDsaError, MlDsaRandomization},
-    software_signing::SignatureScheme as SharedSigningAlgorithm,
-};
+use software_key_core::post_quantum::{MlDsaError, MlDsaRandomization};
 
 const AES_CMAC_LENGTH: usize = 16;
 
@@ -75,13 +72,13 @@ fn software_sign_mechanism_supported(
                     || piv_is_hashed_rsa_pkcs(mechanism)
                     || piv_is_pss_mechanism(mechanism)
             }
-            KeyKind::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+            KeyKind::Edwards(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
             KeyKind::MlDsa(_) => mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE,
             KeyKind::Ec(_) => {
                 mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
             }
         },
-        SoftwarePrivateKeyMaterial::X25519(_) => false,
+        SoftwarePrivateKeyMaterial::Montgomery(_) => false,
         SoftwarePrivateKeyMaterial::MlKem(_) => false,
     }
 }
@@ -90,11 +87,11 @@ fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, 
     match key {
         SoftwarePrivateKeyMaterial::Signing(key) => match key.key_kind() {
             KeyKind::Rsa { .. } => key.rsa_size().map_err(|_| CKR_KEY_TYPE_INCONSISTENT.into()),
-            KeyKind::Ed25519 => Ok(64),
+            KeyKind::Edwards(curve) => Ok(curve.signature_length()),
             KeyKind::MlDsa(parameter_set) => Ok(parameter_set.signature_length()),
             KeyKind::Ec(curve) => Ok(ec_parameters(curve)?.coordinate_length * 2),
         },
-        SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::Montgomery(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         SoftwarePrivateKeyMaterial::MlKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
@@ -144,9 +141,13 @@ fn software_sign(
             };
             result.map_err(shared_signing_error)
         }
-        SoftwarePrivateKeyMaterial::Signing(key) if matches!(key.key_kind(), KeyKind::Ed25519) => {
-            let algorithm = SharedSigningAlgorithm::Ed25519;
-            key.sign_message(algorithm, data)
+        SoftwarePrivateKeyMaterial::Signing(key)
+            if matches!(key.key_kind(), KeyKind::Edwards(_)) =>
+        {
+            let KeyKind::Edwards(curve) = key.key_kind() else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            key.sign_message(curve.signature_scheme(), data)
                 .map(|signature| signature.into_bytes())
                 .map_err(|_| Error::from(CKR_FUNCTION_FAILED))
         }
@@ -159,7 +160,7 @@ fn software_sign(
                 .map(|signature| signature.into_bytes())
                 .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
         }
-        SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::Montgomery(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         SoftwarePrivateKeyMaterial::Signing(key) if matches!(key.key_kind(), KeyKind::MlDsa(_)) => {
             shared_ml_dsa_sign(key, ml_dsa, data)
         }

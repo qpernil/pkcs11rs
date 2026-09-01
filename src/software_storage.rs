@@ -1,9 +1,9 @@
 use crate::{
     CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyKind, KeyMaterial, MlDsaParameterSet,
-    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwarePrivateKeyMaterialExt, SoftwareSigningKey,
-    SoftwareX25519Key, TokenObject, ec_curve_from_parameters, ec_curve_parameters,
-    secure_channel_crypto,
+    CKR_PIN_LEN_RANGE, EcCurve, EdwardsCurve, Error, GcmParameters, KeyKind, KeyMaterial,
+    MlDsaParameterSet, MlDsaPrivateKey, MontgomeryCurve, SoftwareMontgomeryKey,
+    SoftwarePrivateKeyMaterial, SoftwarePrivateKeyMaterialExt, SoftwareSigningKey, TokenObject,
+    ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
 };
 use der::{
     Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
@@ -64,7 +64,9 @@ const EXPORT_SALT_LENGTH: usize = 16;
 const EXPORT_IV_LENGTH: usize = 16;
 const EC_PUBLIC_KEY_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+const ED448_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.113");
 const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
+const X448_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.111");
 const ML_DSA_44_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
 const ML_DSA_65_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
 const ML_DSA_87_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
@@ -1857,11 +1859,19 @@ pub(crate) fn material_to_pkcs8(
         let scalar = Zeroizing::new(material.private_value().ok_or(CKR_DATA_INVALID)?);
         return ec_pkcs8(curve, scalar.as_ref());
     }
-    let (oid, value) = match material {
-        SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Ed25519(key)) => {
-            (ED25519_OID, key.to_bytes().to_vec())
+    if let SoftwarePrivateKeyMaterial::Signing(key) = material {
+        if matches!(key.key_kind(), KeyKind::Edwards(_)) {
+            return key.to_pkcs8_der().map_err(|_| CKR_DATA_INVALID.into());
         }
-        SoftwarePrivateKeyMaterial::X25519(key) => (X25519_OID, key.serialized().to_vec()),
+    }
+    let (oid, value) = match material {
+        SoftwarePrivateKeyMaterial::Montgomery(key) => (
+            match key.curve() {
+                MontgomeryCurve::X25519 => X25519_OID,
+                MontgomeryCurve::X448 => X448_OID,
+            },
+            key.serialized().to_vec(),
+        ),
         _ => return Err(CKR_DATA_INVALID.into()),
     };
     let value = Zeroizing::new(value);
@@ -1999,20 +2009,27 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
     let value = <&OctetStringRef>::from_der(info.private_key.as_bytes())
         .map_err(|_| CKR_DATA_INVALID)?
         .as_bytes();
-    let value: [u8; 32] = value
-        .try_into()
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     if info.algorithm.parameters.is_some() {
         return Err(CKR_DATA_INVALID.into());
     }
-    if info.algorithm.oid == ED25519_OID {
-        return SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ed25519, &value)
+    if info.algorithm.oid == ED25519_OID || info.algorithm.oid == ED448_OID {
+        let curve = if info.algorithm.oid == ED25519_OID {
+            EdwardsCurve::Ed25519
+        } else {
+            EdwardsCurve::Ed448
+        };
+        return SoftwareSigningKey::from_pkcs8_der_for_kind(KeyKind::Edwards(curve), encoded)
             .map(SoftwarePrivateKeyMaterial::Signing)
             .map_err(|_| CKR_DATA_INVALID.into());
     }
-    if info.algorithm.oid == X25519_OID {
-        return SoftwareX25519Key::from_serialized(&value)
-            .map(SoftwarePrivateKeyMaterial::X25519)
+    if info.algorithm.oid == X25519_OID || info.algorithm.oid == X448_OID {
+        let curve = if info.algorithm.oid == X25519_OID {
+            MontgomeryCurve::X25519
+        } else {
+            MontgomeryCurve::X448
+        };
+        return SoftwareMontgomeryKey::from_serialized(curve, value)
+            .map(SoftwarePrivateKeyMaterial::Montgomery)
             .map_err(|_| CKR_DATA_INVALID.into());
     }
     Err(CKR_DATA_INVALID.into())
@@ -2193,8 +2210,12 @@ mod tests {
             signing(SignatureScheme::EcdsaBrainpoolP384Sha384, scalar(48)),
             signing(SignatureScheme::EcdsaBrainpoolP512Sha512, scalar(64)),
             signing(SignatureScheme::Ed25519, vec![7; 32]),
-            SoftwarePrivateKeyMaterial::X25519(
-                SoftwareX25519Key::from_serialized(&[7; 32]).unwrap(),
+            signing(SignatureScheme::Ed448, vec![7; 57]),
+            SoftwarePrivateKeyMaterial::Montgomery(
+                SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X25519, &[7; 32]).unwrap(),
+            ),
+            SoftwarePrivateKeyMaterial::Montgomery(
+                SoftwareMontgomeryKey::from_serialized(MontgomeryCurve::X448, &[7; 56]).unwrap(),
             ),
             signing(
                 SignatureScheme::MlDsa(MlDsaParameterSet::MlDsa44),
@@ -2245,7 +2266,9 @@ mod tests {
             assert!(
                 info.algorithm.oid == EC_PUBLIC_KEY_OID
                     || info.algorithm.oid == ED25519_OID
+                    || info.algorithm.oid == ED448_OID
                     || info.algorithm.oid == X25519_OID
+                    || info.algorithm.oid == X448_OID
                     || info.algorithm.oid == ML_DSA_44_OID
                     || info.algorithm.oid == ML_DSA_65_OID
                     || info.algorithm.oid == ML_DSA_87_OID
