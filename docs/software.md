@@ -230,8 +230,8 @@ backend does not duplicate cryptography.
   OAEP decryption, PKCS #1 signatures, and PSS signatures.
 - Weierstrass EC: NIST P-224, P-256, P-384, P-521, secp256k1,
   brainpoolP256r1, brainpoolP384r1, and brainpoolP512r1; ECDSA and ECDH.
-- Edwards: Ed25519 signing.
-- Montgomery: X25519 key agreement.
+- Edwards: Ed25519 and Ed448 signing.
+- Montgomery: X25519 and X448 key agreement.
 - ML-DSA: FIPS 204 parameter sets ML-DSA-44, ML-DSA-65, and ML-DSA-87;
   key-pair generation plus pure signing and verification with optional context
   and deterministic or hedged signing.
@@ -266,8 +266,8 @@ The slot advertises these exact mechanism groups:
 | `CKM_EC_KEY_PAIR_GEN` | 224–521 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_F_P \| CKF_EC_NAMEDCURVE` |
 | `CKM_ECDSA` and hashed ECDSA variants for SHA-1, SHA-2, and SHA-3 | 224–521 | `CKF_SIGN \| CKF_VERIFY \| CKF_EC_F_P \| CKF_EC_NAMEDCURVE` |
 | `CKM_ECDH1_DERIVE`, `CKM_ECDH1_COFACTOR_DERIVE` | 224–521 | `CKF_DERIVE` |
-| `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | 255 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_NAMEDCURVE \| CKF_EC_CURVENAME` |
-| `CKM_EDDSA` | 255 | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | 255–448 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_NAMEDCURVE \| CKF_EC_CURVENAME` |
+| `CKM_EDDSA` | 255–448 | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_DSA_KEY_PAIR_GEN` | 1312–2592 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_KEM_KEY_PAIR_GEN` | 800–1568 bytes | `CKF_GENERATE_KEY_PAIR` |

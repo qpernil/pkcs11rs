@@ -33,6 +33,8 @@ const IOS_MODULE_MAP: &str = r#"module PKCS11RS {
     export *
 }
 "#;
+const MACOS_TOOL_DEFAULT_TEAM: &str = "Q4X2Q59C2D";
+const MACOS_TOOL_BUNDLE_NAME: &str = "pkcs11rs-tool.app";
 
 const WRAPPER: &str = r#"#define CK_PTR *
 #define CK_DECLARE_FUNCTION(returnType, name) returnType name
@@ -52,13 +54,14 @@ fn main() {
         Some("bindings") => bindings(&args),
         Some("ios") => ios(&args),
         Some("load-shared-library") => load_shared_library(&args),
+        Some("macos-tool") => macos_tool(&args),
         _ => usage(),
     }
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]"
+        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]\n       cargo xtask macos-tool [--release] [--team TEAM]"
     );
     process::exit(2);
 }
@@ -313,6 +316,83 @@ fn absolute_path(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tool(args: &[String]) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask directory has a parent")
+        .to_path_buf();
+    let mut release = false;
+    let mut team = env::var("PKCS11RS_APPLE_DEVELOPMENT_TEAM")
+        .unwrap_or_else(|_| MACOS_TOOL_DEFAULT_TEAM.to_owned());
+    let mut arguments = args.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--team" => {
+                let value = arguments.next().unwrap_or_else(|| usage());
+                if value.is_empty() {
+                    usage();
+                }
+                team.clone_from(value);
+            }
+            "--release" if !release => release = true,
+            "--help" | "-h" => {
+                println!("usage: cargo xtask macos-tool [--release] [--team TEAM]");
+                return;
+            }
+            _ => usage(),
+        }
+    }
+
+    let profile = if release { "release" } else { "debug" };
+    let xcode_configuration = if release { "Release" } else { "Debug" };
+    let xcode_output = target_directory(&root).join("macos-tool").join(profile);
+    let bundle = xcode_output.join(MACOS_TOOL_BUNDLE_NAME);
+    if bundle.is_dir() {
+        fs::remove_dir_all(&bundle)
+            .unwrap_or_else(|error| panic!("replace {}: {error}", bundle.display()));
+    }
+    let xcode_intermediates = target_directory(&root).join("macos-tool/intermediates");
+    let project = root.join("tools/pkcs11rs-tool/macos/PKCS11RSTool.xcodeproj");
+    run_command(
+        Command::new("xcodebuild")
+            .current_dir(&root)
+            .arg("-project")
+            .arg(project)
+            .arg("-scheme")
+            .arg("PKCS11RSTool")
+            .arg("-destination")
+            .arg("platform=macOS")
+            .arg("-configuration")
+            .arg(xcode_configuration)
+            .arg("-quiet")
+            .arg("-allowProvisioningUpdates")
+            .arg("-allowProvisioningDeviceRegistration")
+            .arg(format!("DEVELOPMENT_TEAM={team}"))
+            .arg(format!(
+                "CONFIGURATION_BUILD_DIR={}",
+                xcode_output.display()
+            ))
+            .arg(format!("OBJROOT={}", xcode_intermediates.display()))
+            .arg("build"),
+    );
+    let bundled_executable = bundle.join("Contents/MacOS/pkcs11rs-tool");
+    run_command(
+        Command::new("codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg(&bundle),
+    );
+    println!("created signed app bundle {}", bundle.display());
+    println!("run {}", bundled_executable.display());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_tool(_args: &[String]) {
+    eprintln!("cargo xtask macos-tool requires macOS");
+    process::exit(2);
 }
 
 fn load_shared_library(args: &[String]) {

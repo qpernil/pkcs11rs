@@ -1666,7 +1666,6 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "const-oid 0.10.2",
- "core-foundation",
  "der 0.8.1",
  "ed25519-dalek",
  "flate2",
@@ -1682,13 +1681,12 @@ dependencies = [
  "pcsc",
  "pkcs11rs-local-hardware",
  "pkcs8 0.11.0",
+ "platform-credential",
  "rsa",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
  "sec1",
- "security-framework",
- "security-framework-sys",
  "serde",
  "serde_json",
  "signature 3.0.0",
@@ -1753,6 +1751,7 @@ dependencies = [
  "minicbor",
  "p256",
  "pkcs8 0.11.0",
+ "platform-credential",
  "rustls",
  "rustls-webpki",
  "software-key-core",
@@ -1805,6 +1804,17 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "platform-credential"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "security-framework",
+ "security-framework-sys",
+ "software-key-core",
+ "zeroize",
+]
 
 [[package]]
 name = "polyval"

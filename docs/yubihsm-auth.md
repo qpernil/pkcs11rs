@@ -757,11 +757,10 @@ its firmware exposes the complete challenge/calculation exchange.
 
 On macOS and iOS, the asymmetric backend resolves a permanent Secure Enclave
 P-256 key by the binary Keychain application tag
-`pkcs11rs.yubihsm-auth.<name>`. The host app is responsible for creating that
-key with matching Keychain access-group entitlements; login never creates a
-missing credential. The public key is exportable for provisioning a matching
-YubiHSM Authentication Key and public projection. The private key is not
-exported.
+`pkcs11rs.yubihsm-auth.<name>` in the signed host application's default
+Keychain access group. Login never creates a missing credential. The public key
+is exportable for provisioning a matching YubiHSM Authentication Key and public
+projection. The private key is not exported.
 
 Apple's API performs raw ECDH in the Secure Enclave but returns the shared
 secret to the caller. pkcs11rs therefore holds that intermediate only in a
@@ -770,10 +769,11 @@ derives the session keys, verifies the YubiHSM receipt, and drops the
 intermediate immediately. Session recreation retains the protected key
 reference and device-trust configuration, not private key material.
 
-The same source is compiled for macOS and iOS. Keychain access groups and app
-entitlements decide which named credentials each host application can resolve.
-Device public-key trust is unchanged and is checked before the protected static
-ECDH operation. TLS trust remains a separate configuration.
+The same source is compiled for macOS and iOS. Code signing, the provisioning
+profile, and the host application's default Keychain access group decide which
+named credentials it can resolve. Device public-key trust is unchanged and is
+checked before the protected static ECDH operation. TLS trust remains a
+separate configuration.
 
 A Windows implementation can provide the same asymmetric operation through
 CNG/TPM. CNG can keep the ECDH secret behind an `NCRYPT_SECRET_HANDLE` and apply
@@ -781,10 +781,13 @@ the required prepend/hash construction with `NCryptDeriveKey`, so a Windows
 backend may avoid exposing even the intermediate shared secret. No credential
 string changes are needed when that backend is added.
 
-Remaining management work is to expose generate, list, show-public and delete
-operations in a signed host utility. Symmetric platform authentication remains
-reserved for providers that can keep both AES-128 keys non-exportable while
-offering the required CMAC operations.
+The `pkcs11rs-tool platform-credential` commands generate, list, inspect and
+delete these credentials. On macOS, `cargo xtask macos-tool` builds an app-like
+CLI bundle so Xcode can embed the development provisioning profile that
+authorizes its Keychain entitlement. On iOS, the embedding application uses
+its normal signed application identity. Symmetric platform authentication
+remains reserved for providers that can keep both AES-128 keys non-exportable
+while offering the required CMAC operations.
 
 ## Asymmetric hardware provisioning test
 

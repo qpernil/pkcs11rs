@@ -17,6 +17,7 @@ const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "std"] }
 minicbor = { version = "2.3.0", features = ["alloc"] }
 pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "std"] }
+platform-credential = { path = "../../crates/platform-credential" }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
 software-key-core = { path = "../../../software-key-core" }
 spki = { version = "0.8.0", features = ["alloc", "std"] }

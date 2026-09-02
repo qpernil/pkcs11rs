@@ -138,7 +138,7 @@ capability and is disabled for all
 hardware and applet slots. The typed implementation covers RSA, every
 Weierstrass curve supported by the hardware backends (NIST
 P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
-Ed25519, and X25519. `PKCS11RS_SOFTWARE_SLOTS` creates one independent
+Ed25519, Ed448, X25519, and X448. `PKCS11RS_SOFTWARE_SLOTS` creates one independent
 `SoftwareSlot` and `SoftwareSession` backend for each configured name. These
 slots have no transport or hardware flags. They use token-wide user login to
 gate private material. A configured generic token-storage root is scoped by

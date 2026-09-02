@@ -1,0 +1,242 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* main.c */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000002 /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
+		A10000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000004 /* PKCS11RSTool.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PKCS11RSTool.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000005 /* pkcs11rs-tool.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = pkcs11rs-tool.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000007 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000008 /* PKCS11RSTool */,
+				A10000000000000000000009 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000008 /* PKCS11RSTool */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000002 /* main.c */,
+				A10000000000000000000003 /* Info.plist */,
+				A10000000000000000000004 /* PKCS11RSTool.entitlements */,
+			);
+			path = PKCS11RSTool;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000009 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000005 /* pkcs11rs-tool.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1000000000000000000000A /* PKCS11RSTool */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000000000000000000000B /* Build configuration list for PBXNativeTarget "PKCS11RSTool" */;
+			buildPhases = (
+				A1000000000000000000000C /* Sources */,
+				A10000000000000000000006 /* Frameworks */,
+				A1000000000000000000000D /* Copy Rust CLI */,
+				A1000000000000000000000E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PKCS11RSTool;
+			productName = pkcs11rs-tool;
+			productReference = A10000000000000000000005 /* pkcs11rs-tool.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1000000000000000000000F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A1000000000000000000000A = {
+						CreatedOnToolsVersion = 26.0;
+						DevelopmentTeam = Q4X2Q59C2D;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000000010 /* Build configuration list for PBXProject "PKCS11RSTool" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000007;
+			productRefGroup = A10000000000000000000009 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1000000000000000000000A /* PKCS11RSTool */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1000000000000000000000E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A1000000000000000000000D /* Copy Rust CLI */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Rust CLI";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nREPOSITORY_ROOT=$(cd \"$PROJECT_DIR/../../..\" && pwd)\nCARGO_BIN=${CARGO:-$HOME/.cargo/bin/cargo}\nif [ ! -x \"$CARGO_BIN\" ]; then\n    echo \"error: cargo was not found at $CARGO_BIN\" >&2\n    exit 1\nfi\nif [ \"$CONFIGURATION\" = Release ]; then\n    \"$CARGO_BIN\" build --locked --package pkcs11rs-tool --manifest-path \"$REPOSITORY_ROOT/Cargo.toml\" --release\n    RUST_PROFILE=release\nelse\n    \"$CARGO_BIN\" build --locked --package pkcs11rs-tool --manifest-path \"$REPOSITORY_ROOT/Cargo.toml\"\n    RUST_PROFILE=debug\nfi\nRUST_EXECUTABLE=$REPOSITORY_ROOT/target/$RUST_PROFILE/pkcs11rs-tool\nif [ ! -f \"$RUST_EXECUTABLE\" ]; then\n    echo \"error: Rust executable is missing: $RUST_EXECUTABLE\" >&2\n    exit 1\nfi\ncp \"$RUST_EXECUTABLE\" \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\nchmod 755 \"$TARGET_BUILD_DIR/$EXECUTABLE_PATH\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A1000000000000000000000C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* main.c in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = PKCS11RSTool/PKCS11RSTool.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = Q4X2Q59C2D;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = pkcs11rs-tool;
+				INFOPLIST_FILE = PKCS11RSTool/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.qpernil.pkcs11rs.tool;
+				PRODUCT_NAME = pkcs11rs-tool;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Debug;
+		};
+		A10000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = PKCS11RSTool/PKCS11RSTool.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = Q4X2Q59C2D;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				EXECUTABLE_NAME = pkcs11rs-tool;
+				INFOPLIST_FILE = PKCS11RSTool/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.qpernil.pkcs11rs.tool;
+				PRODUCT_NAME = pkcs11rs-tool;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Release;
+		};
+		A10000000000000000000013 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A10000000000000000000014 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A1000000000000000000000B /* Build configuration list for PBXNativeTarget "PKCS11RSTool" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000011 /* Debug */,
+				A10000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000010 /* Build configuration list for PBXProject "PKCS11RSTool" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000013 /* Debug */,
+				A10000000000000000000014 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A1000000000000000000000F /* Project object */;
+}
