@@ -789,6 +789,282 @@ its normal signed application identity. Symmetric platform authentication
 remains reserved for providers that can keep both AES-128 keys non-exportable
 while offering the required CMAC operations.
 
+### Platform credential login architecture
+
+A platform credential login is a complete YubiHSM user login whose long-term
+client private key is held by an operating-system key provider. `keyring` is a
+description of that storage model, not a credential-string mechanism name.
+PKCS11RS selects the provider compiled for the host platform and refers to a
+credential only by its local, nonnumeric name.
+
+```text
+PKCS #11 application
+        |
+        | C_Login or C_LoginUser
+        v
+PKCS11RS YubiHSM slot
+        |
+        | authentication-key ID and platform credential name
+        v
+platform-credential provider
+        |
+        | protected static ECDH and public-key access
+        v
+asymmetric YubiHSM handshake
+        |
+        v
+encrypted SessionMessage transport
+```
+
+The architecture has four independent identities and policy sources:
+
+| Component | Purpose |
+| --- | --- |
+| Platform credential | Authenticates the client while keeping its static private key non-exportable. |
+| YubiHSM Authentication Key | Assigns capabilities, delegated capabilities, and domains to the resulting session. |
+| Public credential projection | Maps a provider public key to a YubiHSM Authentication Key ID before login. |
+| YubiHSM device trust | Authenticates the device static key used by the asymmetric handshake. |
+
+The projection has no cryptographic authority. The YubiHSM enforces the policy
+of the actual Authentication Key after authentication; PKCS11RS does not infer
+or reproduce that authorization locally.
+
+#### Login selection
+
+An explicit platform login identifies both sides of the association:
+
+```text
+:1003@reserve
+```
+
+Here `1003` is the target YubiHSM Authentication Key ID and `reserve` is the
+local platform credential name. This selector contains no password delimiter,
+does not invoke pinentry, and does not encode whether the provider is Apple,
+CNG, TPM, or another implementation.
+
+PKCS #11 3.x callers normally pass the selector separately:
+
+```text
+C_LoginUser(
+    username = ":1003@reserve",
+    PIN pointer = NULL,
+    PIN length = 0
+)
+```
+
+The packed `C_Login` form accepts the same explicit selector. `C_LoginUser`
+additionally supports projection-based resolution:
+
+```text
+:*@reserve
+```
+
+For this form, public discovery must already have produced the selected
+YubiHSM slot's public token-object view. PKCS11RS resolves `reserve`, obtains
+its public point, compares it with eligible projections, and tries only their
+two-byte Authentication Key IDs in projection order. No match returns
+`CKR_USER_TYPE_INVALID`; a missing or ambiguous explicit platform credential
+maps to `CKR_PIN_INCORRECT`; an unavailable platform provider maps to
+`CKR_FUNCTION_NOT_SUPPORTED`. Wildcard login is not itself a public discovery
+credential because that would create a circular dependency.
+
+Before either login form begins authentication, the slot closes any existing
+secure session and clears its private object cache. `C_LoginUser` accepts only
+`CKU_USER`, validates that the session belongs to the selected YubiHSM slot,
+and rejects a nonempty PIN for a platform credential.
+
+#### Provider boundary
+
+`platform-credential` separates authentication from persistent lifecycle
+management. `AuthenticationCredentialProvider` resolves a name without
+changing state, while `AuthenticationCredentialStore` explicitly generates,
+lists, reads the public key of, or deletes a credential.
+
+The active asymmetric primitive is `PrefixedX963Credential`:
+
+```rust
+pub trait PrefixedX963Credential: Send + Sync {
+    fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError>;
+
+    fn derive_prefixed_x963(
+        &self,
+        peer_public_key: &SoftwarePublicKey,
+        hash: HashAlgorithm,
+        prefix: &[u8],
+        shared_info: &[u8],
+        output_length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError>;
+}
+```
+
+This boundary does not expose the static private key, a general provider key
+handle, or platform-specific types. The same caller works with the Apple
+provider and a future Windows CNG/TPM provider without changing the credential
+selector or YubiHSM protocol code.
+
+`PlatformAuthenticationCredential` can also contain a `CmacPairCredential`.
+That contract represents two non-exportable AES keys through role-specific
+CMAC operations and leaves room for symmetric platform authentication. The
+current YubiHSM platform-login path deliberately accepts only an asymmetric
+`PrefixedX963Credential`; no symmetric platform backend is enabled.
+
+#### Asymmetric handshake
+
+PKCS11RS generates a fresh ephemeral P-256 key pair for every login. It sends
+a plain `CreateSession` containing the target Authentication Key ID and the
+host ephemeral public point. The response contains a clear session ID, the
+device ephemeral public point, and a receipt.
+
+The client obtains the device static public key through the YubiHSM protocol
+and validates it against configured device trust before invoking the protected
+credential. It then forms two independent ECDH values:
+
+```text
+Z_ephemeral = ECDH(host ephemeral private, device ephemeral public)
+Z_static    = ECDH(platform static private, device static public)
+```
+
+The common software crypto layer calculates `Z_ephemeral`. The platform
+provider calculates `Z_static` while keeping the long-term private key inside
+its protected store. The prefixed X9.63 construction expands 64 bytes as:
+
+```text
+SHA-256(Z_ephemeral || Z_static || counter || shared_info)
+
+bytes  0..16  receipt key
+bytes 16..32  S-ENC
+bytes 32..48  S-MAC
+bytes 48..64  S-RMAC
+```
+
+On Apple platforms, Secure Enclave performs raw static ECDH but Apple's API
+returns `Z_static` to the process. The provider therefore keeps it only in a
+zeroizing buffer, performs the prefixed KDF in Rust, and drops the intermediate
+immediately. A provider capable of applying the complete construction behind
+its key boundary may avoid exposing even that shared secret.
+
+PKCS11RS verifies the device receipt as a constant-time AES-CMAC comparison
+over the device and host ephemeral points. If trust, derivation, or receipt
+verification fails, it sends a best-effort invalid close for the pending
+session and discards all derived material. Asymmetric authentication needs no
+separate host-cryptogram step after a valid receipt.
+
+#### Established session and lifetime
+
+After authentication, the ordinary YubiHSM secure-session implementation owns
+the clear session ID, `S-ENC`, `S-MAC`, `S-RMAC`, request counter, and receipt
+as the initial MAC chaining value. Every protected operation then uses the same
+encrypted `SessionMessage` transport as a symmetrically authenticated session.
+The session keys remain in zeroizing memory and are removed on logout, final
+session close, authentication replacement, or invalidation.
+
+If public discovery is active, PKCS11RS reads the authenticated key information
+and requires its domains to equal the public-discovery Authentication Key's
+domains. A mismatch closes the new session instead of combining inconsistent
+public and private object views.
+
+By default, loss of the device or secure session is exposed to the caller and
+requires a new login. When session recreation is explicitly enabled, the slot
+retains an opaque provider credential reference, Authentication Key ID, and
+device-trust configuration. It performs a completely new handshake after
+reconnection or timeout; it never reuses old session keys or retains the
+platform private key as bytes.
+
+Connector TLS trust remains independent of YubiHSM device trust. TLS
+authenticates the connector service and protects the network route. Device
+trust authenticates the static key participating in the YubiHSM handshake.
+Both checks can therefore be required for a remote deployment without merging
+their certificate or key stores.
+
+### Provisioning an iPhone platform credential
+
+A Secure Enclave credential is generated and provisioned entirely inside the
+iPhone smoke applications through PKCS11RS. There is one supported application
+flow: the user connects an already authorized YubiKey when bootstrap
+administration is required and presses **Provision this iPhone for YubiHSM
+login**. No public-key export, QR code, enrollment file, or separate desktop
+provisioner participates in this flow.
+
+The button performs these operations:
+
+1. Generate the device-local platform credential if it does not already exist.
+   The Apple provider creates a permanent P-256 private key in the Secure
+   Enclave, tagged as `pkcs11rs.yubihsm-auth.<name>`, protected as
+   `AccessibleWhenUnlockedThisDeviceOnly`, and scoped to the smoke
+   application's Keychain access group.
+2. Enumerate the configured or discovered YubiHSM slots. The application uses
+   a locally connected, already provisioned YubiHSM Auth credential to open an
+   administrative session on each selected target. This existing authority is
+   the unavoidable bootstrap authorization for adding a new client identity.
+3. Ask PKCS11RS to read the platform public key internally and provision it as
+   a new asymmetric Authentication Key with the selected ID, capabilities,
+   delegated capabilities, and domains. The private key and public-key bytes
+   never cross the Swift or Objective-C application boundary.
+4. Create the corresponding public projection under the same two-byte ID so
+   later pre-login discovery can resolve the credential. Provisioning creates
+   the harmless public projection first, then the Authentication Key, and
+   removes the projection if the second operation fails. It never overwrites
+   an existing object ID implicitly.
+5. Close the bootstrap session and authenticate again with the newly created
+   platform credential. An authenticated operation must succeed before the UI
+   reports that target as provisioned.
+
+Provisioning is atomic per target as far as the device protocol allows, but is
+not a distributed transaction across several HSMs. The smoke application keeps
+an explicit result for every target, permits a failed target to be retried, and
+does not roll back a successfully verified credential on another target.
+
+For example, the result can be presented as:
+
+```text
+Virtual YubiHSM       provisioned   login verified
+YubiHSM target 1      provisioned   login verified
+YubiHSM target 2      provisioned   login verified
+```
+
+The two checked-in iOS smoke applications implement the same behavior. Their
+UI code remains a thin orchestrator; credential storage, public-key handling,
+YubiHSM commands, cleanup, and login verification belong to shared PKCS11RS
+code.
+
+For an Authentication Key assigned ID `1004`, explicit login is:
+
+```text
+username = ":1004@iphone-qpernil"
+PIN pointer = NULL
+PIN length = 0
+```
+
+Once public discovery can read the projection, the equivalent resolved form is:
+
+```text
+username = ":*@iphone-qpernil"
+PIN pointer = NULL
+PIN length = 0
+```
+
+The resolved form follows the platform credential login architecture above:
+the private key is not involved in discovery, the Secure Enclave performs the
+static ECDH operation, derived intermediates are zeroized, and the established
+session receives exactly the policy of the provisioned Authentication Key.
+
+The static PKCS11RS library executes inside the iOS application and therefore
+uses that application's code-signing identity and Keychain entitlements. The
+same stable application identity and access group must be used by later builds
+that need to resolve the credential. The current access control requires an
+unlocked device and private-key usage, but does not request biometric presence
+for every login; biometric policy is a separate product decision.
+
+The Apple provider and all four Rust lifecycle operations already compile for
+iOS, and platform-backed `C_LoginUser` is implemented. Completing the button
+requires PKCS11RS-prefixed C functions for platform-credential generate, list,
+get-public-key, and delete, plus one high-level per-session YubiHSM operation
+that provisions the named credential and its projection. The latter requires a
+read/write session with an active administrative login and accepts the target
+ID, label, domains, capabilities, and delegated capabilities. These functions
+use ordinary PKCS #11 two-call output-buffer conventions where applicable and
+never return private material.
+
 ## Asymmetric hardware provisioning test
 
 The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` and

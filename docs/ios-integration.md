@@ -161,6 +161,13 @@ pkcs11rs general USB interfaces or bulk endpoints. The Simulator has neither a
 USB CCID reader nor NFC, but it can exercise software slots and remote
 connectors.
 
+The shared Apple provider also compiles into the XCFramework and can use a
+P-256 credential generated in the physical iPhone's Secure Enclave for remote
+YubiHSM login. See
+[Provisioning an iPhone platform credential](yubihsm-auth.md#provisioning-an-iphone-platform-credential)
+for the device-local key lifecycle, public-key enrollment, trust boundaries,
+login syntax, and the app-facing functions still to be added.
+
 ## NFC configuration
 
 NFC discovery is opt-in because the first `C_GetSlotList` presents Apple's
