@@ -181,6 +181,15 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("discovery-password"));
 
+    let credential =
+        crate::configured_yubihsm_public_discovery_credential(Some(":1003@reserve".into()))
+            .unwrap()
+            .unwrap();
+    assert_eq!(credential.authkey_id, 0x1003);
+    assert!(credential.hsmauth_credential.is_none());
+    assert_eq!(credential.platform_credential.as_deref(), Some("reserve"));
+    assert!(credential.configured_password.is_none());
+
     let credential = crate::configured_yubihsm_public_discovery_credential(Some(
         ":0001default key@12345678:password".into(),
     ))

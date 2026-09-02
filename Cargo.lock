@@ -1666,6 +1666,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "const-oid 0.10.2",
+ "core-foundation",
  "der 0.8.1",
  "ed25519-dalek",
  "flate2",
@@ -1686,6 +1687,8 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "sec1",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "signature 3.0.0",
@@ -2102,6 +2105,29 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "security-framework"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
+dependencies = [
+ "bitflags",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework-sys"
+version = "2.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]
