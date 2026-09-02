@@ -268,6 +268,34 @@ impl ProtocolPeer {
             .map_err(|_| CKR_DEVICE_ERROR.into())
     }
 
+    fn provision_asymmetric_authentication_public_key(
+        &self,
+        id: u16,
+        public_key: &[u8],
+    ) -> Result<(), Error> {
+        parse_p256_public_key(public_key)?;
+        self.device
+            .borrow_mut()
+            .provision_object(VirtualObjectRecord {
+                info: VirtualObjectInfo {
+                    capabilities: VirtualCapabilitySet::ALL,
+                    id,
+                    length: 72,
+                    domains: u16::MAX,
+                    object_type: VirtualObjectType::AuthenticationKey,
+                    algorithm: YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+                    sequence: 1,
+                    origin: 1,
+                    label: format!("platform-authkey-{id}").into_bytes(),
+                    delegated_capabilities: VirtualCapabilitySet::ALL,
+                },
+                material: VirtualObjectMaterial::Authentication(
+                    VirtualAuthenticationKeyMaterial::Asymmetric(public_key[1..].to_vec()),
+                ),
+            })
+            .map_err(|_| CKR_DEVICE_ERROR.into())
+    }
+
     fn has_active_session(&self) -> bool {
         self.device.borrow().active_session_count() != 0
     }
@@ -1681,6 +1709,69 @@ impl Connector for AsymmetricHsmAuthPeer {
     }
 }
 
+struct SoftwarePlatformCredential(SoftwareSigningKey);
+
+impl crate::platform_crypto::PrefixedX963Credential for SoftwarePlatformCredential {
+    fn public_key(&self) -> Result<SoftwarePublicKey, crate::platform_crypto::PlatformCryptoError> {
+        Ok(self.0.public_key())
+    }
+
+    fn derive_prefixed_x963(
+        &self,
+        peer_public_key: &SoftwarePublicKey,
+        hash: software_key_core::digest::HashAlgorithm,
+        prefix: &[u8],
+        shared_info: &[u8],
+        output_length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, crate::platform_crypto::PlatformCryptoError> {
+        let SoftwarePublicKey::Ec {
+            curve: EcCurve::P256,
+            uncompressed,
+        } = peer_public_key
+        else {
+            return Err(crate::platform_crypto::PlatformCryptoError::InvalidPublicKey);
+        };
+        let secret = software_key_core::software_key_agreement::derive_with_signing_key(
+            &self.0,
+            uncompressed,
+        )
+        .map_err(|_| crate::platform_crypto::PlatformCryptoError::InvalidPublicKey)?;
+        crate::platform_crypto::prefixed_x963_kdf(hash, prefix, &secret, shared_info, output_length)
+    }
+}
+
+#[test]
+fn platform_credential_opens_a_real_asymmetric_secure_session() {
+    const AUTHKEY_ID: u16 = 0x1003;
+    let peer = ProtocolPeer::new();
+    let credential = SoftwarePlatformCredential(
+        test_private_key(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 7,
+        ])
+        .unwrap(),
+    );
+    let SoftwarePublicKey::Ec { uncompressed, .. } = credential.0.public_key() else {
+        panic!("test credential must be P-256");
+    };
+    peer.provision_asymmetric_authentication_public_key(AUTHKEY_ID, &uncompressed)
+        .unwrap();
+
+    let mut session = SecureSession::authenticate_asymmetric_with_platform_credential(
+        &peer,
+        AUTHKEY_ID,
+        &credential,
+        None,
+    )
+    .unwrap();
+    assert!(
+        !session
+            .send_command(&peer, &Command::get_storage_info())
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn test_tlv_value(encoded: &[u8], wanted: u8) -> Result<&[u8], Error> {
     let mut offset = 0;
     while offset < encoded.len() {
@@ -1737,6 +1828,13 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
         crate::parse_yubihsm_login_username(b"0000").unwrap(),
         crate::YubiHsmLoginUsername::Direct(0)
     ));
+    assert_eq!(
+        crate::parse_yubihsm_login_username(b":1003@reserve").unwrap(),
+        crate::YubiHsmLoginUsername::Platform(crate::PlatformLogin {
+            name: "reserve",
+            authkey_id: 0x1003,
+        })
+    );
 
     assert_eq!(
         crate::parse_yubihsm_login_username(b":*").unwrap(),
@@ -1759,6 +1857,12 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
             source: Some("87654321"),
         })
     );
+    assert_eq!(
+        crate::parse_yubihsm_login_username(b":*@reserve").unwrap(),
+        crate::YubiHsmLoginUsername::PlatformWildcard(crate::PlatformWildcardLogin {
+            name: "reserve",
+        })
+    );
 }
 
 #[test]
@@ -1774,6 +1878,10 @@ fn yubihsm_login_splits_username_from_password() {
     assert_eq!(
         crate::split_yubihsm_login(b":0001default@12345678").unwrap(),
         (b":0001default@12345678".as_slice(), None)
+    );
+    assert_eq!(
+        crate::split_yubihsm_login(b":1003@reserve").unwrap(),
+        (b":1003@reserve".as_slice(), None)
     );
     assert_eq!(
         crate::split_yubihsm_login(b":0001default:").unwrap(),
@@ -1797,6 +1905,7 @@ fn yubihsm_login_rejects_malformed_usernames() {
         b"@001",
         b"@00ff",
         b"@xyz1",
+        b":1003@12345678",
     ] {
         assert!(
             crate::parse_yubihsm_login_username(username).is_err(),

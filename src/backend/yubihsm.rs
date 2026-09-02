@@ -460,6 +460,11 @@ pub(crate) enum YubiHsmSessionReauthentication {
         provider: HsmAuthProvider,
         password: Zeroizing<Vec<u8>>,
     },
+    Platform {
+        authkey_id: u16,
+        credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+        trust_prefix: Option<std::ffi::OsString>,
+    },
 }
 
 impl std::fmt::Debug for YubiHsmSessionReauthentication {
@@ -484,6 +489,10 @@ impl std::fmt::Debug for YubiHsmSessionReauthentication {
                 .field("source", &provider.source_identifier())
                 .field("password", &"[REDACTED]")
                 .finish(),
+            Self::Platform { authkey_id, .. } => fmt
+                .debug_struct("Platform")
+                .field("authkey_id", &format_args!("{authkey_id:04x}"))
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -500,6 +509,16 @@ impl YubiHsmSessionReauthentication {
                 provider,
                 password,
             } => provider.authenticate(connector, *authkey_id, password),
+            Self::Platform {
+                authkey_id,
+                credential,
+                trust_prefix,
+            } => YubiHsmSecureSession::authenticate_asymmetric_with_platform_credential(
+                connector,
+                *authkey_id,
+                credential.as_ref(),
+                trust_prefix.as_deref(),
+            ),
         }
     }
 }
@@ -525,6 +544,7 @@ impl YubiHsmSessionState {
 pub(crate) struct YubiHsmPublicDiscoveryConfig {
     pub(crate) authkey_id: u16,
     pub(crate) hsmauth_credential: Option<HsmAuthCredentialSelector>,
+    pub(crate) platform_credential: Option<String>,
     pub(crate) configured_password: Option<Zeroizing<Vec<u8>>>,
 }
 
@@ -539,6 +559,7 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryConfig {
         fmt.debug_struct("YubiHsmPublicDiscoveryConfig")
             .field("authkey_id", &format_args!("{:04x}", self.authkey_id))
             .field("hsmauth_credential", &self.hsmauth_credential)
+            .field("platform_credential", &self.platform_credential)
             .field("password", &"[REDACTED]")
             .finish()
     }
@@ -546,6 +567,12 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryConfig {
 
 impl YubiHsmPublicDiscoveryConfig {
     fn login(&self) -> YubiHsmLoginUsername<'_> {
+        if let Some(name) = self.platform_credential.as_deref() {
+            return YubiHsmLoginUsername::Platform(PlatformLogin {
+                name,
+                authkey_id: self.authkey_id,
+            });
+        }
         match self.hsmauth_credential.as_ref() {
             Some(credential) => YubiHsmLoginUsername::HsmAuth(HsmAuthLogin {
                 label: &credential.label,
@@ -614,14 +641,14 @@ pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
     let (username, password) =
         split_yubihsm_login(credential.as_bytes()).map_err(|_| CKR_ARGUMENTS_BAD)?;
     let login = parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let (authkey_id, hsmauth_credential) = match &login {
+    let (authkey_id, hsmauth_credential, platform_credential) = match &login {
         YubiHsmLoginUsername::Direct(authkey_id) => {
             if password
                 .is_some_and(|password| !password.is_empty() && !(8..=64).contains(&password.len()))
             {
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
-            (*authkey_id, None)
+            (*authkey_id, None, None)
         }
         YubiHsmLoginUsername::HsmAuth(login) => {
             if password.is_some_and(|password| password.len() > 16) {
@@ -633,21 +660,34 @@ pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
                     label: login.label.to_owned(),
                     source: login.source.map(str::to_owned),
                 }),
+                None,
             )
         }
-        YubiHsmLoginUsername::HsmAuthWildcard(_) => return Err(CKR_ARGUMENTS_BAD.into()),
+        YubiHsmLoginUsername::Platform(login) => {
+            if password.is_some_and(|password| !password.is_empty()) {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            (login.authkey_id, None, Some(login.name.to_owned()))
+        }
+        YubiHsmLoginUsername::HsmAuthWildcard(_) | YubiHsmLoginUsername::PlatformWildcard(_) => {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
     };
     let password = match login {
         YubiHsmLoginUsername::Direct(_) => password.filter(|password| !password.is_empty()),
         YubiHsmLoginUsername::HsmAuth(_) => password,
-        YubiHsmLoginUsername::HsmAuthWildcard(_) => return Err(CKR_ARGUMENTS_BAD.into()),
+        YubiHsmLoginUsername::Platform(_) => None,
+        YubiHsmLoginUsername::HsmAuthWildcard(_) | YubiHsmLoginUsername::PlatformWildcard(_) => {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
     };
-    if password.is_none() && !pinentry.is_configured() {
+    if password.is_none() && platform_credential.is_none() && !pinentry.is_configured() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(Some(Arc::new(YubiHsmPublicDiscoveryConfig {
         authkey_id,
         hsmauth_credential,
+        platform_credential,
         configured_password: password.map(|password| Zeroizing::new(password.to_vec())),
     })))
 }
@@ -1525,6 +1565,74 @@ impl YubiHsmSlot {
         ))
     }
 
+    fn authenticate_platform_credential(
+        &self,
+        login: &PlatformLogin<'_>,
+    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+        log!(
+            2,
+            "YubiHSM authentication requested through platform credential {:?}, authentication key {:04x}",
+            login.name,
+            login.authkey_id
+        );
+        let credential = self.resolve_platform_asymmetric(login.name)?;
+        self.authenticate_resolved_platform_credential(login.authkey_id, credential)
+    }
+
+    fn resolve_platform_asymmetric(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn crate::platform_crypto::PrefixedX963Credential>, Error> {
+        use crate::platform_crypto::PlatformAuthenticationCredential;
+
+        let credential =
+            crate::platform_crypto::resolve_platform_credential(name).map_err(|error| {
+                log!(
+                    1,
+                    "platform authentication credential {:?} could not be resolved: {}",
+                    name,
+                    error
+                );
+                match error {
+                    crate::platform_crypto::PlatformCryptoError::NotFound
+                    | crate::platform_crypto::PlatformCryptoError::Ambiguous
+                    | crate::platform_crypto::PlatformCryptoError::InvalidName => {
+                        Error::from(CKR_PIN_INCORRECT)
+                    }
+                    crate::platform_crypto::PlatformCryptoError::Unsupported => {
+                        Error::from(CKR_FUNCTION_NOT_SUPPORTED)
+                    }
+                    _ => Error::from(CKR_DEVICE_ERROR),
+                }
+            })?;
+        let PlatformAuthenticationCredential::Asymmetric(credential) = credential else {
+            return Err(CKR_MECHANISM_INVALID.into());
+        };
+        Ok(credential)
+    }
+
+    fn authenticate_resolved_platform_credential(
+        &self,
+        authkey_id: u16,
+        credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+        let session = YubiHsmSecureSession::authenticate_asymmetric_with_platform_credential(
+            self.connector.as_ref(),
+            authkey_id,
+            credential.as_ref(),
+            self.trust_prefix.as_deref(),
+        )?;
+        Ok((
+            session,
+            authkey_id,
+            YubiHsmSessionReauthentication::Platform {
+                authkey_id,
+                credential,
+                trust_prefix: self.trust_prefix.clone(),
+            },
+        ))
+    }
+
     pub(crate) fn resolve_hsmauth_wildcard(
         &self,
         slot_id: CK_SLOT_ID,
@@ -1589,6 +1697,59 @@ impl YubiHsmSlot {
         Ok(matches)
     }
 
+    fn resolve_platform_wildcard(
+        &self,
+        slot_id: CK_SLOT_ID,
+        selector: &PlatformWildcardLogin<'_>,
+        token_objects: &[TokenObject],
+    ) -> Result<
+        (
+            Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+            Vec<u16>,
+        ),
+        Error,
+    > {
+        if !self.public_discovery_available(slot_id) {
+            return Err(CKR_USER_TYPE_INVALID.into());
+        }
+        let credential = self.resolve_platform_asymmetric(selector.name)?;
+        let public = credential
+            .public_key()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let SoftwarePublicKey::Ec {
+            curve: EcCurve::P256,
+            uncompressed,
+        } = public
+        else {
+            return Err(CKR_MECHANISM_INVALID.into());
+        };
+        let public = uncompressed.strip_prefix(&[0x04]).ok_or(CKR_DEVICE_ERROR)?;
+        let authkey_ids = token_objects
+            .iter()
+            .filter_map(|object| {
+                if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    || object.key_type != CKK_EC as CK_KEY_TYPE
+                    || object.id.len() != 2
+                {
+                    return None;
+                }
+                let PublicKeyMaterial::Ec { public_key, .. } =
+                    object.projected_public_key().ok()?
+                else {
+                    return None;
+                };
+                if public_key.as_slice() != public {
+                    return None;
+                }
+                Some(u16::from_be_bytes(object.id.as_slice().try_into().ok()?))
+            })
+            .collect::<Vec<_>>();
+        if authkey_ids.is_empty() {
+            return Err(CKR_USER_TYPE_INVALID.into());
+        }
+        Ok((credential, authkey_ids))
+    }
+
     fn authenticate_parsed_login(
         &self,
         login: YubiHsmLoginUsername<'_>,
@@ -1610,7 +1771,14 @@ impl YubiHsmSlot {
                     self.authenticate_hsmauth_provider(provider, login.authkey_id, password)
                 })
             }
-            YubiHsmLoginUsername::HsmAuthWildcard(_) => Err(CKR_PIN_INCORRECT.into()),
+            YubiHsmLoginUsername::Platform(login) => {
+                if !password.is_empty() {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                self.authenticate_platform_credential(&login)
+            }
+            YubiHsmLoginUsername::HsmAuthWildcard(_)
+            | YubiHsmLoginUsername::PlatformWildcard(_) => Err(CKR_PIN_INCORRECT.into()),
             YubiHsmLoginUsername::Direct(authkey_id) => {
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
@@ -1633,10 +1801,19 @@ impl YubiHsmSlot {
             YubiHsmLoginUsername::HsmAuth(login) => {
                 format!("Enter the authentication password for {:?}.", login.label)
             }
-            YubiHsmLoginUsername::HsmAuthWildcard(_) => return Err(CKR_ARGUMENTS_BAD.into()),
+            YubiHsmLoginUsername::Platform(login) => {
+                format!("Use platform credential {:?}.", login.name)
+            }
+            YubiHsmLoginUsername::HsmAuthWildcard(_)
+            | YubiHsmLoginUsername::PlatformWildcard(_) => {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
         };
         if let Some(password) = config.configured_password.as_ref() {
             return self.authenticate_parsed_login(config.login(), password);
+        }
+        if matches!(config.login(), YubiHsmLoginUsername::Platform(_)) {
+            return self.authenticate_parsed_login(config.login(), &[]);
         }
         let entered = self.pinentry.request(pinentry::Prompt {
             title: &title,
@@ -1648,6 +1825,9 @@ impl YubiHsmSlot {
                 return Err(CKR_PIN_INCORRECT.into());
             }
             YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+            YubiHsmLoginUsername::Platform(_) if !entered.is_empty() => {
                 return Err(CKR_PIN_INCORRECT.into());
             }
             _ => {}
@@ -1662,6 +1842,14 @@ impl YubiHsmSlot {
         password: &[u8],
         token_objects: &[TokenObject],
     ) -> Result<(), Error> {
+        enum WildcardCandidates {
+            HsmAuth(Vec<(HsmAuthProvider, u16)>),
+            Platform {
+                credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+                authkey_ids: Vec<u16>,
+            },
+        }
+
         let login = parse_yubihsm_login_username(username)?;
         let wildcard = match &login {
             YubiHsmLoginUsername::HsmAuthWildcard(selector) => {
@@ -1669,14 +1857,30 @@ impl YubiHsmSlot {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
                 let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
-                Some(self.resolve_hsmauth_wildcard(slot_id, selector, token_objects)?)
+                Some(WildcardCandidates::HsmAuth(self.resolve_hsmauth_wildcard(
+                    slot_id,
+                    selector,
+                    token_objects,
+                )?))
+            }
+            YubiHsmLoginUsername::PlatformWildcard(selector) => {
+                if !password.is_empty() {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
+                let (credential, authkey_ids) =
+                    self.resolve_platform_wildcard(slot_id, selector, token_objects)?;
+                Some(WildcardCandidates::Platform {
+                    credential,
+                    authkey_ids,
+                })
             }
             _ => None,
         };
         let _ = self.close_active_session("pre-login");
         self.clear_cached_private_objects()?;
         let (session, authkey_id, reauthentication) = match wildcard {
-            Some(candidates) => {
+            Some(WildcardCandidates::HsmAuth(candidates)) => {
                 let mut last_error = Error::from(CKR_PIN_INCORRECT);
                 let mut authenticated = None;
                 for (provider, authkey_id) in candidates {
@@ -1696,6 +1900,25 @@ impl YubiHsmSlot {
                         Err(error) => {
                             last_error = error;
                         }
+                    }
+                }
+                authenticated.ok_or(last_error)?
+            }
+            Some(WildcardCandidates::Platform {
+                credential,
+                authkey_ids,
+            }) => {
+                let mut last_error = Error::from(CKR_PIN_INCORRECT);
+                let mut authenticated = None;
+                for authkey_id in authkey_ids {
+                    match self
+                        .authenticate_resolved_platform_credential(authkey_id, credential.clone())
+                    {
+                        Ok(result) => {
+                            authenticated = Some(result);
+                            break;
+                        }
+                        Err(error) => last_error = error,
                     }
                 }
                 authenticated.ok_or(last_error)?
@@ -4089,7 +4312,11 @@ impl Slot for YubiHsmSlot {
         if let Some(password) = password {
             return self.login_user_for_slot(None, username, password, &[]);
         }
-        let YubiHsmLoginUsername::HsmAuth(login) = parse_yubihsm_login_username(username)? else {
+        let parsed = parse_yubihsm_login_username(username)?;
+        if matches!(parsed, YubiHsmLoginUsername::Platform(_)) {
+            return self.login_user_for_slot(None, username, &[], &[]);
+        }
+        let YubiHsmLoginUsername::HsmAuth(login) = parsed else {
             return Err(CKR_PIN_INCORRECT.into());
         };
         let title = self.with_hsmauth_provider(&login, |provider| {
@@ -4119,7 +4346,8 @@ impl Slot for YubiHsmSlot {
     fn login_user_uses_token_objects(&self, username: &[u8]) -> bool {
         matches!(
             parse_yubihsm_login_username(username),
-            Ok(YubiHsmLoginUsername::HsmAuthWildcard(_))
+            Ok(YubiHsmLoginUsername::HsmAuthWildcard(_)
+                | YubiHsmLoginUsername::PlatformWildcard(_))
         )
     }
     fn supports_login_user(&self) -> bool {
@@ -4132,6 +4360,12 @@ impl Slot for YubiHsmSlot {
         pinentry: &pinentry::Pinentry,
         token_objects: &[TokenObject],
     ) -> Result<(), Error> {
+        if matches!(
+            parse_yubihsm_login_username(username),
+            Ok(YubiHsmLoginUsername::Platform(_) | YubiHsmLoginUsername::PlatformWildcard(_))
+        ) {
+            return self.login_user_for_slot(Some(slot_id), username, &[], token_objects);
+        }
         let title = self.label();
         let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
         let description = format!("Enter the authentication password for {username} on {title}.");
@@ -4516,10 +4750,23 @@ pub(crate) struct HsmAuthWildcardLogin<'a> {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PlatformLogin<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) authkey_id: u16,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PlatformWildcardLogin<'a> {
+    pub(crate) name: &'a str,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum YubiHsmLoginUsername<'a> {
     Direct(u16),
     HsmAuth(HsmAuthLogin<'a>),
     HsmAuthWildcard(HsmAuthWildcardLogin<'a>),
+    Platform(PlatformLogin<'a>),
+    PlatformWildcard(PlatformWildcardLogin<'a>),
 }
 
 pub(crate) fn parse_yubihsm_authkey_id(value: &[u8]) -> Result<u16, Error> {
@@ -4568,11 +4815,29 @@ pub(crate) fn parse_yubihsm_login_username(
         let source = source
             .map(|source| parse_hsmauth_selector_part(source, 128))
             .transpose()?;
+        if label.is_none()
+            && let Some(name) = source
+            && crate::platform_crypto::validate_platform_credential_name(name).is_ok()
+        {
+            return Ok(YubiHsmLoginUsername::PlatformWildcard(
+                PlatformWildcardLogin { name },
+            ));
+        }
         return Ok(YubiHsmLoginUsername::HsmAuthWildcard(
             HsmAuthWildcardLogin { label, source },
         ));
     }
     match username.first() {
+        Some(b':') if username.get(5) == Some(&b'@') => {
+            let authkey_id = parse_yubihsm_authkey_id(&username[1..5])?;
+            let name = parse_hsmauth_selector_part(&username[6..], 128)?;
+            crate::platform_crypto::validate_platform_credential_name(name)
+                .map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
+            Ok(YubiHsmLoginUsername::Platform(PlatformLogin {
+                name,
+                authkey_id,
+            }))
+        }
         Some(b':') => parse_hsmauth_username(username).map(YubiHsmLoginUsername::HsmAuth),
         _ => parse_yubihsm_authkey_id(username).map(YubiHsmLoginUsername::Direct),
     }

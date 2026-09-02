@@ -82,6 +82,7 @@ use configuration::{
     SecureChannelConfiguration,
 };
 
+mod platform_crypto;
 mod secure_channel_crypto;
 mod software_storage;
 pub(crate) use software_storage::SoftwareTokenStore;

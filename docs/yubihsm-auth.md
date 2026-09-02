@@ -450,12 +450,13 @@ an explicit apply step; that tooling is outside the runtime compatibility path.
 
 ## YubiHSM login
 
-An ordinary YubiHSM slot supports two `C_Login` PIN forms:
+An ordinary YubiHSM slot supports three `C_Login` PIN forms:
 
 | Authentication | PIN form |
 | --- | --- |
 | Direct authentication key | `AAAApassword` |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]:<credential-password>` |
+| Platform-protected asymmetric credential | `:AAAA@<name>` |
 
 `AAAA` is the four-hex-digit ID of the authentication key on the target
 YubiHSM. Credential labels are printable UTF-8 strings. For example,
@@ -480,6 +481,13 @@ the target YubiHSM authentication-key ID. The following colon separates the
 selector from the password, so the password itself may contain colons. The
 selected credential and target YubiHSM authentication key must form a
 compatible symmetric or asymmetric authentication pair.
+
+A nonnumeric selector after an otherwise empty label selects the platform
+credential provider compiled for the operating system. For example,
+`:1003@reserve` selects platform credential `reserve` and target Authentication
+Key `1003`. Platform names are nonempty, nonnumeric UTF-8 strings and cannot
+contain `@` or `:`. This form has no password delimiter and never invokes
+pinentry.
 
 For direct authentication, the module first checks the ordinary `algorithm`
 field in cached Authentication Key object information. If object information
@@ -511,6 +519,8 @@ separately with `C_LoginUser`:
 | Direct authentication key | `AAAA` | Password |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
 | Unique matching asymmetric credential | `:*[<label>][@<source>]` | Credential password |
+| Platform-protected credential | `:AAAA@<name>` | Null pointer and zero length |
+| Matching platform credential projection | `:*@<name>` | Null pointer and zero length |
 
 The wildcard form is available only through `C_LoginUser`, whose session
 identifies the target YubiHSM slot. It requires successful public discovery on
@@ -528,6 +538,12 @@ authentication attempt rejects the supplied password, the call returns
 Explicit selectors and packed `C_Login` behavior are unchanged. Wildcards are
 not accepted as public discovery credentials because that would make discovery
 circular.
+
+The platform wildcard compares the named credential's P-256 public point with
+the target slot's discovered two-byte-ID public projections. It tries matching
+Authentication Key IDs in projection order. No matching projection returns
+`CKR_USER_TYPE_INVALID`; a failed cryptographic authentication returns the
+underlying authentication error.
 
 Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
 password through pinentry while retaining the username as the authentication
@@ -729,60 +745,46 @@ than by `C_Login`; if the device rejects the retained key, the SO login is
 cleared so the caller can retry. Reset is destructive and removes every
 YubiHSM Auth credential.
 
-## Future: provider-backed authentication credentials
+## Platform-protected authentication credentials
 
-The current implementation authenticates with password-derived direct
-YubiHSM material or a credential held by the YubiHSM Auth applet. A future
-internal provider boundary may additionally allow explicitly selected ordinary
-PKCS #11 keys to supply the same YubiHSM authentication protocols. This is a
-development direction, not current behavior or a public API commitment.
+The internal provider boundary describes protocol-neutral protected
+operations rather than Apple or YubiHSM types. An asymmetric provider exposes
+its public key and the prefixed X9.63 construction used by YubiHSM asymmetric
+authentication. A symmetric provider contract represents an atomic K-ENC and
+K-MAC pair through CMAC operations, although no platform symmetric backend is
+enabled yet. The YubiHSM Auth applet remains a higher-level provider because
+its firmware exposes the complete challenge/calculation exchange.
 
-The preferred first implementation is a regular P-256 private key. The key
-must be selected by stable provider and object identity, remain usable for
-ECDH, and may remain non-extractable. Its provider would derive the static
-secret from the target device public key; the existing asymmetric handshake
-would then derive and verify the ephemeral session keys and receipt. Target
-device-key validation through an enrolled public key or verified attestation
-must be mandatory for this mode. Qualifying P-256 keys must never become login
-credentials through implicit discovery.
+On macOS and iOS, the asymmetric backend resolves a permanent Secure Enclave
+P-256 key by the binary Keychain application tag
+`pkcs11rs.yubihsm-auth.<name>`. The host app is responsible for creating that
+key with matching Keychain access-group entitlements; login never creates a
+missing credential. The public key is exportable for provisioning a matching
+YubiHSM Authentication Key and public projection. The private key is not
+exported.
 
-A later symmetric implementation may accept an explicitly associated pair of
-AES-128 keys: one K-ENC key and one K-MAC key. Both keys must belong to the same
-provider and security domain, have compatible token lifetimes and CMAC/KDF
-policy, and be referenced as one atomic credential recipe. The implementation
-must invoke provider operations rather than read either `CKA_VALUE`. Labels and
-transient object handles are not sufficient pair identities, and arbitrary AES
-keys must not be inferred as credentials.
+Apple's API performs raw ECDH in the Secure Enclave but returns the shared
+secret to the caller. pkcs11rs therefore holds that intermediate only in a
+zeroizing buffer, prepends the independently generated ephemeral ECDH secret,
+derives the session keys, verifies the YubiHSM receipt, and drops the
+intermediate immediately. Session recreation retains the protected key
+reference and device-trust configuration, not private key material.
 
-The generalized internal abstraction should describe a YubiHSM authentication
-provider rather than treating these keys as YubiHSM Auth applet objects or as
-an ordinary application-visible cryptographic mechanism. Implementations may
-include the existing applet credential, an explicit P-256 key, an explicit AES
-pair, and the existing password-derived direct credential. Configuration or a
-future vendor selector must use stable token and object identities.
+The same source is compiled for macOS and iOS. Keychain access groups and app
+entitlements decide which named credentials each host application can resolve.
+Device public-key trust is unchanged and is checked before the protected static
+ECDH operation. TLS trust remains a separate configuration.
 
-This work must define the cross-slot authorization and concurrency boundary
-before adding key providers:
+A Windows implementation can provide the same asymmetric operation through
+CNG/TPM. CNG can keep the ECDH secret behind an `NCRYPT_SECRET_HANDLE` and apply
+the required prepend/hash construction with `NCryptDeriveKey`, so a Windows
+backend may avoid exposing even the intermediate shared secret. No credential
+string changes are needed when that backend is added.
 
-- the source token must already authorize use of a private credential key;
-- circular authentication, where a target must authenticate before it can use
-  its own authentication credential, must be rejected;
-- source and target slot locking must have a fixed order and must not call back
-  through the public PKCS #11 ABI;
-- session recreation must retain stable credential references rather than
-  copied static key material;
-- source logout, removal, replacement, or object deletion must invalidate
-  authentication and recreation; and
-- derived session keys must remain only in zeroizing memory for the target
-  YubiHSM session and must never become PKCS #11 objects.
-
-Initial qualification should cover non-extractable software P-256 keys,
-wrong-device trust, source logout and removal, target reconnection, ambiguous
-object identities, circular dependencies, and concurrent cross-slot login.
-AES-pair qualification must additionally cover wrong key roles, mismatched
-providers, missing keys, non-AES-128 material, and card-cryptogram rejection.
-This feature is also a concrete design probe for the
-[provider abstraction roadmap](provider-abstraction-plan.md).
+Remaining management work is to expose generate, list, show-public and delete
+operations in a signed host utility. Symmetric platform authentication remains
+reserved for providers that can keep both AES-128 keys non-exportable while
+offering the required CMAC operations.
 
 ## Asymmetric hardware provisioning test
 

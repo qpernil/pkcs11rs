@@ -726,6 +726,59 @@ impl SecureSession {
         Self::send_invalid_close(connector, handshake.sid, counter, handshake.receipt);
     }
 
+    pub(crate) fn authenticate_asymmetric_with_platform_credential(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        credential: &dyn crate::platform_crypto::PrefixedX963Credential,
+        trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<Self, Error> {
+        let host_ephemeral_key = p256_secret_key()?;
+        let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
+        let handshake = Self::begin_asymmetric(connector, authkey_id, &host_ephemeral_public)?;
+        let result = (|| {
+            let device_ephemeral_public = &handshake.context[P256_PUBLIC_KEY_LENGTH..];
+            parse_p256_public_key(device_ephemeral_public)?;
+            let ephemeral_secret = p256_ecdh(&host_ephemeral_key, device_ephemeral_public)?;
+            let device_static_public = trusted_device_public_key(connector, trust_prefix)?;
+            let peer = SoftwarePublicKey::Ec {
+                curve: EcCurve::P256,
+                uncompressed: device_static_public.to_vec(),
+            };
+            let session_keys = credential
+                .derive_prefixed_x963(
+                    &peer,
+                    software_key_core::digest::HashAlgorithm::Sha256,
+                    &ephemeral_secret,
+                    &SCP11_SHARED_INFO,
+                    64,
+                )
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
+            receipt_input.extend_from_slice(&handshake.context[P256_PUBLIC_KEY_LENGTH..]);
+            receipt_input.extend_from_slice(&host_ephemeral_public);
+            let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
+            if !bool::from(expected_receipt.ct_eq(&handshake.receipt)) {
+                return Err(Error::from(CKR_ENCRYPTED_DATA_INVALID));
+            }
+            let key = |range: std::ops::Range<usize>| {
+                session_keys[range]
+                    .try_into()
+                    .map(Zeroizing::new)
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+            };
+            Ok((key(16..32)?, key(32..48)?, key(48..64)?))
+        })();
+        match result {
+            Ok((s_enc, s_mac, s_rmac)) => Ok(Self::complete_asymmetric_with_session_keys(
+                handshake, s_enc, s_mac, s_rmac,
+            )),
+            Err(error) => {
+                Self::close_failed_asymmetric_handshake(connector, handshake);
+                Err(error)
+            }
+        }
+    }
+
     fn send_invalid_close(
         connector: &dyn Connector,
         sid: u8,

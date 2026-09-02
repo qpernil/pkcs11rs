@@ -547,6 +547,9 @@ export PKCS11RS_YUBIHSM_DISCOVERY='00a5service-owned-password'
 
 # Or a YubiHSM Auth credential used with target Authentication Key 00a5
 export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-password'
+
+# Or a named platform-protected P-256 credential (macOS/iOS Secure Enclave)
+export PKCS11RS_YUBIHSM_DISCOVERY=':00a5@reserve'
 ```
 
 The credential is tried independently on every YubiHSM. The module retains all
@@ -575,6 +578,10 @@ authenticates. Optional label and source constraints use
 `:*<label>[@<source>]`. This form requires successful public discovery and
 fails when there is no match or no candidate authenticates. The normal explicit
 `:AAAA<label>[@<source>]` form remains available.
+
+For a named platform credential, use `:AAAA@reserve` explicitly or
+`:*@reserve` to match its public point to a discovered Authentication Key
+projection. These forms carry no password.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
