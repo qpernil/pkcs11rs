@@ -300,6 +300,13 @@ YubiHSM authentication-key ID, optional applet credential and source, and
 password separately; public-discovery runtime state is held by the target
 YubiHSM slot, not globally.
 
+The focused `yubihsm-auth-client` crate owns the transport-independent APDU and
+TLV exchange that produces YubiHSM session keys. PKCS11RS supplies its shared
+CCID connector as the transport; external qualification tools can supply PC/SC
+without copying the credential protocol. Applet discovery, reader selection,
+PKCS #11 error mapping, and target-session policy remain in their respective
+callers.
+
 An asymmetric credential's public point may be persisted as an ordinary public
 object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
 The optional `C_LoginUser` wildcard selector asks the target YubiHSM slot to
