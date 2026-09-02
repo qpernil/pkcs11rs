@@ -994,7 +994,7 @@ The button performs these operations:
    application's Keychain access group.
 2. Enumerate the configured or discovered YubiHSM slots. The application uses
    a locally connected, already provisioned YubiHSM Auth credential to open an
-   administrative session on each selected target. This existing authority is
+   administrative session on each present target. This existing authority is
    the unavoidable bootstrap authorization for adding a new client identity.
 3. Ask PKCS11RS to read the platform public key internally and provision it as
    a new asymmetric Authentication Key with the selected ID, capabilities,
@@ -1013,6 +1013,16 @@ Provisioning is atomic per target as far as the device protocol allows, but is
 not a distributed transaction across several HSMs. The smoke application keeps
 an explicit result for every target, permits a failed target to be retried, and
 does not roll back a successfully verified credential on another target.
+
+The operation is deliberately idempotent. A repeated button press reuses the
+same named platform key. An Authentication Key and projection whose visible
+policy and public material exactly match the request produce `already
+provisioned`; a matching projection left by an interrupted first attempt is
+completed and produces `repaired`. A pre-existing Authentication Key without
+its projection is not repaired because its public half cannot be read through
+the portable protocol and therefore cannot be proven to match. Any differing
+object or projection at the requested identity is an explicit conflict. No
+retry overwrites or rotates key material implicitly.
 
 For example, the result can be presented as:
 
@@ -1055,15 +1065,18 @@ that need to resolve the credential. The current access control requires an
 unlocked device and private-key usage, but does not request biometric presence
 for every login; biometric policy is a separate product decision.
 
-The Apple provider and all four Rust lifecycle operations already compile for
-iOS, and platform-backed `C_LoginUser` is implemented. Completing the button
-requires PKCS11RS-prefixed C functions for platform-credential generate, list,
-get-public-key, and delete, plus one high-level per-session YubiHSM operation
-that provisions the named credential and its projection. The latter requires a
+The Apple provider and all four Rust lifecycle operations compile for iOS and
+are exported as `PKCS11RS_PlatformCredentialGenerate`,
+`PKCS11RS_PlatformCredentialList`,
+`PKCS11RS_PlatformCredentialGetPublicKey`, and
+`PKCS11RS_PlatformCredentialDelete`. The button uses the high-level
+`PKCS11RS_YubiHsmProvisionPlatformCredential` operation. It requires a
 read/write session with an active administrative login and accepts the target
-ID, label, domains, capabilities, and delegated capabilities. These functions
-use ordinary PKCS #11 two-call output-buffer conventions where applicable and
-never return private material.
+ID, label, domains, capabilities, and delegated capabilities. PKCS11RS reads or
+generates the named platform credential internally and returns whether the
+target was provisioned, already provisioned, or repaired. The lifecycle
+functions use ordinary PKCS #11 two-call output-buffer conventions where
+applicable and never return private material.
 
 ## Asymmetric hardware provisioning test
 

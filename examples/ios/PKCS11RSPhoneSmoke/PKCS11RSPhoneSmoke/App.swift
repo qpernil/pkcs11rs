@@ -7,6 +7,11 @@ private let initialSlotListCapacity = 10
 private let objectFindBatchCapacity = 64
 private let objectAttributeBufferCapacity = 1024
 private let yubiHsmAuthPassword = "password"
+private let platformCredentialName = "iphone-qpernil"
+private let platformCredentialLabel = "iPhone qpernil"
+private let platformAuthenticationKeyID = CK_ULONG(0x1004)
+private let platformDomains = CK_ULONG(0xffff)
+private let platformCapabilities = [UInt8](repeating: 0xff, count: 8)
 private let softwareTokenName = "iPhone smoke"
 private let softwareTokenModel = "Software token"
 private let softwareTokenPIN = "password"
@@ -1433,8 +1438,10 @@ private func authenticatedObjectInventory(
 private final class InspectionViewController: UIViewController {
     private let statusLabel = UILabel()
     private let refreshButton = UIButton(type: .system)
+    private let provisionButton = UIButton(type: .system)
     private let inventoryView = UITextView()
     var onRefresh: (() -> Void)?
+    var onProvision: (() -> Void)?
     private var refreshStartedAt: Date?
     private var refreshTimer: Timer?
 
@@ -1453,6 +1460,12 @@ private final class InspectionViewController: UIViewController {
         refreshButton.addTarget(self, action: #selector(refresh), for: .touchUpInside)
         view.addSubview(refreshButton)
 
+        provisionButton.translatesAutoresizingMaskIntoConstraints = false
+        provisionButton.configuration = .borderedProminent()
+        provisionButton.configuration?.title = "Provision this iPhone for YubiHSM login"
+        provisionButton.addTarget(self, action: #selector(provision), for: .touchUpInside)
+        view.addSubview(provisionButton)
+
         inventoryView.translatesAutoresizingMaskIntoConstraints = false
         inventoryView.backgroundColor = .systemBackground
         inventoryView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -1463,8 +1476,11 @@ private final class InspectionViewController: UIViewController {
             refreshButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             refreshButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             statusLabel.centerYAnchor.constraint(equalTo: refreshButton.centerYAnchor),
-            statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            inventoryView.topAnchor.constraint(equalTo: refreshButton.bottomAnchor, constant: 4),
+            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            provisionButton.topAnchor.constraint(equalTo: refreshButton.bottomAnchor, constant: 8),
+            provisionButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            provisionButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            inventoryView.topAnchor.constraint(equalTo: provisionButton.bottomAnchor, constant: 4),
             inventoryView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             inventoryView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             inventoryView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -1474,6 +1490,7 @@ private final class InspectionViewController: UIViewController {
     func beginRefresh() {
         refreshTimer?.invalidate()
         refreshButton.isEnabled = false
+        provisionButton.isEnabled = false
         refreshStartedAt = Date()
         updateRefreshStatus()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
@@ -1493,6 +1510,7 @@ private final class InspectionViewController: UIViewController {
         refreshStartedAt = nil
         statusLabel.isHidden = true
         refreshButton.isEnabled = true
+        provisionButton.isEnabled = true
     }
 
     private func updateRefreshStatus() {
@@ -1504,6 +1522,10 @@ private final class InspectionViewController: UIViewController {
 
     @objc private func refresh() {
         onRefresh?()
+    }
+
+    @objc private func provision() {
+        onProvision?()
     }
 }
 
@@ -1644,6 +1666,152 @@ private final class ModuleInspector {
         return lines.joined(separator: "\n")
     }
 
+    func provisionPhone(configuration: ConnectorConfiguration) -> String {
+        let initialize = initialize(configuration: configuration)
+        guard initialize == CKR_OK else {
+            return "C_Initialize failed: \(initialize)"
+        }
+
+        var count = CK_ULONG()
+        var result = C_GetSlotList(CK_BBOOL(CK_TRUE), nil, &count)
+        guard result == CKR_OK else {
+            return "C_GetSlotList(size) failed: \(result)"
+        }
+        var slots = [CK_SLOT_ID](repeating: 0, count: Int(count))
+        result = slots.withUnsafeMutableBufferPointer { buffer in
+            C_GetSlotList(CK_BBOOL(CK_TRUE), buffer.baseAddress, &count)
+        }
+        guard result == CKR_OK else {
+            return "C_GetSlotList failed: \(result)"
+        }
+
+        var targets = [(CK_SLOT_ID, String)]()
+        for slot in slots.prefix(Int(count)) {
+            var token = CK_TOKEN_INFO()
+            if C_GetTokenInfo(slot, &token) == CKR_OK {
+                let label = paddedString(token.label)
+                if label.hasPrefix("YubiHSM #") {
+                    targets.append((slot, label))
+                }
+            }
+        }
+        guard !targets.isEmpty else {
+            return "No YubiHSM target is present."
+        }
+
+        var lines = [
+            "Provision this iPhone for YubiHSM login",
+            "Credential: \(platformCredentialName)",
+            String(format: "Authentication Key: %04llX", UInt64(platformAuthenticationKeyID)),
+            "",
+        ]
+        for (slot, target) in targets {
+            lines.append(contentsOf: provisionTarget(slot: slot, name: target))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func provisionTarget(slot: CK_SLOT_ID, name: String) -> [String] {
+        var session = CK_SESSION_HANDLE(CK_INVALID_HANDLE)
+        var result = C_OpenSession(
+            slot,
+            CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+            nil,
+            nil,
+            &session
+        )
+        guard result == CKR_OK else {
+            return ["\(name): open failed: \(result)"]
+        }
+        defer { _ = C_CloseSession(session) }
+
+        var bootstrapUsername = Array(":*".utf8)
+        var bootstrapPassword = Array(yubiHsmAuthPassword.utf8)
+        result = bootstrapPassword.withUnsafeMutableBufferPointer { password in
+            bootstrapUsername.withUnsafeMutableBufferPointer { username in
+                C_LoginUser(
+                    session,
+                    CK_USER_TYPE(CKU_USER),
+                    password.baseAddress,
+                    CK_ULONG(password.count),
+                    username.baseAddress,
+                    CK_ULONG(username.count)
+                )
+            }
+        }
+        _ = bootstrapPassword.withUnsafeMutableBytes { bytes in
+            bytes.initializeMemory(as: UInt8.self, repeating: 0)
+        }
+        guard result == CKR_OK else {
+            return ["\(name): bootstrap login failed: \(result)"]
+        }
+
+        var provisioningResult = CK_ULONG()
+        let capabilities = platformCapabilities
+        let delegatedCapabilities = platformCapabilities
+        result = Array(platformCredentialName.utf8).withUnsafeBufferPointer { credential in
+            Array(platformCredentialLabel.utf8).withUnsafeBufferPointer { label in
+                capabilities.withUnsafeBufferPointer { capabilities in
+                    delegatedCapabilities.withUnsafeBufferPointer { delegated in
+                        PKCS11RS_YubiHsmProvisionPlatformCredential(
+                            session,
+                            credential.baseAddress,
+                            CK_ULONG(credential.count),
+                            platformAuthenticationKeyID,
+                            label.baseAddress,
+                            CK_ULONG(label.count),
+                            platformDomains,
+                            capabilities.baseAddress,
+                            CK_ULONG(capabilities.count),
+                            delegated.baseAddress,
+                            CK_ULONG(delegated.count),
+                            &provisioningResult
+                        )
+                    }
+                }
+            }
+        }
+        guard result == CKR_OK else {
+            _ = C_Logout(session)
+            return ["\(name): provisioning failed: \(result)"]
+        }
+        let action = switch provisioningResult {
+        case CK_ULONG(PKCS11RS_PLATFORM_PROVISIONED): "provisioned"
+        case CK_ULONG(PKCS11RS_PLATFORM_ALREADY_PROVISIONED): "already provisioned"
+        case CK_ULONG(PKCS11RS_PLATFORM_REPAIRED): "repaired"
+        default: "provisioned (unknown result \(provisioningResult))"
+        }
+        let logout = C_Logout(session)
+        guard logout == CKR_OK else {
+            return ["\(name): \(action), bootstrap logout failed: \(logout)"]
+        }
+
+        var platformUsername = Array(
+            String(format: ":%04llX@%@", UInt64(platformAuthenticationKeyID), platformCredentialName)
+                .utf8
+        )
+        result = platformUsername.withUnsafeMutableBufferPointer { username in
+            C_LoginUser(
+                session,
+                CK_USER_TYPE(CKU_USER),
+                nil,
+                0,
+                username.baseAddress,
+                CK_ULONG(username.count)
+            )
+        }
+        guard result == CKR_OK else {
+            return ["\(name): \(action), platform login failed: \(result)"]
+        }
+        var random = UInt8()
+        let verification = C_GenerateRandom(session, &random, 1)
+        _ = C_Logout(session)
+        guard verification == CKR_OK else {
+            return ["\(name): \(action), authenticated verification failed: \(verification)"]
+        }
+        return ["\(name): \(action), login verified"]
+    }
+
     func finalize() {
         if initialized {
             let result = C_Finalize(nil)
@@ -1677,6 +1845,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         controller.onRefresh = { [weak self] in
             self?.refresh()
         }
+        controller.onProvision = { [weak self] in
+            self?.provisionPhone()
+        }
         initializeModule()
 
         return true
@@ -1706,6 +1877,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         inspectionQueue.async { [weak self] in
             guard let self else { return }
             let result = moduleInspector.initializeAndDescribe(configuration: configuration)
+            DispatchQueue.main.async {
+                self.controller.showInventory(result)
+            }
+        }
+    }
+
+    private func provisionPhone() {
+        let configuration = connectorConfiguration()
+        controller.beginRefresh()
+        inspectionQueue.async { [weak self] in
+            guard let self else { return }
+            let result = moduleInspector.provisionPhone(configuration: configuration)
             DispatchQueue.main.async {
                 self.controller.showInventory(result)
             }

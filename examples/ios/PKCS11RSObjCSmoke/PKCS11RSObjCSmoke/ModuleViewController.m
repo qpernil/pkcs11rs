@@ -14,6 +14,10 @@ static NSString *const PKCS11RSSoftwareMLDSAID = @"iphone-smoke-ml-dsa-87";
 static NSString *const PKCS11RSSoftwareMLKEMLabel = @"iPhone smoke ML-KEM-1024";
 static NSString *const PKCS11RSSoftwareMLKEMID = @"iphone-smoke-ml-kem-1024";
 static NSString *const PKCS11RSHsmAuthPassword = @"password";
+static NSString *const PKCS11RSPlatformCredentialName = @"iphone-qpernil";
+static NSString *const PKCS11RSPlatformCredentialLabel = @"iPhone qpernil";
+static const CK_ULONG PKCS11RSPlatformAuthenticationKeyID = 0x1004UL;
+static const CK_ULONG PKCS11RSPlatformDomains = 0xffffUL;
 enum {
     PKCS11RSInitialSlotCapacity = 10,
     PKCS11RSObjectBatchCapacity = 64,
@@ -149,6 +153,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     NSString *_connectorURL;
     NSString *_tokenStoragePath;
     UIButton *_refreshButton;
+    UIButton *_provisionButton;
     UILabel *_statusLabel;
     UITextView *_outputView;
     NSDate *_operationStartedAt;
@@ -184,6 +189,14 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                        action:@selector(refresh:)
              forControlEvents:UIControlEventTouchUpInside];
 
+    _provisionButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _provisionButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_provisionButton setTitle:@"Provision this iPhone for YubiHSM login"
+                      forState:UIControlStateNormal];
+    [_provisionButton addTarget:self
+                         action:@selector(provisionPhone:)
+               forControlEvents:UIControlEventTouchUpInside];
+
     _statusLabel = [[UILabel alloc] init];
     _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _statusLabel.font = [UIFont monospacedDigitSystemFontOfSize:12
@@ -202,6 +215,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         heading,
         explanation,
         _refreshButton,
+        _provisionButton,
         _statusLabel,
     ]];
     header.translatesAutoresizingMaskIntoConstraints = NO;
@@ -231,6 +245,40 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     [self performInspectionIncludingSlots:YES];
 }
 
+- (void)provisionPhone:(id)sender {
+    (void)sender;
+    [_operationTimer invalidate];
+    _operationStartedAt = [NSDate date];
+    [self updateOperationStatus:nil];
+    _operationTimer = [NSTimer scheduledTimerWithTimeInterval:1
+                                                       target:self
+                                                     selector:@selector(updateOperationStatus:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+    _refreshButton.enabled = NO;
+    _provisionButton.enabled = NO;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(_moduleQueue, ^{
+        @autoreleasepool {
+            NSString *report = [weakSelf provisionPhoneReport];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ModuleViewController *strongSelf = weakSelf;
+                if (strongSelf == nil) {
+                    return;
+                }
+                strongSelf->_outputView.text = report;
+                [strongSelf->_operationTimer invalidate];
+                strongSelf->_operationTimer = nil;
+                strongSelf->_operationStartedAt = nil;
+                strongSelf->_statusLabel.hidden = YES;
+                strongSelf->_refreshButton.enabled = YES;
+                strongSelf->_provisionButton.enabled = YES;
+            });
+        }
+    });
+}
+
 - (void)performInspectionIncludingSlots:(BOOL)includeSlots {
     [_operationTimer invalidate];
     _operationStartedAt = [NSDate date];
@@ -241,6 +289,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                      userInfo:nil
                                                       repeats:YES];
     _refreshButton.enabled = NO;
+    _provisionButton.enabled = NO;
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(_moduleQueue, ^{
@@ -257,6 +306,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                 strongSelf->_operationStartedAt = nil;
                 strongSelf->_statusLabel.hidden = YES;
                 strongSelf->_refreshButton.enabled = YES;
+                strongSelf->_provisionButton.enabled = YES;
             });
         }
     });
@@ -1276,6 +1326,174 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                     PKCS11RSReturnValue(close)]];
     }
     return lines;
+}
+
+- (NSString *)provisionTargetSlot:(CK_SLOT_ID)slot name:(NSString *)name {
+    CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
+    CK_RV result = C_OpenSession(slot,
+                                 CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                                 NULL_PTR,
+                                 NULL_PTR,
+                                 &session);
+    if (result != CKR_OK) {
+        return [NSString stringWithFormat:@"%@: open failed: %@",
+                                          name,
+                                          PKCS11RSReturnValue(result)];
+    }
+
+    NSMutableData *password =
+        [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSMutableData *bootstrapUsername =
+        [[@":*" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    result = C_LoginUser(session,
+                         CKU_USER,
+                         password.mutableBytes,
+                         (CK_ULONG)password.length,
+                         bootstrapUsername.mutableBytes,
+                         (CK_ULONG)bootstrapUsername.length);
+    [password resetBytesInRange:NSMakeRange(0, password.length)];
+    if (result != CKR_OK) {
+        C_CloseSession(session);
+        return [NSString stringWithFormat:@"%@: bootstrap login failed: %@",
+                                          name,
+                                          PKCS11RSReturnValue(result)];
+    }
+
+    CK_BYTE capabilities[8];
+    CK_BYTE delegatedCapabilities[8];
+    memset(capabilities, 0xff, sizeof(capabilities));
+    memset(delegatedCapabilities, 0xff, sizeof(delegatedCapabilities));
+    NSData *credentialName =
+        [PKCS11RSPlatformCredentialName dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *label = [PKCS11RSPlatformCredentialLabel dataUsingEncoding:NSUTF8StringEncoding];
+    CK_ULONG provisioningResult = 0;
+    result = PKCS11RS_YubiHsmProvisionPlatformCredential(
+        session,
+        credentialName.bytes,
+        (CK_ULONG)credentialName.length,
+        PKCS11RSPlatformAuthenticationKeyID,
+        label.bytes,
+        (CK_ULONG)label.length,
+        PKCS11RSPlatformDomains,
+        capabilities,
+        sizeof(capabilities),
+        delegatedCapabilities,
+        sizeof(delegatedCapabilities),
+        &provisioningResult);
+    if (result != CKR_OK) {
+        C_Logout(session);
+        C_CloseSession(session);
+        return [NSString stringWithFormat:@"%@: provisioning failed: %@",
+                                          name,
+                                          PKCS11RSReturnValue(result)];
+    }
+
+    NSString *action = nil;
+    switch (provisioningResult) {
+        case PKCS11RS_PLATFORM_PROVISIONED:
+            action = @"provisioned";
+            break;
+        case PKCS11RS_PLATFORM_ALREADY_PROVISIONED:
+            action = @"already provisioned";
+            break;
+        case PKCS11RS_PLATFORM_REPAIRED:
+            action = @"repaired";
+            break;
+        default:
+            action = [NSString stringWithFormat:@"provisioned (unknown result %lu)",
+                                                (unsigned long)provisioningResult];
+            break;
+    }
+    CK_RV logout = C_Logout(session);
+    if (logout != CKR_OK) {
+        C_CloseSession(session);
+        return [NSString stringWithFormat:@"%@: %@, bootstrap logout failed: %@",
+                                          name,
+                                          action,
+                                          PKCS11RSReturnValue(logout)];
+    }
+
+    NSString *selector = [NSString stringWithFormat:@":%04lX@%@",
+                                                     (unsigned long)PKCS11RSPlatformAuthenticationKeyID,
+                                                     PKCS11RSPlatformCredentialName];
+    NSMutableData *platformUsername =
+        [[selector dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    result = C_LoginUser(session,
+                         CKU_USER,
+                         NULL_PTR,
+                         0,
+                         platformUsername.mutableBytes,
+                         (CK_ULONG)platformUsername.length);
+    if (result != CKR_OK) {
+        C_CloseSession(session);
+        return [NSString stringWithFormat:@"%@: %@, platform login failed: %@",
+                                          name,
+                                          action,
+                                          PKCS11RSReturnValue(result)];
+    }
+    CK_BYTE random = 0;
+    CK_RV verification = C_GenerateRandom(session, &random, 1);
+    C_Logout(session);
+    C_CloseSession(session);
+    if (verification != CKR_OK) {
+        return [NSString stringWithFormat:@"%@: %@, authenticated verification failed: %@",
+                                          name,
+                                          action,
+                                          PKCS11RSReturnValue(verification)];
+    }
+    return [NSString stringWithFormat:@"%@: %@, login verified", name, action];
+}
+
+- (NSString *)provisionPhoneReport {
+    if (!_moduleInitialized) {
+        (void)[self inspectModuleIncludingSlots:NO];
+        if (!_moduleInitialized) {
+            return @"C_Initialize failed before provisioning.";
+        }
+    }
+
+    CK_ULONG count = 0;
+    CK_RV result = C_GetSlotList(CK_TRUE, NULL_PTR, &count);
+    if (result != CKR_OK) {
+        return [NSString stringWithFormat:@"C_GetSlotList(size) failed: %@",
+                                          PKCS11RSReturnValue(result)];
+    }
+    NSMutableData *slotStorage = [NSMutableData dataWithLength:count * sizeof(CK_SLOT_ID)];
+    result = C_GetSlotList(CK_TRUE, slotStorage.mutableBytes, &count);
+    if (result != CKR_OK) {
+        return [NSString stringWithFormat:@"C_GetSlotList failed: %@",
+                                          PKCS11RSReturnValue(result)];
+    }
+
+    NSMutableArray<NSNumber *> *targets = [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *names = [[NSMutableArray alloc] init];
+    CK_SLOT_ID *slots = slotStorage.mutableBytes;
+    for (CK_ULONG index = 0; index < count; index++) {
+        CK_TOKEN_INFO token = {0};
+        if (C_GetTokenInfo(slots[index], &token) != CKR_OK) {
+            continue;
+        }
+        NSString *label = PKCS11RSFixedString(token.label, sizeof(token.label));
+        if ([label hasPrefix:@"YubiHSM #"]) {
+            [targets addObject:@(slots[index])];
+            [names addObject:label];
+        }
+    }
+    if (targets.count == 0) {
+        return @"No YubiHSM target is present.";
+    }
+
+    NSMutableString *report = [[NSMutableString alloc] init];
+    [report appendString:@"Provision this iPhone for YubiHSM login\n"];
+    [report appendFormat:@"Credential: %@\n", PKCS11RSPlatformCredentialName];
+    [report appendFormat:@"Authentication Key: %04lX\n\n",
+                         (unsigned long)PKCS11RSPlatformAuthenticationKeyID];
+    for (NSUInteger index = 0; index < targets.count; index++) {
+        NSString *line = [self provisionTargetSlot:targets[index].unsignedLongValue
+                                               name:names[index]];
+        [report appendFormat:@"%@\n", line];
+    }
+    return report;
 }
 
 - (NSString *)inspectModuleIncludingSlots:(BOOL)includeSlots {

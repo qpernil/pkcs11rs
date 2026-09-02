@@ -14,6 +14,15 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+The **Provision this iPhone for YubiHSM login** button uses the existing
+YubiHSM Auth administrator credential as bootstrap authority for every present
+YubiHSM. A single high-level PKCS11RS call creates or reuses the named Secure
+Enclave credential, installs its asymmetric Authentication Key and public
+projection idempotently, and reports `provisioned`, `already provisioned`, or
+`repaired`. The app then logs out and verifies a fresh platform-credential
+login plus an authenticated random operation before reporting success. A
+conflicting ID is never overwritten.
+
 For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
 [iOS integration guide](../../../docs/ios-integration.md). The Objective-C

@@ -16,6 +16,13 @@ credential public points with that HSM's public projections and tries matching
 credential/Authentication Key pairs until one authenticates. A successful
 login produces a second authenticated object inventory before the app logs out.
 
+The **Provision this iPhone for YubiHSM login** button exercises the same
+idempotent high-level PKCS11RS provisioning API as the Swift app. It uses the
+connected YubiHSM Auth administrator credential for bootstrap login, provisions
+every present YubiHSM, and verifies a fresh Secure Enclave-backed login and
+authenticated random operation. Repeated presses reuse exact matches; conflicts
+are reported without overwriting existing objects.
+
 All synchronous PKCS #11 work runs on one serial background queue. The example
 uses the same initialization configuration as the Swift UIKit smoke app:
 CryptoTokenKit NFC discovery, the local or overridden YubiHSM connector,
