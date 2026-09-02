@@ -5,6 +5,10 @@ use crate::{
     CKR_PIN_LOCKED, CKR_TOKEN_NOT_RECOGNIZED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector,
     Error, ResponseApdu,
 };
+use yubihsm_auth_client::{
+    Client as ProtocolClient, Command as ProtocolCommand, Error as ProtocolError,
+    Response as ProtocolResponse, Transport,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01];
@@ -15,10 +19,11 @@ const TAG_CREDENTIAL_PASSWORD: u8 = 0x73;
 const TAG_ALGORITHM: u8 = 0x74;
 const TAG_KEY_ENC: u8 = 0x75;
 const TAG_KEY_MAC: u8 = 0x76;
-const TAG_CONTEXT: u8 = 0x77;
+#[cfg(test)]
 const TAG_RESPONSE: u8 = 0x78;
 const TAG_TOUCH: u8 = 0x7a;
 const TAG_MANAGEMENT_KEY: u8 = 0x7b;
+#[cfg(test)]
 const TAG_PUBLIC_KEY: u8 = 0x7c;
 const TAG_PRIVATE_KEY: u8 = 0x7d;
 
@@ -40,8 +45,8 @@ const CREDENTIAL_PASSWORD_LENGTH: usize = 16;
 const MIN_LABEL_LENGTH: usize = 1;
 const MAX_LABEL_LENGTH: usize = 64;
 const P256_PUBLIC_KEY_LENGTH: usize = 65;
-const SESSION_KEY_LENGTH: usize = 16;
-const SESSION_KEYS_LENGTH: usize = SESSION_KEY_LENGTH * 3;
+#[cfg(test)]
+const SESSION_KEYS_LENGTH: usize = 48;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -78,11 +83,7 @@ pub(crate) struct Info {
     pub(crate) credentials: Vec<Credential>,
 }
 
-pub(crate) struct SessionKeys {
-    pub(crate) enc: Zeroizing<[u8; SESSION_KEY_LENGTH]>,
-    pub(crate) mac: Zeroizing<[u8; SESSION_KEY_LENGTH]>,
-    pub(crate) rmac: Zeroizing<[u8; SESSION_KEY_LENGTH]>,
-}
+pub(crate) type SessionKeys = yubihsm_auth_client::SessionKeys;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SymmetricCredentialKeys<'a> {
@@ -117,13 +118,32 @@ pub(crate) enum Administration<'a> {
     Reset,
 }
 
-impl std::fmt::Debug for SessionKeys {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.debug_struct("SessionKeys").finish_non_exhaustive()
+pub(crate) struct Client;
+
+struct ConnectorTransport<'a>(&'a dyn Connector);
+
+impl Transport for ConnectorTransport<'_> {
+    type Error = Error;
+
+    fn exchange(&self, command: &ProtocolCommand) -> Result<ProtocolResponse, Self::Error> {
+        let mut command = CommandApdu {
+            cla: command.cla,
+            ins: command.instruction,
+            p1: command.p1,
+            p2: command.p2,
+            data: command.data.clone(),
+            le: None,
+            extended: false,
+        };
+        let response = self.0.send_short_apdu(&command);
+        command.data.zeroize();
+        let response = response?;
+        Ok(ProtocolResponse {
+            data: response.data,
+            status: response.status,
+        })
     }
 }
-
-pub(crate) struct Client;
 
 impl Client {
     pub(crate) fn discover(&self, connector: &dyn Connector) -> Result<Info, Error> {
@@ -224,12 +244,9 @@ impl Client {
         label: &str,
         credential_password: Option<&[u8]>,
     ) -> Result<Vec<u8>, Error> {
-        let mut data = encode_tlv(TAG_LABEL, validate_label(label)?)?;
-        if let Some(password) = credential_password {
-            let password = padded_credential_password(password)?;
-            data.extend(encode_tlv(TAG_CREDENTIAL_PASSWORD, password.as_slice())?);
-        }
-        self.command(connector, INS_GET_CHALLENGE, 0, 0, data, true)
+        ProtocolClient
+            .get_challenge(&ConnectorTransport(connector), label, credential_password)
+            .map_err(map_protocol_error)
     }
 
     pub(crate) fn calculate_session_keys_symmetric(
@@ -240,14 +257,15 @@ impl Client {
         card_cryptogram: &[u8],
         credential_password: &[u8],
     ) -> Result<SessionKeys, Error> {
-        self.calculate_session_keys(
-            connector,
-            label,
-            context,
-            None,
-            card_cryptogram,
-            credential_password,
-        )
+        ProtocolClient
+            .calculate_session_keys_symmetric(
+                &ConnectorTransport(connector),
+                label,
+                context,
+                card_cryptogram,
+                credential_password,
+            )
+            .map_err(map_protocol_error)
     }
 
     pub(crate) fn calculate_session_keys_asymmetric(
@@ -260,36 +278,16 @@ impl Client {
         credential_password: &[u8],
     ) -> Result<SessionKeys, Error> {
         validate_public_key(device_public_key)?;
-        self.calculate_session_keys(
-            connector,
-            label,
-            context,
-            Some(device_public_key),
-            receipt,
-            credential_password,
-        )
-    }
-
-    fn calculate_session_keys(
-        &self,
-        connector: &dyn Connector,
-        label: &str,
-        context: &[u8],
-        public_key: Option<&[u8]>,
-        response: &[u8],
-        credential_password: &[u8],
-    ) -> Result<SessionKeys, Error> {
-        let mut data = encode_tlv(TAG_LABEL, validate_label(label)?)?;
-        data.extend(encode_tlv(TAG_CONTEXT, context)?);
-        if let Some(public_key) = public_key {
-            data.extend(encode_tlv(TAG_PUBLIC_KEY, public_key)?);
-        }
-        data.extend(encode_tlv(TAG_RESPONSE, response)?);
-        let password = padded_credential_password(credential_password)?;
-        data.extend(encode_tlv(TAG_CREDENTIAL_PASSWORD, password.as_slice())?);
-
-        let response = Zeroizing::new(self.command(connector, INS_CALCULATE, 0, 0, data, true)?);
-        parse_session_keys(&response)
+        ProtocolClient
+            .calculate_session_keys_asymmetric(
+                &ConnectorTransport(connector),
+                label,
+                context,
+                device_public_key,
+                receipt,
+                credential_password,
+            )
+            .map_err(map_protocol_error)
     }
 
     #[allow(dead_code)]
@@ -494,6 +492,18 @@ fn require_success(response: ResponseApdu) -> Result<Vec<u8>, Error> {
     Err(hsmauth_status_mapping(response.status).0.into())
 }
 
+fn map_protocol_error(error: ProtocolError<Error>) -> Error {
+    match error {
+        ProtocolError::Transport(error) => error,
+        ProtocolError::InvalidLabel => CKR_ARGUMENTS_BAD.into(),
+        ProtocolError::InvalidPassword => CKR_PIN_INCORRECT.into(),
+        ProtocolError::InvalidPublicKey => CKR_DATA_INVALID.into(),
+        ProtocolError::DataTooLong => CKR_DATA_LEN_RANGE.into(),
+        ProtocolError::MalformedResponse => CKR_DEVICE_ERROR.into(),
+        ProtocolError::Status(status) => hsmauth_status_mapping(status).0.into(),
+    }
+}
+
 fn hsmauth_status_mapping(status: u16) -> (CK_RV, &'static str) {
     match status {
         0x6100..=0x61ff => (CKR_DEVICE_ERROR as CK_RV, "CKR_DEVICE_ERROR"),
@@ -626,17 +636,6 @@ fn parse_credentials(encoded: &[u8]) -> Result<Vec<Credential>, Error> {
             })
         })
         .collect()
-}
-
-fn parse_session_keys(encoded: &[u8]) -> Result<SessionKeys, Error> {
-    if encoded.len() != SESSION_KEYS_LENGTH {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    Ok(SessionKeys {
-        enc: Zeroizing::new(encoded[..16].try_into().map_err(|_| CKR_DEVICE_ERROR)?),
-        mac: Zeroizing::new(encoded[16..32].try_into().map_err(|_| CKR_DEVICE_ERROR)?),
-        rmac: Zeroizing::new(encoded[32..].try_into().map_err(|_| CKR_DEVICE_ERROR)?),
-    })
 }
 
 fn credential_prefix(

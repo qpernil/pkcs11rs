@@ -16,12 +16,14 @@ members = [
     "crates/platform-credential",
     "crates/pkcs11rs-connector",
     "crates/pkcs11rs-local-hardware",
+    "crates/yubihsm-auth-client",
     "tools/pkcs11rs-tool",
 ]
 default-members = [
     ".",
     "crates/platform-credential",
     "crates/pkcs11rs-connector",
+    "crates/yubihsm-auth-client",
     "tools/pkcs11rs-tool",
 ]
 exclude = ["xtask"]
@@ -52,6 +54,7 @@ virtual-yubikey-core = { path = "../virtual-yubikey/crates/virtual-yubikey-core"
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
 software-key-core = { path = "../software-key-core" }
 platform-credential = { path = "crates/platform-credential" }
+yubihsm-auth-client = { path = "crates/yubihsm-auth-client" }
 zeroize = "1.9.0"
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "derive", "std"] }

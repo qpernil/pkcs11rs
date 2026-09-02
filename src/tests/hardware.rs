@@ -2534,15 +2534,14 @@ mod fido2_hardware {
 
     impl Drop for PreviewCredentialCleanup {
         fn drop(&mut self) {
-            if self.armed {
-                if let Err(error) =
+            if self.armed
+                && let Err(error) =
                     delete_fido2_test_credential(self.slot_id, &self.pin, &self.credential_id)
-                {
-                    eprintln!(
-                        "failed to clean up previewSign credential {:02x?}: {error:?}",
-                        self.credential_id
-                    );
-                }
+            {
+                eprintln!(
+                    "failed to clean up previewSign credential {:02x?}: {error:?}",
+                    self.credential_id
+                );
             }
         }
     }
