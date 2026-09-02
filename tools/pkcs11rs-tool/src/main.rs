@@ -26,6 +26,10 @@ const USAGE: &str = "\
 usage:
   pkcs11rs-tool certificate-bundle create --purpose PURPOSE --output FILE [--key FILE] [--trust FILE] [--force] CERTIFICATE...
   pkcs11rs-tool certificate-bundle verify --purpose PURPOSE [--key FILE] [--trust FILE] FILE
+  pkcs11rs-tool platform-credential generate NAME
+  pkcs11rs-tool platform-credential list
+  pkcs11rs-tool platform-credential show-public NAME
+  pkcs11rs-tool platform-credential delete NAME
   pkcs11rs-tool --help
   pkcs11rs-tool --version
 
@@ -65,9 +69,22 @@ fn information_response(arguments: &[OsString]) -> Option<&'static str> {
         [object, argument] if object == OsStr::new("certificate-bundle") && is_help(argument) => {
             Some(USAGE)
         }
+        [object, argument] if object == OsStr::new("platform-credential") && is_help(argument) => {
+            Some(USAGE)
+        }
         [object, operation, argument]
             if object == OsStr::new("certificate-bundle")
                 && matches!(operation.to_str(), Some("create" | "verify"))
+                && is_help(argument) =>
+        {
+            Some(USAGE)
+        }
+        [object, operation, argument]
+            if object == OsStr::new("platform-credential")
+                && matches!(
+                    operation.to_str(),
+                    Some("generate" | "list" | "show-public" | "delete")
+                )
                 && is_help(argument) =>
         {
             Some(USAGE)
@@ -96,14 +113,20 @@ struct Options {
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), String> {
-    let options = parse_arguments(arguments)?;
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "platform-credential")
+    {
+        return platform_credential(&arguments[1..]);
+    }
+    let options = parse_certificate_bundle_arguments(arguments)?;
     match options.operation {
         Operation::Create => create(options),
         Operation::Verify => verify(options),
     }
 }
 
-fn parse_arguments(arguments: Vec<OsString>) -> Result<Options, String> {
+fn parse_certificate_bundle_arguments(arguments: Vec<OsString>) -> Result<Options, String> {
     let mut arguments = arguments.into_iter();
     if arguments.next().as_deref() != Some(OsStr::new("certificate-bundle")) {
         return Err(USAGE.to_owned());
@@ -206,6 +229,83 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<Options, String> {
         force,
         inputs,
     })
+}
+
+fn platform_credential(arguments: &[OsString]) -> Result<(), String> {
+    use platform_credential::{
+        PlatformCredentialAlgorithm, delete_platform_credential, generate_platform_credential,
+        list_platform_credentials, platform_credential_public_key,
+    };
+
+    let (operation, name) = match arguments {
+        [operation] if operation == "list" => ("list", None),
+        [operation, name] if operation == "generate" => ("generate", Some(name)),
+        [operation, name] if operation == "show-public" => ("show-public", Some(name)),
+        [operation, name] if operation == "delete" => ("delete", Some(name)),
+        _ => return Err(USAGE.to_owned()),
+    };
+    let name = name
+        .map(|name| {
+            name.to_str()
+                .ok_or_else(|| "credential name must be UTF-8".to_owned())
+        })
+        .transpose()?;
+
+    match operation {
+        "generate" => {
+            let name = name.expect("validated command shape");
+            let public = generate_platform_credential(name).map_err(|error| error.to_string())?;
+            println!("generated {name}");
+            report_platform_public_key(&public)?;
+        }
+        "list" => {
+            for credential in list_platform_credentials().map_err(|error| error.to_string())? {
+                let algorithm = match credential.algorithm {
+                    PlatformCredentialAlgorithm::P256 => "p256",
+                    _ => "unknown",
+                };
+                println!("{} {algorithm}", credential.name);
+            }
+        }
+        "show-public" => {
+            let public = platform_credential_public_key(name.expect("validated command shape"))
+                .map_err(|error| error.to_string())?;
+            report_platform_public_key(&public)?;
+        }
+        "delete" => {
+            let name = name.expect("validated command shape");
+            delete_platform_credential(name).map_err(|error| error.to_string())?;
+            println!("deleted {name}");
+        }
+        _ => unreachable!("validated operation"),
+    }
+    Ok(())
+}
+
+fn report_platform_public_key(
+    public: &software_key_core::software_signing::SoftwarePublicKey,
+) -> Result<(), String> {
+    use software_key_core::software_signing::{EcCurve, SoftwarePublicKey};
+
+    let SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed,
+    } = public
+    else {
+        return Err("platform provider returned an unexpected public-key algorithm".to_owned());
+    };
+    println!("p256-sec1 {}", hex(uncompressed));
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn option_value(
@@ -440,7 +540,7 @@ mod tests {
     #[test]
     fn parser_requires_purpose_and_key_by_profile() {
         assert!(
-            parse_arguments(vec![
+            parse_certificate_bundle_arguments(vec![
                 "certificate-bundle".into(),
                 "verify".into(),
                 "bundle.cbor".into(),
@@ -448,7 +548,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            parse_arguments(vec![
+            parse_certificate_bundle_arguments(vec![
                 "certificate-bundle".into(),
                 "verify".into(),
                 "--purpose".into(),
@@ -458,7 +558,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            parse_arguments(vec![
+            parse_certificate_bundle_arguments(vec![
                 "certificate-bundle".into(),
                 "create".into(),
                 "--purpose".into(),
@@ -481,9 +581,38 @@ mod tests {
             Some(USAGE)
         );
         assert_eq!(
+            information_response(&[
+                "platform-credential".into(),
+                "show-public".into(),
+                "-h".into()
+            ]),
+            Some(USAGE)
+        );
+        assert_eq!(
             information_response(&["--version".into()]),
             Some(concat!("pkcs11rs-tool ", env!("CARGO_PKG_VERSION")))
         );
         assert_eq!(information_response(&["unknown".into()]), None);
+    }
+
+    #[test]
+    fn platform_credential_commands_have_strict_shapes() {
+        assert_eq!(
+            platform_credential(&["generate".into()]),
+            Err(USAGE.to_owned())
+        );
+        assert_eq!(
+            platform_credential(&["list".into(), "extra".into()]),
+            Err(USAGE.to_owned())
+        );
+        assert_eq!(
+            platform_credential(&["unknown".into()]),
+            Err(USAGE.to_owned())
+        );
+    }
+
+    #[test]
+    fn public_key_hex_is_fixed_width_and_lowercase() {
+        assert_eq!(hex(&[0, 1, 0xab, 0xff]), "0001abff");
     }
 }

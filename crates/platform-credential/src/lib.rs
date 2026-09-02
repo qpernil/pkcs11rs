@@ -1,9 +1,9 @@
 //! Platform-protected authentication credentials.
 //!
-//! This module deliberately exposes protocol-neutral cryptographic operations.
-//! A backend may keep its private material in hardware (Secure Enclave, TPM),
-//! in another PKCS #11 token, or in a dedicated authentication applet without
-//! teaching the caller how that backend stores or uses keys.
+//! The public boundary is deliberately independent of Apple Security,
+//! Windows CNG, TPMs, or any other storage mechanism. Backends expose only
+//! the cryptographic operations the authentication protocol needs and a small
+//! lifecycle API used by management tools.
 
 use software_key_core::{
     digest::{HashAlgorithm, HashContext},
@@ -15,15 +15,15 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) use apple::ApplePlatformCryptoProvider;
+use apple::ApplePlatformCryptoProvider;
 
 /// Failure reported by a platform credential provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum PlatformCryptoError {
+pub enum PlatformCryptoError {
     InvalidName,
+    AlreadyExists,
     NotFound,
     Ambiguous,
-    #[cfg_attr(any(target_os = "macos", target_os = "ios"), allow(dead_code))]
     Unsupported,
     InvalidPublicKey,
     OutputTooLong,
@@ -34,6 +34,7 @@ impl fmt::Display for PlatformCryptoError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidName => formatter.write_str("invalid platform credential name"),
+            Self::AlreadyExists => formatter.write_str("platform credential already exists"),
             Self::NotFound => formatter.write_str("platform credential not found"),
             Self::Ambiguous => formatter.write_str("platform credential name is ambiguous"),
             Self::Unsupported => formatter.write_str("operation is not supported by this provider"),
@@ -48,7 +49,7 @@ impl std::error::Error for PlatformCryptoError {}
 
 /// An asymmetric credential capable of the exact construction needed by
 /// YubiHSM asymmetric authentication and SCP11-style handshakes.
-pub(crate) trait PrefixedX963Credential: Send + Sync {
+pub trait PrefixedX963Credential: Send + Sync {
     fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError>;
 
     fn derive_prefixed_x963(
@@ -63,56 +64,125 @@ pub(crate) trait PrefixedX963Credential: Send + Sync {
 
 /// The two independent AES-CMAC keys used by symmetric HSM authentication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-pub(crate) enum CmacKeyRole {
+pub enum CmacKeyRole {
     Encryption,
     Mac,
 }
 
 /// A symmetric credential whose raw AES keys need not be exportable.
-#[allow(dead_code)]
-pub(crate) trait CmacPairCredential: Send + Sync {
+pub trait CmacPairCredential: Send + Sync {
     fn cmac(&self, role: CmacKeyRole, message: &[u8]) -> Result<[u8; 16], PlatformCryptoError>;
 }
 
-/// The primitive kind determines how the common YubiHSM authentication layer
-/// drives the credential; it is metadata, not credential-string syntax.
+/// The primitive kind determines how the common authentication layer drives
+/// the credential; it is metadata, not credential-string syntax.
 #[derive(Clone)]
-pub(crate) enum PlatformAuthenticationCredential {
+pub enum PlatformAuthenticationCredential {
     Asymmetric(Arc<dyn PrefixedX963Credential>),
-    #[allow(dead_code)]
     Symmetric(Arc<dyn CmacPairCredential>),
 }
 
-/// Resolves a logical credential name in the provider compiled for this OS.
-pub(crate) trait AuthenticationCredentialProvider: Send + Sync {
+/// Algorithm of a managed platform credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PlatformCredentialAlgorithm {
+    P256,
+}
+
+/// Non-secret information returned while enumerating managed credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformCredentialInfo {
+    pub name: String,
+    pub algorithm: PlatformCredentialAlgorithm,
+}
+
+/// Resolves credentials for authentication without changing persistent state.
+pub trait AuthenticationCredentialProvider: Send + Sync {
     fn resolve(&self, name: &str) -> Result<PlatformAuthenticationCredential, PlatformCryptoError>;
+}
+
+/// Explicit lifecycle operations used by administration tools and host apps.
+pub trait AuthenticationCredentialStore: Send + Sync {
+    fn generate(&self, name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError>;
+    fn list(&self) -> Result<Vec<PlatformCredentialInfo>, PlatformCryptoError>;
+    fn public_key(&self, name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError>;
+    fn delete(&self, name: &str) -> Result<(), PlatformCryptoError>;
 }
 
 /// Resolve the provider selected by the current build target. Platform names
 /// intentionally do not encode whether the implementation is Apple, CNG, TPM,
 /// or some future backend.
-pub(crate) fn resolve_platform_credential(
+pub fn resolve_platform_credential(
     name: &str,
 ) -> Result<PlatformAuthenticationCredential, PlatformCryptoError> {
+    current_provider().resolve(name)
+}
+
+pub fn generate_platform_credential(name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError> {
+    current_provider().generate(name)
+}
+
+pub fn list_platform_credentials() -> Result<Vec<PlatformCredentialInfo>, PlatformCryptoError> {
+    current_provider().list()
+}
+
+pub fn platform_credential_public_key(
+    name: &str,
+) -> Result<SoftwarePublicKey, PlatformCryptoError> {
+    current_provider().public_key(name)
+}
+
+pub fn delete_platform_credential(name: &str) -> Result<(), PlatformCryptoError> {
+    current_provider().delete(name)
+}
+
+fn current_provider() -> impl AuthenticationCredentialProvider + AuthenticationCredentialStore {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        ApplePlatformCryptoProvider.resolve(name)
+        ApplePlatformCryptoProvider
     }
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     {
+        UnsupportedPlatformCryptoProvider
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[derive(Clone, Copy, Debug, Default)]
+struct UnsupportedPlatformCryptoProvider;
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+impl AuthenticationCredentialProvider for UnsupportedPlatformCryptoProvider {
+    fn resolve(&self, name: &str) -> Result<PlatformAuthenticationCredential, PlatformCryptoError> {
+        validate_platform_credential_name(name)?;
+        Err(PlatformCryptoError::Unsupported)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+impl AuthenticationCredentialStore for UnsupportedPlatformCryptoProvider {
+    fn generate(&self, name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError> {
+        validate_platform_credential_name(name)?;
+        Err(PlatformCryptoError::Unsupported)
+    }
+
+    fn list(&self) -> Result<Vec<PlatformCredentialInfo>, PlatformCryptoError> {
+        Err(PlatformCryptoError::Unsupported)
+    }
+
+    fn public_key(&self, name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError> {
+        validate_platform_credential_name(name)?;
+        Err(PlatformCryptoError::Unsupported)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), PlatformCryptoError> {
         validate_platform_credential_name(name)?;
         Err(PlatformCryptoError::Unsupported)
     }
 }
 
 /// X9.63 KDF with a caller-supplied prefix before the ECDH secret.
-///
-/// Keeping this construction here makes every backend agree on byte ordering.
-/// Backends that can perform the complete KDF inside protected hardware may do
-/// so; backends exposing only raw ECDH use this helper and immediately zeroize
-/// the transient secret.
-pub(crate) fn prefixed_x963_kdf(
+pub fn prefixed_x963_kdf(
     hash: HashAlgorithm,
     prefix: &[u8],
     shared_secret: &[u8],
@@ -143,7 +213,7 @@ pub(crate) fn prefixed_x963_kdf(
     Ok(output)
 }
 
-pub(crate) fn validate_platform_credential_name(name: &str) -> Result<(), PlatformCryptoError> {
+pub fn validate_platform_credential_name(name: &str) -> Result<(), PlatformCryptoError> {
     if name.is_empty()
         || name.bytes().all(|byte| byte.is_ascii_digit())
         || name.bytes().any(|byte| byte == b'@' || byte == b':')

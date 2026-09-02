@@ -42,8 +42,8 @@ The minimum supported Rust version is 1.85.
 - **Named software slots** created only by explicit configuration, with
   login-gated asymmetric and secret keys, plus encrypted persistent key
   objects when local token storage is configured. This includes RSA, EC,
-  Ed25519, X25519, ML-DSA, ML-KEM, AES, HMAC, generic-secret, and legacy 3DES
-  keys.
+  Ed25519, Ed448, X25519, X448, ML-DSA, ML-KEM, AES, HMAC, generic-secret,
+  and legacy 3DES keys.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
@@ -192,9 +192,9 @@ Software private-key objects retain the typed `software-key-core` runtime key
 after login or restore. `KeyKind` controls generation/import and
 `SignatureScheme` controls an individual signing operation, so RSA padding or
 digest choices are no longer used to identify a stored key. PKCS#8, EC scalars,
-Ed25519 seeds, and ML seeds are persistence/export DTOs only; parsing,
+Edwards-curve seeds, and ML seeds are persistence/export DTOs only; parsing,
 validation, expansion, and RSA CRT precomputation happen once at the boundary.
-PKCS11RS uses the shared `SoftwarePrivateKey` union and `EcCurve` identity
+PKCS11RS uses the shared `SoftwarePrivateKey` union and curve identities
 directly; only PKCS #11 public projections, attributes, and error mapping remain
 provider-specific adapters.
 
@@ -224,6 +224,24 @@ such as the iOS XCFramework and generated-binding checks.
 `CERTIFICATE` blocks into canonical CBOR bundles and verifies bundles according
 to their configured TLS, SCP11 OCE, or collection purpose. See
 [Certificate-bundle authoring](docs/pkcs11rs-tool.md).
+
+On Apple platforms it also manages named platform-protected YubiHSM
+authentication credentials. On macOS, build its signed app-like CLI bundle
+through Xcode so that the development provisioning profile accompanies the
+executable:
+
+```sh
+cargo xtask macos-tool
+target/macos-tool/debug/pkcs11rs-tool.app/Contents/MacOS/pkcs11rs-tool \
+  platform-credential generate reserve
+```
+
+`PKCS11RS_APPLE_DEVELOPMENT_TEAM` or `--team TEAM` selects another Apple
+development team. The bundle is only a signing and provisioning container; the
+contained program remains a normal command-line tool. The checked-in
+`tools/pkcs11rs-tool/macos/PKCS11RSTool.xcodeproj` can also be opened directly;
+its shared Debug scheme builds the Rust workspace component and runs a
+read-only credential listing in Xcode's console.
 
 ### iOS XCFramework
 
@@ -778,9 +796,9 @@ cargo test --locked
 cargo test --locked --all-features
 ```
 
-These default-workspace commands test the PKCS #11 provider, connector, and
-`pkcs11rs-tool`. Add `--workspace` to also run the internal local-hardware
-crate's package tests directly.
+These default-workspace commands test the PKCS #11 provider, platform
+credential provider, connector, and `pkcs11rs-tool`. Add `--workspace` to also
+run the internal local-hardware crate's package tests directly.
 
 To test the production shared library with the operating system's native
 dynamic loader, without Python, build it and run the explicit loader smoke
@@ -1021,8 +1039,8 @@ key explicitly.
 
 The module has typed software private-key implementations for RSA, NIST P-224,
 P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,
-brainpoolP512r1, Ed25519, and X25519. They are reserved for named slots
-configured by `PKCS11RS_SOFTWARE_SLOTS`; hardware and applet slots neither
+brainpoolP512r1, Ed25519, Ed448, X25519, and X448. They are reserved for named
+slots configured by `PKCS11RS_SOFTWARE_SLOTS`; hardware and applet slots neither
 advertise nor create generic software private keys. Their shared public-key
 implementation remains available for projected and imported public objects.
 A private template with `CKA_TOKEN=CK_TRUE` never falls back to software

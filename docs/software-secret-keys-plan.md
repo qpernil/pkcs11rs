@@ -39,15 +39,15 @@ lifecycle.
 
 ## Key generation, import, copy, and derivation
 
-Generation, import, copy, ECDH, X25519, HKDF, PBKDF2, and unwrap output share
-one typed materialization boundary. It validates class, key type, length,
+Generation, import, copy, ECDH, Montgomery-curve agreement, HKDF, PBKDF2, and
+unwrap output share one typed materialization boundary. It validates class, key type, length,
 lifetime, privacy, usage, sensitivity, extractability, and policy templates;
 constructs zeroizing key material; publishes either a session or token object;
 and returns a handle only after the complete operation succeeds.
 
 ECDH supports `CKD_NULL` and the SHA-1, SHA-2, and SHA-3 ANSI X9.63 KDFs with
-optional shared data and multi-block expansion. Software Weierstrass and X25519
-private keys, PIV, OpenPGP, and YubiHSM sources use the same host-side output
+optional shared data and multi-block expansion. Software Weierstrass, X25519,
+and X448 private keys, PIV, OpenPGP, and YubiHSM sources use the same host-side output
 materialization rules after their respective private-key operations.
 
 HKDF supports SHA-1, SHA-256, SHA-384, and SHA-512 in extract-only,

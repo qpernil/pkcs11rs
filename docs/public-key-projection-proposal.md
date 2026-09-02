@@ -12,9 +12,10 @@ pkcs11rs includes a vendor-defined reference implementation named
 for all supported backends and accepts `CKA_TOKEN=true` when the slot has a
 writable token provider. YubiHSM supplies a native provider that retains the
 public object in pkcs11rs-owned canonical metadata on the device. It supports
-software RSA and EC private keys in named software slots and PIV, OpenPGP, YubiHSM,
-resident-FIDO, and previewSign private objects when their backend metadata
-contains a validated RSA, EC, or Ed25519 public component. RSA encryption and
+software RSA, Weierstrass EC, Edwards, and Montgomery private keys in named
+software slots and PIV, OpenPGP, YubiHSM, resident-FIDO, and previewSign private
+objects when their backend metadata contains a validated RSA, EC, Edwards, or
+Montgomery public component. RSA encryption and
 RSA, ECDSA, and EdDSA verification execute in software on the projected
 object. Native public objects and provider-restored objects are normalized
 through the same canonical projected-key backing before those operations, so
