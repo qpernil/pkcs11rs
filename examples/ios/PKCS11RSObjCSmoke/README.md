@@ -8,20 +8,26 @@ Its functional smoke coverage is synchronized with the Swift UIKit app; the
 difference is the client language and its direct Objective-C representation of
 the same C structures, buffers, sessions, and lifecycle.
 
-The inventory also exercises YubiHSM Auth authentication. It discovers the
-credential metadata through ordinary PKCS #11 objects, then calls
-`C_LoginUser` with the wildcard selector `:*` and the prototype credential
-password `password` for each YubiHSM. pkcs11rs compares available asymmetric
-credential public points with that HSM's public projections and tries matching
-credential/Authentication Key pairs until one authenticates. A successful
-login produces a second authenticated object inventory before the app logs out.
+The inventory also exercises automatic YubiHSM authentication. It calls
+`C_LoginUser` with the provider-independent wildcard selector `:*` and the
+prototype YubiHSM Auth credential password `password` for each YubiHSM.
+pkcs11rs prefers a matching credential from an attached YubiKey and falls back
+to a matching platform credential, for which the supplied password is ignored.
+A successful login produces a second authenticated object inventory before the
+app logs out.
 
-The **Provision this iPhone for YubiHSM login** button exercises the same
-idempotent high-level PKCS11RS provisioning API as the Swift app. It uses the
-connected YubiHSM Auth administrator credential for bootstrap login, provisions
-every present YubiHSM, and verifies a fresh Secure Enclave-backed login and
-authenticated random operation. Repeated presses reuse exact matches; conflicts
-are reported without overwriting existing objects.
+The platform-credential button exercises the same idempotent high-level
+PKCS11RS lifecycle API as the Swift app. **Provision platform credential** uses
+the connected YubiHSM Auth administrator credential for bootstrap login,
+provisions every present YubiHSM, and verifies a fresh Secure Enclave-backed
+login and authenticated random operation. When the local credential exists,
+the button changes to **Unprovision platform credential**; that action removes
+only target objects proven to match and deletes the local key only after every
+present target succeeds. Conflicts are neither overwritten nor deleted.
+Because iOS scopes Keychain items to the signed application, this app uses its
+own `iphone-qpernil-objc` credential and Authentication Key `1005`; the Swift
+app independently uses `iphone-qpernil` and `1004`. Both can therefore remain
+provisioned at the same time.
 
 All synchronous PKCS #11 work runs on one serial background queue. The example
 uses the same initialization configuration as the Swift UIKit smoke app:

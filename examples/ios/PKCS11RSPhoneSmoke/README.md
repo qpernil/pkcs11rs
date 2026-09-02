@@ -14,14 +14,16 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
-The **Provision this iPhone for YubiHSM login** button uses the existing
+The platform-credential button reflects the named Secure Enclave credential's
+current local state. **Provision platform credential** uses the existing
 YubiHSM Auth administrator credential as bootstrap authority for every present
-YubiHSM. A single high-level PKCS11RS call creates or reuses the named Secure
-Enclave credential, installs its asymmetric Authentication Key and public
-projection idempotently, and reports `provisioned`, `already provisioned`, or
-`repaired`. The app then logs out and verifies a fresh platform-credential
-login plus an authenticated random operation before reporting success. A
-conflicting ID is never overwritten.
+YubiHSM. A high-level PKCS11RS call creates or reuses the credential, installs
+its asymmetric Authentication Key and public projection idempotently, and
+reports `provisioned`, `already provisioned`, or `repaired`. The app then logs
+out and verifies a fresh platform-credential login plus an authenticated random
+operation. **Unprovision platform credential** verifies and removes the
+matching target objects from every present HSM, then deletes the local key only
+if every target succeeded. A conflict is never overwritten or deleted.
 
 For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
@@ -119,12 +121,13 @@ keypairs are persistent.
 
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials. For each YubiHSM slot it calls `C_LoginUser` with the
-wildcard username `:*` and the prototype credential password `password`.
-pkcs11rs compares available asymmetric credential public points with that
-slot's publicly discovered `CKO_PUBLIC_KEY` projections and tries the matching
-credential/Authentication Key pairs until one logs in. After a successful
-login, the app enumerates the objects again as an authenticated user, logs out,
-and closes the session. On iOS the module
+provider-independent wildcard username `:*` and the prototype YubiHSM Auth
+credential password `password`. pkcs11rs compares available credential public
+points with that slot's publicly discovered `CKO_PUBLIC_KEY` projections. It
+prefers a matching credential from an attached YubiKey, then falls back to a
+matching platform credential and ignores the password for that candidate.
+After a successful login, the app enumerates the objects again as an
+authenticated user, logs out, and closes the session. On iOS the module
 reconciles ordinary CryptoTokenKit USB smart-card readers before requesting
 interactive NFC discovery. A USB view of an NFC-discovered serial therefore
 rebinds its existing slots before their refresh can request NFC reacquisition.
@@ -265,7 +268,8 @@ buffer lifetimes and cleanup.
 
 The generic package should remain usable with other conforming PKCS #11
 modules. A small optional pkcs11rs extension may provide typed construction of
-named and wildcard YubiHSM Auth login selectors. Refactoring this smoke app
+named, provider-independent wildcard, YubiHSM Auth, and platform login
+selectors. Refactoring this smoke app
 onto the wrapper would validate the package against software,
 USB CCID, NFC CryptoTokenKit, and remote YubiHSM slots before presenting it as
 a general client library.

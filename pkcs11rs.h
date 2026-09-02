@@ -271,6 +271,18 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmProvisionPlatformCredential)(
   CK_ULONG_PTR pulProvisioningResult
 );
 
+/*
+ * Idempotently remove the matching Authentication Key and public projection
+ * from the YubiHSM behind an authenticated read/write session. The named
+ * platform credential remains in the platform key store.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmUnprovisionPlatformCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pCredentialName,
+  CK_ULONG ulCredentialNameLen,
+  CK_ULONG ulAuthenticationKeyId
+);
+
 #define PKCS11RS_HSMAUTH_P256_PUBLIC_KEY_SIZE 65
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutSymmetricCredential)(

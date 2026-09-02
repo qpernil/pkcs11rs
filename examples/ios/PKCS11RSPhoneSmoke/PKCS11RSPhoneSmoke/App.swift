@@ -1413,7 +1413,7 @@ private func authenticatedObjectInventory(
     }
     if loginResult == CKR_OK {
         lines.append("")
-        lines.append("YubiHSM Auth login \(usernameValue): success")
+        lines.append("Automatic credential login \(usernameValue): success")
         lines.append(contentsOf: objectInventory(
             session: session,
             title: "Objects (authenticated session)"
@@ -1425,7 +1425,7 @@ private func authenticatedObjectInventory(
     } else if loginResult != CKR_FUNCTION_NOT_SUPPORTED {
         lines.append("")
         lines.append(
-            "YubiHSM Auth login \(usernameValue) failed: \(loginResult)"
+            "Automatic credential login \(usernameValue) failed: \(loginResult)"
         )
     }
     let closeResult = C_CloseSession(session)
@@ -1441,49 +1441,68 @@ private final class InspectionViewController: UIViewController {
     private let provisionButton = UIButton(type: .system)
     private let inventoryView = UITextView()
     var onRefresh: (() -> Void)?
-    var onProvision: (() -> Void)?
+    var onProvision: ((Bool) -> Void)?
+    private var platformCredentialProvisioned = false
     private var refreshStartedAt: Date?
     private var refreshTimer: Timer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
+
+        let heading = UILabel()
+        heading.font = .preferredFont(forTextStyle: .title2)
+        heading.text = "PKCS #11 module inventory"
+
+        let explanation = UILabel()
+        explanation.font = .preferredFont(forTextStyle: .body)
+        explanation.numberOfLines = 0
+        explanation.text =
+            "This Swift smoke app inspects PKCS #11 slots and provisions a platform credential."
+
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         statusLabel.textColor = .secondaryLabel
         statusLabel.isHidden = true
-        view.addSubview(statusLabel)
 
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
         refreshButton.configuration = .bordered()
         refreshButton.configuration?.title = "Refresh"
         refreshButton.addTarget(self, action: #selector(refresh), for: .touchUpInside)
-        view.addSubview(refreshButton)
 
         provisionButton.translatesAutoresizingMaskIntoConstraints = false
         provisionButton.configuration = .borderedProminent()
-        provisionButton.configuration?.title = "Provision this iPhone for YubiHSM login"
+        provisionButton.configuration?.title = "Provision platform credential"
         provisionButton.addTarget(self, action: #selector(provision), for: .touchUpInside)
-        view.addSubview(provisionButton)
+
+        let buttonRow = UIStackView(arrangedSubviews: [provisionButton, refreshButton])
+        buttonRow.axis = .horizontal
+        buttonRow.alignment = .center
+        buttonRow.distribution = .equalSpacing
+
+        let header = UIStackView(arrangedSubviews: [heading, explanation, buttonRow, statusLabel])
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.axis = .vertical
+        header.alignment = .leading
+        header.spacing = 12
+        buttonRow.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        view.addSubview(header)
 
         inventoryView.translatesAutoresizingMaskIntoConstraints = false
-        inventoryView.backgroundColor = .systemBackground
+        inventoryView.backgroundColor = .secondarySystemBackground
         inventoryView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         inventoryView.isEditable = false
-        inventoryView.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 20, right: 12)
+        inventoryView.text = "Not inspected yet."
         view.addSubview(inventoryView)
+        let safeArea = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            refreshButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            refreshButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            statusLabel.centerYAnchor.constraint(equalTo: refreshButton.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            provisionButton.topAnchor.constraint(equalTo: refreshButton.bottomAnchor, constant: 8),
-            provisionButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            provisionButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            inventoryView.topAnchor.constraint(equalTo: provisionButton.bottomAnchor, constant: 4),
-            inventoryView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            inventoryView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            inventoryView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            header.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 20),
+            header.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 20),
+            header.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -20),
+            inventoryView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
+            inventoryView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor, constant: 20),
+            inventoryView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor, constant: -20),
+            inventoryView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor, constant: -20),
         ])
     }
 
@@ -1502,6 +1521,13 @@ private final class InspectionViewController: UIViewController {
     func showInventory(_ inventory: String) {
         endOperation()
         inventoryView.text = inventory
+    }
+
+    func setPlatformCredentialProvisioned(_ provisioned: Bool) {
+        platformCredentialProvisioned = provisioned
+        provisionButton.configuration?.title = provisioned
+            ? "Unprovision platform credential"
+            : "Provision platform credential"
     }
 
     private func endOperation() {
@@ -1525,7 +1551,7 @@ private final class InspectionViewController: UIViewController {
     }
 
     @objc private func provision() {
-        onProvision?()
+        onProvision?(platformCredentialProvisioned)
     }
 }
 
@@ -1672,29 +1698,11 @@ private final class ModuleInspector {
             return "C_Initialize failed: \(initialize)"
         }
 
-        var count = CK_ULONG()
-        var result = C_GetSlotList(CK_BBOOL(CK_TRUE), nil, &count)
-        guard result == CKR_OK else {
-            return "C_GetSlotList(size) failed: \(result)"
+        let discovery = yubiHsmTargets()
+        if let error = discovery.error {
+            return error
         }
-        var slots = [CK_SLOT_ID](repeating: 0, count: Int(count))
-        result = slots.withUnsafeMutableBufferPointer { buffer in
-            C_GetSlotList(CK_BBOOL(CK_TRUE), buffer.baseAddress, &count)
-        }
-        guard result == CKR_OK else {
-            return "C_GetSlotList failed: \(result)"
-        }
-
-        var targets = [(CK_SLOT_ID, String)]()
-        for slot in slots.prefix(Int(count)) {
-            var token = CK_TOKEN_INFO()
-            if C_GetTokenInfo(slot, &token) == CKR_OK {
-                let label = paddedString(token.label)
-                if label.hasPrefix("YubiHSM #") {
-                    targets.append((slot, label))
-                }
-            }
-        }
+        let targets = discovery.targets
         guard !targets.isEmpty else {
             return "No YubiHSM target is present."
         }
@@ -1709,6 +1717,101 @@ private final class ModuleInspector {
             lines.append(contentsOf: provisionTarget(slot: slot, name: target))
         }
         return lines.joined(separator: "\n")
+    }
+
+    func unprovisionPhone(configuration: ConnectorConfiguration) -> String {
+        let initialize = initialize(configuration: configuration)
+        guard initialize == CKR_OK else {
+            return "C_Initialize failed: \(initialize)"
+        }
+
+        let discovery = yubiHsmTargets()
+        if let error = discovery.error {
+            return error
+        }
+        let targets = discovery.targets
+        guard !targets.isEmpty else {
+            return "No YubiHSM target is present; the platform credential was retained."
+        }
+
+        var lines = [
+            "Unprovision this iPhone from YubiHSM login",
+            "Credential: \(platformCredentialName)",
+            String(format: "Authentication Key: %04llX", UInt64(platformAuthenticationKeyID)),
+            "",
+        ]
+        var allSucceeded = true
+        for (slot, target) in targets {
+            let outcome = unprovisionTarget(slot: slot, name: target)
+            lines.append(outcome.report)
+            allSucceeded = allSucceeded && outcome.succeeded
+        }
+        guard allSucceeded else {
+            lines.append("")
+            lines.append("The local platform credential was retained so unprovisioning can be retried.")
+            return lines.joined(separator: "\n")
+        }
+
+        let deletion = Array(platformCredentialName.utf8).withUnsafeBufferPointer { credential in
+            PKCS11RS_PlatformCredentialDelete(
+                credential.baseAddress,
+                CK_ULONG(credential.count)
+            )
+        }
+        if deletion == CKR_OK || deletion == CKR_OBJECT_HANDLE_INVALID {
+            lines.append("")
+            lines.append("Local platform credential deleted.")
+        } else {
+            lines.append("")
+            lines.append("Local credential deletion failed: \(deletion)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func platformCredentialExists() -> Bool {
+        var publicKey = [UInt8](repeating: 0, count: 65)
+        var publicKeyLength = CK_ULONG(publicKey.count)
+        let result = Array(platformCredentialName.utf8).withUnsafeBufferPointer { credential in
+            publicKey.withUnsafeMutableBufferPointer { publicKey in
+                PKCS11RS_PlatformCredentialGetPublicKey(
+                    credential.baseAddress,
+                    CK_ULONG(credential.count),
+                    publicKey.baseAddress,
+                    &publicKeyLength
+                )
+            }
+        }
+        return result == CKR_OK
+    }
+
+    private func yubiHsmTargets() -> (
+        targets: [(CK_SLOT_ID, String)],
+        error: String?
+    ) {
+        var count = CK_ULONG()
+        var result = C_GetSlotList(CK_BBOOL(CK_TRUE), nil, &count)
+        guard result == CKR_OK else {
+            return ([], "C_GetSlotList(size) failed: \(result)")
+        }
+        var slots = [CK_SLOT_ID](repeating: 0, count: Int(count))
+        result = slots.withUnsafeMutableBufferPointer { buffer in
+            C_GetSlotList(CK_BBOOL(CK_TRUE), buffer.baseAddress, &count)
+        }
+        guard result == CKR_OK else {
+            return ([], "C_GetSlotList failed: \(result)")
+        }
+
+        var targets = [(CK_SLOT_ID, String)]()
+        for slot in slots.prefix(Int(count)) {
+            var token = CK_TOKEN_INFO()
+            if C_GetTokenInfo(slot, &token) == CKR_OK {
+                let label = paddedString(token.label)
+                if label.hasPrefix("YubiHSM #") {
+                    targets.append((slot, label))
+                }
+            }
+        }
+        return (targets, nil)
     }
 
     private func provisionTarget(slot: CK_SLOT_ID, name: String) -> [String] {
@@ -1812,6 +1915,62 @@ private final class ModuleInspector {
         return ["\(name): \(action), login verified"]
     }
 
+    private func unprovisionTarget(slot: CK_SLOT_ID, name: String) -> (
+        report: String,
+        succeeded: Bool
+    ) {
+        var session = CK_SESSION_HANDLE(CK_INVALID_HANDLE)
+        var result = C_OpenSession(
+            slot,
+            CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+            nil,
+            nil,
+            &session
+        )
+        guard result == CKR_OK else {
+            return ("\(name): open failed: \(result)", false)
+        }
+        defer { _ = C_CloseSession(session) }
+
+        var bootstrapUsername = Array(":*".utf8)
+        var bootstrapPassword = Array(yubiHsmAuthPassword.utf8)
+        result = bootstrapPassword.withUnsafeMutableBufferPointer { password in
+            bootstrapUsername.withUnsafeMutableBufferPointer { username in
+                C_LoginUser(
+                    session,
+                    CK_USER_TYPE(CKU_USER),
+                    password.baseAddress,
+                    CK_ULONG(password.count),
+                    username.baseAddress,
+                    CK_ULONG(username.count)
+                )
+            }
+        }
+        _ = bootstrapPassword.withUnsafeMutableBytes { bytes in
+            bytes.initializeMemory(as: UInt8.self, repeating: 0)
+        }
+        guard result == CKR_OK else {
+            return ("\(name): bootstrap login failed: \(result)", false)
+        }
+
+        result = Array(platformCredentialName.utf8).withUnsafeBufferPointer { credential in
+            PKCS11RS_YubiHsmUnprovisionPlatformCredential(
+                session,
+                credential.baseAddress,
+                CK_ULONG(credential.count),
+                platformAuthenticationKeyID
+            )
+        }
+        let logout = C_Logout(session)
+        guard result == CKR_OK else {
+            return ("\(name): unprovisioning failed: \(result)", false)
+        }
+        guard logout == CKR_OK else {
+            return ("\(name): unprovisioned, logout failed: \(logout)", false)
+        }
+        return ("\(name): unprovisioned", true)
+    }
+
     func finalize() {
         if initialized {
             let result = C_Finalize(nil)
@@ -1845,8 +2004,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         controller.onRefresh = { [weak self] in
             self?.refresh()
         }
-        controller.onProvision = { [weak self] in
-            self?.provisionPhone()
+        controller.onProvision = { [weak self] provisioned in
+            self?.setPlatformCredentialProvisioned(!provisioned)
         }
         initializeModule()
 
@@ -1865,8 +2024,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         inspectionQueue.async { [weak self] in
             guard let self else { return }
             let result = moduleInspector.inspect(configuration: configuration)
+            let provisioned = moduleInspector.platformCredentialExists()
             DispatchQueue.main.async {
                 self.controller.showInventory(result)
+                self.controller.setPlatformCredentialProvisioned(provisioned)
             }
         }
     }
@@ -1877,20 +2038,26 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         inspectionQueue.async { [weak self] in
             guard let self else { return }
             let result = moduleInspector.initializeAndDescribe(configuration: configuration)
+            let provisioned = moduleInspector.platformCredentialExists()
             DispatchQueue.main.async {
                 self.controller.showInventory(result)
+                self.controller.setPlatformCredentialProvisioned(provisioned)
             }
         }
     }
 
-    private func provisionPhone() {
+    private func setPlatformCredentialProvisioned(_ provision: Bool) {
         let configuration = connectorConfiguration()
         controller.beginRefresh()
         inspectionQueue.async { [weak self] in
             guard let self else { return }
-            let result = moduleInspector.provisionPhone(configuration: configuration)
+            let result = provision
+                ? moduleInspector.provisionPhone(configuration: configuration)
+                : moduleInspector.unprovisionPhone(configuration: configuration)
+            let provisioned = moduleInspector.platformCredentialExists()
             DispatchQueue.main.async {
                 self.controller.showInventory(result)
+                self.controller.setPlatformCredentialProvisioned(provisioned)
             }
         }
     }

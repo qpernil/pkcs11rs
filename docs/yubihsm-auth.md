@@ -476,11 +476,11 @@ source YubiKey serial number:
 
 When a source has no serial number, its slot description is used as the source
 identifier. `@` and `:` are reserved in the credential selector. The leading
-colon identifies a YubiHSM Auth login, and the next four characters are always
-the target YubiHSM authentication-key ID. The following colon separates the
-selector from the password, so the password itself may contain colons. The
-selected credential and target YubiHSM authentication key must form a
-compatible symmetric or asymmetric authentication pair.
+colon identifies a provider-routed login, and the next four characters are
+always the target YubiHSM authentication-key ID. The following colon separates
+a YubiHSM Auth selector from its password, so the password itself may contain
+colons. The selected credential and target YubiHSM authentication key must form
+a compatible symmetric or asymmetric authentication pair.
 
 A nonnumeric selector after an otherwise empty label selects the platform
 credential provider compiled for the operating system. For example,
@@ -508,6 +508,18 @@ may be omitted to request it through pinentry:
 :0001default@12345678
 ```
 
+Direct symmetric authentication uses the same convention. Exactly four
+hexadecimal digits select the Authentication Key and request its password
+through pinentry:
+
+```text
+0001
+```
+
+Appending the password keeps the noninteractive direct form, for example
+`0001password`. Because a direct password is at least eight bytes, the exact
+four-character form is unambiguous.
+
 The form `:0001default@12345678:` still supplies an explicitly empty password
 and does not open pinentry.
 
@@ -518,7 +530,8 @@ separately with `C_LoginUser`:
 | --- | --- | --- |
 | Direct authentication key | `AAAA` | Password |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
-| Unique matching asymmetric credential | `:*[<label>][@<source>]` | Credential password |
+| Any matching local credential | `:*` | Optional YubiHSM Auth credential password |
+| Matching YubiHSM Auth credential | `:*<label>[@<source>]` | Credential password |
 | Platform-protected credential | `:AAAA@<name>` | Null pointer and zero length |
 | Matching platform credential projection | `:*@<name>` | Null pointer and zero length |
 
@@ -526,15 +539,18 @@ The wildcard form is available only through `C_LoginUser`, whose session
 identifies the target YubiHSM slot. It requires successful public discovery on
 that slot. pkcs11rs compares each eligible credential's long-term public point
 with the slot's persisted public projections; the matching projection's
-two-byte `CKA_ID` supplies the Authentication Key ID. `:*` applies no label or
-source constraint, while `:*asymmetric@87654321` and `:*@87654321` narrow the
-candidate credentials. Matching pairs are tried in discovery order and the
-first successful authentication wins. Multiple projections of the same
-credential under different Authentication Key IDs are therefore supported.
+two-byte `CKA_ID` supplies the Authentication Key ID. Bare `:*` considers all
+matching local credential providers. Matching YubiHSM Auth credentials are
+tried first when a YubiKey is present, using the supplied password; matching
+platform credentials follow and disregard that password because possession of
+the protected private key is their authentication factor. The forms
+`:*asymmetric@87654321` and `:*@87654321` remain YubiHSM Auth-only constraints.
+Matching pairs are tried in discovery order and the first successful
+authentication wins. Multiple projections of the same credential under
+different Authentication Key IDs are therefore supported.
 Zero matches returns `CKR_USER_TYPE_INVALID`, because no credential identity was
-resolved and no password was tried. If matching candidates exist but every
-authentication attempt rejects the supplied password, the call returns
-`CKR_PIN_INCORRECT`.
+resolved and no authentication was tried. If matching candidates exist but none
+authenticates, the call returns the last relevant authentication error.
 Explicit selectors and packed `C_Login` behavior are unchanged. Wildcards are
 not accepted as public discovery credentials because that would make discovery
 circular.
@@ -981,9 +997,9 @@ their certificate or key stores.
 A Secure Enclave credential is generated and provisioned entirely inside the
 iPhone smoke applications through PKCS11RS. There is one supported application
 flow: the user connects an already authorized YubiKey when bootstrap
-administration is required and presses **Provision this iPhone for YubiHSM
-login**. No public-key export, QR code, enrollment file, or separate desktop
-provisioner participates in this flow.
+administration is required and presses **Provision platform credential**. No
+public-key export, QR code, enrollment file, or separate desktop provisioner
+participates in this flow.
 
 The button performs these operations:
 
@@ -1024,6 +1040,25 @@ the portable protocol and therefore cannot be proven to match. Any differing
 object or projection at the requested identity is an explicit conflict. No
 retry overwrites or rotates key material implicitly.
 
+The button is a two-state lifecycle control. Its label is **Provision platform
+credential** when the named local credential is absent and **Unprovision
+platform credential** when it is present. Unprovisioning authenticates to every
+currently present YubiHSM target, asks
+`PKCS11RS_YubiHsmUnprovisionPlatformCredential` to verify that the public
+projection at the requested ID exactly matches the named platform key, and only
+then removes that Authentication Key and projection. The operation is
+idempotent when both target objects are already absent. It refuses to delete an
+Authentication Key that cannot be bound to the platform credential through its
+projection because the Authentication Key public half is not portably
+readable.
+
+After all present targets succeed, the application deletes the named local
+Secure Enclave credential. If any target fails, or no target is present, the
+local credential is retained so the operation can be retried. This is not a
+global registry of every HSM on which the credential may ever have been
+installed: an unavailable or unconfigured target cannot be modified by the
+application.
+
 For example, the result can be presented as:
 
 ```text
@@ -1035,7 +1070,11 @@ YubiHSM target 2      provisioned   login verified
 The two checked-in iOS smoke applications implement the same behavior. Their
 UI code remains a thin orchestrator; credential storage, public-key handling,
 YubiHSM commands, cleanup, and login verification belong to shared PKCS11RS
-code.
+code. Each app has its own Keychain scope and therefore provisions an
+independent identity: the Swift app uses `iphone-qpernil` with Authentication
+Key `1004`, while the Objective-C app uses `iphone-qpernil-objc` with
+Authentication Key `1005`. Provisioning or removing one does not alter the
+other.
 
 For an Authentication Key assigned ID `1004`, explicit login is:
 
@@ -1070,13 +1109,16 @@ are exported as `PKCS11RS_PlatformCredentialGenerate`,
 `PKCS11RS_PlatformCredentialList`,
 `PKCS11RS_PlatformCredentialGetPublicKey`, and
 `PKCS11RS_PlatformCredentialDelete`. The button uses the high-level
-`PKCS11RS_YubiHsmProvisionPlatformCredential` operation. It requires a
-read/write session with an active administrative login and accepts the target
-ID, label, domains, capabilities, and delegated capabilities. PKCS11RS reads or
-generates the named platform credential internally and returns whether the
-target was provisioned, already provisioned, or repaired. The lifecycle
-functions use ordinary PKCS #11 two-call output-buffer conventions where
-applicable and never return private material.
+`PKCS11RS_YubiHsmProvisionPlatformCredential` and
+`PKCS11RS_YubiHsmUnprovisionPlatformCredential` operations. Both require a
+read/write session with an active administrative login. Provisioning accepts
+the target ID, label, domains, capabilities, and delegated capabilities;
+PKCS11RS reads or generates the named platform credential internally and
+returns whether the target was provisioned, already provisioned, or repaired.
+Unprovisioning accepts the credential name and target ID and validates the
+public binding before deletion. The lifecycle functions use ordinary PKCS #11
+two-call output-buffer conventions where applicable and never return private
+material.
 
 ## Asymmetric hardware provisioning test
 
