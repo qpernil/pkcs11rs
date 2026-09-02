@@ -12,6 +12,9 @@ use software_key_core::{
 use std::{fmt, sync::Arc};
 use zeroize::{Zeroize, Zeroizing};
 
+/// Maximum UTF-8 byte length of a managed credential name.
+pub const PLATFORM_CREDENTIAL_NAME_CAPACITY: usize = 128;
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -215,8 +218,11 @@ pub fn prefixed_x963_kdf(
 
 pub fn validate_platform_credential_name(name: &str) -> Result<(), PlatformCryptoError> {
     if name.is_empty()
+        || name.len() > PLATFORM_CREDENTIAL_NAME_CAPACITY
         || name.bytes().all(|byte| byte.is_ascii_digit())
-        || name.bytes().any(|byte| byte == b'@' || byte == b':')
+        || name
+            .bytes()
+            .any(|byte| byte == b'@' || byte == b':' || byte == 0)
     {
         return Err(PlatformCryptoError::InvalidName);
     }
@@ -264,5 +270,9 @@ mod tests {
                 Err(PlatformCryptoError::InvalidName)
             );
         }
+        assert_eq!(
+            validate_platform_credential_name(&"x".repeat(PLATFORM_CREDENTIAL_NAME_CAPACITY + 1)),
+            Err(PlatformCryptoError::InvalidName)
+        );
     }
 }

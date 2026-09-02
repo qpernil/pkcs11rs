@@ -133,6 +133,7 @@ pub(crate) struct ProtocolPeer {
     authkeys_with_get_opaque: RefCell<HashSet<u16>>,
     asymmetric_authkeys: RefCell<HashSet<u16>>,
     listed_authkeys: RefCell<HashSet<u16>>,
+    visible_authkey_info: RefCell<HashMap<u16, ObjectInfo>>,
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
     corrupt_card_cryptogram: Cell<bool>,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
@@ -189,6 +190,7 @@ impl ProtocolPeer {
             authkeys_with_get_opaque: RefCell::new(HashSet::from([1, 2])),
             asymmetric_authkeys: RefCell::new(HashSet::new()),
             listed_authkeys: RefCell::new(HashSet::new()),
+            visible_authkey_info: RefCell::new(HashMap::new()),
             x25519_private_keys: RefCell::new(x25519_private_keys),
             corrupt_card_cryptogram: Cell::new(false),
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
@@ -362,6 +364,32 @@ impl ProtocolPeer {
 
     fn list_authentication_key(&self, authkey_id: u16) {
         self.listed_authkeys.borrow_mut().insert(authkey_id);
+    }
+
+    pub(crate) fn expose_provisioned_authentication_key(
+        &self,
+        id: u16,
+        label: &str,
+        domains: u16,
+        capabilities: [u8; 8],
+        delegated_capabilities: [u8; 8],
+    ) {
+        self.listed_authkeys.borrow_mut().insert(id);
+        self.visible_authkey_info.borrow_mut().insert(
+            id,
+            ObjectInfo {
+                capabilities,
+                id,
+                length: 64,
+                domains,
+                object_type: YUBIHSM_AUTHENTICATION_KEY,
+                algorithm: YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+                sequence: 1,
+                origin: 0,
+                label: label.to_owned(),
+                delegated_capabilities,
+            },
+        );
     }
 
     fn add_public_certificate_pair(&self) {
@@ -637,7 +665,12 @@ impl ProtocolPeer {
                                 return Err(CKR_DEVICE_ERROR.into());
                             }
                             let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                            if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY {
+                            if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY
+                                && let Some(info) =
+                                    self.visible_authkey_info.borrow().get(&id).cloned()
+                            {
+                                (inner.command | RESPONSE_BIT, encode_object_info(&info))
+                            } else if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY {
                                 let domains = self
                                     .authkey_domains
                                     .borrow()
@@ -1353,6 +1386,21 @@ pub(crate) fn make_yubihsm_test_slot() -> (
     );
     slot.trust_prefix = Some(trust.prefix.clone());
     (Box::new(slot), commands, corrupt_response_mac, trust)
+}
+
+pub(crate) fn make_yubihsm_provisioning_test_slot()
+-> (Box<dyn crate::Slot>, Rc<ProtocolPeer>, TestTrustEntry) {
+    let peer = Rc::new(ProtocolPeer::new());
+    let trust = TestTrustEntry::new();
+    let mut slot = crate::YubiHsmSlot::new(
+        peer.clone(),
+        (2, 4, 1),
+        vec![
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57,
+        ],
+    );
+    slot.trust_prefix = Some(trust.prefix.clone());
+    (Box::new(slot), peer, trust)
 }
 
 pub(crate) fn make_yubihsm_asymmetric_test_slot() -> (

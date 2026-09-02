@@ -58,6 +58,12 @@ The nonstandard administration entry points are grouped by feature:
 - `PKCS11RS_HsmAuth*` creates, updates, deletes, and resets credentials in the
   YubiHSM Auth applet. See
   [YubiHSM Auth administration](yubihsm-auth.md#yubihsm-auth-administration).
+- `PKCS11RS_PlatformCredential*` generates, lists, reads the public half of, and
+  deletes credentials backed by the current platform's protected key store.
+  `PKCS11RS_YubiHsmProvisionPlatformCredential` idempotently installs one such
+  credential in the YubiHSM behind an authenticated read/write session. See
+  [platform credential login](yubihsm-auth.md#platform-credential-login-architecture)
+  and [iPhone provisioning](yubihsm-auth.md#provisioning-an-iphone-platform-credential).
 - `PKCS11RS_SoftwareExportPrivateKey` exports an extractable private key from a
   named software slot as password-encrypted PKCS #8. See
   [software private-key export](software.md#password-encrypted-pkcs-8-export).

@@ -538,6 +538,166 @@ fn unavailable_yubihsm_connector_is_an_empty_slot() {
 }
 
 #[test]
+fn yubihsm_platform_provisioning_is_idempotent_and_rejects_policy_conflicts() {
+    const SLOT_ID: CK_SLOT_ID = 0x5053;
+    const AUTHENTICATION_KEY_ID: u16 = 0x1004;
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (slot, peer, _trust) = crate::yubihsm::tests::make_yubihsm_provisioning_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut admin = b"0001password".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            admin.as_mut_ptr(),
+            admin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let key = crate::SoftwareSigningKey::generate(crate::SignatureScheme::EcdsaP256Sha256)
+        .unwrap()
+        .public_key();
+    let policy = [0xff; 8];
+    assert_eq!(
+        crate::api::platform_credential::provision_platform_credential(
+            session,
+            "phone",
+            AUTHENTICATION_KEY_ID,
+            "iPhone",
+            u16::MAX,
+            policy,
+            policy,
+            &key,
+        )
+        .unwrap(),
+        crate::api::platform_credential::PKCS11RS_PLATFORM_PROVISIONED
+    );
+    peer.expose_provisioned_authentication_key(
+        AUTHENTICATION_KEY_ID,
+        "iPhone",
+        u16::MAX,
+        policy,
+        policy,
+    );
+    assert_eq!(
+        crate::api::platform_credential::provision_platform_credential(
+            session,
+            "phone",
+            AUTHENTICATION_KEY_ID,
+            "iPhone",
+            u16::MAX,
+            policy,
+            policy,
+            &key,
+        )
+        .unwrap(),
+        crate::api::platform_credential::PKCS11RS_PLATFORM_ALREADY_PROVISIONED
+    );
+    assert!(
+        crate::api::platform_credential::provision_platform_credential(
+            session,
+            "phone",
+            AUTHENTICATION_KEY_ID,
+            "another label",
+            u16::MAX,
+            policy,
+            policy,
+            &key,
+        )
+        .is_err()
+    );
+
+    const REPAIR_KEY_ID: u16 = 0x1005;
+    let crate::SoftwarePublicKey::Ec { uncompressed, .. } = &key else {
+        panic!("generated P-256 key did not expose an EC public point");
+    };
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut repair_id = REPAIR_KEY_ID.to_be_bytes();
+    let mut repair_label = b"repair".to_vec();
+    let mut parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    let mut point = crate::der_octet_string(uncompressed).unwrap();
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut repair_id),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut repair_label),
+        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+        bytes_attribute(CKA_EC_POINT as CK_ATTRIBUTE_TYPE, &mut point),
+    ];
+    let mut projection = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut projection,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::platform_credential::provision_platform_credential(
+            session,
+            "phone",
+            REPAIR_KEY_ID,
+            "repair",
+            u16::MAX,
+            policy,
+            policy,
+            &key,
+        )
+        .unwrap(),
+        crate::api::platform_credential::PKCS11RS_PLATFORM_REPAIRED
+    );
+
+    const AUTHENTICATION_KEY_WITHOUT_PROJECTION_ID: u16 = 0x1006;
+    peer.expose_provisioned_authentication_key(
+        AUTHENTICATION_KEY_WITHOUT_PROJECTION_ID,
+        "unverifiable",
+        u16::MAX,
+        policy,
+        policy,
+    );
+    assert!(
+        crate::api::platform_credential::provision_platform_credential(
+            session,
+            "phone",
+            AUTHENTICATION_KEY_WITHOUT_PROJECTION_ID,
+            "unverifiable",
+            u16::MAX,
+            policy,
+            policy,
+            &key,
+        )
+        .is_err()
+    );
+
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
     let slot = crate::yubihsm::tests::make_yubihsm_connector_named_test_slot();
     let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };

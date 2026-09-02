@@ -27,6 +27,7 @@ mod interfaces;
 mod kem;
 mod key;
 mod object;
+pub(crate) mod platform_credential;
 mod security_domain;
 mod session;
 mod software;

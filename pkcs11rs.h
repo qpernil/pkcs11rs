@@ -205,6 +205,72 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmEnrollDevicePublicKey)(
   CK_ULONG_PTR pulFingerprintLen
 );
 
+#define PKCS11RS_PLATFORM_CREDENTIAL_NAME_CAPACITY 128
+#define PKCS11RS_PLATFORM_CREDENTIAL_ALGORITHM_P256 1UL
+
+typedef struct PKCS11RS_PLATFORM_CREDENTIAL_INFO {
+  CK_ULONG ulAlgorithm;
+  CK_ULONG ulNameLen;
+  CK_UTF8CHAR name[PKCS11RS_PLATFORM_CREDENTIAL_NAME_CAPACITY];
+} PKCS11RS_PLATFORM_CREDENTIAL_INFO;
+
+typedef PKCS11RS_PLATFORM_CREDENTIAL_INFO CK_PTR
+  PKCS11RS_PLATFORM_CREDENTIAL_INFO_PTR;
+
+/*
+ * Platform credential lifecycle. Public-key outputs use an uncompressed SEC1
+ * point and ordinary two-call buffer semantics. List uses the same convention
+ * with pulCredentialCount as an element count.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_PlatformCredentialGenerate)(
+  const CK_UTF8CHAR *pName,
+  CK_ULONG ulNameLen,
+  CK_BYTE_PTR pPublicKey,
+  CK_ULONG_PTR pulPublicKeyLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_PlatformCredentialGetPublicKey)(
+  const CK_UTF8CHAR *pName,
+  CK_ULONG ulNameLen,
+  CK_BYTE_PTR pPublicKey,
+  CK_ULONG_PTR pulPublicKeyLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_PlatformCredentialList)(
+  PKCS11RS_PLATFORM_CREDENTIAL_INFO_PTR pCredentials,
+  CK_ULONG_PTR pulCredentialCount
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_PlatformCredentialDelete)(
+  const CK_UTF8CHAR *pName,
+  CK_ULONG ulNameLen
+);
+
+#define PKCS11RS_PLATFORM_PROVISIONED 1UL
+#define PKCS11RS_PLATFORM_ALREADY_PROVISIONED 2UL
+#define PKCS11RS_PLATFORM_REPAIRED 3UL
+
+/*
+ * Idempotently provision a named platform credential into the YubiHSM behind
+ * an authenticated read/write session. Capability values are the canonical
+ * eight-byte YubiHSM bitsets. Existing objects are accepted only when their
+ * complete visible policy and public projection match the request.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmProvisionPlatformCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pCredentialName,
+  CK_ULONG ulCredentialNameLen,
+  CK_ULONG ulAuthenticationKeyId,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  CK_ULONG ulDomains,
+  const CK_BYTE *pCapabilities,
+  CK_ULONG ulCapabilitiesLen,
+  const CK_BYTE *pDelegatedCapabilities,
+  CK_ULONG ulDelegatedCapabilitiesLen,
+  CK_ULONG_PTR pulProvisioningResult
+);
+
 #define PKCS11RS_HSMAUTH_P256_PUBLIC_KEY_SIZE 65
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutSymmetricCredential)(
