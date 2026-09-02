@@ -692,6 +692,20 @@ fn yubihsm_platform_provisioning_is_idempotent_and_rejects_policy_conflicts() {
         .is_err()
     );
 
+    crate::api::platform_credential::unprovision_platform_credential(
+        session,
+        AUTHENTICATION_KEY_ID,
+        &key,
+    )
+    .unwrap();
+    crate::api::platform_credential::unprovision_platform_credential(
+        session,
+        AUTHENTICATION_KEY_ID,
+        &key,
+    )
+    .unwrap();
+    assert!(peer.deleted_object(AUTHENTICATION_KEY_ID, crate::YUBIHSM_AUTHENTICATION_KEY));
+
     assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();

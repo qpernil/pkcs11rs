@@ -166,6 +166,31 @@ ffi_entry_point! {
     }
 }
 
+ffi_entry_point! {
+    pub fn PKCS11RS_YubiHsmUnprovisionPlatformCredential(
+        session_handle: CK_SESSION_HANDLE,
+        credential_name: *const CK_UTF8CHAR,
+        credential_name_len: CK_ULONG,
+        authentication_key_id: CK_ULONG,
+    ) -> CK_RV {
+        map((|| -> Result<(), Error> {
+            let credential_name = platform_name(credential_name, credential_name_len)?;
+            let authentication_key_id = u16::try_from(authentication_key_id)
+                .ok()
+                .filter(|id| *id != 0)
+                .ok_or(CKR_ARGUMENTS_BAD)?;
+            validate_provisioning_session(session_handle)?;
+            let public_key = crate::platform_crypto::platform_credential_public_key(credential_name)
+                .map_err(platform_crypto_error)?;
+            unprovision_platform_credential(
+                session_handle,
+                authentication_key_id,
+                &public_key,
+            )
+        })())
+    }
+}
+
 fn platform_name<'a>(name: *const CK_UTF8CHAR, name_len: CK_ULONG) -> Result<&'a str, Error> {
     let value = unsafe { from_raw_parts(name, name_len as usize) }?;
     let value = std::str::from_utf8(value).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
@@ -414,6 +439,115 @@ pub(crate) fn provision_platform_credential(
         } else {
             PKCS11RS_PLATFORM_PROVISIONED
         })
+    })
+}
+
+pub(crate) fn unprovision_platform_credential(
+    session_handle: CK_SESSION_HANDLE,
+    authentication_key_id: u16,
+    platform_public_key: &SoftwarePublicKey,
+) -> Result<(), Error> {
+    let uncompressed = platform_public_key_bytes(platform_public_key)?;
+    let raw_public_key = uncompressed.get(1..).ok_or(CKR_DEVICE_ERROR)?;
+    with_session_context_mut(session_handle, |ctx| {
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+            return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        if !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+
+        ctx.refresh_slot_token_objects(slot_id)?;
+        let objects = ctx.resolved_objects()?;
+        let authentication_keys = objects
+            .iter()
+            .filter(|(_, object)| {
+                matches!(
+                    object.material,
+                    KeyMaterial::YubiHsm {
+                        id,
+                        object_type: YUBIHSM_AUTHENTICATION_KEY,
+                        ..
+                    } if id == authentication_key_id
+                )
+            })
+            .map(|(_, object)| object)
+            .collect::<Vec<_>>();
+        if authentication_keys.len() > 1 {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        if authentication_keys.first().is_some_and(|object| {
+            !matches!(
+                object.material,
+                KeyMaterial::YubiHsm {
+                    algorithm: YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+                    ..
+                }
+            )
+        }) {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+
+        let matching_id = authentication_key_id.to_be_bytes();
+        let public_candidates = objects
+            .iter()
+            .filter(|(_, object)| {
+                object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && object.token
+                    && object.id == matching_id
+            })
+            .map(|(_, object)| object)
+            .collect::<Vec<_>>();
+        let matching_projection = public_candidates.iter().find(|object| {
+            matches!(
+                &object.material,
+                KeyMaterial::Public(PublicKeyMaterial::Ec { parameters, public_key })
+                    if parameters.as_slice() == [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]
+                        && public_key.as_slice() == raw_public_key
+            )
+        });
+        if !public_candidates.is_empty()
+            && (public_candidates.len() != 1 || matching_projection.is_none())
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        if !authentication_keys.is_empty() && matching_projection.is_none() {
+            // The Authentication Key public half cannot be read portably. Do
+            // not delete an object unless its persisted projection binds it to
+            // the requested platform credential.
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+
+        if let Some(authentication_key) = authentication_keys.first() {
+            ctx.get_slot(slot_id)?
+                .yubihsm_destroy_native_object(slot_id, &authentication_key.unique_id)?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+        }
+
+        let projection = ctx
+            .resolved_objects()?
+            .into_iter()
+            .find(|(_, object)| {
+                object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && object.token
+                    && object.id == matching_id
+                    && matches!(
+                        &object.material,
+                        KeyMaterial::Public(PublicKeyMaterial::Ec { parameters, public_key })
+                            if parameters.as_slice() == [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]
+                                && public_key.as_slice() == raw_public_key
+                    )
+            });
+        if let Some((handle, projection)) = projection
+            && !ctx.destroy_backed_object(handle, &projection)?
+        {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        Ok(())
     })
 }
 

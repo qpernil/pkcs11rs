@@ -314,6 +314,14 @@ impl ProtocolPeer {
         self.closed_sessions.get()
     }
 
+    pub(crate) fn deleted_object(&self, id: u16, object_type: u8) -> bool {
+        let expected = [id.to_be_bytes().as_slice(), &[object_type]].concat();
+        self.inner_commands
+            .borrow()
+            .iter()
+            .any(|(command, data)| *command == CommandCode::DeleteObject as u8 && data == &expected)
+    }
+
     pub(crate) fn has_metadata_object(&self, id: u16) -> bool {
         self.metadata_objects.borrow().contains_key(&id)
     }
@@ -985,6 +993,10 @@ impl ProtocolPeer {
                             {
                                 (COMMAND_ERROR, vec![0x0b])
                             } else {
+                                if object_type == YUBIHSM_AUTHENTICATION_KEY {
+                                    self.listed_authkeys.borrow_mut().remove(&id);
+                                    self.visible_authkey_info.borrow_mut().remove(&id);
+                                }
                                 self.objects
                                     .borrow_mut()
                                     .retain(|candidate| *candidate != id);
@@ -1886,10 +1898,7 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
 
     assert_eq!(
         crate::parse_yubihsm_login_username(b":*").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
-            label: None,
-            source: None,
-        })
+        crate::YubiHsmLoginUsername::UniversalWildcard
     );
     assert_eq!(
         crate::parse_yubihsm_login_username(b":*asymmetric@87654321").unwrap(),
@@ -1915,6 +1924,10 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
 
 #[test]
 fn yubihsm_login_splits_username_from_password() {
+    assert_eq!(
+        crate::split_yubihsm_login(b"0001").unwrap(),
+        (b"0001".as_slice(), None)
+    );
     assert_eq!(
         crate::split_yubihsm_login(b"00fFpassword").unwrap(),
         (b"00fF".as_slice(), Some(PASSWORD))
@@ -4994,6 +5007,25 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         yubihsm.inner_commands.borrow().as_slice(),
         [(CommandCode::GetStorageInfo as u8, Vec::new())]
     );
+    assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_authentication_key_id_uses_pinentry_for_its_password() {
+    let _guard = crate::test::TEST_LOCK.lock().unwrap();
+    let pinentry = crate::test::TestPinentry::new("password");
+    let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
+    let mut slot = crate::YubiHsmSlot::new(
+        yubihsm.clone(),
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_RSA_2048],
+    );
+
+    crate::Slot::login_with_pinentry(&mut slot, b"0001", &pinentry.pinentry()).unwrap();
+    let session =
+        crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
+    assert!(session.get_session_info().is_ok());
     assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
 }
 

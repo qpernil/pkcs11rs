@@ -14,39 +14,148 @@ appropriate PKCS #11 error instead of being omitted.
 
 The minimum supported Rust version is 1.85.
 
-## Backends
+## Feature map
 
-- **YubiKey PIV** over native CCID (PC/SC on desktop and CryptoTokenKit on
-  iOS), including RSA,
-  ECDSA, Ed25519, ECDH/X25519, certificates, metadata, attestation, PIN policy,
-  and random generation.
-- **YubiKey OpenPGP** over native CCID, including
-  signing, RSA deciphering, ECDH, certificates, OpenPGP PIN KDFs, and random
-  generation.
-- **YubiHSM 2** over direct USB or the HTTP YubiHSM Connector, including
-  authenticated sessions, hardware-backed asymmetric, symmetric, HMAC,
-  wrapping, opaque, and authentication objects.
-- **YubiHSM Auth** as a discoverable CCID applet whose credentials can
-  authenticate sessions on local or remote YubiHSM slots.
-- **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
-  SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
-- **FIDO2** discovery over native USB HID and the CTAP smart-card binding over
-  NFC or USB CCID where available. This includes PIN provisioning and changes,
-  read-only resident-credential and public-key metadata, and an explicit
-  one-shot GetAssertion mechanism after context-specific PIN
-  login, with an experimental opt-in previewSign registration, offline
-  derivation, and hardware-signing lifecycle on devices advertising that
-  extension.
-- **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
-  applets.
-- **Named software slots** created only by explicit configuration, with
-  login-gated asymmetric and secret keys, plus encrypted persistent key
-  objects when local token storage is configured. This includes RSA, EC,
-  Ed25519, Ed448, X25519, X448, ML-DSA, ML-KEM, AES, HMAC, generic-secret,
-  and legacy 3DES keys.
+The short version is that one PKCS #11 module can present YubiKey applets,
+local and remote YubiHSMs, FIDO authenticators, and full software tokens through
+the same ABI. The implementation is deliberately capability-driven: hardware
+and firmware decide which objects and mechanisms appear on each slot.
 
-Hardware and firmware capabilities determine which objects and mechanisms are
-available in a particular slot.
+### Standards and provider architecture
+
+- Complete PKCS #11 **2.40, 3.0, 3.1, and 3.2 function tables**, including
+  stable behavior for unsupported entry points, standard session and object
+  lifecycles, multipart operations, and PKCS #11 3.2 profile objects. See
+  [Architecture](docs/architecture.md) and
+  [PKCS11RS extensions](docs/extensions.md).
+- Independently locked slots and sessions, shared physical-device coordination,
+  hot-plug reconciliation, deterministic object identity, and concurrent work
+  across different devices. See [Architecture](docs/architecture.md).
+- Strict JSON initialization through `CK_C_INITIALIZE_ARGS.pReserved`, with
+  environment fallbacks for conventional PKCS #11 loaders. See
+  [Initialization configuration](docs/configuration.md).
+- Canonical names for mechanisms, return values, object classes, key types,
+  attributes, and profiles, exposed through small C helper functions. See
+  [Vendor extensions](docs/extensions.md).
+
+### YubiKey applications
+
+- **PIV** over native CCID, with RSA, ECDSA, Ed25519, ECDH/X25519,
+  certificates, metadata, attestation, PIN and management-key administration,
+  touch/PIN policy, and hardware random generation. See
+  [YubiKey PIV](docs/piv.md).
+- **OpenPGP** signing, RSA deciphering, ECDH, certificates, key generation and
+  import, PIN administration, and OpenPGP PIN KDFs. See
+  [YubiKey OpenPGP](docs/openpgp.md).
+- **YubiHSM Auth** credential discovery and administration, with symmetric and
+  asymmetric credentials that can open local or remote YubiHSM sessions. See
+  [YubiHSM Auth](docs/yubihsm-auth.md#yubihsm-auth-administration).
+- **Issuer Security Domain** discovery, CPLC and CA metadata, SCP11 certificate
+  chains, plus explicit SCP03 and SCP11 administration. See
+  [CCID applets](docs/ccid.md), [SCP03](docs/scp03.md), and
+  [SCP11](docs/scp11.md).
+- Shared PC/SC/CryptoTokenKit reader ownership prevents different applet slots
+  on the same physical YubiKey from racing each other while preserving
+  concurrency between devices. See [CCID applets](docs/ccid.md).
+
+### FIDO2 as PKCS #11
+
+- Native USB HID and CTAP-over-CCID/NFC discovery, PIN initialization and
+  changes, resident-credential inventory, and public-key metadata. See
+  [FIDO2 support](docs/fido2.md).
+- A one-shot GetAssertion signing mechanism after context-specific PIN login.
+  See [FIDO2 signing](docs/fido2.md).
+- An opt-in **previewSign** lifecycle with registration, offline key derivation,
+  persistent protocol metadata, and hardware signing on devices that advertise
+  the extension. See [previewSign](docs/preview-sign.md).
+
+### YubiHSM
+
+- Direct native USB and remote HTTP(S) access, authenticated encrypted sessions,
+  session expiry, reconnection, device identity and trust, public pre-login
+  discovery, audit behavior, and the supported device-advertised object and
+  cryptographic command surface. See
+  [YubiHSM and YubiHSM Auth](docs/yubihsm-auth.md).
+- Asymmetric and symmetric authentication, including direct Authentication
+  Keys, YubiHSM Auth credentials, protected platform credentials, pinentry, and
+  `C_LoginUser` selectors that can automatically match a public projection to
+  any available local credential provider. See
+  [YubiHSM login](docs/yubihsm-auth.md#yubihsm-login).
+- Hardware-backed asymmetric and symmetric operations, AES, HMAC, opaque
+  objects, AES-CCM wrapping, RSA wrapping, public RSA wrap keys, and canonical
+  PKCS #11 metadata. See
+  [YubiHSM objects and mechanisms](docs/yubihsm-auth.md#slot-layout).
+- Public-key projection can recover an independent public object from a private
+  key, including persistent YubiHSM public objects. See the
+  [public-key projection proposal](docs/public-key-projection-proposal.md).
+- Protected prefixed ECDH keeps the reusable static agreement inside the key
+  provider while producing session-specific KDF output. See
+  [protected prefixed ECDH](docs/prefixed-ecdh-derive.md).
+- Device-public-key enrollment and trust remain independent of connector TLS
+  trust, allowing both the network service and the HSM itself to be
+  authenticated. See
+  [YubiHSM device trust](docs/yubihsm-auth.md#asymmetric-device-key-trust).
+
+### Platform-protected login
+
+- A provider abstraction performs the exact prefixed X9.63 KDF needed for
+  asymmetric YubiHSM authentication without exporting the platform private key
+  or static shared secret. See
+  [Platform credential architecture](docs/yubihsm-auth.md#platform-credential-login-architecture).
+- macOS and iOS use permanent P-256 keys in Apple's Secure Enclave. Named
+  credentials can be generated, listed, inspected, deleted, provisioned into a
+  YubiHSM, matched automatically at login, and safely unprovisioned. See
+  [iPhone provisioning](docs/yubihsm-auth.md#provisioning-an-iphone-platform-credential)
+  and [credential tooling](docs/pkcs11rs-tool.md#platform-credentials).
+
+### Software tokens and shared crypto core
+
+- Explicitly configured named software slots support RSA; ordinary EC curves;
+  Ed25519 and Ed448; X25519 and X448; ML-DSA and ML-KEM; AES, HMAC,
+  generic-secret, and legacy 3DES keys. See
+  [Named software slots](docs/software.md).
+- Parsed runtime keys are retained after generation, import, or restore, so
+  repeated use performs only the requested cryptographic operation instead of
+  reparsing or re-expanding key material.
+- Session keys are login-gated and scoped to their creating session. Token keys
+  use encrypted persistence when storage is configured, and extractable private
+  keys can be exported as password-encrypted, OpenSSL-compatible PKCS #8. See
+  [Software slots](docs/software.md) and
+  [Content-addressed CBOR storage](docs/storage.md).
+- Cryptographic key representation and implementations live in the focused
+  sibling `software-key-core` crate and are reused instead of maintaining
+  algorithm-specific copies in each provider.
+
+### Secure transport, remote access, and virtual devices
+
+- SCP03 and SCP11a/b/c secure messaging share the same CCID transaction model.
+  See [SCP03](docs/scp03.md) and [SCP11](docs/scp11.md).
+- The asynchronous multi-device connector exposes every attached YubiHSM by
+  verified serial, serializes requests per device, runs different devices
+  concurrently, handles detach/reconnect without unsafe replay, and supports
+  HTTPS plus optional mutual TLS. See
+  [Multi-device connector](docs/connector.md).
+- A connector build can host persisted `virtual-yubihsm-core` instances beside
+  physical USB devices, using independent actor threads, atomic state updates,
+  and ownership locks. See
+  [Embedded virtual YubiHSMs](docs/connector.md#embedded-virtual-yubihsms).
+
+### Apple integration, tools, and validation
+
+- The iOS XCFramework contains the same C ABI and an iOS-native
+  CryptoTokenKit transport. Applications get USB CCID, NFC, software slots,
+  remote YubiHSMs, and Secure Enclave credentials without implementing a
+  transport callback. See [iOS integration](docs/ios-integration.md).
+- Checked-in [Swift](examples/ios/PKCS11RSPhoneSmoke) and
+  [Objective-C](examples/ios/PKCS11RSObjCSmoke) smoke apps exercise discovery,
+  software crypto, post-quantum operations, automatic YubiHSM login, and
+  idempotent platform-credential provisioning.
+- `pkcs11rs-tool` authors and validates canonical certificate bundles and
+  manages Apple platform credentials. See
+  [Authoring and credential management](docs/pkcs11rs-tool.md).
+- Linux, Windows, macOS, iOS, MSRV, ABI, profile, advisory, license, protocol
+  vector, virtual-device, and explicitly gated live-hardware validation are all
+  represented in the test and CI matrix below.
 
 The vendor `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` mechanism provides a reference
 implementation of public-key projection through `C_DeriveKey`: a private key
