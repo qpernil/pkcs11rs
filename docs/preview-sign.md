@@ -277,10 +277,7 @@ PKCS11RS_FIDO2_TEST_PIN=123456 \
 ```
 
 This validates the full host stack against independently running virtual
-firmware, not a physical previewSign-capable YubiKey. The pre-release YubiKey
-used earlier did not advertise `previewSign`; a one-time forced probe returned
-success while omitting the extension outputs and therefore did not establish
-support. Physical-device questions still include positive vectors,
-attestation trust policy, ticket lifetime and replay behavior, and whether a
-validated physical serial is sufficient routing metadata for a configured
-local provider.
+firmware, not a physical previewSign-capable YubiKey. Physical-device support
+requires positive vectors covering attestation trust policy, ticket lifetime
+and replay behavior, and whether a validated physical serial is sufficient
+routing metadata for a configured local provider.

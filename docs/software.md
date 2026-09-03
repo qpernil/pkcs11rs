@@ -123,8 +123,7 @@ independently to every PKCS #8 key:
   names.
 
 Headers and record envelopes are strict canonical CBOR with explicit schema,
-version, KDF, AEAD, and parameter identifiers. Development-era formats have no
-migration or compatibility path.
+version, KDF, AEAD, and parameter identifiers.
 
 Asymmetric private-record plaintext is DER-encoded PKCS #8
 `OneAsymmetricKey` version 0:

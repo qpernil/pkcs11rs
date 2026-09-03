@@ -155,8 +155,8 @@ $PKCS11RS_TOKEN_STORAGE/
 ```
 
 `<applet>` is one of `fido2`, `piv`, `openpgp`, `yubihsm-auth`, or
-`issuer-security-domain`. The FIDO-only compatibility setting retains the
-earlier `$PKCS11RS_FIDO2_STORAGE/fido2-v1/yubico-serial-.../objects` layout.
+`issuer-security-domain`. The FIDO-only `PKCS11RS_FIDO2_STORAGE` setting uses
+the `$PKCS11RS_FIDO2_STORAGE/fido2-v1/yubico-serial-.../objects` layout.
 Hex encoding makes the physical identity a safe, reversible path component on
 every supported platform. The version directory permits a future binding
 scheme to coexist without silently reinterpreting an existing store.
