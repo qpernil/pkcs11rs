@@ -114,17 +114,16 @@ and firmware decide which objects and mechanisms appear on each slot.
   Ed25519 and Ed448; X25519 and X448; ML-DSA and ML-KEM; AES, HMAC,
   generic-secret, and legacy 3DES keys. See
   [Named software slots](docs/software.md).
-- Parsed runtime keys are retained after generation, import, or restore, so
-  repeated use performs only the requested cryptographic operation instead of
-  reparsing or re-expanding key material.
+- Parsed runtime keys are retained after generation, import, or restore.
+  Parsing and key expansion occur at those boundaries; repeated use performs
+  only the requested cryptographic operation.
 - Session keys are login-gated and scoped to their creating session. Token keys
   use encrypted persistence when storage is configured, and extractable private
   keys can be exported as password-encrypted, OpenSSL-compatible PKCS #8. See
   [Software slots](docs/software.md) and
   [Content-addressed CBOR storage](docs/storage.md).
 - Cryptographic key representation and implementations live in the focused
-  sibling `software-key-core` crate and are reused instead of maintaining
-  algorithm-specific copies in each provider.
+  sibling `software-key-core` crate and are shared by the providers.
 
 ### Secure transport, remote access, and virtual devices
 
@@ -298,11 +297,11 @@ works/
 ```
 
 Software private-key objects retain the typed `software-key-core` runtime key
-after login or restore. `KeyKind` controls generation/import and
-`SignatureScheme` controls an individual signing operation, so RSA padding or
-digest choices are no longer used to identify a stored key. PKCS#8, EC scalars,
-Edwards-curve seeds, and ML seeds are persistence/export DTOs only; parsing,
-validation, expansion, and RSA CRT precomputation happen once at the boundary.
+after login or restore. `KeyKind` identifies the stored key material, while
+`SignatureScheme` specifies an individual signing operation, including its RSA
+padding and digest choices. PKCS#8, EC scalars, Edwards-curve seeds, and ML
+seeds are persistence/export DTOs only; parsing, validation, expansion, and RSA
+CRT precomputation happen once at the boundary.
 PKCS11RS uses the shared `SoftwarePrivateKey` union and curve identities
 directly; only PKCS #11 public projections, attributes, and error mapping remain
 provider-specific adapters.
@@ -1120,9 +1119,9 @@ fails explicitly instead of silently becoming session-local. When
 `PKCS11RS_TOKEN_STORAGE` is configured, slots with a stable Yubico physical
 serial install separate durable local providers for each applet and
 automatically restore their saved backed objects. `PKCS11RS_FIDO2_STORAGE`
-retains its earlier FIDO-only behavior for compatibility. Applications can
-also restore exported previewSign registration or derived-key wrappers
-manually through `C_CreateObject`.
+configures durable storage for FIDO2 slots only. Applications can also restore
+exported previewSign registration or derived-key wrappers manually through
+`C_CreateObject`.
 
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct
