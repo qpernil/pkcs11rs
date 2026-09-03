@@ -33,7 +33,9 @@ const IOS_MODULE_MAP: &str = r#"module PKCS11RS {
     export *
 }
 "#;
+#[cfg(target_os = "macos")]
 const MACOS_TOOL_DEFAULT_TEAM: &str = "Q4X2Q59C2D";
+#[cfg(target_os = "macos")]
 const MACOS_TOOL_BUNDLE_NAME: &str = "pkcs11rs-tool.app";
 
 const WRAPPER: &str = r#"#define CK_PTR *
