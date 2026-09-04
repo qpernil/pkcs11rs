@@ -9,6 +9,7 @@ repository = "https://github.com/qpernil/pkcs11rs"
 license = "MIT OR Apache-2.0"
 keywords = ["pkcs11", "cryptoki", "yubikey", "yubihsm", "hsm"]
 categories = ["api-bindings", "cryptography", "hardware-support"]
+publish = false
 
 [workspace]
 members = [
