@@ -827,7 +827,7 @@ Detailed configuration:
 - [iPhone smoke test](examples/ios/PKCS11RSPhoneSmoke/README.md)
 - [Objective-C iPhone smoke test](examples/ios/PKCS11RSObjCSmoke/README.md)
 - [Software secret-key design](docs/software-secret-keys-plan.md)
-- [Provider abstraction roadmap](docs/provider-abstraction-plan.md)
+- [Provider boundary direction](docs/provider-abstraction-plan.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
 - [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)
 - [PIV backend](docs/piv.md)
