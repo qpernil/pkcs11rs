@@ -15,7 +15,7 @@ continue to use the shared implementations.
 ## Prerequisites
 
 Building the iOS XCFramework requires macOS, Xcode with the iOS SDK and Command
-Line Tools, and Rust 1.85 or newer. The generated artifact supports ARM64 iPhone
+Line Tools, and Rust 1.94 or newer. The generated artifact supports ARM64 iPhone
 and iPad devices and Apple Silicon (`arm64`) Simulator destinations; it does not
 include an Intel (`x86_64`) Simulator slice.
 

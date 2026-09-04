@@ -12,7 +12,7 @@ The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
 appropriate PKCS #11 error instead of being omitted.
 
-The minimum supported Rust version is 1.85.
+The minimum supported Rust version is 1.94.
 
 ## Feature map
 
@@ -250,7 +250,7 @@ locking, session ownership, transport sharing, and cache boundaries.
 | Windows | Rust tests, Python ABI tests, and OASIS profile cases run with warnings denied on a native Windows runner. |
 | macOS | The `.dylib`, Rust tests, Python ABI tests, OASIS profile cases, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
 | iOS | Release device and Apple Silicon Simulator libraries are packaged as an XCFramework in GitHub Actions. Local CCID access uses CryptoTokenKit directly from Rust. |
-| MSRV | An all-features build is checked with Rust 1.85. |
+| MSRV | An all-features build is checked with Rust 1.94. |
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
 | Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. Python tests cover production slot and token metadata plus an independently gated, self-cleaning previewSign cycle through the dynamic-library ABI. |
 
@@ -863,9 +863,9 @@ requirements:
 
 | Platform | Requirements |
 | --- | --- |
-| Linux | Rust 1.85 or newer, a working C compiler/linker, `pkg-config`, PC/SC development files, libudev development files, and `/bin/sh` |
-| macOS | Rust 1.85 or newer, Xcode Command Line Tools, `pkg-config`, and `/bin/sh`; PC/SC and IOKit are system frameworks |
-| Windows | Rust 1.85 or newer using the MSVC target, Visual Studio C++ Build Tools, and the Windows SDK; no separately installed PC/SC, HID, or libudev package is required |
+| Linux | Rust 1.94 or newer, a working C compiler/linker, `pkg-config`, PC/SC development files, libudev development files, and `/bin/sh` |
+| macOS | Rust 1.94 or newer, Xcode Command Line Tools, `pkg-config`, and `/bin/sh`; PC/SC and IOKit are system frameworks |
+| Windows | Rust 1.94 or newer using the MSVC target, Visual Studio C++ Build Tools, and the Windows SDK; no separately installed PC/SC, HID, or libudev package is required |
 
 For example, on Debian or Ubuntu:
 
