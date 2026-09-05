@@ -53,7 +53,7 @@ flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
 virtual-yubikey-core = { path = "../virtual-yubikey/crates/virtual-yubikey-core", optional = true }
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
-software-key-core = { path = "../software-key-core" }
+software-key-core = { path = "../software-key-core", features = ["x509"] }
 platform-credential = { path = "crates/platform-credential" }
 yubihsm-auth-client = { path = "crates/yubihsm-auth-client" }
 zeroize = "1.9.0"
@@ -72,7 +72,6 @@ subtle = "2.6.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 x509-cert = { version = "0.3.0", default-features = false, features = ["builder", "std"] }
-webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"

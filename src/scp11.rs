@@ -279,7 +279,7 @@ impl Scp11KeySet {
             key_material[16..32].to_vec(),
             key_material[32..48].to_vec(),
             key_material[48..64].to_vec(),
-            None,
+            Some(key_material[64..80].to_vec()),
             self.host.is_some(),
             expected_receipt,
             SCP11_SECURITY_LEVEL,

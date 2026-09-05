@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(feature = "mock-yubikey")]
+#[path = "virtual_admin_tests.rs"]
+mod virtual_administration;
 use p256::ecdsa::SigningKey;
 use std::{cell::RefCell, time::Duration};
 
@@ -272,4 +275,306 @@ fn rejects_noncanonical_or_trailing_response_tlvs() {
     noncanonical.extend_from_slice(&point);
     noncanonical.extend_from_slice(&encode_tlv(&[0x86], &[0; 16]).unwrap());
     assert!(parse_authentication_response(&noncanonical).is_err());
+}
+
+#[cfg(feature = "mock-yubikey")]
+mod virtual_card {
+    use super::*;
+    use crate::{mock_yubikey::MockYubiKeyConnector, select_application};
+    use virtual_yubikey_core::{
+        DeviceProfile, FIDO2_AID, HSMAUTH_AID, ISSUER_SECURITY_DOMAIN_AID, MANAGEMENT_AID,
+        OPENPGP_AID, PIV_AID, VirtualYubiKey,
+    };
+
+    fn fixture(variant: Scp11Variant) -> (MockYubiKeyConnector, Scp11KeySet) {
+        let mut profile = DeviceProfile::yubikey_5_8_ccid(42);
+        profile.applets.openpgp = true;
+        let mut device = VirtualYubiKey::new(profile.clone());
+        // The fixture's leaf key is scalar 5, issued by CA scalar 4.
+        let chain = certificate_chain(&signing_key(4));
+        let card = private_key(8);
+        device
+            .provision_scp11(
+                variant.key_id(),
+                1,
+                &card.serialized().unwrap(),
+                0x10,
+                1,
+                &chain[..1],
+            )
+            .unwrap();
+        assert!(device.take_security_domain_persistent_change());
+        assert!(!device.take_security_domain_persistent_change());
+        let sd = device.security_domain_persistent_state().unwrap();
+        let device = VirtualYubiKey::from_persistent_states(
+            profile,
+            &device.piv_persistent_state().unwrap(),
+            &device.hsmauth_persistent_state().unwrap(),
+            &sd,
+        )
+        .unwrap();
+        let keys = Scp11KeySet {
+            variant,
+            key_version: 1,
+            card_public_key: Some(encode_private_public_point(&card).unwrap()),
+            certificate_trust: None,
+            host: Some(Scp11aHostCredentials {
+                key_version: 1,
+                key_id: 0x10,
+                private_key: private_key(5),
+                certificates: chain.into_iter().rev().collect(),
+            }),
+        };
+        (MockYubiKeyConnector::from_device(device), keys)
+    }
+
+    fn command(ins: u8, p2: u8, data: &[u8]) -> CommandApdu {
+        CommandApdu {
+            cla: 0,
+            ins,
+            p1: 0,
+            p2,
+            data: data.to_vec(),
+            le: Some(256),
+            extended: false,
+        }
+    }
+
+    fn authenticate_command(keys: &Scp11KeySet) -> CommandApdu {
+        CommandApdu {
+            cla: 0x80,
+            ins: keys.variant.instruction(),
+            p1: keys.key_version,
+            p2: keys.variant.key_id(),
+            data: authentication_data(
+                &encode_private_public_point(&private_key(7)).unwrap(),
+                keys.variant.parameter(),
+            )
+            .unwrap(),
+            le: Some(256),
+            extended: false,
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_protect_every_ccid_applet_after_persistence_roundtrip() {
+        let cases: &[(&[u8], u8, u8, &[u8])] = &[
+            (&MANAGEMENT_AID, 0x1d, 0, &[]),
+            (&HSMAUTH_AID, 0x07, 0, &[]),
+            (&OPENPGP_AID, 0x84, 0, &[]),
+            (&PIV_AID, 0xfd, 0, &[]),
+            (&FIDO2_AID, 0x10, 0, &[0x04]),
+            (&ISSUER_SECURITY_DOMAIN_AID, 0xca, 0xe0, &[]),
+        ];
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, mut keys) = fixture(variant);
+            // Both explicit and automatic host CA selection are supported.
+            for automatic in [false, true] {
+                if automatic {
+                    let host = keys.host.as_mut().unwrap();
+                    host.key_id = 0;
+                    host.key_version = 0;
+                }
+                for &(aid, ins, p2, data) in cases {
+                    select_application(&connector, aid).unwrap();
+                    // Mock transport is SHORT_ONLY, so certificates use ISO chaining.
+                    let mut session = keys.authenticate_selected(&connector).unwrap();
+                    session.require_oce_authentication().unwrap();
+                    let response = session
+                        .transmit(&connector, &command(ins, p2, data))
+                        .unwrap();
+                    assert!(!response.data.is_empty(), "{variant:?} {aid:x?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_reject_untrusted_hosts_wrong_private_keys_and_ca_selectors() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            for failure in 0..4 {
+                let (connector, mut keys) = fixture(variant);
+                select_application(&connector, &PIV_AID).unwrap();
+                let host = keys.host.as_mut().unwrap();
+                match failure {
+                    0 => host.private_key = private_key(6),
+                    1 => {
+                        host.certificates = certificate_chain(&signing_key(6))
+                            .into_iter()
+                            .rev()
+                            .collect()
+                    }
+                    2 => host.key_id = 0x20,
+                    3 => {
+                        // A self-signed certificate delivered by the host is not a trust anchor.
+                        let key = signing_key(6);
+                        host.certificates = vec![crate::certificate_builder::p256_certificate(
+                            key.verifying_key(),
+                            &key,
+                            "CN=Untrusted",
+                            "CN=Untrusted",
+                            9,
+                            true,
+                        )];
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    keys.authenticate_selected(&connector).is_err(),
+                    "{variant:?} case {failure}"
+                );
+                // No host authentication attempt permits an unauthenticated protected APDU.
+                let mut invalid = command(0xfd, 0, &[0; 8]);
+                invalid.cla = 4;
+                assert!(
+                    connector
+                        .send_apdu(&invalid)
+                        .unwrap()
+                        .require_success(&invalid)
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_consume_uploads_and_select_clears_credentials_and_sessions() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, keys) = fixture(variant);
+            select_application(&connector, &PIV_AID).unwrap();
+            let auth = authenticate_command(&keys);
+            assert!(
+                connector
+                    .send_apdu(&auth)
+                    .unwrap()
+                    .require_success(&auth)
+                    .is_err()
+            );
+            keys.upload_host_certificates(&connector).unwrap();
+            select_application(&connector, &PIV_AID).unwrap();
+            assert!(
+                connector
+                    .send_apdu(&auth)
+                    .unwrap()
+                    .require_success(&auth)
+                    .is_err()
+            );
+            keys.upload_host_certificates(&connector).unwrap();
+            let mut wrong_variant = auth.clone();
+            wrong_variant.data[5] = 0; // SCP11b parameters cannot be used with an A/C key.
+            assert!(
+                connector
+                    .send_apdu(&wrong_variant)
+                    .unwrap()
+                    .require_success(&wrong_variant)
+                    .is_err()
+            );
+            assert!(
+                connector
+                    .send_apdu(&auth)
+                    .unwrap()
+                    .require_success(&auth)
+                    .is_err()
+            );
+            let mut session = keys.authenticate_selected(&connector).unwrap();
+            select_application(&connector, &PIV_AID).unwrap();
+            let version = command(0xfd, 0, &[]);
+            assert!(
+                session
+                    .transmit(&connector, &version)
+                    .unwrap()
+                    .require_success(&version)
+                    .is_err()
+            );
+            // Recovery requires a fresh upload and handshake.
+            let mut session = keys.authenticate_selected(&connector).unwrap();
+            assert_eq!(
+                session
+                    .transmit(&connector, &command(0xfd, 0, &[]))
+                    .unwrap()
+                    .data,
+                [5, 8, 0]
+            );
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_reject_incomplete_malformed_and_mismatched_uploads() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, keys) = fixture(variant);
+            select_application(&connector, &PIV_AID).unwrap();
+            let root = keys.host.as_ref().unwrap().certificates.last().unwrap();
+            let upload = CommandApdu {
+                cla: 0x80,
+                ins: 0x2a,
+                p1: 1,
+                p2: 0x90,
+                data: root.clone(),
+                le: None,
+                extended: true,
+            };
+            connector
+                .send_apdu(&upload)
+                .unwrap()
+                .require_success(&upload)
+                .unwrap();
+            let auth = authenticate_command(&keys);
+            assert!(
+                connector
+                    .send_apdu(&auth)
+                    .unwrap()
+                    .require_success(&auth)
+                    .is_err()
+            );
+            connector
+                .send_apdu(&upload)
+                .unwrap()
+                .require_success(&upload)
+                .unwrap();
+            let mut final_upload = upload.clone();
+            final_upload.p2 = 0x20;
+            final_upload.data = keys.host.as_ref().unwrap().certificates[0].clone();
+            assert!(
+                connector
+                    .send_apdu(&final_upload)
+                    .unwrap()
+                    .require_success(&final_upload)
+                    .is_err()
+            );
+            keys.upload_host_certificates(&connector).unwrap();
+            final_upload.p2 = 0x10;
+            final_upload.data = vec![0x30, 0];
+            assert!(
+                connector
+                    .send_apdu(&final_upload)
+                    .unwrap()
+                    .require_success(&final_upload)
+                    .is_err()
+            );
+            assert!(
+                connector
+                    .send_apdu(&auth)
+                    .unwrap()
+                    .require_success(&auth)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_accept_leaf_only_upload_with_configured_issuer() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, mut keys) = fixture(variant);
+            keys.host.as_mut().unwrap().certificates.truncate(1);
+            select_application(&connector, &PIV_AID).unwrap();
+            let mut session = keys.authenticate_selected(&connector).unwrap();
+            assert_eq!(
+                session
+                    .transmit(&connector, &command(0xfd, 0, &[]))
+                    .unwrap()
+                    .data,
+                [5, 8, 0]
+            );
+        }
+    }
 }
