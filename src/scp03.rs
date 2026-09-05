@@ -305,7 +305,7 @@ impl std::fmt::Debug for Scp03KeySet {
 }
 
 impl Scp03KeySet {
-    fn yubikey_factory() -> Self {
+    pub(crate) fn yubikey_factory() -> Self {
         let key = || Zeroizing::new(YUBIKEY_FACTORY_KEY.to_vec());
         Self {
             key_version: YUBIKEY_FACTORY_KEY_VERSION,

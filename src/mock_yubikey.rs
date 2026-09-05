@@ -32,6 +32,25 @@ pub(crate) struct MockYubiKeyConnector {
 
 impl MockYubiKeyConnector {
     #[cfg(test)]
+    pub(crate) fn restore_persistent_state(&self, profile: DeviceProfile) {
+        let mut state = self.state.lock().unwrap();
+        *state = VirtualYubiKey::from_persistent_states(
+            profile,
+            &state.piv_persistent_state().unwrap(),
+            &state.hsmauth_persistent_state().unwrap(),
+            &state.security_domain_persistent_state().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_device(device: VirtualYubiKey) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(device)),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self, Error> {
         Ok(Self {
             state: Arc::new(Mutex::new(device(FidoConfiguration::default()))),
@@ -133,7 +152,11 @@ impl Connector for MockYubiKeyConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CcidCtapTransport, CtapClient, select_application};
+    use crate::scp03::YUBIKEY_SECURITY_LEVEL;
+    use crate::{
+        CcidCtapTransport, CtapClient, Scp03KeySet, Scp03Session, Scp11KeySet,
+        SecurityDomainClient, select_application,
+    };
     use std::rc::Rc;
 
     #[test]
@@ -220,5 +243,64 @@ mod tests {
         client
             .authorize_credential_enumeration(&info, b"123456")
             .unwrap();
+    }
+
+    #[test]
+    fn host_scp03_implementation_interoperates_with_the_virtual_yubikey() {
+        let connector = MockYubiKeyConnector::new().unwrap();
+        select_application(&connector, &crate::piv::PIV_AID).unwrap();
+        let keys = Scp03KeySet::yubikey_factory();
+        let mut session = Scp03Session::authenticate_selected(
+            &connector,
+            &keys,
+            YUBIKEY_SECURITY_LEVEL,
+            &crate::piv::PIV_AID,
+        )
+        .unwrap();
+        let command = crate::CommandApdu {
+            cla: 0,
+            ins: 0xfd,
+            p1: 0,
+            p2: 0,
+            data: Vec::new(),
+            le: Some(256),
+            extended: false,
+        };
+        assert_eq!(
+            session.transmit(&connector, &command).unwrap().data,
+            [5, 8, 0]
+        );
+    }
+
+    #[test]
+    fn host_scp11b_validates_the_virtual_chain_and_protects_piv() {
+        let connector = MockYubiKeyConnector::new().unwrap();
+        select_application(
+            &connector,
+            &virtual_yubikey_core::ISSUER_SECURITY_DOMAIN_AID,
+        )
+        .unwrap();
+        let key_ref = crate::security_domain::KeyRef { kid: 0x13, kvn: 1 };
+        let certificates = SecurityDomainClient
+            .get_certificate_bundle(&connector, key_ref)
+            .unwrap();
+        assert_eq!(certificates.len(), 2);
+        let keys = Scp11KeySet::scp11b_from_certificates(1, &certificates[1..], &certificates[..1])
+            .unwrap();
+        select_application(&connector, &crate::piv::PIV_AID).unwrap();
+        let mut session = keys.authenticate_selected(&connector).unwrap();
+        let command = crate::CommandApdu {
+            cla: 0,
+            ins: 0xfd,
+            p1: 0,
+            p2: 0,
+            data: Vec::new(),
+            le: Some(256),
+            extended: false,
+        };
+        assert_eq!(
+            session.transmit(&connector, &command).unwrap().data,
+            [5, 8, 0]
+        );
     }
 }
