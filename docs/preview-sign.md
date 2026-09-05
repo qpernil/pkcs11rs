@@ -18,6 +18,19 @@ cryptographic API.
 
 ## Registration wire format
 
+FIDO slots do not retain the PIN. User login obtains an RP-scoped administration
+token for one registration or credential deletion. Another administration
+operation requires a fresh user login (logout followed by login); obtaining a
+signing token can also invalidate that administration token.
+
+Derived signing keys report `CKA_ALWAYS_AUTHENTICATE = CK_TRUE`. Each signature
+uses `C_SignInit`, followed by `C_Login(CKU_CONTEXT_SPECIFIC, PIN)` and `C_Sign`,
+just like a regular FIDO assertion. Only the operation's scoped token is retained,
+not the PIN. Length queries and short-buffer retries reuse the pending signature
+result without another authenticator operation. Tokens are redacted from debug
+output and cleared on logout or session cleanup; there is no automatic PIN-based
+token renewal.
+
 The extension identifier is `previewSign`. The
 `authenticatorMakeCredential` extension input is:
 
@@ -172,10 +185,11 @@ The FIDO slot advertises these vendor mechanisms only when
 
 `C_Login` uses the authenticator's preferred supported PIN/UV protocol. When
 permissioned PIN/UV tokens are available, it requests one scoped to the
-dedicated previewSign RP with make-credential and get-assertion permissions.
-The legacy `getPINToken` path is necessarily unscoped, but pkcs11rs uses it
-only for those previewSign operations. The token is zeroized on logout, PIN
-change, session-state reset, and reconnect.
+dedicated previewSign RP with make-credential and credential-management
+permissions for one administration operation. Signing obtains a separate
+get-assertion token through context-specific login. Legacy `getPINToken`
+supports creation/assertion but cannot authorize modern credential management.
+Retained tokens are zeroized on use, logout, PIN change, and session-state reset.
 
 The initial lifecycle is:
 
@@ -196,10 +210,11 @@ The initial lifecycle is:
    `CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION` and
    `CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY`. Its template independently selects
    session or token lifetime.
-4. `C_Sign` with `CKM_PKCS11RS_PREVIEW_SIGN` sends the parent credential ID,
+4. After `C_SignInit` and `C_Login(CKU_CONTEXT_SPECIFIC, PIN)`, `C_Sign` with
+   `CKM_PKCS11RS_PREVIEW_SIGN` sends the parent credential ID,
    signing-key handle, 32-byte ESP256 digest, and preserved COSE_Sign_Args to
    GetAssertion. It returns the 64-byte raw P-256 `r || s` signature.
-5. Destroying the generated private parent-credential object while logged in
+5. Destroying the generated private parent-credential object after a fresh user login
    sends authenticated CTAP `deleteCredential`. Destroying imported
    registration or derived-key wrappers affects only their configured PKCS #11
    storage lifetime.

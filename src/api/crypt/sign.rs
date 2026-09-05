@@ -681,10 +681,13 @@ fn sign_init(
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
-        let context_specific_rp_id =
-            matches!(object.material, KeyMaterial::FidoResidentPrivate { .. })
-                .then(|| object.rp_id.clone())
-                .flatten();
+        let context_specific_rp_id = match &object.material {
+            KeyMaterial::FidoResidentPrivate { .. } => object.rp_id.clone(),
+            KeyMaterial::PreviewSignDerived { registration, .. } => {
+                Some(registration.rp_id().to_owned())
+            }
+            _ => None,
+        };
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
             key: object.material.clone(),
             public_key: object.public_key.clone(),
@@ -769,7 +772,10 @@ fn sign(
                 return Err(error);
             }
         };
-        if let KeyMaterial::FidoResidentPrivate { credential_id } = &operation.key {
+        if matches!(
+            &operation.key,
+            KeyMaterial::FidoResidentPrivate { .. } | KeyMaterial::PreviewSignDerived { .. }
+        ) {
             let rp_id = operation
                 .context_specific_rp_id
                 .as_deref()
@@ -791,12 +797,28 @@ fn sign(
                     .try_into()
                     .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
                 let result = match ctx._get_slot_mut(operation.slot_id) {
-                    Ok(slot) => slot.fido_get_assertion(
-                        &authorization,
-                        rp_id,
-                        credential_id,
-                        client_data_hash,
-                    ),
+                    Ok(slot) => match &operation.key {
+                        KeyMaterial::FidoResidentPrivate { credential_id } => slot
+                            .fido_get_assertion(
+                                &authorization,
+                                rp_id,
+                                credential_id,
+                                client_data_hash,
+                            ),
+                        KeyMaterial::PreviewSignDerived {
+                            registration,
+                            derived,
+                            ..
+                        } => slot.fido_preview_sign(
+                            &authorization,
+                            registration,
+                            data,
+                            derived
+                                .additional_args_cbor()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                        ),
+                        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                    },
                     Err(error) => Err(error),
                 };
                 let response = match result {
@@ -806,6 +828,12 @@ fn sign(
                         return Err(error);
                     }
                 };
+                if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. })
+                    && response.len() != 64
+                {
+                    ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+                    return Err(CKR_DEVICE_ERROR.into());
+                }
                 let active = ctx
                     .get_session_context_mut(session_handle)?
                     .sign_operation
@@ -1068,20 +1096,6 @@ fn sign(
                     } else {
                         Ok(response)
                     }
-                }
-                KeyMaterial::PreviewSignDerived {
-                    registration,
-                    derived,
-                    ..
-                } => {
-                    let arguments = derived
-                        .additional_args_cbor()
-                        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                    ctx._get_slot_mut(operation.slot_id)?.fido_preview_sign(
-                        registration,
-                        data,
-                        arguments,
-                    )
                 }
                 _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }

@@ -345,10 +345,18 @@ pub(crate) struct DiscoverableCredential {
     pub(crate) response_cbor: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct CredentialAuthorization {
     protocol: PinUvAuthProtocol,
     token: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for CredentialAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialAuthorization")
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) struct Client {
@@ -539,6 +547,7 @@ impl Client {
         Ok(CredentialAuthorization { protocol, token })
     }
 
+    #[cfg(test)]
     pub(crate) fn authorize_preview_sign(
         &self,
         info: &AuthenticatorInfo,
@@ -565,6 +574,22 @@ impl Client {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
         self.authorize_with_pin(info, pin, PERMISSION_GET_ASSERTION, Some(rp_id))
+    }
+
+    pub(crate) fn authorize_preview_administration(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+    ) -> Result<CredentialAuthorization, CtapError> {
+        if info.option("noMcGaPermissionsWithClientPin") {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        self.authorize_with_pin(
+            info,
+            pin,
+            PERMISSION_MAKE_CREDENTIAL | PERMISSION_CREDENTIAL_MANAGEMENT,
+            Some(PREVIEW_SIGN_RP_ID),
+        )
     }
 
     pub(crate) fn create_preview_sign_registration(
