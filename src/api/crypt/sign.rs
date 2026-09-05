@@ -492,6 +492,15 @@ fn sign_init(
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
+        if mechanism.is_null() {
+            return ctx
+                .get_session_context_mut(session_handle)?
+                .sign_operation
+                .take()
+                .map(|_| ())
+                .ok_or_else(|| CKR_OPERATION_NOT_INITIALIZED.into());
+        }
+
         if ctx
             .get_session_context(session_handle)?
             .sign_operation
@@ -512,35 +521,8 @@ fn sign_init(
         let ml_dsa = ml_dsa_parameters(mechanism)?;
         let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
-        } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
-            if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
-                return Err(CKR_MECHANISM_PARAM_INVALID.into());
-            }
-            let parameters =
-                unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR) }?;
-            let mgf = match parameters.mgf {
-                x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
-                x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
-                x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
-                x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
-                x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
-                x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
-                x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
-                x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
-                x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
-                _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
-            };
-            let salt_length = u16::try_from(parameters.sLen)
-                .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
-            Some((mgf, salt_length, parameters.hashAlg))
         } else if piv_is_pss_mechanism(mechanism.mechanism) {
-            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
-                return Err(CKR_MECHANISM_PARAM_INVALID.into());
-            }
-            let digest =
-                piv_hash_mechanism(mechanism.mechanism).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-            let hash = pss_hash_mechanism(mechanism.mechanism)?;
-            Some((0, digest.size() as u16, hash))
+            Some(super::shared::parse_rsa_pss_parameters(mechanism)?)
         } else {
             if !matches!(
                 mechanism.mechanism,

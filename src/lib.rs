@@ -1004,7 +1004,7 @@ pub(crate) use connector::{
 };
 #[cfg(feature = "native-hardware")]
 pub(crate) use connector::{PcscConnector, UsbConnector};
-#[cfg(test)]
+#[cfg(all(test, feature = "native-hardware"))]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, usb_bcd_version};
 
 #[cfg(feature = "mock-yubikey")]

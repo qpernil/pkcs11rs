@@ -946,7 +946,7 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
     );
     assert_eq!(
         crate::api::C_SignInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 2),
-        CKR_ARGUMENTS_BAD as CK_RV
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     let mut unsupported = CK_MECHANISM {
@@ -1194,6 +1194,38 @@ pub fn software_rsa_round_trips_every_supported_signature_form() {
             "verification failed for mechanism {:#x}",
             mechanism.mechanism
         );
+        if crate::piv_is_pss_mechanism(mechanism.mechanism) {
+            // A round trip alone would also pass if both sides ignored the
+            // parameters. Changing either parameter must invalidate the signature.
+            let original = unsafe { *mechanism.pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>() };
+            for change_salt in [true, false] {
+                let mut changed = original;
+                if change_salt {
+                    changed.sLen += 1;
+                } else {
+                    changed.mgf = CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE;
+                }
+                let mut wrong = CK_MECHANISM {
+                    mechanism: mechanism.mechanism,
+                    pParameter: (&mut changed as *mut CK_RSA_PKCS_PSS_PARAMS).cast(),
+                    ulParameterLen: std::mem::size_of_val(&changed) as CK_ULONG,
+                };
+                assert_eq!(
+                    crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut wrong, 1),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(
+                    crate::api::C_Verify(
+                        TEST_SESSION_HANDLE,
+                        data.as_mut_ptr(),
+                        data.len() as CK_ULONG,
+                        signature.as_mut_ptr(),
+                        signature_length
+                    ),
+                    CKR_SIGNATURE_INVALID as CK_RV,
+                );
+            }
+        }
     }
 
     let _guard = TEST_LOCK.lock().unwrap();
@@ -1231,6 +1263,16 @@ pub fn software_rsa_round_trips_every_supported_signature_form() {
             pParameter: std::ptr::null_mut(),
             ulParameterLen: 0,
         };
+        let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+            hashAlg: crate::pss_hash_mechanism(mechanism_type)
+                .unwrap_or(CKM_SHA256 as CK_MECHANISM_TYPE),
+            mgf: CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE,
+            sLen: 17,
+        };
+        if crate::HASHED_RSA_PSS_MECHANISMS.contains(&mechanism_type) {
+            mechanism.pParameter = (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast();
+            mechanism.ulParameterLen = std::mem::size_of_val(&parameters) as CK_ULONG;
+        }
         let mut message = b"shared RSA PKCS11 integration".to_vec();
         round_trip(&mut mechanism, &mut message);
     }
@@ -1768,7 +1810,7 @@ pub fn verify_init_reports_key_and_mechanism_errors() {
     );
     assert_eq!(
         crate::api::C_VerifyInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
-        CKR_ARGUMENTS_BAD as CK_RV
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     let mut unsupported = CK_MECHANISM {

@@ -48,11 +48,14 @@ fn scalar_attribute<T>(type_: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE 
     }
 }
 
+#[path = "api_contracts.rs"]
+mod api_contracts;
 #[path = "crypto.rs"]
 mod crypto;
 #[path = "general.rs"]
 mod general;
 #[path = "hardware.rs"]
+#[cfg(feature = "native-hardware")]
 mod hardware;
 #[path = "interfaces.rs"]
 mod interfaces;
@@ -7539,7 +7542,7 @@ impl crate::Connector for FailingConnector {
         _receive_buffer: &'a mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
-        Err(pkcs11rs_local_hardware::Error::DeviceFailure.into())
+        Err(CKR_DEVICE_ERROR.into())
     }
 }
 
@@ -7640,7 +7643,7 @@ impl crate::Connector for SelectableConnector {
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
         if !self.present.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(pkcs11rs_local_hardware::Error::DeviceFailure.into());
+            return Err(CKR_DEVICE_ERROR.into());
         }
         if send_buffer.get(1) == Some(&0xa4)
             && !self.select_ok.load(std::sync::atomic::Ordering::Relaxed)
@@ -8466,6 +8469,16 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
                 pParameter: std::ptr::null_mut(),
                 ulParameterLen: 0,
             };
+            let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+                hashAlg: crate::pss_hash_mechanism(mechanism_type)
+                    .unwrap_or(CKM_SHA256 as CK_MECHANISM_TYPE),
+                mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+                sLen: 17,
+            };
+            if crate::HASHED_RSA_PSS_MECHANISMS.contains(&mechanism_type) {
+                mechanism.pParameter = (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast();
+                mechanism.ulParameterLen = std::mem::size_of_val(&parameters) as CK_ULONG;
+            }
             let init = crate::api::C_SignInit(session_handle, &mut mechanism, private);
             if !expected.contains(&mechanism_type) {
                 assert_eq!(init, CKR_MECHANISM_INVALID as CK_RV);
