@@ -473,7 +473,7 @@ impl DiscoveredSlotBackend {
         }
     }
 
-    #[cfg(all(test, not(feature = "abi-tests")))]
+    #[cfg(all(test, not(any(feature = "abi-tests", feature = "mock-yubikey"))))]
     fn http_yubihsm_connector(&self) -> &HttpConnector {
         match self {
             Self::HttpYubiHsm(connector) => connector,
@@ -3302,7 +3302,7 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3433,7 +3433,7 @@ mod discovery_tests {
         assert_eq!(current.nfc_reacquisitions.get(), 0);
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
@@ -3462,7 +3462,7 @@ mod discovery_tests {
         request
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn http_response(stream: &mut impl Write, body: &[u8]) {
         write!(
             stream,
@@ -3473,7 +3473,7 @@ mod discovery_tests {
         stream.write_all(body).unwrap();
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn yubihsm_frame(command: u8, data: &[u8]) -> Vec<u8> {
         let mut frame = vec![command];
         frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
@@ -3481,7 +3481,7 @@ mod discovery_tests {
         frame
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn yubihsm_device_info(serial: u32) -> Vec<u8> {
         let mut data = vec![2, 5, 0];
         data.extend_from_slice(&serial.to_be_bytes());
@@ -3489,7 +3489,7 @@ mod discovery_tests {
         yubihsm_frame(0x86, &data)
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn connector_inventory(serials: &[&str]) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "devices": serials
@@ -3504,7 +3504,7 @@ mod discovery_tests {
         .unwrap()
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn connector_test_context(url: String) -> ModuleContext {
         let mut configuration = ModuleConfiguration::resolve(None).unwrap();
         configuration.logging_level = Some(crate::logging::LogLevel::Off);
@@ -3523,7 +3523,7 @@ mod discovery_tests {
         ModuleContext::new_with_configuration(configuration).unwrap()
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn http_slot_identity(endpoint_index: usize, serial: &str) -> DiscoveredSlotIdentity {
         DiscoveredSlotIdentity {
             source: DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index),
@@ -3531,7 +3531,7 @@ mod discovery_tests {
         }
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     #[test]
     fn unavailable_http_yubihsm_does_not_hide_local_software_slots() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3551,7 +3551,7 @@ mod discovery_tests {
         );
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     #[test]
     fn repeated_http_discovery_preserves_slots_and_presence() {
         struct Interaction {
@@ -3692,7 +3692,7 @@ mod discovery_tests {
         server.join().unwrap();
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     #[test]
     fn duplicate_http_urls_remain_independent_slots() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3756,7 +3756,7 @@ mod discovery_tests {
         );
     }
 
-    #[cfg(not(feature = "abi-tests"))]
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     #[test]
     fn http_discovery_recovers_after_listener_restart() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3838,6 +3838,7 @@ mod discovery_tests {
     }
 
     #[test]
+    #[cfg(not(feature = "mock-yubikey"))]
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
         let configuration = ModuleConfiguration::resolve(None).unwrap();
         let context = ModuleContext {

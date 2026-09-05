@@ -23,6 +23,14 @@ fn digest_init(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, _logged_in) = ctx.session_details(session_handle)?;
+        if mechanism.is_null() {
+            return ctx
+                .get_session_context_mut(session_handle)?
+                .digest_operation
+                .take()
+                .map(|_| ())
+                .ok_or_else(|| CKR_OPERATION_NOT_INITIALIZED.into());
+        }
         if ctx
             .get_session_context(session_handle)?
             .digest_operation

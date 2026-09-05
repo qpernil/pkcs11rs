@@ -1256,17 +1256,17 @@ impl Connector for UsbConnector {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native-hardware"))]
 pub(crate) fn ensure_complete_write(actual: usize, expected: usize) -> Result<(), Error> {
     pkcs11rs_local_hardware::ensure_complete_write(actual, expected).map_err(Error::from)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native-hardware"))]
 pub(crate) fn needs_zero_length_packet(length: usize, packet_size: usize) -> bool {
     pkcs11rs_local_hardware::needs_zero_length_packet(length, packet_size)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native-hardware"))]
 pub(crate) fn usb_bcd_version(raw: u16) -> (u8, u8) {
     pkcs11rs_local_hardware::usb_bcd_version(raw)
 }

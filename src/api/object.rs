@@ -1607,24 +1607,15 @@ fn copy_object(
             .resolve_object(object)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
-        if matches!(
-            copied_object.material,
-            KeyMaterial::Profile { .. }
-                | KeyMaterial::IssuerSecurityDomainData { .. }
-                | KeyMaterial::IssuerSecurityDomainCertificate { .. }
-                | KeyMaterial::HsmAuthCredential { .. }
-        ) {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
-        if matches!(copied_object.material, KeyMaterial::YubiHsm { .. }) {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
-        if copied_object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-            && ctx.is_native_token_object_handle(object)
-            && matches!(copied_object.material, KeyMaterial::Public(_))
+        // Use the same effective policy exposed by C_GetAttributeValue, including
+        // backend restrictions and immutable device-key projections.
+        if object_attribute_value(
+            ctx,
+            session_handle,
+            object,
+            &copied_object,
+            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+        )? != Some(bool_attribute(true))
         {
             return Err(CKR_ACTION_PROHIBITED.into());
         }

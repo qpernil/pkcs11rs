@@ -255,6 +255,10 @@ backend does not duplicate cryptography.
 
 The slot advertises these exact mechanism groups:
 
+Both raw and hashed RSA-PSS mechanisms require `CK_RSA_PKCS_PSS_PARAMS`.
+For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
+`mgf` and `sLen` select the MGF1 hash and salt length independently.
+
 | Mechanisms | Key-size range | Flags |
 | --- | ---: | --- |
 | `CKM_RSA_PKCS_KEY_PAIR_GEN` | 1024–4096 | `CKF_GENERATE_KEY_PAIR` |

@@ -436,6 +436,7 @@ pub fn initialize_validates_mutex_callback_configuration() {
 }
 
 #[test]
+#[cfg(feature = "native-hardware")]
 pub fn short_usb_writes_are_device_errors() {
     assert!(crate::ensure_complete_write(64, 64).is_ok());
     let rv: CK_RV = crate::ensure_complete_write(63, 64).unwrap_err().into();
@@ -443,6 +444,7 @@ pub fn short_usb_writes_are_device_errors() {
 }
 
 #[test]
+#[cfg(feature = "native-hardware")]
 pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
     assert!(crate::needs_zero_length_packet(64, 64));
     assert!(crate::needs_zero_length_packet(128, 64));
@@ -451,6 +453,7 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 }
 
 #[test]
+#[cfg(feature = "native-hardware")]
 pub fn usb_bcd_version_extracts_major_and_minor_components() {
     assert_eq!(crate::usb_bcd_version(0x0210), (2, 1));
     assert_eq!(crate::usb_bcd_version(0x1234), (12, 3));

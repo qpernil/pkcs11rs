@@ -1,5 +1,41 @@
 use crate::*;
 
+/// Decode both raw and composite RSA-PSS mechanisms. Composite mechanisms fix
+/// the message hash, but the caller still supplies the MGF and salt length.
+pub(super) fn parse_rsa_pss_parameters(
+    mechanism: &CK_MECHANISM,
+) -> Result<(u8, u16, CK_MECHANISM_TYPE), Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = unsafe { _as_ref(mechanism.pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>()) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if mechanism.mechanism != CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        && parameters.hashAlg != pss_hash_mechanism(mechanism.mechanism)?
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let mgf = match parameters.mgf {
+        x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
+        x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
+        x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
+        x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+        x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+        x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+        x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+        x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+        x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    let salt_length =
+        u16::try_from(parameters.sLen).map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let parsed = (mgf, salt_length, parameters.hashAlg);
+    shared_rsa_pss_parameters(parsed).map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    Ok(parsed)
+}
+
 pub(crate) type RsaOaepParameters = (u8, CK_MECHANISM_TYPE, Vec<u8>);
 
 pub(crate) fn parse_rsa_oaep_parameters(

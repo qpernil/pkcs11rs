@@ -121,6 +121,16 @@ fn sign_and_verify(
         pParameter: std::ptr::null_mut(),
         ulParameterLen: 0,
     };
+    let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: crate::pss_hash_mechanism(mechanism_type)
+            .unwrap_or(CKM_SHA256 as CK_MECHANISM_TYPE),
+        mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+        sLen: 17,
+    };
+    if crate::HASHED_RSA_PSS_MECHANISMS.contains(&mechanism_type) {
+        mechanism.pParameter = (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast();
+        mechanism.ulParameterLen = std::mem::size_of_val(&parameters) as CK_ULONG;
+    }
     assert_eq!(
         crate::api::C_SignInit(session, &mut mechanism, private),
         CKR_OK as CK_RV,
