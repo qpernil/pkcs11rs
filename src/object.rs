@@ -1440,7 +1440,8 @@ impl TokenObject {
                         pin_policy,
                         ..
                     } => openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy),
-                    KeyMaterial::FidoResidentPrivate { .. } => true,
+                    KeyMaterial::FidoResidentPrivate { .. }
+                    | KeyMaterial::PreviewSignDerived { .. } => true,
                     _ => false,
                 }))
             }

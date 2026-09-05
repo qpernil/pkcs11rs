@@ -225,10 +225,28 @@ mod tests {
     }
 
     #[test]
-    fn protocol_one_only_mock_supports_legacy_pin_and_credential_management() {
-        exercise_pin_and_credential_management(Rc::new(
-            MockYubiKeyConnector::protocol_one_only().unwrap(),
+    fn legacy_pin_token_does_not_authorize_modern_credential_management() {
+        let connector = Rc::new(MockYubiKeyConnector::protocol_one_only().unwrap());
+        select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
+        let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
+        let info = client.get_info().unwrap();
+        client
+            .create_discoverable_test_credential(&info, b"123456")
+            .unwrap();
+        let authorization = client
+            .authorize_credential_enumeration(&info, b"123456")
+            .unwrap();
+        assert!(matches!(
+            client.enumerate_credentials(&info, &authorization),
+            Err(crate::ctap::CtapError::Status(0x33))
         ));
+    }
+
+    #[test]
+    fn protocol_one_permissioned_tokens_support_credential_management() {
+        exercise_pin_and_credential_management(Rc::new(MockYubiKeyConnector::from_device(device(
+            FidoConfiguration::default().with_pin_uv_auth_protocols(vec![1]),
+        ))));
     }
 
     #[test]

@@ -165,6 +165,7 @@ pub(crate) trait Slot {
     }
     fn fido_preview_sign(
         &mut self,
+        _authorization: &crate::ctap::CredentialAuthorization,
         _registration: &crate::preview_sign::PreviewSignRegistration,
         _to_be_signed: &[u8],
         _additional_args_cbor: &[u8],

@@ -187,6 +187,30 @@ fn find_objects(
     handles[..count as usize].to_vec()
 }
 
+fn authorize_preview_operation(session: CK_SESSION_HANDLE, digest: &[u8; 32]) {
+    let mut length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            digest.as_ptr().cast_mut(),
+            32,
+            std::ptr::null_mut(),
+            &mut length
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    let mut pin = *b"123456";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+}
+
 #[test]
 fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     let _guard = super::TEST_LOCK.lock().unwrap();
@@ -532,6 +556,15 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
         CKR_OK as CK_RV
     );
+    authorize_preview_operation(session, &digest);
+    assert_eq!(
+        read_attribute(
+            session,
+            restored_signing_key,
+            CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
+        ),
+        [CK_TRUE as u8]
+    );
     let mut signature_len = 0;
     assert_eq!(
         crate::api::C_Sign(
@@ -544,6 +577,19 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
     assert_eq!(signature_len, 64);
+    let mut short_signature = [0u8; 8];
+    let mut short_len = short_signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            digest.as_ptr().cast_mut(),
+            32,
+            short_signature.as_mut_ptr(),
+            &mut short_len
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(short_len, 64);
     let mut signature = vec![0; signature_len as usize];
     assert_eq!(
         crate::api::C_Sign(
@@ -578,12 +624,38 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
 
     assert_eq!(
         crate::api::C_DestroyObject(session, credential_private_key),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, credential_private_key),
+        CKR_OK as CK_RV
+    );
+    // Logout removes private session objects; restore the exported derived key
+    // before checking that the deleted parent can no longer sign.
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            restored_template.as_mut_ptr(),
+            restored_template.len() as CK_ULONG,
+            &mut restored_signing_key
+        ),
         CKR_OK as CK_RV
     );
     assert_eq!(
         crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
         CKR_OK as CK_RV
     );
+    authorize_preview_operation(session, &digest);
     assert_eq!(
         crate::api::C_Sign(
             session,
@@ -826,6 +898,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         crate::api::C_SignInit(session, &mut mechanism, signing_key),
         CKR_OK as CK_RV
     );
+    authorize_preview_operation(session, &digest);
     let mut signature_length = 0;
     assert_eq!(
         crate::api::C_Sign(
