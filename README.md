@@ -14,6 +14,11 @@ appropriate PKCS #11 error instead of being omitted.
 
 The minimum supported Rust version is 1.94.
 
+Ordinary login PINs and passwords are not retained for later operations by
+default. Scoped authorization tokens and session keys have backend-specific
+lifetimes; opt-in session recovery and configured discovery credentials are
+explicit exceptions. See the [authentication secret retention policy](docs/authentication-secrets.md).
+
 ## Feature map
 
 The short version is that one PKCS #11 module can present YubiKey applets,
