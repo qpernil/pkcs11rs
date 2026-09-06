@@ -499,7 +499,6 @@ fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
         CKR_OK as CK_RV
     );
 
-    let mut slots_with_digests = 0;
     for slot_id in slots {
         let kind = {
             let context = test_slot_context(slot_id);
@@ -508,23 +507,14 @@ fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
         };
         let session = open_test_session(slot_id);
         let tested = assert_advertised_digest_vectors(slot_id, session);
-        let expected = if kind == crate::SlotKind::Software {
-            digest_vectors().len()
-        } else {
-            0
-        };
         assert_eq!(
-            tested, expected,
+            tested,
+            digest_vectors().len(),
             "slot {slot_id} ({kind:?}) advertised the wrong standalone digests"
         );
-        slots_with_digests += usize::from(tested != 0);
         assert_advertised_sha512_multipart(slot_id, session);
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     }
-    assert!(
-        slots_with_digests > 0,
-        "ABI configuration has no software slot"
-    );
     finalize_for_test();
 }
 
@@ -5713,6 +5703,14 @@ fn yubihsm_x25519_objects_use_montgomery_key_type() {
         crate::YUBIHSM_ALGO_ED25519
     );
     assert_eq!(
+        crate::yubihsm_ec_algorithm(&[0x06, 0x03, 0x2b, 0x65, 0x6f]).unwrap(),
+        crate::YUBIHSM_ALGO_X448
+    );
+    assert_eq!(
+        crate::yubihsm_ec_algorithm(&[0x06, 0x03, 0x2b, 0x65, 0x71]).unwrap(),
+        crate::YUBIHSM_ALGO_ED448
+    );
+    assert_eq!(
         crate::yubihsm_ec_algorithm(&[0x13, 0x07, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
             .unwrap(),
         crate::YUBIHSM_ALGO_ED25519
@@ -5778,24 +5776,79 @@ fn yubihsm_x25519_objects_use_montgomery_key_type() {
 
 #[test]
 fn yubihsm_x25519_derive_returns_readable_session_object() {
-    yubihsm_x25519_two_way_derive(
+    yubihsm_montgomery_two_way_derive(
         7,
         8,
-        Some(&crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY),
-        Some(&crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY),
-        Some(&crate::yubihsm::tests::RFC7748_SHARED_SECRET),
+        &[
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ],
+        32,
+        Some((
+            crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY.as_slice(),
+            crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY.as_slice(),
+            crate::yubihsm::tests::RFC7748_SHARED_SECRET.as_slice(),
+        )),
         false,
     );
 }
 
 #[test]
+fn yubihsm_x448_objects_use_montgomery_key_type() {
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x05, 0x07, 0x0b, 0x17]),
+        id: 0x1244,
+        length: 56,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_X448,
+        sequence: 1,
+        origin: 1,
+        label: "x448".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_X448,
+        key: vec![0x5a; 56],
+    };
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
+    assert_eq!(objects.len(), 2);
+    for object in &objects {
+        assert_eq!(object.key_type, CKK_EC_MONTGOMERY as CK_KEY_TYPE);
+        assert_eq!(
+            object.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+            Some(vec![0x06, 0x03, 0x2b, 0x65, 0x6f])
+        );
+    }
+    let public = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+        Some([0x04, 0x38].into_iter().chain([0x5a; 56]).collect())
+    );
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert!(private.derive);
+    assert!(!private.sign);
+}
+
+#[test]
 fn yubihsm_x25519_prefixed_derive_is_atomic_and_matches_x963() {
-    yubihsm_x25519_two_way_derive(
+    yubihsm_montgomery_two_way_derive(
         7,
         8,
-        Some(&crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY),
-        Some(&crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY),
-        Some(&crate::yubihsm::tests::RFC7748_SHARED_SECRET),
+        &[
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ],
+        32,
+        Some((
+            crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY.as_slice(),
+            crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY.as_slice(),
+            crate::yubihsm::tests::RFC7748_SHARED_SECRET.as_slice(),
+        )),
         true,
     );
 }
@@ -6121,6 +6174,198 @@ fn yubihsm_ed25519_objects_use_edwards_key_type() {
 }
 
 #[test]
+fn yubihsm_ed448_objects_use_edwards_key_type() {
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x08]),
+        id: 0x1248,
+        length: 57,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_ED448,
+        sequence: 1,
+        origin: 1,
+        label: "ed448".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_ED448,
+        key: vec![0x5a; 57],
+    };
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
+    assert_eq!(objects.len(), 2);
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.key_type, CKK_EC_EDWARDS as CK_KEY_TYPE);
+    assert!(private.sign);
+    assert!(!private.derive);
+    assert_eq!(
+        private.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x06, 0x03, 0x2b, 0x65, 0x71])
+    );
+    let public = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert!(public.verify);
+    assert_eq!(
+        public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+        Some([0x04, 0x39].into_iter().chain([0x5a; 57]).collect())
+    );
+}
+
+#[test]
+fn yubihsm_ed448_generation_signing_and_verification_cross_the_provider_path() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut ec_params = [0x06u8, 0x03, 0x2b, 0x65, 0x71];
+    let mut key_id = [0, 13];
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            pValue: ec_params.as_mut_ptr().cast(),
+            ulValueLen: ec_params.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: key_id.as_mut_ptr().cast(),
+            ulValueLen: key_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut verify as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut private_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: key_id.as_mut_ptr().cast(),
+            ulValueLen: key_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut sign as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut generate = CK_MECHANISM {
+        mechanism: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut generate,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public_key,
+            &mut private_key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_EDDSA as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut message = b"virtual YubiHSM Ed448 provider test".to_vec();
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    let mut signature_length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(signature_length, 114);
+    let mut signature = vec![0; signature_length as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert!(
+        commands
+            .borrow()
+            .iter()
+            .any(|(command, _)| { *command == crate::yubihsm::CommandCode::SignEddsa as u8 })
+    );
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_object_identity_survives_device_sequence_wraps() {
     let info = crate::yubihsm::ObjectInfo {
         capabilities: [0; 8],
@@ -6150,17 +6395,43 @@ fn piv_native_identity_changes_with_object_contents() {
 
 #[test]
 fn yubihsm_x25519_random_keys_derive_both_directions() {
-    yubihsm_x25519_two_way_derive(9, 10, None, None, None, false);
+    yubihsm_montgomery_two_way_derive(
+        9,
+        10,
+        &[
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ],
+        32,
+        None,
+        false,
+    );
 }
 
-fn yubihsm_x25519_two_way_derive(
+#[test]
+fn yubihsm_x448_random_keys_execute_raw_and_protected_derivation() {
+    for protected in [false, true] {
+        yubihsm_montgomery_two_way_derive(
+            11,
+            12,
+            &[0x06, 0x03, 0x2b, 0x65, 0x6f],
+            56,
+            None,
+            protected,
+        );
+    }
+}
+
+fn yubihsm_montgomery_two_way_derive(
     first_id: u8,
     second_id: u8,
-    expected_first_public: Option<&[u8; 32]>,
-    expected_second_public: Option<&[u8; 32]>,
-    expected_shared: Option<&[u8; 32]>,
+    curve_parameters: &[u8],
+    field_length: usize,
+    expected_vectors: Option<(&[u8], &[u8], &[u8])>,
     protected: bool,
 ) {
+    let (expected_first_public, expected_second_public, expected_shared) = expected_vectors
+        .map(|(first, second, shared)| (Some(first), Some(second), Some(shared)))
+        .unwrap_or((None, None, None));
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -6194,10 +6465,8 @@ fn yubihsm_x25519_two_way_derive(
         CKR_OK as CK_RV
     );
 
-    let generate_x25519 = |id: u8| {
-        let mut ec_params: [u8; 12] = [
-            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
-        ];
+    let generate_montgomery = |id: u8| {
+        let mut ec_params = curve_parameters.to_vec();
         let mut key_id = [0, id];
         let mut token = CK_TRUE as CK_BBOOL;
         let mut derive = CK_TRUE as CK_BBOOL;
@@ -6263,8 +6532,8 @@ fn yubihsm_x25519_two_way_derive(
         assert_eq!(rv, CKR_OK as CK_RV);
         (public_key, private_key)
     };
-    let _ = generate_x25519(first_id);
-    let _ = generate_x25519(second_id);
+    let _ = generate_montgomery(first_id);
+    let _ = generate_montgomery(second_id);
 
     let find_key = |id: u8, class: CK_OBJECT_CLASS| {
         let mut key_id = [0, id];
@@ -6305,7 +6574,7 @@ fn yubihsm_x25519_two_way_derive(
     let other_private_handle = find_key(second_id, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
 
     let read_ec_point = |object| {
-        let mut point = vec![0u8; 34];
+        let mut point = vec![0u8; field_length + 2];
         let mut attribute = CK_ATTRIBUTE {
             type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
             pValue: point.as_mut_ptr().cast(),
@@ -6447,7 +6716,7 @@ fn yubihsm_x25519_two_way_derive(
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut verify = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
-    let mut value = [0u8; 32];
+    let mut value = vec![0u8; field_length];
     let mut attributes = [
         CK_ATTRIBUTE {
             type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -6567,7 +6836,7 @@ fn yubihsm_x25519_two_way_derive(
         ),
         CKR_OK as CK_RV
     );
-    let mut reverse_value = [0u8; 32];
+    let mut reverse_value = vec![0u8; field_length];
     let mut reverse_value_attribute = CK_ATTRIBUTE {
         type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
         pValue: reverse_value.as_mut_ptr().cast(),
@@ -7013,7 +7282,9 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         crate::YUBIHSM_ALGO_HMAC_SHA1,
         crate::YUBIHSM_ALGO_HMAC_SHA512,
         crate::YUBIHSM_ALGO_ED25519,
+        crate::YUBIHSM_ALGO_ED448,
         crate::YUBIHSM_ALGO_X25519,
+        crate::YUBIHSM_ALGO_X448,
         crate::YUBIHSM_ALGO_AES_ECB,
     ]);
     let mechanism = |type_| {
@@ -7066,16 +7337,16 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     let montgomery = mechanism(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE).unwrap();
     assert_eq!(
         (montgomery.min_key_size, montgomery.max_key_size),
-        (255, 255)
+        (255, 448)
     );
     assert_ne!(montgomery.flags & CKF_EC_CURVENAME as CK_FLAGS, 0);
     let ecdh = mechanism(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((ecdh.min_key_size, ecdh.max_key_size), (255, 255));
+    assert_eq!((ecdh.min_key_size, ecdh.max_key_size), (255, 448));
     let edwards = mechanism(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((edwards.min_key_size, edwards.max_key_size), (255, 255));
+    assert_eq!((edwards.min_key_size, edwards.max_key_size), (255, 448));
     assert_eq!(edwards.flags, montgomery.flags);
     let eddsa = mechanism(CKM_EDDSA as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
+    assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 448));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_AES_CBC_PAD as CK_MECHANISM_TYPE).is_none());
     let kwp = mechanism(CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE).unwrap();
@@ -7314,8 +7585,8 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
 fn yubihsm_mechanisms_cover_the_yubico_2_8_pkcs11_baseline() {
     // Compatibility baseline from yubihsm-shell 2.8.0
     // pkcs11/util_pkcs11.c:get_mechanism_list(). Standalone digest
-    // mechanisms are intentionally excluded because pkcs11rs assigns those
-    // software-only operations to software slots.
+    // mechanisms are intentionally excluded from this raw backend list;
+    // Slot::mechanisms adds the provider-wide software digests.
     let mechanisms = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_PKCS1_SHA1,
         crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256,

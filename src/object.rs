@@ -9,10 +9,10 @@ use crate::{
     CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_ALGORITHM,
     CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY,
     CKA_YUBICO_TOUCH_POLICY, Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm,
-    OpenPgpClient, OpenPgpKeyRef, PivClient, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
-    YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState,
-    der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
-    is_yubihsm_rsa, is_yubihsm_x25519, montgomery_curve_from_parameters,
+    OpenPgpClient, OpenPgpKeyRef, PivClient, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
+    YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState, der_octet_string,
+    edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
+    is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa, montgomery_curve_from_parameters,
     montgomery_curve_parameters, openpgp_signature_requires_context_specific_login,
     piv_algorithm_from_certificate, piv_effective_pin_policy, piv_public_key_from_certificate,
     send_yubihsm_secure_command, yubihsm_capabilities_to_attributes, yubihsm_capability,
@@ -1764,14 +1764,14 @@ impl TokenObject {
                             algorithm,
                             public_key,
                             ..
-                        } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
+                        } if is_yubihsm_edwards(*algorithm) && !public_key.is_empty() => {
                             der_octet_string(public_key)
                         }
                         KeyMaterial::YubiHsm {
                             algorithm,
                             public_key,
                             ..
-                        } if is_yubihsm_x25519(*algorithm) && !public_key.is_empty() => {
+                        } if is_yubihsm_montgomery(*algorithm) && !public_key.is_empty() => {
                             der_octet_string(public_key)
                         }
                         _ => None,

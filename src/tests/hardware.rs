@@ -3525,6 +3525,14 @@ mod fido2_hardware {
                 ),
                 CKR_OK as CK_RV
             );
+            assert_eq!(
+                read_attribute(
+                    session,
+                    restored_signing_key,
+                    CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
+                ),
+                [CK_TRUE as CK_BBOOL]
+            );
 
             let mut project = CK_MECHANISM {
                 mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
@@ -3558,6 +3566,25 @@ mod fido2_hardware {
                 CKR_OK as CK_RV
             );
             let mut signature_length = 0;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    digest.as_ptr().cast_mut(),
+                    digest.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut signature_length,
+                ),
+                CKR_USER_NOT_LOGGED_IN as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_Login(
+                    session,
+                    CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+                    pin.as_mut_ptr(),
+                    pin.len() as CK_ULONG,
+                ),
+                CKR_OK as CK_RV
+            );
             assert_eq!(
                 crate::api::C_Sign(
                     session,

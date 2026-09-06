@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import ctypes
 import concurrent.futures
+import ctypes
+import hashlib
 import os
 import pathlib
 import platform
@@ -19,6 +20,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 ABI_TARGET = ROOT / "target" / "abi-tests"
+MOCK_YUBIKEY_TARGET = ROOT / "target" / "mock-yubikey-abi-tests"
 CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
 CKR_CANT_LOCK = 0xA
@@ -77,6 +79,8 @@ CKF_LOGIN_REQUIRED = 0x00000004
 CKF_USER_PIN_INITIALIZED = 0x00000008
 CKF_TOKEN_INITIALIZED = 0x00000400
 CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
+CKF_FIND_OBJECTS = 0x00000040
+CKF_DIGEST = 0x00000400
 CKF_SIGN = 0x00000800
 CKF_VERIFY = 0x00002000
 CKF_GENERATE = 0x00008000
@@ -120,6 +124,13 @@ CKM_AES_KEY_WRAP = 0x00002109
 CKM_AES_KEY_WRAP_KWP = 0x0000210B
 CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
+CKM_VENDOR_DEFINED = 0x80000000
+CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN = CKM_VENDOR_DEFINED | 0x50530001
+CKM_PKCS11RS_PREVIEW_SIGN_DERIVE = CKM_VENDOR_DEFINED | 0x50530002
+CKM_PKCS11RS_PREVIEW_SIGN = CKM_VENDOR_DEFINED | 0x50530003
+CKM_PKCS11RS_PROJECT_PUBLIC_KEY = CKM_VENDOR_DEFINED | 0x50530004
+CKM_PKCS11RS_FIDO_ASSERTION = CKM_VENDOR_DEFINED | 0x50530005
+CKM_PKCS11RS_PREFIXED_ECDH_DERIVE = CKM_VENDOR_DEFINED | 0x50530006
 CKG_MGF1_SHA256 = 2
 CKD_NULL = 1
 CKD_SHA256_KDF = 6
@@ -178,6 +189,7 @@ CKA_LOCAL = 0x00000163
 CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
 CKA_KEY_GEN_MECHANISM = 0x00000166
+CKA_ALWAYS_AUTHENTICATE = 0x00000202
 CKA_WRAP_WITH_TRUSTED = 0x00000210
 CKA_WRAP_TEMPLATE = 0x40000211
 CKA_UNWRAP_TEMPLATE = 0x40000212
@@ -192,6 +204,7 @@ CKA_PROFILE_ID = 0x00000601
 CKA_PKCS11RS_PIV_OBJECT_TAG = 0x80005056
 CKU_SO = 0
 CKU_USER = 1
+CKU_CONTEXT_SPECIFIC = 2
 CKS_RO_PUBLIC_SESSION = 0
 CKS_RO_USER_FUNCTIONS = 1
 CKS_RW_PUBLIC_SESSION = 2
@@ -219,6 +232,10 @@ def library_path() -> pathlib.Path:
     else:
         name = "libpkcs11rs.so"
     return ABI_TARGET / "debug" / name
+
+
+def mock_yubikey_library_path() -> pathlib.Path:
+    return MOCK_YUBIKEY_TARGET / "debug" / library_path().name
 
 
 def openssl_pkcs11_provider_path() -> pathlib.Path | None:
@@ -274,6 +291,25 @@ def load_library() -> ctypes.CDLL:
             "abi-tests",
             "--target-dir",
             str(ABI_TARGET),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    return ctypes.CDLL(str(path))
+
+
+def load_mock_yubikey_library() -> ctypes.CDLL:
+    path = mock_yubikey_library_path()
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            "mock-yubikey",
+            "--target-dir",
+            str(MOCK_YUBIKEY_TARGET),
         ],
         cwd=ROOT,
         check=True,
@@ -422,6 +458,14 @@ class PKCS11RS_BYTE_BUFFER(ctypes.Structure):
     ]
 
 
+class PKCS11RS_PLATFORM_CREDENTIAL_INFO(ctypes.Structure):
+    _fields_ = [
+        ("ulAlgorithm", CK_ULONG),
+        ("ulNameLen", CK_ULONG),
+        ("name", CK_BYTE * 128),
+    ]
+
+
 class CK_MECHANISM_INFO(ctypes.Structure):
     _fields_ = [
         ("ulMinKeySize", CK_ULONG),
@@ -437,6 +481,18 @@ class CK_ECDH1_DERIVE_PARAMS(ctypes.Structure):
         ("pSharedData", ctypes.POINTER(CK_BYTE)),
         ("ulPublicDataLen", CK_ULONG),
         ("pPublicData", ctypes.POINTER(CK_BYTE)),
+    ]
+
+
+class CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("kdf", CK_ULONG),
+        ("ulSharedDataLen", CK_ULONG),
+        ("pSharedData", ctypes.POINTER(CK_BYTE)),
+        ("ulPublicDataLen", CK_ULONG),
+        ("pPublicData", ctypes.POINTER(CK_BYTE)),
+        ("ulPrefixDataLen", CK_ULONG),
+        ("pPrefixData", ctypes.POINTER(CK_BYTE)),
     ]
 
 
@@ -634,6 +690,422 @@ class CK_FUNCTION_LIST_3_2(ctypes.Structure):
         (name, ctypes.c_void_p)
         for name in PKCS11_2_40_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS
     ]
+
+
+class MockYubiKeyAbiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.lib = load_mock_yubikey_library()
+        cls.lib.C_Initialize.argtypes = [ctypes.c_void_p]
+        cls.lib.C_Initialize.restype = CK_RV
+        cls.lib.C_Finalize.argtypes = [ctypes.c_void_p]
+        cls.lib.C_Finalize.restype = CK_RV
+        cls.lib.C_GetSlotList.argtypes = [
+            CK_BYTE,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GetSlotList.restype = CK_RV
+        cls.lib.C_GetMechanismList.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GetMechanismList.restype = CK_RV
+        cls.lib.C_OpenSession.argtypes = [
+            CK_ULONG,
+            CK_FLAGS,
+            CK_VOID_PTR,
+            CK_VOID_PTR,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_OpenSession.restype = CK_RV
+        cls.lib.C_CloseSession.argtypes = [CK_ULONG]
+        cls.lib.C_CloseSession.restype = CK_RV
+        cls.lib.C_Login.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_Login.restype = CK_RV
+        cls.lib.C_Logout.argtypes = [CK_ULONG]
+        cls.lib.C_Logout.restype = CK_RV
+        cls.lib.C_FindObjectsInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_FindObjectsInit.restype = CK_RV
+        cls.lib.C_FindObjects.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_FindObjects.restype = CK_RV
+        cls.lib.C_FindObjectsFinal.argtypes = [CK_ULONG]
+        cls.lib.C_FindObjectsFinal.restype = CK_RV
+        cls.lib.C_GetAttributeValue.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_GetAttributeValue.restype = CK_RV
+        cls.lib.C_GenerateKeyPair.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GenerateKeyPair.restype = CK_RV
+        cls.lib.C_DestroyObject.argtypes = [CK_ULONG, CK_ULONG]
+        cls.lib.C_DestroyObject.restype = CK_RV
+        cls.lib.C_SignInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+        ]
+        cls.lib.C_SignInit.restype = CK_RV
+        cls.lib.C_Sign.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_Sign.restype = CK_RV
+        cls.lib.C_DigestInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+        ]
+        cls.lib.C_DigestInit.restype = CK_RV
+        cls.lib.C_Digest.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_Digest.restype = CK_RV
+
+    def setUp(self) -> None:
+        self.lib.C_Finalize(None)
+
+    def tearDown(self) -> None:
+        self.lib.C_Finalize(None)
+
+    def read_attribute(
+        self, session: int, object_handle: int, attribute_type: int
+    ) -> bytes:
+        attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                object_handle,
+                ctypes.byref(attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        value = (CK_BYTE * attribute.ulValueLen)()
+        attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                object_handle,
+                ctypes.byref(attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        return bytes(value)
+
+    def test_resident_fido_assertion_requires_per_operation_login(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        slot_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, None, ctypes.byref(slot_count)),
+            CKR_OK,
+        )
+        self.assertEqual(slot_count.value, 1)
+        slots = (CK_ULONG * slot_count.value)()
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, slots, ctypes.byref(slot_count)),
+            CKR_OK,
+        )
+
+        digests = {
+            CKM_SHA_1: hashlib.sha1,
+            CKM_SHA224: hashlib.sha224,
+            CKM_SHA256: hashlib.sha256,
+            CKM_SHA384: hashlib.sha384,
+            CKM_SHA512: hashlib.sha512,
+            CKM_SHA3_224: hashlib.sha3_224,
+            CKM_SHA3_256: hashlib.sha3_256,
+            CKM_SHA3_384: hashlib.sha3_384,
+            CKM_SHA3_512: hashlib.sha3_512,
+        }
+        expected_mechanisms = set(digests) | {
+            CKM_ECDSA,
+            CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+            CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+            CKM_PKCS11RS_PREVIEW_SIGN,
+            CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+            CKM_PKCS11RS_FIDO_ASSERTION,
+        }
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                slots[0],
+                None,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                slots[0],
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(set(mechanisms), expected_mechanisms)
+
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                slots[0],
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        digest_input_bytes = b"mock YubiKey provider digest"
+        digest_input = (CK_BYTE * len(digest_input_bytes))(*digest_input_bytes)
+        for mechanism_type, constructor in digests.items():
+            digest_mechanism = CK_MECHANISM(mechanism_type, None, 0)
+            self.assertEqual(
+                self.lib.C_DigestInit(
+                    session.value,
+                    ctypes.byref(digest_mechanism),
+                ),
+                CKR_OK,
+            )
+            digest_length = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_Digest(
+                    session.value,
+                    digest_input,
+                    len(digest_input),
+                    None,
+                    ctypes.byref(digest_length),
+                ),
+                CKR_OK,
+            )
+            digest = (CK_BYTE * digest_length.value)()
+            self.assertEqual(
+                self.lib.C_Digest(
+                    session.value,
+                    digest_input,
+                    len(digest_input),
+                    digest,
+                    ctypes.byref(digest_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                bytes(digest[: digest_length.value]),
+                constructor(digest_input_bytes).digest(),
+            )
+        pin = (CK_BYTE * len(b"123456"))(*b"123456")
+        self.assertEqual(
+            self.lib.C_Login(session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+
+        key_type = CK_ULONG(CKK_EC)
+        token = CK_BYTE(1)
+        private = CK_BYTE(1)
+        public_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                ctypes.sizeof(token),
+            ),
+        )
+        private_template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                ctypes.sizeof(token),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private), CK_VOID_PTR),
+                ctypes.sizeof(private),
+            ),
+        )
+        registration_mechanism = CK_MECHANISM(
+            CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+            None,
+            0,
+        )
+        parent_public = CK_ULONG()
+        parent_private = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GenerateKeyPair(
+                session.value,
+                ctypes.byref(registration_mechanism),
+                public_template,
+                len(public_template),
+                private_template,
+                len(private_template),
+                ctypes.byref(parent_public),
+                ctypes.byref(parent_private),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_Logout(session.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Login(session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+
+        private_class = CK_ULONG(CKO_PRIVATE_KEY)
+        sign = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(private_class), CK_VOID_PTR),
+                ctypes.sizeof(private_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_SIGN,
+                ctypes.cast(ctypes.byref(sign), CK_VOID_PTR),
+                ctypes.sizeof(sign),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session.value, template, len(template)),
+            CKR_OK,
+        )
+        private_key = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session.value,
+                ctypes.byref(private_key),
+                1,
+                ctypes.byref(found),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_FindObjectsFinal(session.value), CKR_OK)
+        self.assertEqual(found.value, 1)
+        self.assertEqual(
+            self.read_attribute(
+                session.value,
+                private_key.value,
+                CKA_ALWAYS_AUTHENTICATE,
+            ),
+            b"\x01",
+        )
+
+        mechanism = CK_MECHANISM(CKM_PKCS11RS_FIDO_ASSERTION, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(
+                session.value,
+                ctypes.byref(mechanism),
+                private_key.value,
+            ),
+            CKR_OK,
+        )
+        client_data_hash = hashlib.sha256(b"pkcs11rs Python FIDO assertion").digest()
+        data = (CK_BYTE * len(client_data_hash))(*client_data_hash)
+        response_length = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_Sign(
+                session.value,
+                data,
+                len(data),
+                None,
+                ctypes.byref(response_length),
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+        self.assertEqual(
+            self.lib.C_Login(
+                session.value,
+                CKU_CONTEXT_SPECIFIC,
+                pin,
+                len(pin),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session.value,
+                data,
+                len(data),
+                None,
+                ctypes.byref(response_length),
+            ),
+            CKR_OK,
+        )
+        self.assertGreater(response_length.value, 0)
+        response = (CK_BYTE * response_length.value)()
+        self.assertEqual(
+            self.lib.C_Sign(
+                session.value,
+                data,
+                len(data),
+                response,
+                ctypes.byref(response_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(response[0] & 0xE0, 0xA0)
+        self.assertEqual(
+            self.lib.C_Sign(
+                session.value,
+                data,
+                len(data),
+                None,
+                ctypes.byref(response_length),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+        self.assertEqual(self.lib.C_Logout(session.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Login(session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_DestroyObject(session.value, private_key.value),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_Logout(session.value), CKR_OK)
+        self.assertEqual(self.lib.C_CloseSession(session.value), CKR_OK)
 
 
 class Pkcs11AbiTests(unittest.TestCase):
@@ -888,6 +1360,21 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_DecryptFinal.restype = CK_RV
+        cls.lib.C_DigestInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+        ]
+        cls.lib.C_DigestInit.restype = CK_RV
+        cls.lib.C_Digest.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_Digest.restype = CK_RV
+        cls.lib.C_SessionCancel.argtypes = [CK_ULONG, CK_FLAGS]
+        cls.lib.C_SessionCancel.restype = CK_RV
         cls.lib.C_SignInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -968,6 +1455,15 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_UnwrapKey.restype = CK_RV
+        cls.lib.C_DeriveKey.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_DeriveKey.restype = CK_RV
         cls.lib.C_GenerateRandom.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_BYTE),
@@ -1173,6 +1669,50 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.PKCS11RS_SoftwareExportPrivateKey.restype = CK_RV
+        for name in (
+            "PKCS11RS_PlatformCredentialGenerate",
+            "PKCS11RS_PlatformCredentialGetPublicKey",
+        ):
+            function = getattr(cls.lib, name)
+            function.argtypes = [
+                ctypes.POINTER(CK_BYTE),
+                CK_ULONG,
+                ctypes.POINTER(CK_BYTE),
+                ctypes.POINTER(CK_ULONG),
+            ]
+            function.restype = CK_RV
+        cls.lib.PKCS11RS_PlatformCredentialList.argtypes = [
+            ctypes.POINTER(PKCS11RS_PLATFORM_CREDENTIAL_INFO),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_PlatformCredentialList.restype = CK_RV
+        cls.lib.PKCS11RS_PlatformCredentialDelete.argtypes = [
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_PlatformCredentialDelete.restype = CK_RV
+        cls.lib.PKCS11RS_YubiHsmProvisionPlatformCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_YubiHsmProvisionPlatformCredential.restype = CK_RV
+        cls.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)
@@ -7598,7 +8138,21 @@ fn main() {
                 CKM_YUBICO_AES_CCM_WRAP,
                 CKM_YUBICO_RSA_WRAP,
                 CKM_RSA_AES_KEY_WRAP,
+                CKM_RSA_PKCS,
             }.issubset(set(mechanisms))
+        )
+        mechanism_info = CK_MECHANISM_INFO()
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                CKM_RSA_PKCS,
+                ctypes.byref(mechanism_info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            mechanism_info.flags & (CKF_WRAP | CKF_UNWRAP),
+            CKF_WRAP | CKF_UNWRAP,
         )
 
         target = find_one(2, CKO_SECRET_KEY)
@@ -7751,6 +8305,46 @@ fn main() {
                 rsa_private,
                 wrapped,
                 wrapped_length,
+                template,
+                len(template),
+                ctypes.byref(imported),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(imported.value, target)
+
+        direct_rsa = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        direct_length = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_WrapKey(
+                session,
+                ctypes.byref(direct_rsa),
+                public_wrapper,
+                target,
+                None,
+                ctypes.byref(direct_length),
+            ),
+            CKR_OK,
+        )
+        direct_wrapped = (CK_BYTE * direct_length.value)()
+        self.assertEqual(
+            self.lib.C_WrapKey(
+                session,
+                ctypes.byref(direct_rsa),
+                public_wrapper,
+                target,
+                direct_wrapped,
+                ctypes.byref(direct_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_UnwrapKey(
+                session,
+                ctypes.byref(direct_rsa),
+                rsa_private,
+                direct_wrapped,
+                direct_length,
                 template,
                 len(template),
                 ctypes.byref(imported),
@@ -8146,6 +8740,56 @@ fn main() {
                     "pSharedData": 8,
                     "ulPublicDataLen": 16,
                     "pPublicData": 24,
+                },
+            ),
+        )
+
+    def test_layout_ck_pkcs11rs_prefixed_ecdh_derive_params(self) -> None:
+        self.assert_layout(
+            CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS,
+            56,
+            8,
+            {
+                "kdf": 0,
+                "ulSharedDataLen": 8,
+                "pSharedData": 16,
+                "ulPublicDataLen": 24,
+                "pPublicData": 32,
+                "ulPrefixDataLen": 40,
+                "pPrefixData": 48,
+            },
+            llp64=(
+                48,
+                8,
+                {
+                    "kdf": 0,
+                    "ulSharedDataLen": 4,
+                    "pSharedData": 8,
+                    "ulPublicDataLen": 16,
+                    "pPublicData": 24,
+                    "ulPrefixDataLen": 32,
+                    "pPrefixData": 40,
+                },
+            ),
+        )
+
+    def test_layout_pkcs11rs_platform_credential_info(self) -> None:
+        self.assert_layout(
+            PKCS11RS_PLATFORM_CREDENTIAL_INFO,
+            144,
+            8,
+            {
+                "ulAlgorithm": 0,
+                "ulNameLen": 8,
+                "name": 16,
+            },
+            llp64=(
+                136,
+                4,
+                {
+                    "ulAlgorithm": 0,
+                    "ulNameLen": 4,
+                    "name": 8,
                 },
             ),
         )
@@ -8764,6 +9408,168 @@ fn main() {
             CKR_USER_NOT_LOGGED_IN,
         )
 
+    def test_session_cancel_clears_only_selected_operations(self) -> None:
+        session = self.initialize_and_open_session()
+        digest_mechanism = CK_MECHANISM(CKM_SHA256, None, 0)
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, None, 0),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_DigestInit(session, ctypes.byref(digest_mechanism)),
+            CKR_OK,
+        )
+
+        self.assertEqual(self.lib.C_SessionCancel(session, 0), CKR_OK)
+        self.assertEqual(self.lib.C_SessionCancel(session, CKF_DIGEST), CKR_OK)
+
+        data = (CK_BYTE * 1)(0x42)
+        digest_length = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_Digest(
+                session,
+                data,
+                len(data),
+                None,
+                ctypes.byref(digest_length),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+        objects = (CK_ULONG * 1)()
+        object_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                objects,
+                len(objects),
+                ctypes.byref(object_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SessionCancel(session, CKF_FIND_OBJECTS),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                objects,
+                len(objects),
+                ctypes.byref(object_count),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+        self.assertEqual(
+            self.lib.C_SessionCancel(session, CKF_FIND_OBJECTS | CKF_DIGEST),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SessionCancel(999, CKF_DIGEST),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_platform_credential_exports_validate_without_mutating_platform_state(
+        self,
+    ) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        name = (CK_BYTE * len(b"pkcs11rs-abi-test"))(*b"pkcs11rs-abi-test")
+        public_key_length = CK_ULONG()
+        for function in (
+            self.lib.PKCS11RS_PlatformCredentialGenerate,
+            self.lib.PKCS11RS_PlatformCredentialGetPublicKey,
+        ):
+            self.assertEqual(
+                function(
+                    name,
+                    len(name),
+                    None,
+                    ctypes.byref(public_key_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(public_key_length.value, 65)
+
+        self.assertEqual(
+            self.lib.PKCS11RS_PlatformCredentialList(None, None),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_PlatformCredentialDelete(None, 0),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        label = (CK_BYTE * len(b"ABI validation"))(*b"ABI validation")
+        capabilities = (CK_BYTE * 8)()
+        delegated_capabilities = (CK_BYTE * 8)()
+        provisioning_result = CK_ULONG(99)
+        self.assertEqual(
+            self.lib.PKCS11RS_YubiHsmProvisionPlatformCredential(
+                999,
+                name,
+                len(name),
+                1,
+                label,
+                len(label),
+                1,
+                capabilities,
+                len(capabilities),
+                delegated_capabilities,
+                len(delegated_capabilities),
+                ctypes.byref(provisioning_result),
+            ),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(provisioning_result.value, 0)
+        self.assertEqual(
+            self.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential(
+                999,
+                name,
+                len(name),
+                1,
+            ),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_unavailable_extension_mechanisms_are_rejected(self) -> None:
+        session = self.initialize_and_open_session()
+
+        assertion = CK_MECHANISM(CKM_PKCS11RS_FIDO_ASSERTION, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(assertion), 2),
+            CKR_MECHANISM_INVALID,
+        )
+
+        shared_data = (CK_BYTE * 1)(0x01)
+        public_data = (CK_BYTE * 1)(0x04)
+        prefix_data = (CK_BYTE * 1)(0x02)
+        parameters = CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS(
+            CKD_SHA256_KDF,
+            len(shared_data),
+            shared_data,
+            len(public_data),
+            public_data,
+            len(prefix_data),
+            prefix_data,
+        )
+        mechanism = CK_MECHANISM(
+            CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            ctypes.cast(ctypes.byref(parameters), CK_VOID_PTR),
+            ctypes.sizeof(parameters),
+        )
+        derived_key = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_DeriveKey(
+                session,
+                ctypes.byref(mechanism),
+                2,
+                None,
+                0,
+                ctypes.byref(derived_key),
+            ),
+            CKR_MECHANISM_INVALID,
+        )
+
     def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         required = {
@@ -8773,7 +9579,7 @@ fn main() {
             CKM_ECDSA,
             CKM_GENERIC_SECRET_KEY_GEN,
         }
-        software_only = {
+        provider_digests = {
             CKM_SHA_1,
             CKM_SHA224,
             CKM_SHA256,
@@ -8807,10 +9613,26 @@ fn main() {
             f"missing required mechanisms: {sorted(required - advertised)}",
         )
         self.assertTrue(
-            advertised.isdisjoint(software_only),
-            f"hardware slot advertised software-only mechanisms: "
-            f"{sorted(advertised & software_only)}",
+            provider_digests.issubset(advertised),
+            f"missing provider-wide digest mechanisms: "
+            f"{sorted(provider_digests - advertised)}",
         )
+
+        for digest in provider_digests:
+            digest_info = CK_MECHANISM_INFO()
+            self.assertEqual(
+                self.lib.C_GetMechanismInfo(
+                    ABI_TEST_SLOT_ID,
+                    digest,
+                    ctypes.byref(digest_info),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(digest_info.flags, CKF_DIGEST)
+            self.assertEqual(
+                (digest_info.ulMinKeySize, digest_info.ulMaxKeySize),
+                (0, 0),
+            )
 
         info = CK_MECHANISM_INFO()
         self.assertEqual(
@@ -8823,6 +9645,106 @@ fn main() {
         )
         self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 4096))
         self.assertEqual(info.flags & CKF_GENERATE, CKF_GENERATE)
+
+    def test_all_present_slots_execute_provider_digest_mechanisms(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        digests = {
+            CKM_SHA_1: hashlib.sha1,
+            CKM_SHA224: hashlib.sha224,
+            CKM_SHA256: hashlib.sha256,
+            CKM_SHA384: hashlib.sha384,
+            CKM_SHA512: hashlib.sha512,
+            CKM_SHA3_224: hashlib.sha3_224,
+            CKM_SHA3_256: hashlib.sha3_256,
+            CKM_SHA3_384: hashlib.sha3_384,
+            CKM_SHA3_512: hashlib.sha3_512,
+        }
+        count = CK_ULONG()
+        self.assertEqual(self.lib.C_GetSlotList(1, None, ctypes.byref(count)), CKR_OK)
+        slots = (CK_ULONG * count.value)()
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+            CKR_OK,
+        )
+        self.assertGreater(count.value, 0)
+
+        data_bytes = b"abc"
+        data = (CK_BYTE * len(data_bytes))(*data_bytes)
+        for slot_id in slots:
+            session = self.open_slot_session(slot_id)
+            try:
+                for mechanism_type, constructor in digests.items():
+                    with self.subTest(slot_id=slot_id, mechanism=mechanism_type):
+                        mechanism = CK_MECHANISM(mechanism_type, None, 0)
+                        self.assertEqual(
+                            self.lib.C_DigestInit(session, ctypes.byref(mechanism)),
+                            CKR_OK,
+                        )
+                        output_len = CK_ULONG()
+                        self.assertEqual(
+                            self.lib.C_Digest(
+                                session,
+                                data,
+                                len(data),
+                                None,
+                                ctypes.byref(output_len),
+                            ),
+                            CKR_OK,
+                        )
+                        output = (CK_BYTE * output_len.value)()
+                        self.assertEqual(
+                            self.lib.C_Digest(
+                                session,
+                                data,
+                                len(data),
+                                output,
+                                ctypes.byref(output_len),
+                            ),
+                            CKR_OK,
+                        )
+                        self.assertEqual(
+                            bytes(output[: output_len.value]),
+                            constructor(data_bytes).digest(),
+                        )
+            finally:
+                self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+
+    def test_issuer_security_domain_slots_advertise_only_exercised_digests(
+        self,
+    ) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        expected = {
+            CKM_SHA_1,
+            CKM_SHA224,
+            CKM_SHA256,
+            CKM_SHA384,
+            CKM_SHA512,
+            CKM_SHA3_224,
+            CKM_SHA3_256,
+            CKM_SHA3_384,
+            CKM_SHA3_512,
+        }
+        for slot_id in (ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID):
+            with self.subTest(slot_id=slot_id):
+                count = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GetMechanismList(
+                        slot_id,
+                        None,
+                        ctypes.byref(count),
+                    ),
+                    CKR_OK,
+                )
+                mechanisms = (CK_ULONG * count.value)()
+                self.assertEqual(
+                    self.lib.C_GetMechanismList(
+                        slot_id,
+                        mechanisms,
+                        ctypes.byref(count),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(set(mechanisms), expected)
 
     def test_generate_random_validates_initialization_and_session(self) -> None:
         random_data = (CK_BYTE * 16)()

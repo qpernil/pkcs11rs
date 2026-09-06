@@ -153,8 +153,19 @@ corresponding `CKA_PROFILE_ID`:
 
 YubiHSM slots advertise the Extended Provider profile because the module
 provides its required provider behavior through the YubiHSM's standard and
-vendor-backed wrapping adaptations. The profile is independent of the objects
-and algorithms currently provisioned on the device.
+vendor-backed wrapping adaptations. The RSA-wrapping requirement is interpreted
+as requiring the capability rather than one particular mechanism identifier.
+The profile is independent of the objects and algorithms currently provisioned
+on the device.
+
+The published OASIS `EXT-M-1-32` test specifically requires `CKF_WRAP` and
+`CKF_UNWRAP` on `CKM_RSA_PKCS`. Physical YubiHSM firmware does not provide that
+direct wrapped-secret format, so its slot exposes RSA-based wrapping through
+`CKM_YUBICO_RSA_WRAP` and `CKM_RSA_AES_KEY_WRAP` and does not pass the test
+literally. The virtual YubiHSM advertises a direct PKCS #1 secret-key wrapping
+extension through a dedicated algorithm marker; pkcs11rs adds the flags only
+when that marker is present. Qualification records for physical devices must
+state the deviation and capability-level interpretation.
 
 Profile objects cannot be modified, copied, or destroyed. Configure a direct
 YubiHSM credential or a YubiHSM Auth credential to enable pre-login

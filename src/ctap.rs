@@ -547,7 +547,7 @@ impl Client {
         Ok(CredentialAuthorization { protocol, token })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "mock-yubikey"))]
     pub(crate) fn authorize_preview_sign(
         &self,
         info: &AuthenticatorInfo,
@@ -671,7 +671,7 @@ impl Client {
         Ok(response)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(not(feature = "abi-tests"), feature = "mock-yubikey")))]
     pub(crate) fn create_discoverable_test_credential(
         &self,
         info: &AuthenticatorInfo,

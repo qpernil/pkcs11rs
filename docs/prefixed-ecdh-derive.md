@@ -39,15 +39,15 @@ the differently ordered SP 800-56A KDF selectors are rejected.
 The accepted X9.63 selectors are the ordinary SHA-1, SHA-224, SHA-256,
 SHA-384, SHA-512, SHA3-224, SHA3-256, SHA3-384, and SHA3-512 `CKD_*_KDF`
 values. The peer public value follows the same encoding rules as
-`CKM_ECDH1_DERIVE`: SEC1 for short-Weierstrass curves and 32 raw bytes for
-X25519.
+`CKM_ECDH1_DERIVE`: SEC1 for short-Weierstrass curves, 32 raw bytes for
+X25519, and 56 raw bytes for X448.
 
 ## Availability and key policy
 
 A YubiHSM slot advertises the mechanism only when its algorithm list contains
 the virtual `ECDH KDF` extension identifier `57` and it supports at least one
 eligible curve. The supported curves are P-224, P-256, P-384, P-521,
-secp256k1, Brainpool P-256, P-384, P-512, and X25519.
+secp256k1, Brainpool P-256, P-384, P-512, X25519, and X448.
 
 The HSM command requires the separate `derive-ecdh-kdf` capability bit `0x38`
 on both the authenticated session and the asymmetric key. Ordinary raw ECDH

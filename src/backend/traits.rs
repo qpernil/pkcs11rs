@@ -315,7 +315,7 @@ pub(crate) trait Slot {
         Ok(Vec::new())
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
-        MECHANISMS.to_vec()
+        Vec::new()
     }
     fn supports_software_public_operations(&self) -> bool {
         true
@@ -327,9 +327,6 @@ pub(crate) trait Slot {
         false
     }
     fn supports_software_secret_operations(&self) -> bool {
-        false
-    }
-    fn supports_software_digest_operations(&self) -> bool {
         false
     }
     fn store_software_private_object(
@@ -410,14 +407,12 @@ pub(crate) trait Slot {
                 mechanisms.push(projection);
             }
         }
-        if self.supports_software_digest_operations() {
-            for software in SOFTWARE_DIGEST_MECHANISMS {
-                if !mechanisms
-                    .iter()
-                    .any(|mechanism| mechanism.type_ == software.type_)
-                {
-                    mechanisms.push(software);
-                }
+        for software in SOFTWARE_DIGEST_MECHANISMS {
+            if !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == software.type_)
+            {
+                mechanisms.push(software);
             }
         }
         mechanisms

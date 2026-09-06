@@ -231,6 +231,10 @@ mod yubihsm_algorithm {
     pub(super) const YUBIHSM_ALGO_AES_KWP: u8 = 55;
     pub(super) const YUBIHSM_ALGO_X25519: u8 = 56;
     pub(super) const YUBIHSM_ALGO_ECDH_KDF: u8 = 57;
+    /// Virtual-YubiHSM discovery marker for direct PKCS #1 v1.5 secret-key wrapping.
+    pub(super) const YUBIHSM_ALGO_RSA_PKCS1_WRAP: u8 = 58;
+    pub(super) const YUBIHSM_ALGO_X448: u8 = 59;
+    pub(super) const YUBIHSM_ALGO_ED448: u8 = 60;
 }
 use yubihsm_algorithm::*;
 
@@ -402,13 +406,13 @@ fn yubihsm_capabilities_to_attributes(
                     || yubihsm_capability(capabilities, 0x06);
                 attributes.decrypt = yubihsm_capability(capabilities, 0x09)
                     || yubihsm_capability(capabilities, 0x0a);
-            } else if algorithm == YUBIHSM_ALGO_ED25519 {
+            } else if is_yubihsm_edwards(algorithm) {
                 attributes.sign = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
                 attributes.sign = yubihsm_capability(capabilities, 0x07);
                 attributes.derive = yubihsm_capability(capabilities, 0x0b)
                     || yubihsm_capability(capabilities, 0x38);
-            } else if is_yubihsm_x25519(algorithm) {
+            } else if is_yubihsm_montgomery(algorithm) {
                 attributes.derive = yubihsm_capability(capabilities, 0x0b)
                     || yubihsm_capability(capabilities, 0x38);
             }
@@ -420,7 +424,7 @@ fn yubihsm_capabilities_to_attributes(
                     || yubihsm_capability(capabilities, 0x06);
                 attributes.encrypt = yubihsm_capability(capabilities, 0x09)
                     || yubihsm_capability(capabilities, 0x0a);
-            } else if algorithm == YUBIHSM_ALGO_ED25519 {
+            } else if is_yubihsm_edwards(algorithm) {
                 attributes.verify = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
                 attributes.verify = yubihsm_capability(capabilities, 0x07);
@@ -464,7 +468,7 @@ fn yubihsm_asymmetric_allowed_mechanisms(
     algorithm: u8,
     capabilities: &[u8; 8],
 ) -> Option<Vec<CK_MECHANISM_TYPE>> {
-    if !(is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm))
+    if !(is_yubihsm_ec(algorithm) || is_yubihsm_montgomery(algorithm))
         || !yubihsm_capability(capabilities, 0x38)
     {
         return None;
@@ -493,7 +497,7 @@ fn yubihsm_attributes_to_capabilities(
             if attributes.sign {
                 if is_yubihsm_rsa(algorithm) {
                     bits.extend([0x05, 0x06]);
-                } else if algorithm == YUBIHSM_ALGO_ED25519 {
+                } else if is_yubihsm_edwards(algorithm) {
                     bits.push(0x08);
                 } else if is_yubihsm_ec(algorithm) {
                     bits.push(0x07);
@@ -502,7 +506,7 @@ fn yubihsm_attributes_to_capabilities(
             if attributes.decrypt && is_yubihsm_rsa(algorithm) {
                 bits.extend([0x09, 0x0a]);
             }
-            if attributes.derive && (is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm)) {
+            if attributes.derive && (is_yubihsm_ec(algorithm) || is_yubihsm_montgomery(algorithm)) {
                 bits.push(0x0b);
             }
         }
@@ -578,8 +582,12 @@ fn is_yubihsm_ec(algorithm: u8) -> bool {
     )
 }
 
-fn is_yubihsm_x25519(algorithm: u8) -> bool {
-    algorithm == YUBIHSM_ALGO_X25519
+fn is_yubihsm_montgomery(algorithm: u8) -> bool {
+    matches!(algorithm, YUBIHSM_ALGO_X25519 | YUBIHSM_ALGO_X448)
+}
+
+fn is_yubihsm_edwards(algorithm: u8) -> bool {
+    matches!(algorithm, YUBIHSM_ALGO_ED25519 | YUBIHSM_ALGO_ED448)
 }
 
 fn yubihsm_ec_parameters(algorithm: u8) -> Option<&'static [u8]> {
@@ -599,9 +607,11 @@ fn yubihsm_ec_parameters(algorithm: u8) -> Option<&'static [u8]> {
             0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d,
         ]),
         YUBIHSM_ALGO_ED25519 => Some(&[0x06, 0x03, 0x2b, 0x65, 0x70]),
+        YUBIHSM_ALGO_ED448 => Some(&[0x06, 0x03, 0x2b, 0x65, 0x71]),
         YUBIHSM_ALGO_X25519 => Some(&[
             0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
         ]),
+        YUBIHSM_ALGO_X448 => Some(&[0x06, 0x03, 0x2b, 0x65, 0x6f]),
         _ => None,
     }
 }

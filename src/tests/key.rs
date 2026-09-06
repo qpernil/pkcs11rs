@@ -3347,6 +3347,45 @@ pub fn yubihsm_key_pair_generation_requires_a_token_private_key() {
 }
 
 #[test]
+pub fn yubihsm_virtual_curve_generation_selects_extension_algorithms() {
+    for (mechanism_type, mut parameters, expected_algorithm, expected_key_type) in [
+        (
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            vec![0x06u8, 0x03, 0x2b, 0x65, 0x6f],
+            crate::YUBIHSM_ALGO_X448,
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+        ),
+        (
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            vec![0x06u8, 0x03, 0x2b, 0x65, 0x71],
+            crate::YUBIHSM_ALGO_ED448,
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+        ),
+    ] {
+        let parameters_attribute = CK_ATTRIBUTE {
+            type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            pValue: parameters.as_mut_ptr().cast(),
+            ulValueLen: parameters.len() as CK_ULONG,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let (private, public, command) =
+            crate::yubihsm_generate_key_pair_command(&mechanism, &[parameters_attribute], &[])
+                .unwrap();
+        assert_eq!(private.key_type, expected_key_type);
+        assert_eq!(public.key_type, expected_key_type);
+        assert_eq!(
+            command.code(),
+            crate::yubihsm::CommandCode::GenerateAsymmetricKey
+        );
+        assert_eq!(command.data().last(), Some(&expected_algorithm));
+    }
+}
+
+#[test]
 pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     let mut modulus_bits = 2048 as CK_ULONG;
     let mut token_object = CK_TRUE as CK_BBOOL;

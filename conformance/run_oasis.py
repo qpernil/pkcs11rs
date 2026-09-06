@@ -40,6 +40,7 @@ ABI_QUALIFICATION_CASES = {
     p11.ABI_TEST_SCP03_SLOT_ID: {"BL-M-1-32"},
     p11.ABI_TEST_YUBIHSM_SLOT_ID: {
         "BL-M-1-32",
+        "EXT-M-1-32",
         "AUTH-M-1-32",
         "CERT-M-1-32",
     },

@@ -29,6 +29,7 @@ pub(crate) enum YubiHsmWrapMechanism {
         full_object: bool,
         parameters: RsaAesWrapParameters,
     },
+    RsaPkcs,
 }
 
 struct YubiHsmUnwrapTemplate {
@@ -119,6 +120,12 @@ pub(crate) fn parse_yubihsm_wrap_mechanism(
     mechanism: &CK_MECHANISM,
 ) -> Result<YubiHsmWrapMechanism, Error> {
     match mechanism.mechanism {
+        x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            Ok(YubiHsmWrapMechanism::RsaPkcs)
+        }
         x if x == CKM_YUBICO_AES_CCM_WRAP => {
             let format = if mechanism.pParameter.is_null() {
                 if mechanism.ulParameterLen != 0 {
@@ -188,6 +195,12 @@ fn validate_yubihsm_wrapping_key(
                 object_type,
                 YUBIHSM_WRAP_KEY | YUBIHSM_WRAP_KEY_PUBLIC | YUBIHSM_PUBLIC_WRAP_KEY
             ) && is_yubihsm_rsa(algorithm)
+        }
+        YubiHsmWrapMechanism::RsaPkcs if unwrapping => {
+            object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(algorithm)
+        }
+        YubiHsmWrapMechanism::RsaPkcs => {
+            object_type == YUBIHSM_PUBLIC_WRAP_KEY && is_yubihsm_rsa(algorithm)
         }
     };
     if !compatible {
@@ -755,6 +768,12 @@ fn wrap_key(
                     },
                 )?
             }
+            YubiHsmWrapMechanism::RsaPkcs => {
+                if target_type != YUBIHSM_SYMMETRIC_KEY {
+                    return Err(CKR_KEY_NOT_WRAPPABLE.into());
+                }
+                YubiHsmCommand::rsa_pkcs_wrap_key(wrapping_key_id, target_type, target_id)?
+            }
         };
         let response = ctx
             ._get_session(session_handle)?
@@ -975,6 +994,22 @@ fn unwrap_key(
                 expected_target_type = Some(target_type);
                 command
             }
+            YubiHsmWrapMechanism::RsaPkcs => {
+                let parsed = parse_yubihsm_unwrap_template(template)?;
+                validate_new_object_access(&parsed.object, flags, logged_in)?;
+                if parsed.object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
+                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
+                }
+                let command = YubiHsmCommand::put_rsa_pkcs_wrapped_key(
+                    unwrapping_key_id,
+                    YUBIHSM_SYMMETRIC_KEY,
+                    &parsed.parameters(),
+                    wrapped,
+                )?;
+                requested_attributes = Some(parsed.object);
+                expected_target_type = Some(YUBIHSM_SYMMETRIC_KEY);
+                command
+            }
         };
         let response = ctx
             ._get_session(session_handle)?
@@ -1088,8 +1123,8 @@ fn parse_yubihsm_unwrap_template(
             let algorithm = yubihsm_ec_algorithm(&ec_parameters.ok_or(CKR_TEMPLATE_INCOMPLETE)?)?;
             let compatible = match key_type {
                 x if x == CKK_EC as CK_KEY_TYPE => is_yubihsm_ec(algorithm),
-                x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => algorithm == YUBIHSM_ALGO_ED25519,
-                _ => is_yubihsm_x25519(algorithm),
+                x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => is_yubihsm_edwards(algorithm),
+                _ => is_yubihsm_montgomery(algorithm),
             };
             if !compatible {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
