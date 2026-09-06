@@ -178,13 +178,21 @@ credential password.
 
 The password may be omitted when `PKCS11RS_PINENTRY` is configured. Public
 discovery requests it lazily after finding the required YubiHSM Auth provider.
-The selector is global configuration, but a prompted password is cached in
-zeroizing memory only by the YubiHSM slot on which authentication succeeds.
-Each slot may therefore prompt independently, and a missing provider or failed
-authentication does not expose or cache the password in another slot. Direct
+The selector is global configuration, but prompting and authentication are
+slot-local. A successful slot retains its authenticated discovery session, not
+the prompted password, by default. Only explicit session recreation retains
+slot-local reauthentication material: derived keys for direct authentication,
+or the credential password for YubiHSM Auth. Each slot may prompt independently;
+without recreation, reconnecting may require another prompt. A prompted password
+is not added to the discovery configuration or cached for another slot. Direct
 configuration consisting of only the four-digit Authentication Key ID uses the
 same behavior. Without pinentry, the password must be explicit. A malformed or
 incomplete value makes `C_Initialize` return `CKR_ARGUMENTS_BAD`.
+
+An explicitly configured discovery password remains available in the slot's
+zeroizing configuration storage independently of session recreation or user
+logout. This is a configured credential, not a cache of a prompted login secret.
+See the [authentication secret retention policy](authentication-secrets.md).
 
 CCID applets and their YubiHSM Auth credentials are enumerated before the module
 performs YubiHSM public discovery. The same configured credential is then tried
@@ -575,10 +583,12 @@ envelope.
 
 The module asks the YubiHSM Auth applet to calculate the session keys and keeps
 those keys in zeroizing memory only for the life of the authenticated YubiHSM
-session. Credential passwords are not retained by default. They are retained
+session. Login credential passwords are not retained by default. They are retained
 in zeroizing memory for the authenticated session only when session recreation
 is explicitly enabled. The direct YubiHSM login forms remain available even
-when no YubiHSM Auth applet is connected.
+when no YubiHSM Auth applet is connected. Explicitly configured discovery
+passwords have a separate configuration lifetime, as described in the
+[authentication secret retention policy](authentication-secrets.md).
 
 ### Asymmetric device-key trust
 

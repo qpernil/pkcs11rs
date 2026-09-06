@@ -171,6 +171,12 @@ environment variable's dynamic names. Each entry carries its own optional
 `discovery_pin`. An omitted pin still falls back to that slot's legacy dynamic
 environment variable.
 
+An explicitly configured `discovery_pin` is retained in zeroizing storage for
+the software-token store's lifetime, independently of user login/logout. It is
+a configured discovery credential, not a cached user login PIN. See the
+[authentication secret retention policy](authentication-secrets.md) for this
+and the YubiHSM configuration exceptions.
+
 ## Direct JSON C example
 
 ```c
