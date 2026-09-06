@@ -3708,8 +3708,8 @@ pub(crate) fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
             CKK_GENERIC_SECRET as CK_KEY_TYPE
         }
         YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256 => CKK_AES as CK_KEY_TYPE,
-        YUBIHSM_ALGO_ED25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
-        YUBIHSM_ALGO_X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+        algorithm if is_yubihsm_edwards(algorithm) => CKK_EC_EDWARDS as CK_KEY_TYPE,
+        algorithm if is_yubihsm_montgomery(algorithm) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
         algorithm if is_yubihsm_rsa(algorithm) => CKK_RSA as CK_KEY_TYPE,
         algorithm if is_yubihsm_ec(algorithm) => CKK_EC as CK_KEY_TYPE,
         algorithm => CKK_VENDOR_DEFINED as CK_KEY_TYPE | algorithm as CK_KEY_TYPE,
@@ -3723,9 +3723,9 @@ pub(crate) fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
 pub(crate) fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
     if is_yubihsm_rsa(algorithm) {
         Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
-    } else if is_yubihsm_x25519(algorithm) {
+    } else if is_yubihsm_montgomery(algorithm) {
         Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
-    } else if algorithm == YUBIHSM_ALGO_ED25519 {
+    } else if is_yubihsm_edwards(algorithm) {
         Some(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
     } else if is_yubihsm_ec(algorithm) {
         Some(CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE)

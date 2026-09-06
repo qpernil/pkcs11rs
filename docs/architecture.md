@@ -126,16 +126,26 @@ objects, login behavior, mechanisms, random generation, and backend sessions.
 
 Backend mechanism lists describe complete slot operations. An operation may
 combine software preprocessing, such as hashing, with a hardware private-key
-command. Standalone software digest mechanisms belong only to software slots;
-hardware slots expose software-assisted composite mechanisms only when the
-operation uses a key in that slot. Software public-key processing adds a
+command. Every present slot exposes the provider-wide standalone SHA-1,
+SHA-2, and SHA-3 digest mechanisms because those operations do not use token
+key material. Their mechanism flags do not include `CKF_HW`. Composite
+mechanisms remain backend-specific because they operate on keys in the slot.
+Software public-key processing adds a
 public-operation flag only to a mechanism already exposed with its paired private operation:
 `CKF_SIGN` enables `CKF_VERIFY`, and `CKF_DECRYPT` enables `CKF_ENCRYPT`. It does
 not introduce a mechanism that the backend's private keys cannot perform. The
 public-projection mechanism remains available because it is itself an operation
 on a private key. Generic software private-key support is an explicit slot
 capability and is disabled for all
-hardware and applet slots. The typed implementation covers RSA, every
+hardware and applet slots.
+
+Every advertised mechanism flag is a tested slot contract. Deterministic tests
+must execute each advertised operation with compatible key material for every
+slot family that exposes it. Exact mechanism-set tests guard slots that expose
+only a restricted surface, so adding a mechanism requires adding its successful
+behavioral test in the same change.
+
+The typed implementation covers RSA, every
 Weierstrass curve supported by the hardware backends (NIST
 P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
 Ed25519, Ed448, X25519, and X448. `PKCS11RS_SOFTWARE_SLOTS` creates one independent

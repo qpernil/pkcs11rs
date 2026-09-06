@@ -6,15 +6,16 @@ use crate::{
     CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, KeyMaterial,
     Slot, TokenObject, YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
     YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256,
-    YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
+    YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_OPAQUE_DATA,
     YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
-    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
-    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY, YubiHsmDiscoveryCache, YubiHsmObjectKey,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot,
-    configured_yubihsm_public_discovery_credential,
+    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519, YUBIHSM_ASYMMETRIC_KEY,
+    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
+    YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
+    YubiHsmSlot, configured_yubihsm_public_discovery_credential,
     key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
     parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command,
 };
+use software_key_core::software_signing::SignatureScheme;
 use std::sync::Arc;
 use std::{
     cell::{Cell, RefCell},
@@ -134,7 +135,9 @@ pub(crate) struct ProtocolPeer {
     asymmetric_authkeys: RefCell<HashSet<u16>>,
     listed_authkeys: RefCell<HashSet<u16>>,
     visible_authkey_info: RefCell<HashMap<u16, ObjectInfo>>,
-    x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
+    montgomery_private_keys:
+        RefCell<HashMap<u16, software_key_core::software_key_agreement::SoftwareMontgomeryKey>>,
+    ed448_private_keys: RefCell<HashMap<u16, SoftwareSigningKey>>,
     corrupt_card_cryptogram: Cell<bool>,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
     expire_next_session_message: Cell<bool>,
@@ -177,9 +180,23 @@ fn encode_metadata_item(encoded: &mut Vec<u8>, tag: u8, value: &[u8]) {
 
 impl ProtocolPeer {
     pub(crate) fn new() -> Self {
-        let mut x25519_private_keys = HashMap::new();
-        x25519_private_keys.insert(7, RFC7748_ALICE_PRIVATE_KEY);
-        x25519_private_keys.insert(8, RFC7748_BOB_PRIVATE_KEY);
+        let mut montgomery_private_keys = HashMap::new();
+        montgomery_private_keys.insert(
+            7,
+            software_key_core::software_key_agreement::SoftwareMontgomeryKey::from_serialized(
+                software_key_core::software_key_agreement::MontgomeryCurve::X25519,
+                &RFC7748_ALICE_PRIVATE_KEY,
+            )
+            .unwrap(),
+        );
+        montgomery_private_keys.insert(
+            8,
+            software_key_core::software_key_agreement::SoftwareMontgomeryKey::from_serialized(
+                software_key_core::software_key_agreement::MontgomeryCurve::X25519,
+                &RFC7748_BOB_PRIVATE_KEY,
+            )
+            .unwrap(),
+        );
         let peer = Self {
             device: RefCell::new(Self::new_virtual_device()),
             commands: RefCell::new(Vec::new()),
@@ -191,7 +208,8 @@ impl ProtocolPeer {
             asymmetric_authkeys: RefCell::new(HashSet::new()),
             listed_authkeys: RefCell::new(HashSet::new()),
             visible_authkey_info: RefCell::new(HashMap::new()),
-            x25519_private_keys: RefCell::new(x25519_private_keys),
+            montgomery_private_keys: RefCell::new(montgomery_private_keys),
+            ed448_private_keys: RefCell::new(HashMap::new()),
             corrupt_card_cryptogram: Cell::new(false),
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
             expire_next_session_message: Cell::new(false),
@@ -515,22 +533,14 @@ impl ProtocolPeer {
             .remove(&authkey_id);
     }
 
-    fn x25519_derive(&self, id: u16, public_key: &[u8]) -> Result<Vec<u8>, Error> {
-        let private_key = self
-            .x25519_private_keys
+    fn montgomery_derive(&self, id: u16, public_key: &[u8]) -> Result<Vec<u8>, Error> {
+        self.montgomery_private_keys
             .borrow()
             .get(&id)
-            .copied()
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
-        if public_key.len() != 32 {
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        let private_key = x25519_dalek::StaticSecret::from(private_key);
-        let public_key_bytes: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-        let public_key = x25519_dalek::PublicKey::from(public_key_bytes);
-        Ok(private_key.diffie_hellman(&public_key).as_bytes().to_vec())
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?
+            .derive(public_key)
+            .map(|secret| secret.to_vec())
+            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
     }
 
     fn aes_key(id: u16) -> &'static [u8] {
@@ -719,14 +729,24 @@ impl ProtocolPeer {
                                 (inner.command | RESPONSE_BIT, encode_object_info(info))
                             } else if inner.data[2] != 3 {
                                 return Err(CKR_DEVICE_ERROR.into());
-                            } else if self.x25519_private_keys.borrow().contains_key(&id) {
+                            } else if let Some(key) =
+                                self.montgomery_private_keys.borrow().get(&id)
+                            {
+                                let (algorithm, length) = match key.curve() {
+                                    software_key_core::software_key_agreement::MontgomeryCurve::X25519 => {
+                                        (YUBIHSM_ALGO_X25519, 64_u16)
+                                    }
+                                    software_key_core::software_key_agreement::MontgomeryCurve::X448 => {
+                                        (YUBIHSM_ALGO_X448, 112_u16)
+                                    }
+                                };
                                 let mut info = vec![0; 66];
                                 info[7 - 0x0b / 8] |= 1 << (0x0b % 8);
                                 info[8..10].copy_from_slice(&id.to_be_bytes());
-                                info[10..12].copy_from_slice(&32u16.to_be_bytes());
+                                info[10..12].copy_from_slice(&length.to_be_bytes());
                                 info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
-                                info[14..18].copy_from_slice(&[3, 56, 1, 1]);
-                                info[18..26].copy_from_slice(b"test-x25");
+                                info[14..18].copy_from_slice(&[3, algorithm, 1, 1]);
+                                info[18..26].copy_from_slice(b"test-mont");
                                 (inner.command | RESPONSE_BIT, info)
                             } else {
                                 let mut info = vec![0; 66];
@@ -768,13 +788,29 @@ impl ProtocolPeer {
                                 response.extend_from_slice(&p256_public_key(&private)?[1..]);
                                 (inner.command | RESPONSE_BIT, response)
                             } else if let Some(private_key) =
-                                self.x25519_private_keys.borrow().get(&id)
+                                self.montgomery_private_keys.borrow().get(&id)
                             {
-                                let private_key = x25519_dalek::StaticSecret::from(*private_key);
-                                let mut key = vec![56];
-                                key.extend_from_slice(
-                                    x25519_dalek::PublicKey::from(&private_key).as_bytes(),
-                                );
+                                let algorithm = match private_key.curve() {
+                                    software_key_core::software_key_agreement::MontgomeryCurve::X25519 => {
+                                        YUBIHSM_ALGO_X25519
+                                    }
+                                    software_key_core::software_key_agreement::MontgomeryCurve::X448 => {
+                                        YUBIHSM_ALGO_X448
+                                    }
+                                };
+                                let mut key = vec![algorithm];
+                                key.extend_from_slice(&private_key.public_key());
+                                (inner.command | RESPONSE_BIT, key)
+                            } else if let Some(private_key) =
+                                self.ed448_private_keys.borrow().get(&id)
+                            {
+                                let SoftwarePublicKey::Edwards { public_key, .. } =
+                                    private_key.public_key()
+                                else {
+                                    return Err(CKR_DEVICE_ERROR.into());
+                                };
+                                let mut key = vec![YUBIHSM_ALGO_ED448];
+                                key.extend_from_slice(&public_key);
                                 (inner.command | RESPONSE_BIT, key)
                             } else {
                                 let mut key = vec![9, 0xc5];
@@ -814,22 +850,44 @@ impl ProtocolPeer {
                             } else {
                                 requested
                             };
-                            if inner.command == CommandCode::GenerateAsymmetricKey as u8
-                                && inner.data.get(52) == Some(&56)
-                            {
-                                let private_key = match id {
-                                    7 => RFC7748_ALICE_PRIVATE_KEY,
-                                    8 => RFC7748_BOB_PRIVATE_KEY,
-                                    _ => {
-                                        let mut private_key = [0; 32];
-                                        getrandom::fill(&mut private_key)
-                                            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-                                        private_key
+                            if inner.command == CommandCode::GenerateAsymmetricKey as u8 {
+                                match inner.data.get(52).copied() {
+                                    Some(YUBIHSM_ALGO_X25519 | YUBIHSM_ALGO_X448) => {
+                                        let curve = if inner.data[52] == YUBIHSM_ALGO_X25519 {
+                                            software_key_core::software_key_agreement::MontgomeryCurve::X25519
+                                        } else {
+                                            software_key_core::software_key_agreement::MontgomeryCurve::X448
+                                        };
+                                        let private_key = if curve
+                                            == software_key_core::software_key_agreement::MontgomeryCurve::X25519
+                                            && matches!(id, 7 | 8)
+                                        {
+                                            self.montgomery_private_keys
+                                                .borrow()
+                                                .get(&id)
+                                                .cloned()
+                                                .ok_or(CKR_DEVICE_ERROR)?
+                                        } else {
+                                            software_key_core::software_key_agreement::SoftwareMontgomeryKey::generate(curve)
+                                                .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?
+                                        };
+                                        self.montgomery_private_keys
+                                            .borrow_mut()
+                                            .insert(id, private_key);
                                     }
-                                };
-                                self.x25519_private_keys
-                                    .borrow_mut()
-                                    .insert(id, private_key);
+                                    Some(YUBIHSM_ALGO_ED448) => {
+                                        let private_key = SoftwareSigningKey::generate_for_kind(
+                                            KeyKind::Edwards(
+                                                software_key_core::software_signing::EdwardsCurve::Ed448,
+                                            ),
+                                        )
+                                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+                                        self.ed448_private_keys
+                                            .borrow_mut()
+                                            .insert(id, private_key);
+                                    }
+                                    _ => {}
+                                }
                             }
                             let object_type = match inner.command {
                                 value if value == CommandCode::GenerateWrapKey as u8 => {
@@ -848,6 +906,8 @@ impl ProtocolPeer {
                                     YUBIHSM_ALGO_RSA_2048 => 256,
                                     YUBIHSM_ALGO_RSA_3072 => 384,
                                     YUBIHSM_ALGO_RSA_4096 => 512,
+                                    YUBIHSM_ALGO_X448 => 112,
+                                    YUBIHSM_ALGO_ED448 => 228,
                                     _ => 32,
                                 }
                             };
@@ -1217,11 +1277,11 @@ impl ProtocolPeer {
                             )
                         }
                         value if value == CommandCode::DeriveEcdh as u8 => {
-                            if inner.data.len() == 34 {
+                            if matches!(inner.data.len(), 34 | 58) {
                                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                                 (
                                     inner.command | RESPONSE_BIT,
-                                    self.x25519_derive(id, &inner.data[2..])?,
+                                    self.montgomery_derive(id, &inner.data[2..])?,
                                 )
                             } else {
                                 (inner.command | RESPONSE_BIT, vec![0x42; 32])
@@ -1247,8 +1307,8 @@ impl ProtocolPeer {
                             }
                             let public_end = 11 + public_length;
                             let prefix_end = public_end + prefix_length;
-                            let secret = if public_length == 32 {
-                                self.x25519_derive(id, &inner.data[11..public_end])?
+                            let secret = if matches!(public_length, 32 | 56) {
+                                self.montgomery_derive(id, &inner.data[11..public_end])?
                             } else {
                                 let private =
                                     crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
@@ -1284,6 +1344,21 @@ impl ProtocolPeer {
                             )
                             .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
                             (inner.command | RESPONSE_BIT, derived.to_vec())
+                        }
+                        value if value == CommandCode::SignEddsa as u8 => {
+                            if inner.data.len() < 2 {
+                                return Err(CKR_DATA_LEN_RANGE.into());
+                            }
+                            let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                            let keys = self.ed448_private_keys.borrow();
+                            if let Some(key) = keys.get(&id) {
+                                let signature = key
+                                    .sign_message(SignatureScheme::Ed448, &inner.data[2..])
+                                    .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+                                (inner.command | RESPONSE_BIT, signature.into_bytes())
+                            } else {
+                                (inner.command | RESPONSE_BIT, inner.data)
+                            }
                         }
                         value
                             if value == CommandCode::EncryptEcb as u8
@@ -1393,7 +1468,7 @@ pub(crate) fn make_yubihsm_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -1408,7 +1483,7 @@ pub(crate) fn make_yubihsm_provisioning_test_slot()
         peer.clone(),
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());

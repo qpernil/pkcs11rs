@@ -272,10 +272,6 @@ impl Slot for SoftwareSlot {
         true
     }
 
-    fn supports_software_digest_operations(&self) -> bool {
-        true
-    }
-
     fn private_objects_require_login(&self) -> bool {
         true
     }

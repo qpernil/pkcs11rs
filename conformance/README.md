@@ -42,8 +42,13 @@ Omit `--case` to execute every advertised case for which the selected token is
 provisioned. Without `--module`, the runner builds and uses the deterministic
 `abi-tests` backend. Its ordinary PIV fixture qualifies only the Baseline
 case because PIV labels are fixed by the applet architecture; its ordinary
-YubiHSM fixture qualifies Baseline, Authentication, and Public Certificates.
-This is the mode used in CI to exercise the executor and prevent regressions.
+YubiHSM fixture qualifies Baseline, Extended, Authentication, and Public
+Certificates. The fixture represents the virtual YubiHSM, whose direct PKCS #1
+secret-key wrapping extension supplies the `CKF_WRAP` and `CKF_UNWRAP` flags on
+`CKM_RSA_PKCS` required by `EXT-M-1-32`. Physical YubiHSM firmware instead
+exposes RSA-based wrapping through `CKM_YUBICO_RSA_WRAP` and
+`CKM_RSA_AES_KEY_WRAP`; its Extended Provider claim uses the capability-level
+interpretation and does not pass that literal mechanism-identifier check.
 With `--module`, every advertised profile is selected and failures are not
 filtered by the runner.
 
@@ -83,6 +88,12 @@ The selected token must be provisioned for the cases being claimed:
 
 Run only the profile or profiles the deployment intends to claim. A profile
 failure is not hidden by success in another case.
+
+For a physical YubiHSM Extended Provider claim, retain evidence for its
+supported RSA-based wrapping mechanisms and record the `EXT-M-1-32`
+mechanism-identifier deviation described above. The repository does not treat
+a filtered or omitted test as a passing result. For a virtual YubiHSM, retain
+the passing literal case together with the advertised extension marker.
 
 ## Interpretation and evidence
 

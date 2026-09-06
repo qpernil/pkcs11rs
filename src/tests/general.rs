@@ -1392,12 +1392,13 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert_eq!(token_info.ulMaxPinLen, 0);
     assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
     let mechanisms = crate::Slot::mechanisms(&slot);
-    for unsupported in crate::SOFTWARE_DIGEST_MECHANISMS {
-        assert!(
-            !mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == unsupported.type_)
-        );
+    for expected in crate::SOFTWARE_DIGEST_MECHANISMS {
+        let advertised = mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == expected.type_)
+            .expect("provider-wide digest mechanism");
+        assert_eq!(advertised.flags, CKF_DIGEST as CK_FLAGS);
+        assert_eq!((advertised.min_key_size, advertised.max_key_size), (0, 0));
     }
     for unsupported in crate::software_public_mechanisms()
         .into_iter()

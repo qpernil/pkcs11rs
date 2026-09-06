@@ -383,6 +383,18 @@ fn rsa_wrap_commands_match_wire_vectors_and_validate_digest_lengths() {
         )
         .is_err()
     );
+
+    let direct = Command::rsa_pkcs_wrap_key(0x1234, 9, 0x5678).unwrap();
+    assert_eq!(direct.code(), CommandCode::GetRsaWrappedKey);
+    assert_eq!(direct.data(), [0x12, 0x34, 9, 0x56, 0x78, 0, 0, 0]);
+
+    let parameters = object("direct");
+    let put = Command::put_rsa_pkcs_wrapped_key(0x1234, 9, &parameters, &[0xaa; 256]).unwrap();
+    assert_eq!(put.code(), CommandCode::PutRsaWrappedKey);
+    assert_eq!(&put.data()[..2], &[0x12, 0x34]);
+    assert_eq!(put.data()[2], 9);
+    assert_eq!(&put.data()[56..58], &[0, 0]);
+    assert_eq!(&put.data()[58..], &[0xaa; 256]);
 }
 
 #[test]

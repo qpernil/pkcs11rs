@@ -1015,7 +1015,7 @@ pub(super) fn yubihsm_object_parameters(
     let mut capabilities = yubihsm_attributes_to_capabilities(object_type, algorithm, attributes);
     if object_type == YUBIHSM_ASYMMETRIC_KEY
         && object.derive
-        && (is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm))
+        && (is_yubihsm_ec(algorithm) || is_yubihsm_montgomery(algorithm))
     {
         let (raw, protected) =
             object

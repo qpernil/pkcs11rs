@@ -27,6 +27,10 @@ impl Slot for AbiTestSlot {
         true
     }
 
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
+        MECHANISMS.to_vec()
+    }
+
     fn name(&self) -> String {
         String::from("PKCS11RS ABI test slot")
     }
@@ -424,6 +428,10 @@ impl Slot for AbiScp03Slot {
         SlotKind::Ccid(CcidApplication::IssuerSecurityDomain)
     }
 
+    fn supports_public_projection(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> String {
         format!("PKCS11RS ABI {} test slot", self.protocol)
     }
@@ -511,6 +519,10 @@ impl Slot for AbiScp03Slot {
         info.ulMinPinLen = 0;
         info.ulMaxPinLen = 0;
         Ok(())
+    }
+
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
+        Vec::new()
     }
 
     fn clear_session(&mut self) {

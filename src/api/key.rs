@@ -1268,6 +1268,8 @@ pub(crate) fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
             0x39,
         ] => Ok(YUBIHSM_ALGO_X25519),
         [0x06, 0x03, 0x2b, 0x65, 0x6e] => Ok(YUBIHSM_ALGO_X25519),
+        [0x06, 0x03, 0x2b, 0x65, 0x6f] => Ok(YUBIHSM_ALGO_X448),
+        [0x06, 0x03, 0x2b, 0x65, 0x71] => Ok(YUBIHSM_ALGO_ED448),
         _ => Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
     }
 }
@@ -1306,7 +1308,7 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                     .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
             let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
             let algorithm = yubihsm_ec_algorithm(&parameters)?;
-            if is_yubihsm_x25519(algorithm) || algorithm == YUBIHSM_ALGO_ED25519 {
+            if is_yubihsm_montgomery(algorithm) || is_yubihsm_edwards(algorithm) {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
             (CKK_EC as CK_KEY_TYPE, algorithm)
@@ -1317,7 +1319,7 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                     .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
             let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
             let algorithm = yubihsm_ec_algorithm(&parameters)?;
-            if !is_yubihsm_x25519(algorithm) {
+            if !is_yubihsm_montgomery(algorithm) {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
             (CKK_EC_MONTGOMERY as CK_KEY_TYPE, algorithm)
@@ -1328,7 +1330,7 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                     .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
             let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
             let algorithm = yubihsm_ec_algorithm(&parameters)?;
-            if algorithm != YUBIHSM_ALGO_ED25519 {
+            if !is_yubihsm_edwards(algorithm) {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
             (CKK_EC_EDWARDS as CK_KEY_TYPE, algorithm)
@@ -1896,7 +1898,7 @@ fn derive_key(
                 algorithm,
                 capabilities,
                 ..
-            } if is_yubihsm_ec(*algorithm) || is_yubihsm_x25519(*algorithm) => {
+            } if is_yubihsm_ec(*algorithm) || is_yubihsm_montgomery(*algorithm) => {
                 DeriveSource::YubiHsm {
                     id: *id,
                     algorithm: *algorithm,
@@ -1913,7 +1915,7 @@ fn derive_key(
             DeriveSource::OpenPgp { algorithm, .. } => {
                 *algorithm == OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
             }
-            DeriveSource::YubiHsm { algorithm, .. } => is_yubihsm_x25519(*algorithm),
+            DeriveSource::YubiHsm { algorithm, .. } => is_yubihsm_montgomery(*algorithm),
         };
         if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
             && source_is_montgomery
@@ -1971,8 +1973,12 @@ fn derive_key(
                 }
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
-            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_x25519(*algorithm) => {
-                (32, 32, false)
+            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_montgomery(*algorithm) => {
+                match *algorithm {
+                    YUBIHSM_ALGO_X25519 => (32, 32, false),
+                    YUBIHSM_ALGO_X448 => (56, 56, false),
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                }
             }
             DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
                 let coordinate_length = yubihsm_ec_coordinate_length(*algorithm)?;

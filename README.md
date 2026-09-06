@@ -198,9 +198,20 @@ discovery result, not merely on the presence of configuration.
 
 YubiHSM slots advertise the Extended Provider profile because the module
 provides its required mechanism discovery and authentication functions. The
-profile does not mandate a particular mechanism. Available wrapping mechanisms
-remain limited to the YubiHSM's standard and vendor-backed adaptations and
-depend on device capabilities.
+profile's RSA-wrapping requirement is interpreted as a capability requirement,
+not as requiring one particular mechanism identifier. Available wrapping
+mechanisms remain limited to the YubiHSM's standard and vendor-backed
+adaptations and depend on device capabilities.
+
+The published OASIS `EXT-M-1-32` test binds RSA wrapping to `CKM_RSA_PKCS` and
+requires `CKF_WRAP` and `CKF_UNWRAP` on that mechanism. Physical YubiHSM
+firmware does not provide that direct wrapped-secret format, so its slot exposes
+RSA wrapping through `CKM_YUBICO_RSA_WRAP` and `CKM_RSA_AES_KEY_WRAP` and does
+not pass the literal check. A virtual YubiHSM advertises its direct PKCS #1
+secret-key wrapping extension through a dedicated device algorithm marker;
+only then does pkcs11rs add those flags and pass the literal test. Conformance
+evidence for a physical slot must identify the mechanism-identifier deviation
+and the capability-level interpretation used for its Extended Provider claim.
 
 ## Threading
 
@@ -1103,8 +1114,9 @@ pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 The initial PIN is `123456`. Mock device state, including PIN changes and
 created credentials, lasts for the client process and survives
 `C_Finalize`/`C_Initialize`; unloading the library or ending the process resets
-it. The mock begins with one deterministic resident
-credential and implements credential-management enumeration, RP-bound
+it. The mock begins without resident credentials. Tests can create a
+deterministic resident credential through previewSign registration and then
+exercise credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification
 through its projected public key. It also implements the complete experimental
 previewSign PKCS #11 flow: credential registration, registration-attribute

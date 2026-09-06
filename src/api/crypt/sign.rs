@@ -902,10 +902,13 @@ fn sign(
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
                 yubihsm_ec_coordinate_length(*algorithm)? * 2
             }
-            KeyMaterial::YubiHsm {
-                algorithm: YUBIHSM_ALGO_ED25519,
-                ..
-            } => 64,
+            KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_edwards(*algorithm) => {
+                match *algorithm {
+                    YUBIHSM_ALGO_ED25519 => 64,
+                    YUBIHSM_ALGO_ED448 => 114,
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                }
+            }
             KeyMaterial::YubiHsm { .. } if operation.mac_length.is_some() => {
                 operation.mac_length.ok_or(CKR_KEY_TYPE_INCONSISTENT)?
             }

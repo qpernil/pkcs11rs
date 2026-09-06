@@ -14,6 +14,7 @@ import threading
 import unittest
 
 from test_pkcs11 import (
+    CKA_ALWAYS_AUTHENTICATE,
     CKA_CLASS,
     CKA_DERIVE,
     CKA_EC_POINT,
@@ -39,9 +40,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 RUN_HARDWARE_TESTS = os.environ.get("PKCS11RS_RUN_HARDWARE_TESTS") == "1"
 CKR_OK = 0
 CKR_SIGNATURE_INVALID = 0xC0
+CKR_USER_NOT_LOGGED_IN = 0x101
 CKF_SERIAL_SESSION = 0x00000004
 CKF_RW_SESSION = 0x00000002
 CKU_USER = 1
+CKU_CONTEXT_SPECIFIC = 2
 CKM_VENDOR_DEFINED = 0x80000000
 CKK_VENDOR_DEFINED = 0x80000000
 CKA_VENDOR_DEFINED = 0x80000000
@@ -500,6 +503,14 @@ class HardwareDiscoveryTests(unittest.TestCase):
                     CKR_OK,
                 )
                 cleanup_handles.append(restored_key.value)
+                self.assertEqual(
+                    self.read_attribute(
+                        session.value,
+                        restored_key.value,
+                        CKA_ALWAYS_AUTHENTICATE,
+                    ),
+                    b"\x01",
+                )
 
                 project_mechanism = CK_MECHANISM(
                     CKM_PKCS11RS_PROJECT_PUBLIC_KEY, None, 0
@@ -543,6 +554,25 @@ class HardwareDiscoveryTests(unittest.TestCase):
                     CKR_OK,
                 )
                 signature_length = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_Sign(
+                        session.value,
+                        digest,
+                        len(digest),
+                        None,
+                        ctypes.byref(signature_length),
+                    ),
+                    CKR_USER_NOT_LOGGED_IN,
+                )
+                self.assertEqual(
+                    self.lib.C_Login(
+                        session.value,
+                        CKU_CONTEXT_SPECIFIC,
+                        pin,
+                        len(pin),
+                    ),
+                    CKR_OK,
+                )
                 self.assertEqual(
                     self.lib.C_Sign(
                         session.value,
@@ -619,6 +649,12 @@ class HardwareDiscoveryTests(unittest.TestCase):
                     self.lib.C_DestroyObject(session.value, handle), CKR_OK
                 )
             cleanup_handles.clear()
+            self.assertEqual(self.lib.C_Logout(session.value), CKR_OK)
+            logged_in = False
+            self.assertEqual(
+                self.lib.C_Login(session.value, CKU_USER, pin, len(pin)), CKR_OK
+            )
+            logged_in = True
             self.assertEqual(
                 self.lib.C_DestroyObject(session.value, parent_private.value),
                 CKR_OK,

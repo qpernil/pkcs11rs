@@ -67,6 +67,20 @@ impl Command {
         Self::from_vec(code, data)
     }
 
+    /// Virtual-YubiHSM extension: zeroed hybrid-wrap selectors request direct
+    /// RSAES-PKCS1-v1_5 wrapping of symmetric key material.
+    pub(crate) fn rsa_pkcs_wrap_key(
+        wrapping_key_id: u16,
+        object_type: u8,
+        object_id: u16,
+    ) -> Result<Self, Error> {
+        let mut data = wrapping_key_id.to_be_bytes().to_vec();
+        data.push(object_type);
+        data.extend_from_slice(&object_id.to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0]);
+        Self::from_vec(CommandCode::GetRsaWrappedKey, data)
+    }
+
     pub(crate) fn put_rsa_wrapped_key(
         wrapping_key_id: u16,
         object_type: u8,
@@ -83,6 +97,21 @@ impl Command {
         data.extend_from_slice(&[hash_algorithm, mgf1_algorithm]);
         data.extend_from_slice(wrapped);
         data.extend_from_slice(label_digest);
+        Self::from_vec(CommandCode::PutRsaWrappedKey, data)
+    }
+
+    /// Virtual-YubiHSM counterpart to [`Self::rsa_pkcs_wrap_key`].
+    pub(crate) fn put_rsa_pkcs_wrapped_key(
+        wrapping_key_id: u16,
+        object_type: u8,
+        parameters: &ObjectParameters,
+        wrapped: &[u8],
+    ) -> Result<Self, Error> {
+        let mut data = wrapping_key_id.to_be_bytes().to_vec();
+        data.push(object_type);
+        data.extend_from_slice(&parameters.encode()?);
+        data.extend_from_slice(&[0, 0]);
+        data.extend_from_slice(wrapped);
         Self::from_vec(CommandCode::PutRsaWrappedKey, data)
     }
 
