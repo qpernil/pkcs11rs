@@ -1,5 +1,6 @@
 mod api;
 mod http_timeout;
+mod i2c;
 mod registry;
 mod tls;
 #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
@@ -9,6 +10,7 @@ use api::{AppState, router};
 use clap::{Parser, ValueEnum};
 use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
+use i2c::I2cYubiHsmSpec;
 use registry::{DeviceRegistry, spawn_discovery};
 use std::{
     future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc,
@@ -143,6 +145,10 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     hardware_discovery: bool,
 
+    /// Experimental I2C YubiHSM (requires experimental-i2c on Linux): BUS@ADDRESS=GPIOCHIP:OFFSET. Repeat for more devices.
+    #[arg(long = "i2c-yubihsm", value_name = "BUS@ADDRESS=GPIOCHIP:OFFSET")]
+    i2c_yubihsms: Vec<I2cYubiHsmSpec>,
+
     /// Embedded virtual YubiHSM expressed as SERIAL=STATE_DIRECTORY. Repeat for more devices.
     #[arg(long = "virtual-yubihsm", value_name = "SERIAL=STATE_DIRECTORY")]
     virtual_yubihsms: Vec<VirtualYubiHsmSpec>,
@@ -189,6 +195,16 @@ async fn main() -> Result<(), BoxError> {
 async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
     let virtual_hsms = VirtualHsmRuntime::start(args, &registry).await?;
+    if let Err(error) = i2c::register(
+        &registry,
+        &args.i2c_yubihsms,
+        Duration::from_secs(args.command_timeout_seconds),
+    )
+    .await
+    {
+        virtual_hsms.shutdown().await?;
+        return Err(error);
+    }
     let discovery = if hardware_discovery_enabled(args) {
         match spawn_discovery(registry.clone()).await {
             Ok(discovery) => Some(discovery),
@@ -249,12 +265,13 @@ fn hardware_discovery_enabled(args: &Args) -> bool {
 
     #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
     {
-        if !args.hardware_discovery {
+        if !args.hardware_discovery && args.i2c_yubihsms.is_empty() {
             tracing::warn!(
-                "ignoring disabled hardware discovery because this connector was built without embedded support"
+                "ignoring disabled hardware discovery because no configured non-USB backend is available"
             );
+            return true;
         }
-        true
+        args.hardware_discovery
     }
 }
 
@@ -339,6 +356,7 @@ fn validate_args(args: &Args) -> Result<(), BoxError> {
             "refusing non-loopback HTTP; configure TLS or pass --allow-insecure-http".into(),
         );
     }
+    i2c::validate(&args.i2c_yubihsms)?;
     Ok(())
 }
 
@@ -587,6 +605,7 @@ mod tests {
             command_timeout_seconds: 30,
             http_max_in_flight_requests: 64,
             hardware_discovery: true,
+            i2c_yubihsms: Vec::new(),
             virtual_yubihsms: Vec::new(),
             virtual_yubihsm_persistence: VirtualPersistence::Batched,
             virtual_yubihsm_batch_delay_ms: DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS,
@@ -600,6 +619,7 @@ mod tests {
         assert_eq!(args.command_timeout_seconds, 60);
         assert_eq!(args.http_max_in_flight_requests, 64);
         assert!(args.hardware_discovery);
+        assert!(args.i2c_yubihsms.is_empty());
         assert_eq!(
             args.virtual_yubihsm_persistence,
             VirtualPersistence::Batched

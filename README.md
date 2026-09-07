@@ -428,10 +428,11 @@ software-token, object-inventory, and YubiHSM Auth coverage.
 ### Asynchronous multi-device connector
 
 The workspace also builds `pkcs11rs-connector`, a fully asynchronous HTTP(S)
-gateway for every YubiHSM attached to the connector host over USB. It uses
-Tokio and Axum for HTTP, Rustls for HTTPS and optional mutual TLS, and nusb's
-native asynchronous transfers from request to physical device. The connector
-hot-plug registry uses the verified USB serial as the stable remote identity.
+gateway for YubiHSMs attached to the connector host over USB or configured I2C
+endpoints on Linux. It uses Tokio and Axum for HTTP, Rustls for HTTPS and
+optional mutual TLS, and nusb's native asynchronous transfers for USB devices.
+The connector registry uses the device-reported serial as the stable remote
+identity.
 
 > **Deployment status:** this daemon is currently intended for loopback,
 > trusted private networks, or use behind a controlled VPN or reverse proxy.
@@ -446,9 +447,13 @@ Start a loopback HTTP connector with:
 cargo run -p pkcs11rs-connector
 ```
 
-On Unix hosts, the optional `embedded-virtual-yubihsm` feature lets the same
-connector serve one or more headless `virtual-yubihsm-core` devices alongside
-physical USB devices:
+An optional `experimental-i2c` feature supports niche Linux I2C experiments.
+Setup and limitations are described under
+[experimental I2C endpoints](docs/connector.md#experimental-i2c-yubihsms).
+
+On Unix hosts, including Linux and macOS, the optional
+`embedded-virtual-yubihsm` feature lets the same connector serve one or more
+headless `virtual-yubihsm-core` devices alongside physical USB devices:
 
 ```sh
 cargo run -p pkcs11rs-connector \
@@ -680,6 +685,11 @@ Direct YubiHSM USB discovery follows `PKCS11RS_HARDWARE_DISCOVERY`, together
 with the other local hardware discovery mechanisms. Configured remote slots
 remain enabled when local hardware discovery is disabled.
 
+Experimental I2C YubiHSMs are accessed through `pkcs11rs-connector` on a Linux host.
+Configure its `--i2c-yubihsm` endpoints and point the PKCS #11 module at that
+connector with `PKCS11RS_YUBIHSM_URLS` or `yubihsm.urls`. See
+[Experimental I2C YubiHSMs](docs/connector.md#experimental-i2c-yubihsms).
+
 Optionally expose YubiHSM public objects before PKCS #11 login with one
 low-privilege discovery Authentication Key:
 
@@ -838,6 +848,7 @@ Detailed configuration:
 - [Initialization configuration](docs/configuration.md)
 - [iOS application integration for Swift and Objective-C](docs/ios-integration.md)
 - [Multi-device YubiHSM connector](docs/connector.md)
+- [Experimental I2C transport requirements and validation](docs/i2c-stability.md)
 - [Named software slots](docs/software.md)
 - [Vendor extension API index](docs/extensions.md)
 - [iPhone smoke test](examples/ios/PKCS11RSPhoneSmoke/README.md)

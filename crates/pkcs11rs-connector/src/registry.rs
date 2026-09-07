@@ -25,6 +25,8 @@ pub enum DeviceTransportKind {
     Usb,
     #[cfg(any(test, all(feature = "embedded-virtual-yubihsm", unix)))]
     Embedded,
+    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    I2c,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -78,6 +80,22 @@ pub struct TransportError {
 }
 
 impl TransportError {
+    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    pub(crate) fn invalid_frame(message: impl Into<String>) -> Self {
+        Self {
+            kind: TransportErrorKind::InvalidCommandFrame,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    pub(crate) fn too_large(message: impl Into<String>) -> Self {
+        Self {
+            kind: TransportErrorKind::CommandTooLarge,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn device(message: impl Into<String>) -> Self {
         Self {
             kind: TransportErrorKind::DeviceTransport,
@@ -461,11 +479,15 @@ impl DeviceRegistry {
         .await;
     }
 
-    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
-    pub(crate) async fn register_virtual(
+    #[cfg(any(
+        all(feature = "experimental-i2c", target_os = "linux"),
+        all(feature = "embedded-virtual-yubihsm", unix)
+    ))]
+    pub(crate) async fn register_configured(
         &self,
         serial: String,
         version: [u8; 3],
+        kind: DeviceTransportKind,
         transport: Box<dyn CommandTransport>,
     ) -> Result<(), TransportError> {
         let mut state = self.state.write().await;
@@ -488,7 +510,7 @@ impl DeviceRegistry {
                 usb_version: format!("{}.{}", version[0], version[1]),
             },
             device_transport: DeviceTransportView {
-                kind: DeviceTransportKind::Embedded,
+                kind,
                 connection_generation: *connection_generation,
             },
             command_transport: Mutex::new(transport),
