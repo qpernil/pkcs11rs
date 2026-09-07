@@ -294,6 +294,13 @@ Object-type, ID, and sequence identify a native cache entry; sequence changes
 discard stale derived properties.
 
 USB and HTTP are connector implementations behind the same backend boundary.
+Experimental I2C device access belongs to the Linux connector daemon; the PKCS #11 module
+uses its existing HTTP discovery and command paths for these devices. The
+connector owns the blocking I2C implementation in `src/i2c/`, including
+whole-bus exchange locking and optional READY handling. Qualification tools
+use the same HTTP command path. See
+[the exchange contract](i2c-stability.md#exchange-contract).
+
 Each configured HTTP service URL is discovered through `/v1/devices`; every
 returned serial becomes its own slot and routes commands through that serial's
 endpoint. All slots from one configured service entry share its HTTP agent and

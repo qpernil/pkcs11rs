@@ -1,6 +1,6 @@
 use crate::{
     VirtualPersistence, VirtualYubiHsmSpec,
-    registry::{CommandTransport, DeviceRegistry, TransportError},
+    registry::{CommandTransport, DeviceRegistry, DeviceTransportKind, TransportError},
 };
 use futures_util::future::BoxFuture;
 use std::{
@@ -133,7 +133,12 @@ impl VirtualHsmActors {
                     }
                 };
             if let Err(error) = registry
-                .register_virtual(spec.serial.to_string(), version, Box::new(transport))
+                .register_configured(
+                    spec.serial.to_string(),
+                    version,
+                    DeviceTransportKind::Embedded,
+                    Box::new(transport),
+                )
                 .await
             {
                 let _ = actor.shutdown().await;

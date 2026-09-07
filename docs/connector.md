@@ -1,9 +1,10 @@
 # PKCS11RS multi-device connector
 
-`pkcs11rs-connector` is an asynchronous network gateway for all YubiHSMs
-attached to one host over USB. It is built in the same Cargo workspace as the
-PKCS #11 module but is a separate package, so its Tokio, Axum, server-side TLS,
-and asynchronous nusb dependencies never enter the iOS XCFramework.
+`pkcs11rs-connector` is an asynchronous network gateway for YubiHSMs attached
+to one host over USB, with optional experimental I2C endpoints on Linux. It is built in the
+same Cargo workspace as the PKCS #11 module but is a separate package, so its
+Tokio, Axum, server-side TLS, and asynchronous nusb dependencies never enter
+the iOS XCFramework.
 
 > **Security status:** the connector is suitable for loopback, a trusted
 > private network, or access through a tightly controlled VPN or reverse proxy.
@@ -14,10 +15,87 @@ and asynchronous nusb dependencies never enter the iOS XCFramework.
 > limits, and the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
+## Experimental I2C YubiHSMs
+
+I2C is a niche experimental transport, excluded from default connector builds.
+On Linux, opt in when building and configure endpoints explicitly:
+
+```sh
+cargo build --release -p pkcs11rs-connector --features experimental-i2c
+```
+
+An endpoint has the form `BUS@ADDRESS=GPIOCHIP:OFFSET`, where the required GPIO
+is an active-low READY line. For example, this serves two I2C HSMs without USB
+discovery:
+
+```sh
+target/release/pkcs11rs-connector \
+  --hardware-discovery false \
+  --i2c-yubihsm /dev/i2c-1@0x24=/dev/gpiochip0:23 \
+  --i2c-yubihsm /dev/i2c-1@0x25=/dev/gpiochip0:22
+```
+
+READY is required on both ends. Use driver ABI 3 and configure `--ready-gpio`
+on the target launcher. Upgrade target and controller together.
+
+The connector probes `DeviceInfo` during startup and registers the returned
+serial and firmware version. Device I/O runs on Tokio's blocking pool with
+one mutex per endpoint. The mutex remains held until an exchange finishes,
+even if the HTTP request waiting for it is cancelled. After a transport
+failure, the failed command is returned without replay. A later command reopens
+the endpoint and probes `DeviceInfo` again;
+the serial must match the registered device before that command is forwarded.
+A different serial or a failed identity probe releases the reopened handles
+and returns a transport error. Changing the configured target to a different
+serial requires restarting the connector to register its new identity.
+
+The PKCS #11 module accesses these devices through its existing HTTP connector
+configuration, for example `PKCS11RS_YUBIHSM_URLS=http://127.0.0.1:12345`.
+It does not open I2C or READY GPIO devices itself.
+
+A command is one I2C write followed by a three-byte response-header read and
+an exact-length payload read. The connector holds the shared bus lock through
+the request's cleanup acknowledgment, releases it while the HSM computes, then
+reacquires it for the entire response read. Different targets can compute
+concurrently. All other clients must cooperate in this advisory bus lock.
+
+READY is active-low. Before writing, the connector arms rising-only detection and drains old GPIO events.
+The target acknowledges cleanup with a physical rising edge, using a short
+assertion first if READY was already inactive. Only the following assertion
+announces the new response. The connector captures the cleanup edge during the write, then arms falling-only
+detection and checks the response level. Single-edge detection avoids Linux
+classifying a fast pulse from a later pin reading. READY stays asserted after the exact
+response read; the next request clears leftover data. There is no polling
+marker, guard byte or post-read drain wait. One endpoint still has only one
+controller exchange at a time, including when an HTTP waiter is cancelled.
+
+A new request supersedes any pending result. The target retains one pending
+request and discards an older worker's result; this cannot undo its side effects.
+A transport failure is returned without automatically replaying the command.
+
+`python3 tools/i2c-stress.py 0x24 --ready /dev/gpiochip0:23 --count 1000`
+runs randomized, byte-exact echo tests. Add `--payload-gap-ms 5` for delayed
+header/body reads or `--abandon-every 10` to verify next-request recovery from
+an unread final byte. Stop the connector before claiming its READY inputs.
+
+The process needs read/write access to the configured `/dev/i2c-*` and
+`/dev/gpiochip*` devices but need not run as root. The generic controller-side
+transport works with Linux I2C adapters; only the separate BCM target driver is
+Raspberry Pi-specific. Configuring an I2C endpoint without the feature or on a
+non-Linux build is rejected at startup. The controller implementation and its
+HTTP adapter live together in the connector's `src/i2c/` directory. Linux GPIO
+access uses `gpiocdev-uapi`; the shared USB hardware crate has no I2C API.
+
+For a foreground test, the native `target-driver --profile` command manages
+the target's driver and unprivileged HSM lifetime. Follow the
+[manual bench test](https://github.com/qpernil/virtual-yubihsm/blob/main/docs/i2c.md#manual-bench-test)
+for profile setup, wiring, and the connector/qualification commands.
+
 ## Embedded virtual YubiHSMs
 
-On Unix, the connector can compile `virtual-yubihsm-core` directly into the
-process. Build the release binary with:
+On Unix, including Linux and macOS, the connector can compile
+`virtual-yubihsm-core` directly into the process. Build the release binary
+with:
 
 ```sh
 cargo build --release -p pkcs11rs-connector \
@@ -54,6 +132,13 @@ coalesces mutations for at most 500 ms; use
 `--virtual-yubihsm-persistence immediate` when every successful mutation must
 wait for durable storage. The batch bound can be changed with
 `--virtual-yubihsm-batch-delay-ms MILLISECONDS`.
+
+Portability roadmap: macOS is already supported by this Unix implementation
+and is covered by the embedded connector tests. Windows support remains to be
+added by replacing the Unix directory-mode setup and `flock`-based persistent
+state lock with equivalent cross-platform abstractions, then adding native
+Windows persistence, exclusion, restart, and shutdown tests. The virtual HSM
+command core itself is not the portability blocker.
 
 ## Architecture
 
@@ -296,8 +381,9 @@ alone until it is physically detached and reattached; sleep/wake does not retry
 the claim. Clients create slots only for `claimed` devices and
 ignore all other, including unknown future, status values.
 
-`transport.kind` is `usb` for enumerated hardware and `embedded` for a virtual
-HSM hosted in the connector. `connection_generation` starts at one and
+`transport.kind` is `usb` for enumerated USB hardware, `i2c` for a configured
+I2C endpoint, and `embedded` for a virtual HSM hosted in the connector.
+`connection_generation` starts at one and
 increases whenever the same serial is newly registered during the connector
 process lifetime. It makes detach, replacement, and re-enumeration visible
 without exposing an operating-system-specific USB identifier or sending a
@@ -570,6 +656,8 @@ cargo build --locked --release -p pkcs11rs-connector
 sudo install -m 0755 target/release/pkcs11rs-connector /usr/local/bin/
 ```
 
+For experimental I2C devices, add `--features experimental-i2c` to the build.
+
 For example, create a dedicated unprivileged account:
 
 ```sh
@@ -606,6 +694,17 @@ ProtectHome=true
 [Install]
 WantedBy=multi-user.target
 ```
+
+For an I2C-only controller, replace the unit's `ExecStart` with:
+
+```ini
+ExecStart=/usr/local/bin/pkcs11rs-connector --listen 127.0.0.1:12345 --hardware-discovery false --i2c-yubihsm /dev/i2c-1@0x24=/dev/gpiochip0:23
+```
+
+Grant the service account read/write access to the configured bus and, when
+used, GPIO chip through udev or device groups. Add the READY suffix to the
+endpoint if wired. The HSM target uses its separate
+[target service recipe](https://github.com/qpernil/virtual-yubihsm/blob/main/docs/i2c.md#service-installation).
 
 Use the HTTPS and mTLS options documented above when the listener is reachable
 from another host. Then load and enable the unit:
