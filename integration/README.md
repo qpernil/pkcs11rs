@@ -80,21 +80,45 @@ The upstream executable accepts PINs as command arguments, so ephemeral test
 PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
-The verified macOS run uses the local `pkcs11test` fork at
-`fd117c9e793f87362234f0d609118e322617b0b7`: **342 cases, 274 passed,
-68 unsupported/skipped, zero failures, crashes, or timeouts**. This inventory
+The verified macOS run uses [qpernil/pkcs11test](https://github.com/qpernil/pkcs11test)
+at `d688ee23d18d27b77652804861161c90b3341d73`: **542 cases, 444 passed,
+98 unsupported/skipped, zero failures, crashes, or timeouts**. The fork preserves
+Google upstream and YubicoLabs history and builds with Google Test 1.10.0. This inventory
 includes six parameterized encryption/decryption cancellation cases. The
-[fixture contracts](../../pkcs11test/README.md#fixture-contracts) describe its
+[fixture contracts](https://github.com/qpernil/pkcs11test#fixture-contracts) describe its
 standards-based corrections and explicit key-policy requirements. These
 results cover this fork and the software backend; they do not establish
 cross-vendor conformance or native hardware support for every passing case.
+The final report is `target/review-final.json`; the module binary is unchanged
+from the unmodified Google baseline below.
+
+An independent, unmodified [Google `dev` baseline](https://github.com/google/pkcs11test/tree/2cbe462c62bacf537b9a9a427a1c053d8c2e4760)
+at `2cbe462c62bacf537b9a9a427a1c053d8c2e4760` runs **331 cases: 234 passed,
+25 unsupported/skipped, 72 failed**, with no crashes or timeouts. It uses the
+same module binary (verified by SHA-256) and disposable software fixtures as
+the fork run. Of its failing cases, 46 encounter unsupported DES setup
+(36 cipher, eight digest-key, two dual-operation cases); four expect pre-3.x
+NULL-mechanism behavior; and eight assume size queries commit to single-part
+processing. The remaining 14 involve wrapping mechanism selection, key
+templates/authentication, PIN/reset assumptions, and RNG-seeding error
+precedence. These raw failures remain failures in the baseline report;
+the fork's corrected fixtures and capability checks make its totals a
+different comparison, not an unchanged-upstream conformance score.
+
+Build unmodified upstream separately and select its executable with
+`--pkcs11test /path/to/upstream/pkcs11test`. The recorded baseline report is
+`target/google-dev-baseline.json`; the installed executable remains the fork.
 
 | Skip reason | Cases |
 | --- | ---: |
 | Single-DES generation unavailable | 40 |
+| Single-DES encryption vectors unavailable | 2 |
 | IV validation inapplicable to supported ECB mechanisms | 4 |
 | MD5 digest unavailable | 12 |
 | MD5-with-RSA unavailable | 3 |
+| MD5-HMAC unavailable (including named input cases) | 23 |
+| Typed SHA HMAC key generation unavailable | 4 |
+| No standard typed MD5 generation fixture | 1 |
 | Combined digest/encryption API unsupported | 4 |
 | Operation-state save/restore unsupported | 2 |
 | Application-provided locking callbacks unsupported | 1 |
@@ -102,7 +126,7 @@ cross-vendor conformance or native hardware support for every passing case.
 | RSA sign/verify recovery unsupported | 1 |
 
 The DES group includes 38 cipher cases and two dual-operation cases blocked by
-DES setup. Four further dual-operation cases reach the unsupported combined
+DES setup. Two separate imported DES vectors also skip. Four further dual-operation cases reach the unsupported combined
 API. ECB cases cannot exercise IV validation and are explicitly skipped.
 Triple-DES and AES are supported and tested independently. Unsupported cases
 remain identified in the report rather than counted as passes.
@@ -118,8 +142,20 @@ errors from advertised operations remain failures. The round-trip test compares
 unwrapped bytes and, when available, direct decryption. The security test first
 wraps an extractable control key, then checks rejection of a protected key.
 Seven independent selector/discovery regressions pass with `make check` in the
-fork. A focused run of the final wrapping and IV fixtures covers 16 cases:
-eight pass and eight are unsupported/inapplicable skips.
+fork. CLI checks verify `-S 0`, an explicit `-w AES-KWP` filter, an unsupported
+DES selection reported as skipped, and rejection of an unknown profile.
+HMAC vectors have individual names, retain the complete published key bytes,
+and cover generic and typed keys, empty messages, and lengths around both hash
+block boundaries. Generic HMAC generation requests `CKK_GENERIC_SECRET`;
+typed generation uses the corresponding SHA key-generation mechanism.
+Cipher vectors also have individual names and require only encryption, not
+key generation. Public session-object fixtures run without authentication in
+read-only sessions; private-key fixtures use optional login and token-object
+creation uses read/write sessions. RSA fixtures destroy both public and private
+objects independently. All six Tookan cases pass; the RSA case verifies an
+extractable wrap/decrypt control before requiring protected-key rejection.
+All 12 RNG cases pass with initialization and session validation independent
+of token RNG capabilities.
 
 `C_WrapKey` and `C_UnwrapKey` resolve the wrapping key before choosing the
 software or native backend. Zero, unknown, and destroyed handles return
@@ -137,10 +173,11 @@ The 14 OpenSC/OpenSSL client cases and 11 fixture/report regressions also pass.
 Against the explicit exclusion list in `yubihsm-shell` checkout
 `4b0247e7857c64f134b85376335581cc198e331d`
 (`pkcs11/tests/CMakeLists.txt`), 127 cases correspond to exclusions: **80 pass
-and 47 skip here**. The comparison maps renamed authenticated fixtures back
+and 47 skip here**. The comparison maps renamed session fixtures back
 to their original identities and `EncryptUpdateAfterSizeQuery` to
 `EncryptModePolicing2`; the six added cancellation cases are excluded from the
-comparison. Fixture corrections mean this is a comparison of exercised test
+comparison. The named cipher/HMAC vector additions do not match that exclusion list.
+Fixture corrections mean this is a comparison of exercised test
 subjects, not an unchanged upstream conformance score or a code-coverage
 measurement. Software tokens permit reset and credential-management tests
 that do not belong in the hardware fixture.
