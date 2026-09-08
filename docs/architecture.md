@@ -30,7 +30,7 @@ MODULE_CONTEXT: RwLock<Option<ModuleContext>>
 
 Every slot has a common host software layer, including named software, YubiHSM,
 PIV, OpenPGP, and FIDO2 slots. `CKA_TOKEN=CK_FALSE` (the default) creates session
-objects: generic data, public keys, asymmetric private keys, and supported secret
+objects: generic data, X.509 certificates, public keys, asymmetric private keys, and supported secret
 keys. Import, generation, derivation, copy, and unwrap publish host-held key
 material through the shared object lifecycle. The creator session owns each
 object; other sessions on that slot can see it subject to login policy. Closing
@@ -40,8 +40,22 @@ slot cannot access it. Secret material uses zeroizing storage.
 `CKO_DATA` session objects support `CKA_APPLICATION`, `CKA_OBJECT_ID`, `CKA_VALUE`,
 and common storage attributes. Their payload and application metadata are
 mutable; copy creates independent content owned by the copying session.
-Generic data token-object creation is unsupported. Existing native data objects,
-such as PIV data and YubiHSM opaque objects, keep their backend-specific behavior.
+`CKO_CERTIFICATE` session objects accept DER X.509 values with
+`CKA_CERTIFICATE_TYPE=CKC_X_509`; descriptive attributes are derived from the
+certificate and supplied values must agree. Certificates support label/ID
+updates and independent copies; their DER value is immutable.
+
+Token data and certificates use the slot's persistence backend. Software slots
+store public objects in the public realm and private objects in the USER realm.
+YubiHSM imports use native `Opaque` objects: `opaque-data` for `CKO_DATA`, and
+`opaque-x509-certificate` for `CKO_CERTIFICATE`. Their stored values are the raw
+payload or DER certificate. Native opaque objects are public PKCS #11 objects;
+HSM domains and authentication capabilities govern device access. They retain
+the native non-copyable policy and support label/ID metadata updates and
+deletion, but payload replacement is read-only. Native data reports
+`CKA_APPLICATION="Opaque object"` and an empty `CKA_OBJECT_ID`; creation rejects
+other nonempty values and rejects `CKA_PRIVATE=true` rather than losing these
+attributes. PIV token imports retain their native slot/tag rules.
 
 Hardware ECDH and protected prefixed ECDH return ordinary software secret keys.
 The template selects the supported key type, usage, sensitivity, and

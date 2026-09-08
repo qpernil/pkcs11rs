@@ -6,7 +6,7 @@
 applications, YubiHSM devices, and explicitly configured in-memory software
 tokens. Every slot supports common software session objects and keys;
 operations with hardware-held private keys remain on the device. Dedicated
-software slots also support encrypted persistent keys when local token storage
+software slots also support encrypted persistent keys, data, and certificates when local token storage
 is configured. See the [shared session layer](docs/architecture.md#shared-software-session-objects-and-mechanism-discovery).
 
 The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function

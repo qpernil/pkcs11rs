@@ -239,8 +239,13 @@ pub(crate) enum KeyMaterial {
         profile_id: CK_PROFILE_ID,
     },
     Data {
+        instance: [u8; 16],
         application: Vec<u8>,
         object_id: Vec<u8>,
+        value: Zeroizing<Vec<u8>>,
+    },
+    Certificate {
+        instance: [u8; 16],
         value: Zeroizing<Vec<u8>>,
     },
     Public(PublicKeyMaterial),
@@ -394,10 +399,15 @@ impl std::fmt::Debug for KeyMaterial {
             Self::SoftwareSecret(key) => {
                 fmt.debug_tuple("SoftwareSecret").field(&key.len()).finish()
             }
+            Self::Certificate { value, .. } => fmt
+                .debug_struct("Certificate")
+                .field("length", &value.len())
+                .finish(),
             Self::Data {
                 application,
                 object_id,
                 value,
+                ..
             } => fmt
                 .debug_struct("Data")
                 .field("application_length", &application.len())
@@ -1874,6 +1884,7 @@ impl TokenObject {
                     {
                         Some(value.to_vec())
                     }
+                    KeyMaterial::Certificate { value, .. } => piv_certificate_attribute(value, x),
                     KeyMaterial::PivCertificate { value, .. }
                     | KeyMaterial::OpenPgpCertificate { value }
                     | KeyMaterial::IssuerSecurityDomainCertificate { value } => {
@@ -2032,6 +2043,7 @@ impl TokenObject {
             application,
             object_id,
             value: data,
+            ..
         } = &mut self.material
         {
             match attribute.type_ {

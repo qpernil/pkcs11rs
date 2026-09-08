@@ -153,6 +153,7 @@ python3 -m unittest discover -s integration -p 'test_*.py'
 | OpenSC | RSA PKCS #1 v1.5, RSA-PSS, and ECDSA signatures, verified independently; modified messages rejected |
 | OpenSC | RSA-OAEP/SHA-256 decryption of independently encrypted data |
 | OpenSC | AES import, ECB/CBC/CBC-PAD encryption and decryption; block boundaries, 4 KiB boundaries, and 72 KiB messages |
+| OpenSC | Public/private token data and X.509 certificate import, read, enumeration, and deletion across independent processes |
 | OpenSC | Wrong-PIN rejection, private-object visibility, independent public/private deletion, and PIN changes preserving key usability |
 | OpenSSL/libp11 | JSON initialization through `init_args`, including rejection of an unsupported configuration version |
 | OpenSSL/libp11 | Token and binary object-ID URI selection, missing-key rejection, and matching public-key export |
@@ -160,7 +161,7 @@ python3 -m unittest discover -s integration -p 'test_*.py'
 | OpenSSL/libp11 | RSA PKCS #1 v1.5 and OAEP/SHA-256 decryption |
 | OpenSSL/libp11 | RSA and EC certificate requests, independently verified and matched to the provisioned public keys |
 
-The 12 top-level software cases include parameterized algorithm and size cases.
+The 14 top-level software cases include parameterized algorithm and size cases.
 They cover interoperability, not every advertised mechanism or TLS application
 workflow. ABI and OASIS profile coverage remain in their existing suites.
 

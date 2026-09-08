@@ -215,6 +215,36 @@ class ClientTests(unittest.TestCase):
 
 
 class OpenSCTests(ClientTests):
+    def test_token_data_objects(self) -> None:
+        for private in (False, True):
+            label = "private-data" if private else "public-data"
+            extra = ["--private"] if private else []
+            self.p11("--write-object", self.message, "--type", "data", "--label", label,
+                     "--application-label", "client integration", *extra, login=True)
+            recovered = self.directory / f"{label}.bin"
+            self.p11("--read-object", "--type", "data", "--label", label,
+                     "--output-file", recovered, login=True)
+            self.assertEqual(recovered.read_bytes(), self.message.read_bytes())
+            self.assertIn(label, self.p11("--list-objects", "--type", "data", login=True))
+            self.p11("--delete-object", "--type", "data", "--label", label, login=True)
+            self.assertNotIn(label, self.p11("--list-objects", "--type", "data", login=True))
+
+    def test_token_x509_certificate(self) -> None:
+        certificate = self.directory / "certificate.der"
+        self.openssl("req", "-new", "-x509", "-newkey", "ec", "-pkeyopt",
+                     "ec_paramgen_curve:P-256", "-noenc", "-subj", "/CN=Token certificate",
+                     "-days", "1", "-keyout", self.directory / "key.pem",
+                     "-outform", "DER", "-out", certificate)
+        self.p11("--write-object", certificate, "--type", "cert", "--id", "c001",
+                 "--label", "client-certificate", login=True)
+        recovered = self.directory / "recovered.der"
+        self.p11("--read-object", "--type", "cert", "--id", "c001",
+                 "--output-file", recovered, login=True)
+        self.assertEqual(recovered.read_bytes(), certificate.read_bytes())
+        self.assertIn("client-certificate", self.p11("--list-objects", "--type", "cert", login=True))
+        self.p11("--delete-object", "--type", "cert", "--id", "c001", login=True)
+        self.assertNotIn("client-certificate", self.p11("--list-objects", "--type", "cert", login=True))
+
     def test_discovery_and_random(self) -> None:
         self.assertIn(TOKEN, self.p11("--list-slots"))
         mechanisms = self.p11("--list-mechanisms")

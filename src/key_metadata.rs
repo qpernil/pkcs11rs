@@ -1,7 +1,7 @@
-//! Canonical metadata for a key backed by hardware or provider-specific state.
+//! Canonical metadata for an object backed by hardware or provider-specific state.
 //!
-//! A record describes the relationship between one backing key and its
-//! potential PKCS #11 public, private, or secret-key aspects. Physical
+//! A record describes a backing object and its PKCS #11 data, certificate,
+//! public-key, private-key, or secret-key aspects. Physical
 //! persistence is deliberately outside the record: a backend may keep the
 //! canonical bytes in a [`crate::storage::StorageProvider`] or translate them
 //! to a backend-native companion-object representation.
@@ -267,7 +267,7 @@ impl BackedKeyMetadata {
         class: u64,
         attributes: KeyAttributes,
     ) -> Result<Option<KeyAttributes>, KeyMetadataError> {
-        validate_key_class(class)?;
+        validate_object_class(class)?;
         if self.aspects.len() >= MAX_ASPECTS && !self.aspects.contains_key(&class) {
             return Err(KeyMetadataError::Malformed("too many key aspects"));
         }
@@ -390,10 +390,12 @@ pub(crate) enum AttributeKind {
     Template,
 }
 
-fn validate_key_class(class: u64) -> Result<(), KeyMetadataError> {
+fn validate_object_class(class: u64) -> Result<(), KeyMetadataError> {
     if matches!(
         class,
-        x if x == u64::from(CKO_PUBLIC_KEY)
+        x if x == u64::from(CKO_DATA)
+            || x == u64::from(CKO_CERTIFICATE)
+            || x == u64::from(CKO_PUBLIC_KEY)
             || x == u64::from(CKO_PRIVATE_KEY)
             || x == u64::from(CKO_SECRET_KEY)
     ) {
@@ -609,7 +611,7 @@ fn decode_aspects(
     let mut aspects = BTreeMap::new();
     for _ in 0..count {
         let class = decoder.u64()?;
-        validate_key_class(class)?;
+        validate_object_class(class)?;
         let attributes = decode_attributes(decoder, 0)?;
         if aspects.insert(class, attributes).is_some() {
             return Err(KeyMetadataError::Malformed("duplicate key aspect"));

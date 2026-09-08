@@ -269,14 +269,15 @@ fn create_object(
             )?;
             return Ok(());
         }
-        if class == Some(CKO_DATA as CK_OBJECT_CLASS) {
-            let mut object = parse_data_object_template(templ)?;
+        if matches!(class, Some(c) if c == CKO_DATA as CK_OBJECT_CLASS || c == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+        {
+            let object = if class == Some(CKO_DATA as CK_OBJECT_CLASS) {
+                parse_data_object_template(templ)?
+            } else {
+                parse_certificate_object_template(templ)?
+            };
             validate_new_object_access(&object, flags, logged_in)?;
-            if object.token {
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-            }
-            object.set_creator(session_handle, slot_id);
-            *object_handle = ctx.insert_object(object)?;
+            *object_handle = publish_data_object(ctx, session_handle, slot_id, object)?;
             return Ok(());
         }
         let software_secret = class == Some(CKO_SECRET_KEY as CK_OBJECT_CLASS);
@@ -315,6 +316,45 @@ fn create_object(
         *object_handle = handle;
         Ok(())
     })
+}
+
+fn publish_data_object(
+    ctx: &mut SlotContext,
+    session: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+    mut object: TokenObject,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    let instance = match &mut object.material {
+        KeyMaterial::Data { instance, .. } | KeyMaterial::Certificate { instance, .. } => instance,
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+    };
+    getrandom::fill(instance).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    if !object.token {
+        object.set_creator(session, slot_id);
+        return ctx.insert_object(object);
+    }
+    if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
+        // Native opaque objects are public PKCS #11 objects. Their access is
+        // controlled by the HSM authentication key's domains and capabilities.
+        if object.private {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        if let KeyMaterial::Data {
+            application,
+            object_id,
+            ..
+        } = &object.material
+            && ((!application.is_empty() && application != b"Opaque object")
+                || !object_id.is_empty())
+        {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+        return import_yubihsm_token_object(ctx, session, slot_id, &object);
+    }
+    if object.private {
+        return persist_software_private_object(ctx, slot_id, &object);
+    }
+    ctx.store_backed_object(session, object)
 }
 
 pub(crate) fn publish_software_secret_object(
@@ -1055,58 +1095,86 @@ pub(super) fn import_yubihsm_token_object(
         .1
         .yubihsm_command(&command)?;
     let id = parse_yubihsm_object_id(&response)?;
-    ctx.refresh_slot_token_objects(slot_id)?;
-    let imported = ctx
-        .resolved_objects()?
-        .into_iter()
-        .find_map(|(_, candidate)| {
-            (candidate.slot_id == Some(slot_id)
-                && candidate.class == expected_class
-                && matches!(
-                    candidate.material,
-                    KeyMaterial::YubiHsm {
-                        id: object_id,
-                        object_type,
-                        ..
-                    } if object_id == id && object_type == expected_object_type
-                ))
-            .then_some(candidate)
-        })
-        .ok_or(CKR_DEVICE_ERROR)?;
-    let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-        slot_id,
-        &imported.unique_id,
-        (!object.id.is_empty()).then_some(object.id.as_slice()),
-        (!object.label.is_empty()).then_some(object.label.as_str()),
-    );
-    let refresh = ctx.refresh_slot_token_objects(slot_id);
-    if let Err(error) = metadata_result {
-        let _ = refresh;
-        return Err(error);
+    let publish = (|| -> Result<CK_OBJECT_HANDLE, Error> {
+        ctx.refresh_slot_token_objects(slot_id)?;
+        let imported = ctx
+            .resolved_objects()?
+            .into_iter()
+            .find_map(|(_, candidate)| {
+                (candidate.slot_id == Some(slot_id)
+                    && candidate.class == expected_class
+                    && matches!(
+                        candidate.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type,
+                            ..
+                        } if object_id == id && object_type == expected_object_type
+                    ))
+                .then_some(candidate)
+            })
+            .ok_or(CKR_DEVICE_ERROR)?;
+        let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+            slot_id,
+            &imported.unique_id,
+            (!object.id.is_empty()).then_some(object.id.as_slice()),
+            (!object.label.is_empty()).then_some(object.label.as_str()),
+        );
+        let refresh = ctx.refresh_slot_token_objects(slot_id);
+        if let Err(error) = metadata_result {
+            let _ = refresh;
+            return Err(error);
+        }
+        refresh?;
+        ctx.resolved_objects()?
+            .into_iter()
+            .find_map(|(handle, candidate)| {
+                (candidate.slot_id == Some(slot_id)
+                    && candidate.class == expected_class
+                    && matches!(
+                        candidate.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type,
+                            ..
+                        } if object_id == id && object_type == expected_object_type
+                    ))
+                .then_some(handle)
+            })
+            .ok_or(CKR_DEVICE_ERROR.into())
+    })();
+    if publish.is_err() {
+        // A failed metadata/publication step must not leave an imported object
+        // behind when C_CreateObject has returned no handle to its caller.
+        let _ = ctx
+            ._get_session(session_handle)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::delete_object(id, expected_object_type));
+        let _ = ctx.refresh_slot_token_objects(slot_id);
     }
-    refresh?;
-    ctx.resolved_objects()?
-        .into_iter()
-        .find_map(|(handle, candidate)| {
-            (candidate.slot_id == Some(slot_id)
-                && candidate.class == expected_class
-                && matches!(
-                    candidate.material,
-                    KeyMaterial::YubiHsm {
-                        id: object_id,
-                        object_type,
-                        ..
-                    } if object_id == id && object_type == expected_object_type
-                ))
-            .then_some(handle)
-        })
-        .ok_or(CKR_DEVICE_ERROR.into())
+    publish
 }
 
 fn yubihsm_import_command(
     object: &TokenObject,
 ) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS, u8), Error> {
     match &object.material {
+        KeyMaterial::Data { value, .. } | KeyMaterial::Certificate { value, .. } => {
+            let algorithm = if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
+                YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
+            } else {
+                YUBIHSM_ALGO_OPAQUE_DATA
+            };
+            Ok((
+                YubiHsmCommand::put_object(
+                    YubiHsmCommandCode::PutOpaque,
+                    &yubihsm_object_parameters(object, YUBIHSM_OPAQUE, algorithm)?,
+                    value,
+                )?,
+                object.class,
+                YUBIHSM_OPAQUE,
+            ))
+        }
         KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
             SoftwareSigningKey::Rsa(key),
         )) if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
@@ -1262,8 +1330,70 @@ fn parse_data_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Err
     }
     let mut object = common.into_object().map_err(Error::from)?;
     object.material = KeyMaterial::Data {
+        instance: [0; 16],
         application,
         object_id,
+        value,
+    };
+    Ok(object)
+}
+
+fn parse_certificate_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    validate_unique_template(templ)?;
+    let value =
+        Zeroizing::new(required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?.to_vec());
+    crate::certificate_chain::subject(&value)
+        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+    let certificate_type = template_attribute(templ, CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE)
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    if read_ulong_template_attribute(certificate_type).map_err(Error::from)?
+        != CKC_X_509 as CK_ULONG
+    {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    let mut common = TokenObjectTemplate {
+        class: Some(CKO_CERTIFICATE as CK_OBJECT_CLASS),
+        key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in templ {
+        match attribute.type_ {
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE
+                || x == CKA_TOKEN as CK_ATTRIBUTE_TYPE
+                || x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_LABEL as CK_ATTRIBUTE_TYPE
+                || x == CKA_ID as CK_ATTRIBUTE_TYPE =>
+            {
+                common.apply_attribute(attribute).map_err(Error::from)?
+            }
+            x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {}
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE =>
+            {
+                if !read_bool_template_attribute(attribute).map_err(Error::from)? {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+            x => {
+                let expected =
+                    piv_certificate_attribute(&value, x).ok_or(CKR_ATTRIBUTE_TYPE_INVALID)?;
+                let supplied = read_attribute_value(attribute).map_err(Error::from)?;
+                // An omitted/empty descriptive field may be derived from the DER.
+                if supplied != expected
+                    && !(supplied.is_empty()
+                        && matches!(x,
+                    y if y == CKA_SUBJECT as CK_ATTRIBUTE_TYPE || y == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+                        || y == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE))
+                {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+        }
+    }
+    let mut object = common.into_object().map_err(Error::from)?;
+    object.material = KeyMaterial::Certificate {
+        instance: [0; 16],
         value,
     };
     Ok(object)
@@ -1680,9 +1810,6 @@ fn copy_object(
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
         }
-        if copied_object.token && matches!(copied_object.material, KeyMaterial::Data { .. }) {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
         if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwarePrivate(_))
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
@@ -1696,6 +1823,13 @@ fn copy_object(
         validate_new_object_access(&copied_object, flags, logged_in)?;
         copied_object.unique_id.clear();
 
+        if matches!(
+            copied_object.material,
+            KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
+        ) {
+            *new_object_handle = publish_data_object(ctx, session_handle, slot_id, copied_object)?;
+            return Ok(());
+        }
         if matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
             *new_object_handle =
                 publish_software_secret_object(ctx, session_handle, slot_id, copied_object)?;
@@ -1776,7 +1910,10 @@ fn destroy_object(
         if stored_object.token
             && matches!(
                 stored_object.material,
-                KeyMaterial::SoftwarePrivate(_) | KeyMaterial::SoftwareSecret(_)
+                KeyMaterial::SoftwarePrivate(_)
+                    | KeyMaterial::SoftwareSecret(_)
+                    | KeyMaterial::Data { .. }
+                    | KeyMaterial::Certificate { .. }
             )
             && ctx.get_slot(slot_id)?.kind() == SlotKind::Software
         {
@@ -2313,6 +2450,32 @@ fn set_attribute_value(
 
         if rv == CKR_OK as CK_RV {
             if ctx.replace_backed_object(object, &stored_object, updated_object.clone())? {
+                return Ok(());
+            }
+            if stored_object.token
+                && stored_object.private
+                && matches!(
+                    stored_object.material,
+                    KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
+                )
+                && ctx.get_slot(slot_id)?.kind() == SlotKind::Software
+            {
+                let replacement = ctx
+                    ._get_slot_mut(slot_id)?
+                    .store_software_private_object(slot_id, &updated_object)?;
+                if let Err(error) = ctx
+                    ._get_slot_mut(slot_id)?
+                    .destroy_software_private_object(&stored_object.unique_id)
+                {
+                    let _ = ctx
+                        ._get_slot_mut(slot_id)?
+                        .destroy_software_private_object(&replacement.unique_id);
+                    return Err(error);
+                }
+                ctx.refresh_slot_token_objects_with_rebindings(
+                    slot_id,
+                    &[(object, replacement.unique_id)],
+                )?;
                 return Ok(());
             }
             if ctx.token_object_handles.contains_key(&object) {
