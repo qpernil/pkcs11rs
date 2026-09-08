@@ -1545,10 +1545,13 @@ fn crypt_update(
         };
         if matches!(operation.mechanism, x if x == CKM_AES_ECB as CK_MECHANISM_TYPE
             || x == CKM_AES_CBC as CK_MECHANISM_TYPE
-            || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE)
+            || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE
+            || x == CKM_DES3_ECB as CK_MECHANISM_TYPE
+            || x == CKM_DES3_CBC as CK_MECHANISM_TYPE
+            || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE)
         {
             let operation = operation.clone();
-            let result = crypt_update_aes_blocks(
+            let result = crypt_update_blocks(
                 ctx,
                 session_handle,
                 operation,
@@ -1587,7 +1590,7 @@ fn crypt_update(
 // ECB/CBC publish complete blocks during Update. Padded decryption retains the
 // final ciphertext block so Final can validate padding. AEAD stays buffered:
 // unauthenticated plaintext must not be released by this path.
-fn crypt_update_aes_blocks(
+fn crypt_update_blocks(
     ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     mut operation: CryptOperation,
@@ -1601,9 +1604,17 @@ fn crypt_update_aes_blocks(
         .len()
         .checked_add(input.len())
         .ok_or(CKR_HOST_MEMORY)?;
-    let retained =
-        usize::from(!encrypting && operation.mechanism == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE);
-    let produced = (total / AES_BLOCK_LENGTH).saturating_sub(retained) * AES_BLOCK_LENGTH;
+    let des3 = matches!(operation.mechanism, x if x == CKM_DES3_ECB as CK_MECHANISM_TYPE
+        || x == CKM_DES3_CBC as CK_MECHANISM_TYPE || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE);
+    let block_length = if des3 {
+        TDES_BLOCK_LENGTH
+    } else {
+        AES_BLOCK_LENGTH
+    };
+    let padded = matches!(operation.mechanism, x if x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE
+        || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE);
+    let retained = usize::from(!encrypting && padded);
+    let produced = (total / block_length).saturating_sub(retained) * block_length;
     let capacity = *output_len;
     *output_len = produced as CK_ULONG;
     if output.is_null() {
@@ -1619,8 +1630,21 @@ fn crypt_update_aes_blocks(
     operation.buffer.extend_from_slice(input);
     if produced != 0 {
         let blocks = &operation.buffer[..produced];
-        let cbc = operation.mechanism != CKM_AES_ECB as CK_MECHANISM_TYPE;
+        let cbc = operation.mechanism != CKM_AES_ECB as CK_MECHANISM_TYPE
+            && operation.mechanism != CKM_DES3_ECB as CK_MECHANISM_TYPE;
         let transformed = Zeroizing::new(match &operation.key {
+            KeyMaterial::SoftwareSecret(key) if des3 && cbc => software_tdes_cbc(
+                key,
+                operation
+                    .des3_iv
+                    .as_ref()
+                    .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                blocks,
+                encrypting,
+            )?,
+            KeyMaterial::SoftwareSecret(key) if des3 => {
+                software_tdes_ecb_blocks(key, blocks, encrypting)?
+            }
             KeyMaterial::SoftwareSecret(key) if cbc => software_aes_cbc(
                 key,
                 operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
@@ -1674,11 +1698,19 @@ fn crypt_update_aes_blocks(
             } else {
                 blocks
             };
-            operation.iv = Some(
-                tail[produced - AES_BLOCK_LENGTH..]
-                    .try_into()
-                    .map_err(|_| CKR_DEVICE_ERROR)?,
-            );
+            if des3 {
+                operation.des3_iv = Some(
+                    tail[produced - TDES_BLOCK_LENGTH..]
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                );
+            } else {
+                operation.iv = Some(
+                    tail[produced - AES_BLOCK_LENGTH..]
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                );
+            }
         }
         // Copy only after consuming input, including when the application uses
         // the same allocation for its input and output.

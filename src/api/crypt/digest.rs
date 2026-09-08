@@ -5,6 +5,7 @@ pub(crate) struct DigestOperation {
     mechanism: CK_MECHANISM_TYPE,
     algorithm: MessageDigest,
     buffer: Vec<u8>,
+    multipart: bool,
 }
 
 fn software_digest(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
@@ -48,6 +49,7 @@ fn digest_init(
             mechanism: mechanism.mechanism,
             algorithm: software_digest(mechanism.mechanism)?,
             buffer: Vec::new(),
+            multipart: false,
         });
         Ok(())
     })
@@ -127,8 +129,10 @@ ffi_entry_point! {
             }
             with_session_context_mut(session_handle, |ctx| {
                 let session = ctx.get_session_context_mut(session_handle)?;
-                if session.digest_operation.is_none() {
-                    return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+                let operation = session.digest_operation.as_ref().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+                if operation.multipart {
+                    session.digest_operation = None;
+                    return Err(CKR_OPERATION_ACTIVE.into());
                 }
                 let data = match unsafe { from_raw_parts(data, data_len as usize) } {
                     Ok(data) => data,
@@ -168,12 +172,10 @@ ffi_entry_point! {
                     return Err(error);
                 }
             };
-            ctx.get_session_context_mut(session_handle)?
-                .digest_operation
-                .as_mut()
-                .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
-                .buffer
-                .extend_from_slice(part);
+            let operation = ctx.get_session_context_mut(session_handle)?
+                .digest_operation.as_mut().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            operation.buffer.extend_from_slice(part);
+            operation.multipart = true;
             Ok(())
         }))
     }
@@ -214,12 +216,10 @@ ffi_entry_point! {
                 KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => value.to_vec(),
                 _ => return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV)),
             };
-            ctx.get_session_context_mut(session_handle)?
-                .digest_operation
-                .as_mut()
-                .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
-                .buffer
-                .extend_from_slice(&value);
+            let operation = ctx.get_session_context_mut(session_handle)?
+                .digest_operation.as_mut().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            operation.buffer.extend_from_slice(&value);
+            operation.multipart = true;
             Ok(())
         }))
     }

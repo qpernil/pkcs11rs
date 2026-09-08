@@ -2731,8 +2731,17 @@ pub fn non_session_entry_points_validate_arguments_or_report_unsupported() {
     );
     assert_eq!(
         crate::api::C_WaitForSlotEvent(0, &mut slot, ::std::ptr::null_mut()),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_WaitForSlotEvent(0, &mut slot, std::ptr::null_mut()),
         CKR_FUNCTION_NOT_SUPPORTED as CK_RV
     );
+    finalize_for_test();
 }
 
 #[test]

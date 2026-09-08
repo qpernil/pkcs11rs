@@ -247,7 +247,11 @@ fn generate_key_object(
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let value_len = value_len.ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    // Triple-length DES has a fixed 24-byte representation, including parity.
+    // Variable-length mechanisms still require CKA_VALUE_LEN in the template.
+    let value_len = value_len
+        .or(des3_generation.then_some(24))
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     if software_secret {
         validate_software_secret_length(key.key_type, value_len as usize)?;
     } else {
@@ -264,6 +268,12 @@ fn generate_key_object(
         derive_pbkdf2(&parameters, &mut value)?;
     } else {
         getrandom::fill(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    }
+    if des3_generation {
+        for byte in &mut value {
+            // DES reserves the low bit of each byte for odd parity.
+            *byte = (*byte & 0xfe) | (((*byte & 0xfe).count_ones() as u8 & 1) ^ 1);
+        }
     }
     key.material = if software_secret {
         KeyMaterial::SoftwareSecret(Zeroizing::new(value))
