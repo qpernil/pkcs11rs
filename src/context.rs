@@ -42,7 +42,6 @@ use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
-const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub(crate) struct TokenStorageConfig {
@@ -282,6 +281,8 @@ pub(crate) struct ModuleContext {
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
     discovery_refresh: Mutex<Option<Instant>>,
+    discovery_refresh_interval: Duration,
+    slot_serials: Option<HashSet<String>>,
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
@@ -976,6 +977,8 @@ impl ModuleContext {
             trust_store: trust_store.clone(),
             hsmauth_providers,
             discovery_refresh: Mutex::new(None),
+            discovery_refresh_interval: configuration.discovery_refresh_interval,
+            slot_serials: configuration.slot_serials,
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
         #[cfg(feature = "abi-tests")]
@@ -1923,6 +1926,12 @@ impl ModuleContext {
             "ccid.probe_reader",
             reader = %base_connector.name()
         ));
+        if known_identity
+            .as_ref()
+            .is_some_and(|identity| !self.serial_is_visible(&identity.serial))
+        {
+            return Ok(Vec::new());
+        }
         base_connector.refresh()?;
         let reader_name = base_connector.name();
         if let Some(identity) = known_identity {
@@ -1952,6 +1961,14 @@ impl ModuleContext {
             }
         }
 
+        if !self.serial_is_visible(
+            &reader_state
+                .device
+                .identity(base_connector.connection_epoch())
+                .serial,
+        ) {
+            return Ok(Vec::new());
+        }
         let mut reader_slots = Vec::new();
         let mut reader_fido_slots = Vec::new();
         let mut discovered_applications = Vec::new();
@@ -2287,13 +2304,19 @@ impl ModuleContext {
                 )?;
                 reader.connector.refresh()?;
                 YubiKeyClient.discover_for_inventory(reader.connector.as_ref(), |serial| {
-                    inventory.contains_key(&CcidInventoryKey::Serial(
-                        PhysicalDeviceKey::YubicoSerial(serial.to_owned()),
-                    ))
+                    !self.serial_is_visible(serial)
+                        || inventory.contains_key(&CcidInventoryKey::Serial(
+                            PhysicalDeviceKey::YubicoSerial(serial.to_owned()),
+                        ))
                 })
             })();
 
             let Ok((serial, device_info)) = discovered_identity else {
+                if self.slot_serials.is_some() {
+                    // A configured device serial cannot match an unidentified
+                    // reader. Do not probe unrelated applets to guess one.
+                    continue;
+                }
                 let discovered = (|| {
                     let _operation = device.lock_operation_with_message(
                         crate::device::DeviceOperationKind::Ccid,
@@ -2350,18 +2373,18 @@ impl ModuleContext {
                 continue;
             }
 
-            let Some(info) = device_info else {
-                log!(1, "CCID reader {} lost its serial registration", name);
-                continue;
-            };
             let identity = DeviceIdentity {
                 manufacturer: String::from("Yubico"),
-                product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
+                product: device_info
+                    .as_ref()
+                    .and_then(|info| info.part_number.clone())
+                    .unwrap_or_else(|| String::from("YubiKey")),
                 serial,
                 hardware_version: None,
-                firmware_version: info.version,
+                firmware_version: device_info.and_then(|info| info.version),
             };
 
+            let excluded = !self.serial_is_visible(&identity.serial);
             let connector = CcidDeviceConnector::new(identity.clone(), reader.connector);
             let reader_state = connector.reader_state();
             let device = reader_state.device.clone();
@@ -2379,7 +2402,7 @@ impl ModuleContext {
                 )
             })();
             match discovered {
-                Ok(slot_ids) if !slot_ids.is_empty() => {
+                Ok(slot_ids) if !slot_ids.is_empty() || excluded => {
                     ccid_devices
                         .entry(key)
                         .or_insert_with(|| connector.reader_state().device.clone());
@@ -2413,10 +2436,16 @@ impl ModuleContext {
         if !slot_contexts.begin_discovery() {
             return Ok(false);
         }
+        if self.slot_serials.as_ref().is_some_and(HashSet::is_empty) {
+            return Ok(true);
+        }
         if !self.software_slots.is_empty() {
             let first_slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
             let mut slots = Vec::with_capacity(self.software_slots.len());
             for (ordinal, name) in self.software_slots.iter().enumerate() {
+                if !self.serial_is_visible(&SoftwareSlot::serial_for_ordinal(ordinal)) {
+                    continue;
+                }
                 let offset = CK_SLOT_ID::try_from(ordinal).map_err(|_| CKR_DEVICE_ERROR)?;
                 let slot_id = first_slot_id.checked_add(offset).ok_or(CKR_DEVICE_ERROR)?;
                 let private_root = self
@@ -2435,14 +2464,16 @@ impl ModuleContext {
                 let token_objects = slot.token_objects(slot_id)?;
                 slots.push((slot_id, slot, token_objects));
             }
-            slot_contexts.insert_slot_contexts(
-                slots,
-                self.handles.clone(),
-                self.pinentry.clone(),
-                self.trust_store.clone(),
-                self.token_storage.as_ref(),
-                None,
-            )?;
+            if !slots.is_empty() {
+                slot_contexts.insert_slot_contexts(
+                    slots,
+                    self.handles.clone(),
+                    self.pinentry.clone(),
+                    self.trust_store.clone(),
+                    self.token_storage.as_ref(),
+                    None,
+                )?;
+            }
         }
         #[cfg(feature = "abi-tests")]
         {
@@ -2511,6 +2542,12 @@ impl ModuleContext {
         );
         #[cfg(feature = "native-hardware")]
         for descriptor in hid_descriptors {
+            if descriptor
+                .serial()
+                .is_some_and(|serial| !self.serial_is_visible(serial))
+            {
+                continue;
+            }
             let descriptor_name = descriptor.name();
             let io = match descriptor.open() {
                 Ok(io) => io,
@@ -2533,10 +2570,11 @@ impl ModuleContext {
             };
             let transport = Rc::new(transport);
             let device_info = if descriptor.is_yubico() {
-                match YubiKeyClient
-                    .discover_from_config_pages(Some(init.firmware_version), |page| {
-                        transport.command(0x42, &[page])
-                    }) {
+                match YubiKeyClient.discover_from_config_pages_for_inventory(
+                    Some(init.firmware_version),
+                    |serial| !self.serial_is_visible(serial),
+                    |page| transport.command(0x42, &[page]),
+                ) {
                     Ok(info) => Some(info),
                     Err(error) => {
                         log!(
@@ -2565,6 +2603,9 @@ impl ModuleContext {
                     .and_then(|info| info.version)
                     .or(Some(init.firmware_version)),
             };
+            if !self.serial_is_visible(&identity.serial) {
+                continue;
+            }
             let (device, shares_ccid_gate) = hid_device_context(&ccid_devices, identity);
             if shares_ccid_gate {
                 tracing::debug!(
@@ -2870,6 +2911,9 @@ impl ModuleContext {
         }
         for candidate in snapshot.candidates {
             let identity = candidate.identity().clone();
+            if !self.serial_is_visible(&identity.provider_slot_id) {
+                continue;
+            }
             if let Some(registration) = registrations.get(&identity) {
                 tracing::debug!(
                     target: "pkcs11rs::discovery",
@@ -3119,6 +3163,9 @@ impl ModuleContext {
         };
         for context in refreshable_slots {
             if let Ok(context) = context.lock() {
+                if !self.slot_is_visible(&context) {
+                    continue;
+                }
                 let _operation = context
                     .device
                     .as_ref()
@@ -3155,7 +3202,24 @@ impl ModuleContext {
     }
 
     pub(crate) fn refresh_discovery_after_init(&self, initialized: bool) -> Result<(), Error> {
-        self.refresh_discovery_with_interval(initialized, DISCOVERY_REFRESH_INTERVAL)
+        self.refresh_discovery_with_interval(initialized, self.discovery_refresh_interval)
+    }
+
+    pub(crate) fn slot_is_visible(&self, child: &SlotContext) -> bool {
+        self.slot_serials.as_ref().is_none_or(|serials| {
+            let serial = child
+                .device
+                .as_ref()
+                .and_then(|device| device.registered_serial())
+                .unwrap_or_else(|| child.slot.serial());
+            serials.contains(serial)
+        })
+    }
+
+    fn serial_is_visible(&self, serial: &str) -> bool {
+        self.slot_serials
+            .as_ref()
+            .is_none_or(|serials| serials.contains(serial))
     }
 
     fn refresh_discovery_with_interval(
@@ -3180,11 +3244,15 @@ impl ModuleContext {
 
     #[cfg(test)]
     pub(crate) fn expire_discovery_refresh_for_test(&self) {
-        *self.discovery_refresh.lock().unwrap() = Some(Instant::now() - DISCOVERY_REFRESH_INTERVAL);
+        *self.discovery_refresh.lock().unwrap() =
+            Instant::now().checked_sub(self.discovery_refresh_interval);
     }
 
     #[allow(unreachable_code)]
     fn refresh_discovery_inner(&self, initialized: bool) -> Result<(), Error> {
+        if self.slot_serials.as_ref().is_some_and(HashSet::is_empty) {
+            return Ok(());
+        }
         let _operation = crate::logging::Operation::info(tracing::info_span!(
             target: "pkcs11rs::discovery",
             "module.refresh_discovery",
@@ -3560,6 +3628,115 @@ mod discovery_tests {
 
     #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     #[test]
+    fn excluded_ccid_serial_does_not_probe_even_hsmauth() {
+        #[derive(Debug)]
+        struct NoIoConnector;
+        impl Connector for NoIoConnector {
+            fn as_debug(&self) -> &dyn std::fmt::Debug {
+                self
+            }
+            fn manufacturer(&self) -> &str {
+                "Yubico"
+            }
+            fn product(&self) -> &str {
+                "YubiKey"
+            }
+            fn major(&self) -> u8 {
+                5
+            }
+            fn minor(&self) -> u8 {
+                7
+            }
+            fn is_present(&self) -> bool {
+                true
+            }
+            fn buffer_size(&self) -> usize {
+                1024
+            }
+            fn refresh(&self) -> Result<(), Error> {
+                panic!("excluded device refreshed")
+            }
+            fn transmit<'a>(
+                &self,
+                _: &[u8],
+                _: &'a mut [u8],
+                _: Duration,
+            ) -> Result<&'a [u8], Error> {
+                panic!("excluded device received an APDU")
+            }
+        }
+        let mut context = connector_test_context("http://127.0.0.1:1".into());
+        context.slot_serials = Some(HashSet::from(["87654321".into()]));
+        let registered_identity = identity("12345678");
+        let state = Arc::new(PcscReaderState::new(Arc::new(DeviceContext::new(
+            registered_identity.clone(),
+        ))));
+        let mut slots = SlotContextRegistry::new();
+        let result = context
+            .insert_ccid_reader_slots(
+                &mut slots,
+                Arc::new(NoIoConnector),
+                state,
+                &mut HashMap::new(),
+                Some(registered_identity),
+            )
+            .unwrap();
+        assert!(result.is_empty());
+        assert!(slots.is_empty());
+    }
+
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[test]
+    fn excluded_http_serial_does_not_send_device_commands() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stopped = stopped.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            while !server_stopped.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        read_http_request(&mut stream);
+                        requests += 1;
+                        http_response(&mut stream, &yubihsm_frame(0x7f, &[1]));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1))
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            requests
+        });
+        let mut context = connector_test_context(url.clone());
+        context.slot_serials = Some(HashSet::from(["87654321".into()]));
+        let source = DiscoverySourceIdentity::configured_http_yubihsm(0);
+        let result = context.reconcile_discovery_snapshot(
+            DiscoverySnapshot::new(
+                source.clone(),
+                vec![DiscoveredSlotCandidate::HttpYubiHsm {
+                    identity: DiscoveredSlotIdentity {
+                        source,
+                        provider_slot_id: "12345678".into(),
+                    },
+                    connector: HttpConnector::new(url, "12345678").unwrap(),
+                }],
+            )
+            .unwrap(),
+        );
+        stopped.store(true, Ordering::Release);
+        assert_eq!(server.join().unwrap(), 0);
+        result.unwrap();
+        assert!(context.slot_contexts.read().unwrap().is_empty());
+    }
+
+    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[test]
     fn unavailable_http_yubihsm_does_not_hide_local_software_slots() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3894,6 +4071,8 @@ mod discovery_tests {
             )),
             hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
             discovery_refresh: Mutex::new(None),
+            discovery_refresh_interval: Duration::from_millis(500),
+            slot_serials: None,
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
 

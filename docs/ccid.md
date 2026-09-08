@@ -21,7 +21,7 @@ configured software slots or opt-in remote YubiHSM HTTP(S) connectors.
 Each applet is added as a separate PKCS #11 slot only when its configured AID
 can be selected successfully. Each fresh `C_GetSlotList` enumeration asks the
 selected provider for its current reader inventory. Calls within the module-wide
-[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+[configurable refresh window (500 ms by default)](architecture.md#discovery-lifecycle-and-stable-slots)
 skip reconciliation. Reader names only locate candidates long
 enough to identify their physical YubiKey serial. They are not stable identity:
 different PC/SC implementations apply different naming and disambiguation
@@ -169,6 +169,12 @@ PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 
 Accepted names are `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`. Names are
 case-insensitive and duplicates are ignored.
+
+This allowlist controls probing, including HSM Auth credential-provider
+discovery. The [`slots.serials` device allowlist](configuration.md) is applied
+first, using the Management serial; excluded devices receive no applet probes.
+Using HSM Auth requires both an allowed helper YubiKey serial and `hsmauth`
+in the applet list. This CCID setting does not disable native FIDO HID discovery.
 
 The YubiKey Management applet is probed during each applet-discovery attempt
 for a native reader that has not yet contributed slots. Its

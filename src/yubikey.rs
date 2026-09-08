@@ -113,9 +113,10 @@ impl Client {
         Ok(info)
     }
 
-    pub(crate) fn discover_from_config_pages(
+    pub(crate) fn discover_from_config_pages_for_inventory(
         &self,
         default_version: Option<(u8, u8, u8)>,
+        mut stop_after_serial: impl FnMut(&str) -> bool,
         mut read_page: impl FnMut(u8) -> Result<Vec<u8>, Error>,
     ) -> Result<DeviceInfo, Error> {
         let mut raw_tlvs = Vec::new();
@@ -135,6 +136,12 @@ impl Client {
                 .transpose()?
                 .unwrap_or(0);
             raw_tlvs.extend(page_tlvs);
+            if serial_from_tlvs(&raw_tlvs)?
+                .as_deref()
+                .is_some_and(&mut stop_after_serial)
+            {
+                break;
+            }
             if more == 0 {
                 break;
             }
@@ -757,6 +764,29 @@ mod tests {
             [vec![0, 0xa4, 0x04, 0, 8], MANAGEMENT_AID.to_vec(), vec![0]].concat()
         );
         assert_eq!(commands[1], vec![0, INS_READ_DEVICE_INFO, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hid_inventory_stops_after_an_excluded_serial() {
+        let mut pages = Vec::new();
+        let info = Client
+            .discover_from_config_pages_for_inventory(
+                Some((5, 7, 2)),
+                |serial| serial == "1363530508",
+                |page| {
+                    pages.push(page);
+                    assert_eq!(page, 0, "excluded devices must not read later pages");
+                    let mut response = response(&[
+                        tlv(TAG_SERIAL, &[0x51, 0x45, 0xd3, 0x0c]),
+                        tlv(TAG_MORE_DATA, &[1]),
+                    ]);
+                    response.truncate(response.len() - 2);
+                    Ok(response)
+                },
+            )
+            .unwrap();
+        assert_eq!(info.serial.as_deref(), Some("1363530508"));
+        assert_eq!(pages, [0]);
     }
 
     #[test]

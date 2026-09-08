@@ -97,8 +97,10 @@ bound serial when a slot-list refresh or device operation needs the card. The
 [iOS integration guide](ios-integration.md#when-the-nfc-ui-appears) distinguishes
 the exact UI triggers from the no-prompt reuse path.
 
-`C_GetSlotList` batches discovery reconciliation in a module-wide 500 ms window.
-The first call reconciles; calls less than 500 ms after the completed pass skip
+`C_GetSlotList` batches discovery reconciliation in a module-wide window,
+defaulting to 500 ms. Configure `discovery.refresh_interval_ms` or its environment
+fallback `PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS`; `0` disables batching.
+The first call reconciles; calls within the period after the completed pass skip
 reconciliation, including count-only calls, different filters, short-buffer
 retries, and calls from other threads. Every call reads the current registry,
 applies its own `tokenPresent` filter, and checks the supplied buffer capacity;
@@ -113,6 +115,14 @@ next pass. Device arrivals/removals discovered by polling may remain unobserved
 until that pass. `C_Finalize` discards the timestamp with the module context, so
 the next initialization starts without a previous refresh. No FFI-wide hook or
 thread-local state participates in batching.
+
+The optional `slots.serials` allowlist rejects excluded devices as soon as
+their serial is known, before applet probes or HSM object discovery. This also
+excludes HSM Auth credential providers: helper devices must be explicitly
+included. Public enumeration and direct slot-ID access enforce the same list.
+Source and applet settings still determine which providers exist; see
+[configuration](configuration.md) for their interaction. The allowlist and
+refresh interval are resolved once per module lifetime.
 
 An inventory provider reports an opaque, provider-defined identity and current
 presence. Reconciliation combines that identity with the provider instance:
@@ -137,9 +147,9 @@ reattachment replaces the transport behind the existing slot even when the OS
 assigns a new USB device ID. Inventory requests and new-slot HSM initialization
 run without holding the slot-registry write lock; only registry snapshots and
 final insertion use it. Native PC/SC or iOS CryptoTokenKit reader inventory is
-enumerated on every listing, so newly attached serials can append applet slots
+enumerated on every reconciliation pass, so newly attached serials can append applet slots
 and known serials can acquire a different transport locator. Existing PC/SC
-and HID slots refresh their transports on every listing. Native
+and HID slots refresh their transports on every reconciliation pass. Native
 HID provider-wide new-device inventory is still created only during module
 initialization.
 

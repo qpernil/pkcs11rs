@@ -758,12 +758,17 @@ fn slot_context(
     // A client may use a known slot ID immediately after C_Initialize.
     // C_GetSlotList is not a prerequisite for other slot operations.
     ctx.init()?;
-    ctx.slot_contexts
+    let child = ctx
+        .slot_contexts
         .read()
         .map_err(|_| Error::from(CKR_MUTEX_BAD))?
         .get(&slot_id)
         .cloned()
-        .ok_or_else(|| Error::from(missing))
+        .ok_or_else(|| Error::from(missing))?;
+    if !ctx.slot_is_visible(&*child.lock().map_err(|_| CKR_MUTEX_BAD)?) {
+        return Err(missing.into());
+    }
+    Ok(child)
 }
 
 fn session_slot_context(

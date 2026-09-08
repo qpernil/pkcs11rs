@@ -171,9 +171,9 @@ fn discover_slot_ids(ctx: &ModuleContext, token_present: bool) -> Result<Vec<CK_
         .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let mut keys = Vec::new();
     for (slot_id, child) in slot_contexts.iter() {
-        if !token_present
-            || child.lock().map_err(|_| CKR_MUTEX_BAD)?.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS
-                != 0
+        let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        if ctx.slot_is_visible(&child)
+            && (!token_present || child.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0)
         {
             keys.push(*slot_id);
         }
