@@ -755,6 +755,9 @@ fn slot_context(
     slot_id: CK_SLOT_ID,
     missing: CK_RV,
 ) -> Result<Arc<Mutex<SlotContext>>, Error> {
+    // A client may use a known slot ID immediately after C_Initialize.
+    // C_GetSlotList is not a prerequisite for other slot operations.
+    ctx.init()?;
     ctx.slot_contexts
         .read()
         .map_err(|_| Error::from(CKR_MUTEX_BAD))?

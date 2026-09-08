@@ -247,6 +247,77 @@ pub fn initialize_accepts_json_reserved_configuration() {
 }
 
 #[test]
+fn known_software_slot_works_after_reinitialize_without_enumeration() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut configuration = br#"{"version":1,"hardware":{"discovery":false},"software":{"slots":[{"name":"slot-lookup-regression"}]},"yubihsm":{"urls":[]}}"#.to_vec();
+    configuration.push(0);
+    let mut args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: 0,
+        pReserved: configuration.as_mut_ptr().cast(),
+    };
+    assert_eq!(
+        crate::api::C_Initialize((&mut args as *mut CK_C_INITIALIZE_ARGS).cast()),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(0, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::api::C_GetSlotList(0, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let slot = slots
+        .into_iter()
+        .find(|slot| {
+            let mut info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
+            crate::api::C_GetSlotInfo(*slot, &mut info) == CKR_OK as CK_RV
+                && String::from_utf8_lossy(&info.slotDescription).contains("slot-lookup-regression")
+        })
+        .expect("configured software slot");
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    // Each operation must work as the first slot call after initialization.
+    for open_session in [false, true] {
+        assert_eq!(
+            crate::api::C_Initialize((&mut args as *mut CK_C_INITIALIZE_ARGS).cast()),
+            CKR_OK as CK_RV
+        );
+        if open_session {
+            let mut session = 0;
+            assert_eq!(
+                crate::api::C_OpenSession(
+                    slot,
+                    CKF_SERIAL_SESSION as CK_FLAGS,
+                    std::ptr::null_mut(),
+                    None,
+                    &mut session
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        } else {
+            let mut info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
+            assert_eq!(crate::api::C_GetSlotInfo(slot, &mut info), CKR_OK as CK_RV);
+        }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+}
+
+#[test]
 pub fn finalize_rejects_reserved_arg() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

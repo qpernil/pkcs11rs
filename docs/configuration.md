@@ -13,6 +13,11 @@ contain `"version": 1`, and invalid JSON, unknown fields, or an unsupported
 version makes `C_Initialize` return `CKR_ARGUMENTS_BAD`. Invalid UTF-8 or a
 missing terminator also returns `CKR_ARGUMENTS_BAD`.
 
+Non-null `pReserved` addresses 1–255 return `CKR_ARGUMENTS_BAD` without being
+dereferenced. This catches small integer sentinels such as `(void *)1`; it does
+not validate arbitrary addresses. Other non-null pointers must refer to readable
+string storage for the duration of the call.
+
 A nonempty value whose first non-whitespace character is not `{` is accepted
 as opaque provider initialization data and ignored. This preserves
 compatibility with applications such as OpenSSL that place their own text in

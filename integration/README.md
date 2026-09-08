@@ -50,6 +50,61 @@ configuration fields and is outside this suite's current provider coverage.
 
 ## Coverage
 
+### Full upstream pkcs11test
+
+`run_pkcs11test.py` runs the installed Google/Yubico `pkcs11test` executable
+against disposable production software tokens:
+
+```sh
+python3 integration/run_pkcs11test.py
+python3 integration/run_pkcs11test.py --filter 'Init.*' --jobs 1
+```
+
+The default includes every upstream case, including upstream-disabled cases,
+SO login, and token initialization (`-I`). It uses no exclusions from
+`yubihsm-shell`. Each case gets a fresh encrypted token store, random PINs, and
+a separate process, so a reset, failed login, or crash cannot spoil another
+case. The runner builds with native hardware support disabled and supplies
+neither hardware endpoints nor an arbitrary-module override. Destructive and
+credential-management coverage belongs on these disposable software tokens;
+the hardware client suite below uses its own restricted fixture.
+
+The JSON report at `target/pkcs11test-results.json` records executable/module
+hashes, selected case count, redacted command output, failures, legacy upstream
+skip reasons, crashes, timeouts, and completion status. It is updated after each
+case. Setup/report errors remain visible without aborting the other cases;
+any failure or incomplete run gives a nonzero exit status. `--timeout` bounds
+each command and `--jobs` controls independent fixtures (default four).
+The upstream executable accepts PINs as command arguments, so ephemeral test
+PINs are visible to local process inspection while it runs; persisted reports
+redact them.
+
+The macOS baseline with upstream checkout
+`c4c3cd5ac5dc7d02525ae4c6e45a0de849e1f9fb` covers 336 cases: 186 passed,
+55 reported unsupported/skipped, and 95 failed, with no crashes or timeouts.
+This is a compatibility baseline, not a passing conformance claim. Remaining
+failures include unsupported DES-dependent fixtures, DES3/HMAC generation
+templates without key lengths, object/attribute semantics, and operation-state
+expectations. Some tests encode implementation assumptions: `TokenInit`, for
+example, installs the supplied user PIN and then unconditionally attempts
+`C_SetPIN` using its hardcoded reset PIN. Failures remain failures in the report
+pending individual review; no blanket error-code conversion or exclusion hides
+them. The upstream-disabled invalid-attribute-length case also fails during
+data-object setup, so it does not establish coverage of the intended bad length.
+
+Slot-based API calls initialize the slot registry even when the client has not
+called `C_GetSlotList` since `C_Initialize`. The upstream invalid-reserved-pointer
+test returns `CKR_ARGUMENTS_BAD` for `(void *)1`; JSON initialization remains a
+supported pkcs11rs extension.
+
+Run the fixture/report regressions without external clients or hardware:
+
+```sh
+python3 -m unittest discover -s integration -p 'test_*.py'
+```
+
+### OpenSC and OpenSSL clients
+
 | Client | Cases |
 | --- | --- |
 | OpenSC | Slot/mechanism discovery and random generation |

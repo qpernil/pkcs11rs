@@ -977,6 +977,13 @@ EC, and AES cases using an existing YubiHSM Auth credential, with temporary
 keys and verified cleanup. See [external client integration tests](integration/README.md) for
 dependencies, case selection, safety boundaries, and JSON result reports.
 
+`python3 integration/run_pkcs11test.py` runs the full installed upstream
+`pkcs11test` suite, including SO and token-reset cases, on a fresh production
+software token per case. It records failures and unsupported cases without
+inheriting `yubihsm-shell` exclusions. See the
+[upstream compatibility baseline](integration/README.md#full-upstream-pkcs11test)
+for current results and remaining gaps.
+
 The four final OASIS PKCS #11 3.2 mandatory provider profile artifacts are
 also executable as four separate tests against either the deterministic ABI
 backend or a selected production module and slot:
