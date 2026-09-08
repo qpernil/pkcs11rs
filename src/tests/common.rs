@@ -902,6 +902,22 @@ fn repeated_slot_list_with_valid_card_handle_is_apdu_free() {
         transport
             .refreshes
             .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    crate::with_context(|ctx| {
+        ctx.expire_discovery_refresh_for_test();
+        Ok(())
+    })
+    .unwrap();
+    second_count = second.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, second.as_mut_ptr(), &mut second_count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        transport
+            .refreshes
+            .load(std::sync::atomic::Ordering::SeqCst),
         2
     );
     assert!(transport.commands.lock().unwrap().is_empty());

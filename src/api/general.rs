@@ -188,7 +188,6 @@ ffi_entry_point! {
         slot_list: *mut CK_SLOT_ID,
         count: *mut ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        let pending = crate::slot_list::take_snapshot();
         unsafe {
             log!(
                 2,
@@ -200,34 +199,21 @@ ffi_entry_point! {
                 Err(error) => return error.into(),
             };
             match with_context(|ctx| {
-                let snapshot = match pending.filter(|snapshot| {
-                    !slot_list.is_null() && snapshot.matches(&ctx.handles, token_present != 0)
-                }) {
-                    Some(snapshot) => snapshot,
-                    None => {
-                        crate::slot_list::Snapshot::new(
-                            &ctx.handles, token_present != 0,
-                            discover_slot_ids(ctx, token_present != 0)?,
-                        )
-                    }
-                };
-                let keys = &snapshot.slots;
+                let keys = discover_slot_ids(ctx, token_present != 0)?;
                 if slot_list.is_null() {
                     *count = keys.len() as CK_ULONG;
-                    snapshot.save();
                     log!(2, "C_GetSlotList returning {:?}", *count);
                     return Ok(CKR_OK as CK_RV);
                 }
 
                 if *count < keys.len() as CK_ULONG {
                     *count = keys.len() as CK_ULONG;
-                    snapshot.save();
                     log!(2, "C_GetSlotList returning {:?}", *count);
                     return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
                 }
 
                 let output = _from_raw_parts_mut(slot_list, keys.len())?;
-                output.copy_from_slice(keys);
+                output.copy_from_slice(&keys);
                 *count = keys.len() as CK_ULONG;
                 log!(2, "C_GetSlotList returning {:?}", (keys, *count));
                 Ok(CKR_OK as CK_RV)

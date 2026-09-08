@@ -3262,7 +3262,23 @@ pub fn open_session_refreshes_token_presence() {
 }
 
 #[test]
-fn slot_list_snapshot_survives_short_buffers_and_is_consumed_on_success() {
+fn slot_list_reconciliation_is_batched_across_buffers_filters_and_threads() {
+    fn list(filter: CK_BBOOL) -> Vec<CK_SLOT_ID> {
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_GetSlotList(filter, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        let mut slots = vec![0; count as usize + 16];
+        count = slots.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_GetSlotList(filter, slots.as_mut_ptr(), &mut count),
+            CKR_OK as CK_RV
+        );
+        slots.truncate(count as usize);
+        slots
+    }
+
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -3272,111 +3288,70 @@ fn slot_list_snapshot_survives_short_buffers_and_is_consumed_on_success() {
         CKR_OK as CK_RV
     );
     install_test_slot_with_backend(TEST_SLOT_ID, Box::new(test_slot(true)));
-    let mut count = 0;
-    assert_eq!(
-        crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
-        CKR_OK as CK_RV
-    );
-    assert!(count > 0);
-    let expected = count;
-    // Unrelated APIs do not participate in slot-list snapshot management.
-    let mut info = unsafe { std::mem::zeroed::<CK_INFO>() };
-    assert_eq!(crate::api::C_GetInfo(&mut info), CKR_OK as CK_RV);
-    // Any further backend refresh will remove the token. The paired buffer
-    // call and its short-buffer retry must instead use the discovered snapshot.
+    assert!(list(1).contains(&TEST_SLOT_ID));
+
+    // Further reconciliation removes this token. Every call in the batch must
+    // still read the current registry, applying its own filter and capacity.
     let mut slot = test_slot(true);
     slot.remove_on_refresh = true;
     install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
-    let mut output = vec![0; count as usize];
-    count = 0;
+    const ABSENT: CK_SLOT_ID = 777;
+    install_test_slot_with_backend(ABSENT, Box::new(test_slot(false)));
+    assert!(list(0).contains(&ABSENT));
+    assert!(!list(1).contains(&ABSENT));
+    let mut dummy = 0;
+    let mut count = 0;
     assert_eq!(
-        crate::api::C_GetSlotList(1, output.as_mut_ptr(), &mut count),
+        crate::api::C_GetSlotList(1, &mut dummy, &mut count),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
-    assert_eq!(count, expected);
-    assert_eq!(
-        crate::api::C_GetSlotList(1, output.as_mut_ptr(), &mut count),
-        CKR_OK as CK_RV
-    );
-    assert!(output[..count as usize].contains(&TEST_SLOT_ID));
+    assert!(count > 0);
+    let threads = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                assert!(list(1).contains(&TEST_SLOT_ID));
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
     assert!(with_test_slot_context(TEST_SLOT_ID, |ctx| ctx
         .slot
         .is_present()));
-    // A successful copy consumes the snapshot, so a new enumeration refreshes.
-    assert_eq!(
-        crate::api::C_GetSlotList(1, output.as_mut_ptr(), &mut count),
-        CKR_OK as CK_RV
-    );
-    assert!(!output[..count as usize].contains(&TEST_SLOT_ID));
+
+    crate::with_context(|ctx| {
+        ctx.expire_discovery_refresh_for_test();
+        Ok(())
+    })
+    .unwrap();
+    assert!(!list(1).contains(&TEST_SLOT_ID));
+    assert!(list(0).contains(&TEST_SLOT_ID));
     finalize_for_test();
 }
 
 #[test]
-fn slot_list_snapshot_invalidation_and_thread_isolation() {
+fn slot_list_reconciliation_window_resets_with_module_lifetime() {
     let _guard = TEST_LOCK.lock().unwrap();
-    for mode in ["count", "filter", "thread", "lifetime", "invalid"] {
-        finalize_for_test();
+    finalize_for_test();
+    for remove_on_refresh in [false, true] {
         assert_eq!(
             initialize_with_configuration(
                 serde_json::json!({"version":1,"hardware":{"discovery":false},"yubihsm":{"urls":[]}})
             ),
             CKR_OK as CK_RV
         );
-        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(test_slot(true)));
+        let mut slot = test_slot(true);
+        slot.remove_on_refresh = remove_on_refresh;
+        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
         let mut count = 0;
         assert_eq!(
             crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
             CKR_OK as CK_RV
         );
-        let mut slot = test_slot(true);
-        slot.remove_on_refresh = true;
-        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
-        match mode {
-            "count" => {
-                assert_eq!(
-                    crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
-                    CKR_OK as CK_RV
-                );
-            }
-            "invalid" => {
-                assert_eq!(
-                    crate::api::C_GetSlotList(1, std::ptr::null_mut(), std::ptr::null_mut()),
-                    CKR_ARGUMENTS_BAD as CK_RV
-                );
-            }
-            "lifetime" => {
-                // Finalizing on another thread cannot clear this thread's TLS.
-                // The module identity must reject the previous snapshot.
-                std::thread::spawn(|| {
-                    finalize_for_test();
-                    assert_eq!(initialize_with_configuration(serde_json::json!({"version":1,"hardware":{"discovery":false},"yubihsm":{"urls":[]}})), CKR_OK as CK_RV);
-                    let mut slot = test_slot(true);
-                    slot.remove_on_refresh = true;
-                    install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
-                }).join().unwrap();
-            }
-            _ => {}
-        }
-        let mut fetch = move || {
-            let mut output = vec![0; count as usize + 32];
-            count = output.len() as CK_ULONG;
-            assert_eq!(
-                crate::api::C_GetSlotList(
-                    if mode == "filter" { 0 } else { 1 },
-                    output.as_mut_ptr(),
-                    &mut count
-                ),
-                CKR_OK as CK_RV
-            );
-        };
-        if mode == "thread" {
-            std::thread::spawn(fetch).join().unwrap();
-        } else {
-            fetch();
-        }
-        assert!(
-            !with_test_slot_context(TEST_SLOT_ID, |ctx| ctx.slot.is_present()),
-            "{mode} must refresh"
+        assert_eq!(
+            with_test_slot_context(TEST_SLOT_ID, |ctx| ctx.slot.is_present()),
+            !remove_on_refresh
         );
         finalize_for_test();
     }

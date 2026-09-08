@@ -97,18 +97,22 @@ bound serial when a slot-list refresh or device operation needs the card. The
 [iOS integration guide](ios-integration.md#when-the-nfc-ui-appears) distinguishes
 the exact UI triggers from the no-prompt reuse path.
 
-A count-only `C_GetSlotList` always performs fresh enumeration and saves the
-sorted slot IDs as a thread-local snapshot. The next buffered slot-list call with
-the same `tokenPresent` filter and module lifetime copies that snapshot without
-another discovery refresh. A successful copy consumes it; `CKR_BUFFER_TOO_SMALL`
-retains it for another buffer retry. A new count query or a different filter
-discards the pending snapshot. Unrelated API calls do not inspect or invalidate
-it; snapshot management is confined to `C_GetSlotList`. Calls on other threads
-enumerate independently. A weak module identity prevents reuse
-across finalization/reinitialization, including lifecycle changes on another
-thread, without retaining the old module. This is a paired-call snapshot without
-a time limit: device changes between the query and its matching copy appear
-in the next fresh enumeration. Even an empty snapshot avoids a second refresh.
+`C_GetSlotList` batches discovery reconciliation in a module-wide 500 ms window.
+The first call reconciles; calls less than 500 ms after the completed pass skip
+reconciliation, including count-only calls, different filters, short-buffer
+retries, and calls from other threads. Every call reads the current registry,
+applies its own `tokenPresent` filter, and checks the supplied buffer capacity;
+there is no saved slot-list snapshot or count matching.
+
+The monotonic completion timestamp shares the discovery mutex, so concurrent
+callers wait for an active pass and then reuse its result. Skipped calls do not
+advance the timestamp; sustained polling therefore cannot indefinitely postpone
+a refresh. A returned reconciliation error does not update the timestamp. There
+is no background refresh: the first call after the window expires performs the
+next pass. Device arrivals/removals discovered by polling may remain unobserved
+until that pass. `C_Finalize` discards the timestamp with the module context, so
+the next initialization starts without a previous refresh. No FFI-wide hook or
+thread-local state participates in batching.
 
 An inventory provider reports an opaque, provider-defined identity and current
 presence. Reconciliation combines that identity with the provider instance:
