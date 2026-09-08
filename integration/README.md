@@ -53,7 +53,8 @@ configuration fields and is outside this suite's current provider coverage.
 ### Full upstream pkcs11test
 
 `run_pkcs11test.py` runs the installed Google/Yubico `pkcs11test` executable
-against disposable production software tokens:
+against disposable production software tokens. This external executable is not
+run by `cargo test`; invoke its runner separately:
 
 ```sh
 python3 integration/run_pkcs11test.py
@@ -79,59 +80,80 @@ The upstream executable accepts PINs as command arguments, so ephemeral test
 PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
-The macOS baseline with upstream checkout
-`c4c3cd5ac5dc7d02525ae4c6e45a0de849e1f9fb` covers 336 cases: **230 passed,
-57 reported unsupported/skipped, and 49 failed**, with no crashes or timeouts.
-This is a compatibility baseline, not a passing conformance claim.
+The verified macOS run uses the local `pkcs11test` fork at
+`c3b8f4915a4313960ce0909e4589e11e6a7b6577`: **342 cases, 276 passed,
+66 unsupported/skipped, zero failures, crashes, or timeouts**. This inventory
+includes six parameterized encryption/decryption cancellation cases. The
+[fixture contracts](../../pkcs11test/README.md#fixture-contracts) describe its
+standards-based corrections and explicit key-policy requirements. These
+results cover this fork and the software backend; they do not establish
+cross-vendor conformance or native hardware support for every passing case.
+
+| Skip reason | Cases |
+| --- | ---: |
+| Single-DES generation unavailable | 42 |
+| MD5 digest unavailable | 12 |
+| MD5-with-RSA unavailable | 3 |
+| Combined digest/encryption API unsupported | 4 |
+| Operation-state save/restore unsupported | 2 |
+| Application-provided locking callbacks unsupported | 1 |
+| Slot-event waiting unsupported | 1 |
+| RSA sign/verify recovery unsupported | 1 |
+
+The DES group includes 36 cipher cases, three wrap/unwrap cases, one
+Tookan-derived wrap-policy case, and two dual-operation cases blocked by DES
+setup. Four further dual-operation cases reach the unsupported combined API.
+Triple-DES and AES are supported and tested independently. Unsupported cases
+remain explicitly identified in the report rather than counted as passes.
 
 All nine generic session data-object cases pass, including creation, independent
 copying, destruction, search, multi-attribute queries, and invalid lengths.
 Library tests exercise shared data/key lifetimes, cross-slot isolation, and
 software crypto on mock YubiHSM, PIV, OpenPGP, FIDO2, and software slots.
 Hardware ECDH results use the same copyable software-secret representation.
+The 14 OpenSC/OpenSSL client cases and 11 fixture/report regressions also pass.
 
 Against the explicit exclusion list in `yubihsm-shell` checkout
 `4b0247e7857c64f134b85376335581cc198e331d`
-(`pkcs11/tests/CMakeLists.txt`), 127 of these cases match exclusions: 52 pass,
-40 skip, and 35 fail here. This compares the same installed test inventory to
-that checkout's exclusions; it does not measure code coverage or compare all
-of yubihsm-shell's test programs. Software tokens permit reset and credential
-management cases that do not belong in the hardware fixture.
+(`pkcs11/tests/CMakeLists.txt`), 127 cases correspond to exclusions: **80 pass
+and 47 skip here**. The comparison maps renamed authenticated fixtures back
+to their original identities and `EncryptUpdateAfterSizeQuery` to
+`EncryptModePolicing2`; the six added cancellation cases are excluded from the
+comparison. Fixture corrections mean this is a comparison of exercised test
+subjects, not an unchanged upstream conformance score or a code-coverage
+measurement. Software tokens permit reset and credential-management tests
+that do not belong in the hardware fixture.
 
-Remaining failures are grouped by the first blocking condition; a fixture
-failure can hide additional assertions:
-
-| Group | Cases | Current finding |
-| --- | ---: | --- |
-| Single-DES fixtures | 20 | Wrap, digest-key, latching, attack, and dual-operation cases require unsupported `CKM_DES_KEY_GEN`. |
-| Private-key access | 4 | Key-pair fixtures hit `CKR_USER_NOT_LOGGED_IN`; template defaults and access expectations need review. |
-| Key attributes | 4 | Imported/generated attribute values, secret-key templates, recover flags, and leading-zero RSA exponent encoding need review. |
-| PIN and SO errors | 3 | Error precedence and wrong-PIN status-flag expectations differ. |
-| Token initialization fixture | 1 | `TokenInit` installs the supplied user PIN, then tries `C_SetPIN` with a different hardcoded reset PIN. |
-| Mechanism enumeration | 1 | The fork rejects additional advertised mechanism flags; its expected masks need review. |
-| HMAC generation fixture | 4 | `CKM_GENERIC_SECRET_KEY_GEN` templates omit the required `CKA_VALUE_LEN`. |
-| NULL-mechanism cancellation | 4 | The fork expects an invalid-argument/mechanism error instead of PKCS #11 3.x cancellation behavior. |
-| Operation mode after size queries | 8 | The fork expects single-part size queries to prevent subsequent multipart calls; review separately from consuming input. |
+The [PKCS #11 object-creation and session contracts](https://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html)
+require imported secret/private keys to report false for `CKA_LOCAL`,
+`CKA_ALWAYS_SENSITIVE`, and `CKA_NEVER_EXTRACTABLE`. Shared software objects
+preserve that history through hardening and copying; current sensitivity and
+extractability remain independently enforced. SO login with any read-only
+session on the slot, including the calling session, returns
+`CKR_SESSION_READ_ONLY_EXISTS`. RSA generation accepts zero-padded unsigned
+big-endian encodings of exponent 65537 across software and hardware backends;
+other exponent values remain rejected.
 
 The [generic-secret generation specification](https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.pdf)
-requires `CKA_VALUE_LEN`; software generation does not guess a length to satisfy
-that fixture. Triple-length DES generation has a fixed 24-byte representation
+requires `CKA_VALUE_LEN`; generation does not guess a length for incomplete
+templates. Triple-length DES generation has a fixed 24-byte representation
 and does not require a length attribute. Its generated bytes have odd parity,
 and ECB/CBC/CBC-PAD updates emit complete blocks while preserving short-buffer
 retry behavior and padded-decryption finalization.
 
 `C_Digest` rejects completion after `C_DigestUpdate` or `C_DigestKey`, including
-an empty update, and terminates that invalid operation. Digest size queries
-still avoid hashing or consuming input. `C_WaitForSlotEvent` reports
+an empty update, and terminates that invalid operation. Single-part size
+queries do not consume input or prevent subsequent multipart processing.
+Digest Final after a single-part size query therefore produces the
+empty-message digest. PKCS #11 3.x NULL mechanisms cancel active encryption
+and decryption; the external fixture verifies that subsequent operations
+report `CKR_OPERATION_NOT_INITIALIZED`. `C_WaitForSlotEvent` reports
 `CKR_CRYPTOKI_NOT_INITIALIZED` before initialization and
 `CKR_FUNCTION_NOT_SUPPORTED` while initialized.
 
-Failures remain failures in the report pending individual review; no blanket
-error-code conversion or exclusion hides them. The upstream-disabled
-invalid-attribute-length case fails during data-object setup, so it does not
-establish coverage of the intended bad length. A newer upstream suite should
-have its own versioned baseline rather than silently replacing this fork's
-comparison results.
+Failures remain failures in the report; no blanket error-code conversion or
+exclusion hides them. A newer upstream suite should have its own versioned
+baseline rather than silently replacing this fork's comparison results.
 
 Slot-based API calls initialize the slot registry even when the client has not
 called `C_GetSlotList` since `C_Initialize`. The upstream invalid-reserved-pointer

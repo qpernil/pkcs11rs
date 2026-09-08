@@ -1913,7 +1913,7 @@ pub fn login_controls_private_object_visibility_and_signing() {
             pin.as_mut_ptr(),
             pin.len() as CK_ULONG
         ),
-        CKR_SESSION_READ_ONLY as CK_RV
+        CKR_SESSION_READ_ONLY_EXISTS as CK_RV
     );
     let mut bad_pin = *b"9999";
     assert_eq!(
@@ -3092,6 +3092,15 @@ pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
     assert_eq!(
         crate::api::C_Login(
             read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_SESSION_READ_ONLY_EXISTS as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(
+            read_only_session,
             CKU_SO as CK_USER_TYPE,
             admin_pin.as_mut_ptr(),
             admin_pin.len() as CK_ULONG,

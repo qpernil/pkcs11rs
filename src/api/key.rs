@@ -648,6 +648,23 @@ pub(crate) struct OpenPgpGeneration {
     pub(crate) touch_policy: u8,
 }
 
+pub(crate) fn validate_rsa_generation_exponent(template: &[CK_ATTRIBUTE]) -> Result<(), Error> {
+    if let Some(attribute) = template_attribute(template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+    {
+        let value = read_attribute_value(attribute).map_err(Error::from)?;
+        let first = value
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(value.len());
+        // PKCS #11 big integers are unsigned, big endian byte strings. Padding
+        // does not change the exponent; these backends generate with 65537.
+        if value[first..] != [1, 0, 1] {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn openpgp_key_ref(id: &[u8]) -> Result<OpenPgpKeyRef, Error> {
     match id {
         [1] => Ok(OpenPgpKeyRef::Signature),
@@ -696,12 +713,7 @@ pub(crate) fn openpgp_generate_key_pair_parameters(
                 template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
                     .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
-            if let Some(exponent) =
-                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
-                && read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1]
-            {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
+            validate_rsa_generation_exponent(public_template)?;
             match bits {
                 2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa {
                     bits: bits as usize,
@@ -847,12 +859,7 @@ fn piv_generate_key_pair_parameters(
                 template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
                     .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
-            if let Some(exponent) =
-                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
-                && read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1]
-            {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
+            validate_rsa_generation_exponent(public_template)?;
             let algorithm = match bits {
                 1024 => piv::Algorithm::Rsa1024,
                 2048 => piv::Algorithm::Rsa2048,
@@ -1037,12 +1044,7 @@ fn software_generate_key_pair(
             if !(1024..=4096).contains(&bits) || bits % 256 != 0 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            if let Some(exponent) =
-                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
-                && read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01]
-            {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
+            validate_rsa_generation_exponent(public_template)?;
             (
                 CKK_RSA as CK_KEY_TYPE,
                 SoftwarePrivateKeyMaterial::Signing(
@@ -1269,12 +1271,7 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                 template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
                     .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
-            if let Some(exponent) =
-                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
-                && read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01]
-            {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
+            validate_rsa_generation_exponent(public_template)?;
             let algorithm = match bits {
                 2048 => YUBIHSM_ALGO_RSA_2048,
                 3072 => YUBIHSM_ALGO_RSA_3072,

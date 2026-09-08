@@ -1435,6 +1435,11 @@ fn parse_create_object_template_with_policy(
     }
     .map_err(Error::from)?;
     object.material = build_imported_key_material(&object, key_components)?;
+    // Imported key bytes have existed outside this object. These history flags
+    // must not be inferred from its current sensitivity/extractability policy.
+    object.always_sensitive = false;
+    object.never_extractable = false;
+
     if software_secret {
         let KeyMaterial::Secret(value) = object.material else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());

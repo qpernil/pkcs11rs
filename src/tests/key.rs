@@ -1581,7 +1581,8 @@ fn software_hkdf_derives_typed_keys_with_data_null_and_key_salts() {
         let object = context.resolve_object(derived).unwrap().unwrap();
         assert_eq!(object.key_type, CKK_AES as CK_KEY_TYPE);
         assert!(object.encrypt && object.decrypt);
-        assert!(object.always_sensitive && object.never_extractable);
+        // The imported base cannot establish an always/never history.
+        assert!(!object.always_sensitive && !object.never_extractable);
         assert!(!object.local);
         assert_eq!(
             object.key_gen_mechanism,
@@ -2034,7 +2035,6 @@ fn every_slot_materializes_typed_session_keys() {
         finalize_for_test();
     }
 }
-
 
 #[test]
 fn software_session_key_pairs_cover_every_supported_curve() {
@@ -2546,7 +2546,6 @@ fn hardware_slots_support_session_keys_without_token_storage_fallback() {
     finalize_for_test();
 }
 
-
 #[test]
 pub fn openpgp_generation_templates_select_reference_algorithm_and_touch_policy() {
     let mechanism = CK_MECHANISM {
@@ -2896,7 +2895,10 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
         crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
         CKR_ATTRIBUTE_SENSITIVE as CK_RV
     );
-    assert_eq!(value_attribute.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+    assert_eq!(
+        value_attribute.ulValueLen,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
 
     sensitive = CK_TRUE as CK_BBOOL;
     extractable = CK_FALSE as CK_BBOOL;
@@ -3550,4 +3552,188 @@ pub fn generate_random_validates_initialization_and_session() {
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
+}
+
+#[test]
+fn rsa_generation_accepts_zero_padded_exponents_without_accepting_other_values() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut bits = 1024 as CK_ULONG;
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    for (mut exponent, expected) in [
+        (vec![1, 0, 1], CKR_OK),
+        (vec![0, 1, 0, 1], CKR_OK),
+        (vec![0, 0, 0, 1, 0, 1], CKR_OK),
+        (vec![0, 0, 3], CKR_ATTRIBUTE_VALUE_INVALID),
+        (vec![0, 0], CKR_ATTRIBUTE_VALUE_INVALID),
+        (vec![], CKR_ATTRIBUTE_VALUE_INVALID),
+    ] {
+        let mut template = [
+            scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut bits),
+            bytes_attribute(CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE, &mut exponent),
+        ];
+        let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                0,
+                &mut public,
+                &mut private
+            ),
+            expected as CK_RV
+        );
+        if expected == CKR_OK {
+            assert_eq!(
+                read_bytes_attribute(
+                    TEST_SESSION_HANDLE,
+                    public,
+                    CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+                ),
+                [1, 0, 1]
+            );
+            assert_eq!(
+                crate::api::C_DestroyObject(TEST_SESSION_HANDLE, public),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_DestroyObject(TEST_SESSION_HANDLE, private),
+                CKR_OK as CK_RV
+            );
+        } else {
+            assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+            assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        }
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn imported_key_history_stays_false_after_hardening_and_copying() {
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let rsa = crate::certificate_builder::rsa_key();
+    for private_key in [false, true] {
+        for already_hardened in [false, true] {
+            let mut class = if private_key {
+                CKO_PRIVATE_KEY
+            } else {
+                CKO_SECRET_KEY
+            } as CK_OBJECT_CLASS;
+            let mut key_type = if private_key { CKK_RSA } else { CKK_AES } as CK_KEY_TYPE;
+            let mut sensitive = already_hardened as CK_BBOOL;
+            let mut extractable = (!already_hardened) as CK_BBOOL;
+            let mut value = [0x41; 16];
+            let mut modulus = rsa.n().to_bytes_be();
+            let mut exponent = rsa.e().to_bytes_be();
+            let mut private_exponent = rsa.d().to_bytes_be();
+            let mut template = vec![
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+                scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+            ];
+            if private_key {
+                template.extend([
+                    bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+                    bytes_attribute(CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE, &mut exponent),
+                    bytes_attribute(
+                        CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE,
+                        &mut private_exponent,
+                    ),
+                ]);
+            } else {
+                template.push(bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value));
+            }
+            let mut imported = 0;
+            assert_eq!(
+                crate::api::C_CreateObject(
+                    TEST_SESSION_HANDLE,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut imported
+                ),
+                CKR_OK as CK_RV
+            );
+            let check_history = |handle| {
+                for attribute in [CKA_ALWAYS_SENSITIVE, CKA_NEVER_EXTRACTABLE, CKA_LOCAL] {
+                    assert_eq!(
+                        read_bytes_attribute(
+                            TEST_SESSION_HANDLE,
+                            handle,
+                            attribute as CK_ATTRIBUTE_TYPE
+                        ),
+                        [CK_FALSE as u8]
+                    );
+                }
+            };
+            check_history(imported);
+            sensitive = CK_TRUE as CK_BBOOL;
+            extractable = CK_FALSE as CK_BBOOL;
+            let mut harden = [
+                scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+                scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+            ];
+            assert_eq!(
+                crate::api::C_SetAttributeValue(
+                    TEST_SESSION_HANDLE,
+                    imported,
+                    harden.as_mut_ptr(),
+                    harden.len() as CK_ULONG
+                ),
+                CKR_OK as CK_RV
+            );
+            check_history(imported);
+            let mut copy = 0;
+            assert_eq!(
+                crate::api::C_CopyObject(
+                    TEST_SESSION_HANDLE,
+                    imported,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut copy
+                ),
+                CKR_OK as CK_RV
+            );
+            check_history(copy);
+            for handle in [imported, copy] {
+                assert_eq!(
+                    read_bytes_attribute(
+                        TEST_SESSION_HANDLE,
+                        handle,
+                        CKA_SENSITIVE as CK_ATTRIBUTE_TYPE
+                    ),
+                    [CK_TRUE as u8]
+                );
+                assert_eq!(
+                    read_bytes_attribute(
+                        TEST_SESSION_HANDLE,
+                        handle,
+                        CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+                    ),
+                    [CK_FALSE as u8]
+                );
+            }
+        }
+    }
+    finalize_for_test();
 }
