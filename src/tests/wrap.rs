@@ -2520,7 +2520,7 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     let mut token_false = CK_FALSE as CK_BBOOL;
     let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
-    let mut invalid_create_template = [
+    let mut session_create_template = [
         scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
         scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token_false),
@@ -2531,18 +2531,19 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
             &mut public_exponent,
         ),
     ];
-    let mut invalid_created = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut session_created = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
         crate::api::C_CreateObject(
             session,
-            invalid_create_template.as_mut_ptr(),
-            invalid_create_template.len() as CK_ULONG,
-            &mut invalid_created,
+            session_create_template.as_mut_ptr(),
+            session_create_template.len() as CK_ULONG,
+            &mut session_created,
         ),
-        CKR_TEMPLATE_INCONSISTENT as CK_RV
+        CKR_OK as CK_RV
     );
-    assert_eq!(invalid_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-    let mut invalid_default_token_template = invalid_create_template
+    assert_ne!(session_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(crate::api::C_DestroyObject(session, session_created), CKR_OK as CK_RV);
+    let mut default_session_template = session_create_template
         .iter()
         .copied()
         .filter(|attribute| attribute.type_ != CKA_TOKEN as CK_ATTRIBUTE_TYPE)
@@ -2550,13 +2551,14 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     assert_eq!(
         crate::api::C_CreateObject(
             session,
-            invalid_default_token_template.as_mut_ptr(),
-            invalid_default_token_template.len() as CK_ULONG,
-            &mut invalid_created,
+            default_session_template.as_mut_ptr(),
+            default_session_template.len() as CK_ULONG,
+            &mut session_created,
         ),
-        CKR_TEMPLATE_INCONSISTENT as CK_RV
+        CKR_OK as CK_RV
     );
-    assert_eq!(invalid_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_ne!(session_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(crate::api::C_DestroyObject(session, session_created), CKR_OK as CK_RV);
 
     let mut invalid_generation_public = [
         scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),

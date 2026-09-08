@@ -26,6 +26,51 @@ MODULE_CONTEXT: RwLock<Option<ModuleContext>>
         └── session handle -> owning slot ID
 ```
 
+## Shared software session objects and mechanism discovery
+
+Every slot has a common host software layer, including named software, YubiHSM,
+PIV, OpenPGP, and FIDO2 slots. `CKA_TOKEN=CK_FALSE` (the default) creates session
+objects: generic data, public keys, asymmetric private keys, and supported secret
+keys. Import, generation, derivation, copy, and unwrap publish host-held key
+material through the shared object lifecycle. The creator session owns each
+object; other sessions on that slot can see it subject to login policy. Closing
+the creator destroys it, and logout destroys private session objects. Another
+slot cannot access it. Secret material uses zeroizing storage.
+
+`CKO_DATA` session objects support `CKA_APPLICATION`, `CKA_OBJECT_ID`, `CKA_VALUE`,
+and common storage attributes. Their payload and application metadata are
+mutable; copy creates independent content owned by the copying session.
+Generic data token-object creation is unsupported. Existing native data objects,
+such as PIV data and YubiHSM opaque objects, keep their backend-specific behavior.
+
+Hardware ECDH and protected prefixed ECDH return ordinary software secret keys.
+The template selects the supported key type, usage, sensitivity, and
+extractability; the result can be copied, used for host cryptography, and
+removed through the same APIs as an imported or generated session key. There
+is no separate synthetic-result key type or forced read-only usage policy.
+
+`CKA_TOKEN=CK_TRUE` selects persistent backend storage. Hardware generation and
+import retain their native mechanism, key-size, curve, and authorization limits;
+unsupported requests fail instead of creating a host session object. Named
+software tokens use their encrypted store for supported persistent keys.
+Operations dispatch from the key's actual material: device-held keys use their
+backend, while host-held keys use the software implementation.
+
+Mechanism discovery merges two lists by mechanism ID:
+
+1. The slot's native `backend_mechanisms()` list.
+2. The common maximum software list, filtered by the slot's
+   `software_mechanism_enabled()` policy (all enabled by default).
+
+The merge deduplicates IDs, takes the minimum and maximum supported key sizes,
+and combines operation flags. Software-only entries omit `CKF_HW`; merged
+entries retain the native flag. These are total slot capabilities, not a
+hardware-only capability query: one PKCS #11 range and flags field cannot
+express separate hardware/software limits or holes in supported sizes. A token
+request or operation with an existing key still undergoes backend and key
+validation. The filter is an internal per-slot advertisement policy, not a
+JSON/environment option or a security boundary for software execution.
+
 ## Module lifecycle and locking
 
 `MODULE_CONTEXT` is the lifecycle state. `None` means that Cryptoki is not

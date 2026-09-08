@@ -1888,120 +1888,153 @@ fn software_ecdh_supports_every_x963_kdf_and_right_truncates_raw_secrets() {
 }
 
 #[test]
-fn software_ecdh_materializes_typed_session_keys() {
+fn every_slot_materializes_typed_session_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
-    finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
-    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-
-    let (public, private) = generate_software_key_pair(
-        TEST_SESSION_HANDLE,
-        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-        Some(
-            &mut crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
-                .unwrap()
-                .to_vec(),
-        ),
-    );
-    let mut peer = object_ec_point(TEST_SESSION_HANDLE, public);
-    let mut aes_type = CKK_AES as CK_KEY_TYPE;
-    let mut aes_length = 16 as CK_ULONG;
-    let mut enabled = CK_TRUE as CK_BBOOL;
-    let mut sensitive = CK_TRUE as CK_BBOOL;
-    let mut extractable = CK_FALSE as CK_BBOOL;
-    let mut aes_template = [
-        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut aes_type),
-        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut aes_length),
-        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
-        scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
-        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
-        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
-    ];
-    let aes = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut aes_template);
-    with_test_slot_context(TEST_SLOT_ID, |context| {
-        let object = context.resolve_object(aes).unwrap().unwrap();
-        assert_eq!(object.key_type, CKK_AES as CK_KEY_TYPE);
-        assert!(object.encrypt && object.decrypt);
-        assert!(object.sensitive && !object.extractable);
-        assert!(object.always_sensitive && object.never_extractable);
-        assert!(!object.local);
+    for kind in [
+        crate::SlotKind::Software,
+        crate::SlotKind::YubiHsm,
+        crate::SlotKind::Fido2,
+        crate::SlotKind::Ccid(crate::CcidApplication::Piv),
+        crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp),
+    ] {
+        finalize_for_test();
         assert_eq!(
-            object.key_gen_mechanism,
-            Some(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE)
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
         );
-        assert!(
-            matches!(object.material, crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 16)
-        );
-    });
-    let mut ecb = CK_MECHANISM {
-        mechanism: CKM_AES_ECB as CK_MECHANISM_TYPE,
-        pParameter: std::ptr::null_mut(),
-        ulParameterLen: 0,
-    };
-    let mut plaintext = *b"derived AES key!";
-    let mut ciphertext = [0; 16];
-    let mut ciphertext_length = ciphertext.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(
-        crate::api::C_Encrypt(
-            TEST_SESSION_HANDLE,
-            plaintext.as_mut_ptr(),
-            plaintext.len() as CK_ULONG,
-            ciphertext.as_mut_ptr(),
-            &mut ciphertext_length,
-        ),
-        CKR_OK as CK_RV
-    );
-    let mut recovered = [0; 16];
-    let mut recovered_length = recovered.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(
-        crate::api::C_Decrypt(
-            TEST_SESSION_HANDLE,
-            ciphertext.as_mut_ptr(),
-            ciphertext_length,
-            recovered.as_mut_ptr(),
-            &mut recovered_length,
-        ),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(recovered, plaintext);
+        let mut slot = test_slot(true);
+        slot.kind = kind;
+        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
+        install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let mut hmac_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
-    let mut hmac_length = 32 as CK_ULONG;
-    let mut nonsensitive = CK_FALSE as CK_BBOOL;
-    let mut hmac_extractable = CK_TRUE as CK_BBOOL;
-    let mut hmac_template = [
-        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
-        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut hmac_length),
-        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut enabled),
-        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut enabled),
-        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut nonsensitive),
-        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut hmac_extractable),
-    ];
-    let hmac = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut hmac_template);
-    sign_and_verify(
-        TEST_SESSION_HANDLE,
-        hmac,
-        hmac,
-        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
-    );
-    with_test_slot_context(TEST_SLOT_ID, |context| {
-        let object = context.resolve_object(hmac).unwrap().unwrap();
-        assert!(!object.always_sensitive);
-        assert!(!object.never_extractable);
-    });
-    finalize_for_test();
+        let (public, private) = generate_software_key_pair(
+            TEST_SESSION_HANDLE,
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            Some(
+                &mut crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                    .unwrap()
+                    .to_vec(),
+            ),
+        );
+        let mut peer = object_ec_point(TEST_SESSION_HANDLE, public);
+        let mut aes_type = CKK_AES as CK_KEY_TYPE;
+        let mut aes_length = 16 as CK_ULONG;
+        let mut enabled = CK_TRUE as CK_BBOOL;
+        let mut sensitive = CK_TRUE as CK_BBOOL;
+        let mut extractable = CK_FALSE as CK_BBOOL;
+        let mut aes_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut aes_type),
+            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut aes_length),
+            scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+            scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+        ];
+        let aes = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut aes_template);
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(aes).unwrap().unwrap();
+            assert_eq!(object.key_type, CKK_AES as CK_KEY_TYPE);
+            assert!(object.encrypt && object.decrypt);
+            assert!(object.sensitive && !object.extractable);
+            assert!(object.always_sensitive && object.never_extractable);
+            assert!(!object.local);
+            assert_eq!(
+                object.key_gen_mechanism,
+                Some(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE)
+            );
+            assert!(
+                matches!(object.material, crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 16)
+            );
+        });
+        let mut copied = 0;
+        assert_eq!(
+            crate::api::C_CopyObject(
+                TEST_SESSION_HANDLE,
+                aes,
+                std::ptr::null_mut(),
+                0,
+                &mut copied
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |ctx| {
+            let original = ctx.resolve_object(aes).unwrap().unwrap();
+            let copy = ctx.resolve_object(copied).unwrap().unwrap();
+            assert_ne!(original.unique_id, copy.unique_id);
+            assert!(copy.sensitive && !copy.extractable);
+            assert!(matches!(
+                copy.material,
+                crate::KeyMaterial::SoftwareSecret(_)
+            ));
+        });
+        let mut ecb = CK_MECHANISM {
+            mechanism: CKM_AES_ECB as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut plaintext = *b"derived AES key!";
+        let mut ciphertext = [0; 16];
+        let mut ciphertext_length = ciphertext.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Encrypt(
+                TEST_SESSION_HANDLE,
+                plaintext.as_mut_ptr(),
+                plaintext.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut recovered = [0; 16];
+        let mut recovered_length = recovered.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Decrypt(
+                TEST_SESSION_HANDLE,
+                ciphertext.as_mut_ptr(),
+                ciphertext_length,
+                recovered.as_mut_ptr(),
+                &mut recovered_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(recovered, plaintext);
+
+        let mut hmac_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+        let mut hmac_length = 32 as CK_ULONG;
+        let mut nonsensitive = CK_FALSE as CK_BBOOL;
+        let mut hmac_extractable = CK_TRUE as CK_BBOOL;
+        let mut hmac_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
+            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut hmac_length),
+            scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut enabled),
+            scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut enabled),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut nonsensitive),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut hmac_extractable),
+        ];
+        let hmac = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut hmac_template);
+        sign_and_verify(
+            TEST_SESSION_HANDLE,
+            hmac,
+            hmac,
+            CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(hmac).unwrap().unwrap();
+            assert!(!object.always_sensitive);
+            assert!(!object.never_extractable);
+        });
+        finalize_for_test();
+    }
 }
+
 
 #[test]
 fn software_session_key_pairs_cover_every_supported_curve() {
@@ -2421,81 +2454,98 @@ fn software_private_token_keys_require_the_dedicated_encrypted_store() {
 }
 
 #[test]
-fn hardware_slots_do_not_fallback_to_generic_software_private_keys() {
+fn hardware_slots_support_session_keys_without_token_storage_fallback() {
     let _guard = TEST_LOCK.lock().unwrap();
-    finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
-    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for kind in [
+        crate::SlotKind::YubiHsm,
+        crate::SlotKind::Fido2,
+        crate::SlotKind::Ccid(crate::CcidApplication::Piv),
+        crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp),
+    ] {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let mut slot = test_slot(true);
+        slot.kind = kind;
+        // This backend cannot execute crypto or persist software keys.
+        install_test_slot_with_backend(81, Box::new(slot));
+        install_test_session(81, 801);
+        let mut params = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+        let (public, private) = generate_software_key_pair(
+            801,
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            Some(&mut params),
+        );
+        sign_and_verify(801, public, private, CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE);
 
-    let mut mechanism_count = 0;
-    assert_eq!(
-        crate::C_GetMechanismList(TEST_SLOT_ID, std::ptr::null_mut(), &mut mechanism_count),
-        CKR_OK as CK_RV
-    );
-    let mut mechanisms = vec![0; mechanism_count as usize];
-    assert_eq!(
-        crate::C_GetMechanismList(TEST_SLOT_ID, mechanisms.as_mut_ptr(), &mut mechanism_count),
-        CKR_OK as CK_RV
-    );
-    assert!(!mechanisms.contains(&(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)));
-    assert!(!mechanisms.contains(&(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)));
+        let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let mut key_type = CKK_EC as CK_KEY_TYPE;
+        let mut value = [0u8; 32];
+        value[31] = 1;
+        let mut template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut params),
+            bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+        ];
+        let mut imported = 0;
+        assert_eq!(
+            crate::api::C_CreateObject(
+                801,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut imported
+            ),
+            CKR_OK as CK_RV,
+            "{kind:?}"
+        );
+        with_test_slot_context(81, |ctx| {
+            assert!(matches!(
+                ctx.resolve_object(imported).unwrap().unwrap().material,
+                crate::KeyMaterial::SoftwarePrivate(_)
+            ));
+        });
 
-    let mut modulus_bits = 1024 as CK_ULONG;
-    let mut public_template = [scalar_attribute(
-        CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-        &mut modulus_bits,
-    )];
-    let mut mechanism = CK_MECHANISM {
-        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-        pParameter: std::ptr::null_mut(),
-        ulParameterLen: 0,
-    };
-    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-    assert_eq!(
-        crate::api::C_GenerateKeyPair(
-            TEST_SESSION_HANDLE,
-            &mut mechanism,
-            public_template.as_mut_ptr(),
-            public_template.len() as CK_ULONG,
-            std::ptr::null_mut(),
-            0,
-            &mut public,
-            &mut private,
-        ),
-        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
-    );
-    assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-    assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-
-    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_EC as CK_KEY_TYPE;
-    let mut parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
-    let mut value = [0u8; 32];
-    value[31] = 1;
-    let mut import_template = [
-        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
-        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
-        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
-        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
-    ];
-    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-    assert_eq!(
-        crate::api::C_CreateObject(
-            TEST_SESSION_HANDLE,
-            import_template.as_mut_ptr(),
-            import_template.len() as CK_ULONG,
-            &mut object,
-        ),
-        CKR_TEMPLATE_INCONSISTENT as CK_RV
-    );
-    assert_eq!(object, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-
+        // A software-only generation request must not manufacture a token key.
+        let mut generation = CK_MECHANISM {
+            mechanism: CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut private_flag = CK_TRUE as CK_BBOOL;
+        let mut token_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private_flag),
+        ];
+        let mut rejected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let count_before = with_test_slot_context(81, |ctx| ctx.memory_objects.len());
+        let result = crate::api::C_GenerateKey(
+            801,
+            &mut generation,
+            token_template.as_mut_ptr(),
+            token_template.len() as CK_ULONG,
+            &mut rejected,
+        );
+        assert_eq!(
+            result,
+            if kind == crate::SlotKind::YubiHsm {
+                CKR_MECHANISM_INVALID as CK_RV
+            } else {
+                CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+            }
+        );
+        assert_eq!(rejected, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        assert_eq!(
+            with_test_slot_context(81, |ctx| ctx.memory_objects.len()),
+            count_before
+        );
+    }
     finalize_for_test();
 }
+
 
 #[test]
 pub fn openpgp_generation_templates_select_reference_algorithm_and_touch_policy() {
@@ -2566,7 +2616,7 @@ pub fn generate_key_creates_secret_key_object() {
     };
     let mut label = *b"Generated secret";
     let mut id = [3u8, 1, 4];
-    let mut token = CK_TRUE as CK_BBOOL;
+    let mut token = CK_FALSE as CK_BBOOL;
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut value_len = 32 as CK_ULONG;
     let mut templ = [
@@ -2709,7 +2759,7 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
     assert_eq!(&read_label, b"Generated secret");
     assert_eq!(read_id, id);
-    assert_eq!(read_token, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_token, CK_FALSE as CK_BBOOL);
     assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
     assert_eq!(read_value_len, value_len);
     assert_eq!(read_sensitive, CK_TRUE as CK_BBOOL);
@@ -2725,7 +2775,7 @@ pub fn generate_key_creates_secret_key_object() {
     with_test_slot_context(TEST_SLOT_ID, |context| {
         let object = context.memory_objects.get(&key).unwrap();
         match &object.material {
-            crate::KeyMaterial::Secret(value) => {
+            crate::KeyMaterial::SoftwareSecret(value) => {
                 assert_eq!(value.len(), value_len as usize);
                 assert!(value.iter().any(|byte| *byte != 0));
             }
@@ -2844,9 +2894,9 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
     };
     assert_eq!(
         crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
-        CKR_OK as CK_RV
+        CKR_ATTRIBUTE_SENSITIVE as CK_RV
     );
-    assert_eq!(value_attribute.ulValueLen, value_len);
+    assert_eq!(value_attribute.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
 
     sensitive = CK_TRUE as CK_BBOOL;
     extractable = CK_FALSE as CK_BBOOL;
@@ -3271,7 +3321,7 @@ pub fn generate_key_reports_mechanism_and_template_errors() {
         CKR_KEY_SIZE_RANGE as CK_RV
     );
 
-    let mut oversized_len = 513 as CK_ULONG;
+    let mut oversized_len = 1025 as CK_ULONG;
     let mut oversized_template = [CK_ATTRIBUTE {
         type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
         pValue: &mut oversized_len as *mut CK_ULONG as CK_VOID_PTR,

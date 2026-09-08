@@ -236,7 +236,6 @@ fn ml_kem_secret_object(
         templ,
         ML_KEM_SHARED_SECRET_LENGTH,
         ML_KEM_SHARED_SECRET_LENGTH,
-        true,
     )?;
     if object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE {
         if requested_length != ML_KEM_SHARED_SECRET_LENGTH {

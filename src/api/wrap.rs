@@ -585,7 +585,15 @@ fn wrap_key(
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let mechanism = unsafe { _as_ref(mechanism) }?;
         let output_len = unsafe { as_mut(wrapped_key_len) }?;
-        if ctx.get_slot(slot_id)?.supports_software_secret_operations() {
+        let software_wrapper = ctx.resolve_object(wrapping_key)?.is_some_and(|object| {
+            matches!(
+                object.material,
+                KeyMaterial::SoftwareSecret(_)
+                    | KeyMaterial::SoftwarePrivate(_)
+                    | KeyMaterial::Public(_)
+            )
+        });
+        if software_wrapper {
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_WRAP as CK_FLAGS)?;
             let target = ctx
@@ -608,13 +616,6 @@ fn wrap_key(
                     SoftwareWrapMechanism::Aes(SoftwareAesWrapMechanism::Kwp(_))
                         | SoftwareWrapMechanism::RsaAes(_)
                 )
-            {
-                return Err(CKR_KEY_NOT_WRAPPABLE.into());
-            }
-            if private_target
-                && !ctx
-                    .get_slot(slot_id)?
-                    .supports_software_private_operations()
             {
                 return Err(CKR_KEY_NOT_WRAPPABLE.into());
             }
@@ -843,7 +844,13 @@ fn unwrap_key(
         let wrapped =
             unsafe { from_raw_parts(wrapped_key as *const u8, wrapped_key_len as usize) }?;
         let template = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-        if ctx.get_slot(slot_id)?.supports_software_secret_operations() {
+        let software_wrapper = ctx.resolve_object(unwrapping_key)?.is_some_and(|object| {
+            matches!(
+                object.material,
+                KeyMaterial::SoftwareSecret(_) | KeyMaterial::SoftwarePrivate(_)
+            )
+        });
+        if software_wrapper {
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
             let wrapper = ctx
@@ -860,13 +867,6 @@ fn unwrap_key(
                     SoftwareWrapMechanism::Aes(SoftwareAesWrapMechanism::Kwp(_))
                         | SoftwareWrapMechanism::RsaAes(_)
                 )
-            {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            if private_target
-                && !ctx
-                    .get_slot(slot_id)?
-                    .supports_software_private_operations()
             {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }

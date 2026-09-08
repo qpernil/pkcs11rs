@@ -1001,7 +1001,7 @@ fn openpgp_generated_key_algorithms_report_key_pair_generation_mechanisms() {
 }
 
 #[test]
-fn openpgp_mechanisms_are_unique_and_add_only_paired_software_public_flags() {
+fn openpgp_mechanisms_combine_native_and_common_software_operations() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
     let mechanisms = crate::Slot::mechanisms(&slot);
@@ -1025,7 +1025,7 @@ fn openpgp_mechanisms_are_unique_and_add_only_paired_software_public_flags() {
         .unwrap();
     assert_eq!(
         raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
-        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+        (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
     );
     for mechanism_type in [
         CKM_SHA256_RSA_PKCS,
@@ -1098,15 +1098,7 @@ fn composite_signing_advertisement_is_exact_for_every_general_slot_family() {
 
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let openpgp = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
-    let openpgp_expected = [
-        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
-        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
-        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
-        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
-        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
-        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
-    ];
-    assert_exact(crate::Slot::mechanisms(&openpgp), &openpgp_expected);
+    assert_exact(crate::Slot::mechanisms(&openpgp), &all);
 
     let base = std::sync::Arc::new(SelectableConnector {
         present: std::sync::atomic::AtomicBool::new(true),
@@ -1471,14 +1463,14 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
         assert_eq!(advertised.flags, CKF_DIGEST as CK_FLAGS);
         assert_eq!((advertised.min_key_size, advertised.max_key_size), (0, 0));
     }
-    for unsupported in crate::software_public_mechanisms()
+    for supported in crate::software_public_mechanisms()
         .into_iter()
         .filter(|mechanism| mechanism.type_ != crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
     {
         assert!(
-            !mechanisms
+            mechanisms
                 .iter()
-                .any(|mechanism| mechanism.type_ == unsupported.type_)
+                .any(|mechanism| mechanism.type_ == supported.type_)
         );
     }
     assert!(
@@ -1495,7 +1487,7 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
         CKM_ECDH1_COFACTOR_DERIVE,
     ] {
         assert!(
-            !mechanisms
+            mechanisms
                 .iter()
                 .any(|mechanism| mechanism.type_ == private_only as CK_MECHANISM_TYPE)
         );
@@ -1770,7 +1762,9 @@ pub fn authentication_loss_cancels_active_private_signing() {
             present: std::cell::Cell::new(true),
             remove_on_refresh: false,
             login_active: Some(login_active.clone()),
-            software_private_operations: false,
+            stores_software_token_keys: false,
+            kind: crate::SlotKind::Synthetic,
+            software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),
             session_objects: Vec::new(),
@@ -3244,7 +3238,9 @@ pub fn open_session_refreshes_token_presence() {
             present: std::cell::Cell::new(true),
             remove_on_refresh: true,
             login_active: None,
-            software_private_operations: false,
+            stores_software_token_keys: false,
+            kind: crate::SlotKind::Synthetic,
+            software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),
             session_objects: Vec::new(),
@@ -3541,7 +3537,9 @@ pub fn get_slot_list_refreshes_registered_slot_presence() {
             present: std::cell::Cell::new(true),
             remove_on_refresh: true,
             login_active: None,
-            software_private_operations: false,
+            stores_software_token_keys: false,
+            kind: crate::SlotKind::Synthetic,
+            software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),
             session_objects: Vec::new(),

@@ -80,14 +80,20 @@ PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
 The macOS baseline with upstream checkout
-`c4c3cd5ac5dc7d02525ae4c6e45a0de849e1f9fb` covers 336 cases: **221 passed,
-57 reported unsupported/skipped, and 58 failed**, with no crashes or timeouts.
+`c4c3cd5ac5dc7d02525ae4c6e45a0de849e1f9fb` covers 336 cases: **230 passed,
+57 reported unsupported/skipped, and 49 failed**, with no crashes or timeouts.
 This is a compatibility baseline, not a passing conformance claim.
+
+All nine generic session data-object cases pass, including creation, independent
+copying, destruction, search, multi-attribute queries, and invalid lengths.
+Library tests exercise shared data/key lifetimes, cross-slot isolation, and
+software crypto on mock YubiHSM, PIV, OpenPGP, FIDO2, and software slots.
+Hardware ECDH results use the same copyable software-secret representation.
 
 Against the explicit exclusion list in `yubihsm-shell` checkout
 `4b0247e7857c64f134b85376335581cc198e331d`
-(`pkcs11/tests/CMakeLists.txt`), 127 of these cases match exclusions: 48 pass,
-40 skip, and 39 fail here. This compares the same installed test inventory to
+(`pkcs11/tests/CMakeLists.txt`), 127 of these cases match exclusions: 52 pass,
+40 skip, and 35 fail here. This compares the same installed test inventory to
 that checkout's exclusions; it does not measure code coverage or compare all
 of yubihsm-shell's test programs. Software tokens permit reset and credential
 management cases that do not belong in the hardware fixture.
@@ -98,7 +104,6 @@ failure can hide additional assertions:
 | Group | Cases | Current finding |
 | --- | ---: | --- |
 | Single-DES fixtures | 20 | Wrap, digest-key, latching, attack, and dual-operation cases require unsupported `CKM_DES_KEY_GEN`. |
-| Data-object creation | 9 | Generic `CKO_DATA` creation and its attributes are missing; downstream copy/find/attribute assertions are not reached. |
 | Private-key access | 4 | Key-pair fixtures hit `CKR_USER_NOT_LOGGED_IN`; template defaults and access expectations need review. |
 | Key attributes | 4 | Imported/generated attribute values, secret-key templates, recover flags, and leading-zero RSA exponent encoding need review. |
 | PIN and SO errors | 3 | Error precedence and wrong-PIN status-flag expectations differ. |

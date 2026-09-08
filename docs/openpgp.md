@@ -1,5 +1,10 @@
 # YubiKey OpenPGP client
 
+The slot also provides the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
+Its advertised mechanisms combine native capabilities with the filtered
+software list. Device operations and token objects retain the native limits
+described below.
+
 The OpenPGP client exposes the YubiKey OpenPGP smart-card applet as a PKCS #11
 slot over native CCID transport. Common CCID discovery
 and slot behavior is documented in [`ccid.md`](ccid.md). To limit discovery to

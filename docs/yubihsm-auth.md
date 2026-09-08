@@ -15,6 +15,11 @@ session keys under the [authentication secret policy](authentication-secrets.md)
 
 ## Slot layout
 
+YubiHSM slots provide the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
+Session-key creation and operations use host software; persistent device keys
+retain the native capabilities and authentication requirements described here.
+Mechanism discovery merges the native list with the filtered software list.
+
 The module exposes one slot for every selectable CCID applet, one slot for
 every physical YubiHSM USB device, and one slot for every device enumerated by
 each URL configured in `PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated
@@ -387,8 +392,9 @@ Boolean attribute has its normal PKCS #11 default of `CK_FALSE`, so omitting
 
 `CKA_TOKEN=CK_TRUE` is required for a native public wrap key because the
 YubiHSM object is persistent. An omitted or false `CKA_TOKEN` requests a
-session object. That remains valid for an ordinary public key, but it is
-inconsistent with `CKA_WRAP=CK_TRUE` on the special paths below.
+session object. `C_CreateObject` accepts this with either value of `CKA_WRAP`
+and creates a software public key; native generation and projection paths
+retain their additional template constraints described below.
 
 `C_CreateObject` has no private source key from which to infer intent. Its RSA
 public-key template is interpreted as follows:
@@ -397,7 +403,7 @@ public-key template is interpreted as follows:
 | --- | --- | --- | --- | --- |
 | Absent or false | Absent/false | Ordinary session `CKO_PUBLIC_KEY` | Session-memory backed public material | Standalone |
 | Absent or false | True | Ordinary token `CKO_PUBLIC_KEY` | Internal opaque `pkcs11rs.public-key` record | Standalone |
-| True | Absent/false | None: `CKR_TEMPLATE_INCONSISTENT` | None | None |
+| True | Absent/false | Software wrap-capable session `CKO_PUBLIC_KEY` | Session-memory backed public material | Standalone |
 | True | True | Wrap-capable token `CKO_PUBLIC_KEY` | Native `YUBIHSM_PUBLIC_WRAP_KEY` | Standalone |
 
 Thus `CKA_WRAP=CK_FALSE` never means “probably a public wrap key.” It is an

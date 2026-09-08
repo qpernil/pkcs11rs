@@ -1,7 +1,10 @@
 # Software secret keys, derivation, and wrapping
 
-Named software slots provide AES, 3DES, generic-secret, and hash-specific HMAC
-keys as session objects or encrypted private token objects. The user-facing
+Every slot provides AES, 3DES, generic-secret, and hash-specific HMAC keys
+as host software session objects. Named software slots additionally provide
+encrypted private token objects. Hardware token requests retain backend
+capability and persistence restrictions. See the
+[shared session layer](architecture.md#shared-software-session-objects-and-mechanism-discovery). The user-facing
 mechanism and lifecycle contract is defined in [`software.md`](software.md).
 
 ## Object and storage model

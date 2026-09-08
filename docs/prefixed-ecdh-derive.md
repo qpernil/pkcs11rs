@@ -61,21 +61,22 @@ Discovered protected-capability keys report `CKA_DERIVE=CK_TRUE` and expose
 their precise permitted derivation mechanisms through
 `CKA_ALLOWED_MECHANISMS`.
 
-## Current derived object
+## Derived object
 
-The virtual YubiHSM command returns the KDF output. `pkcs11rs` wraps that output
-as its existing host-memory `CKK_GENERIC_SECRET` session object. Consequently:
+The virtual YubiHSM command returns the KDF output. `pkcs11rs` stores it as an
+ordinary host software secret key owned by the creating PKCS #11 session. The
+template can select a supported generic-secret, AES, 3DES, or HMAC type and its
+usage, sensitivity, and extractability policy. With no policy attributes, the
+result is a public, nonsensitive, extractable generic-secret session object.
+It can be copied and used by the common software operations. Closing its
+creator destroys it; logout also destroys it when `CKA_PRIVATE=CK_TRUE`.
+Persistent derived software keys require a backend that supports encrypted
+software-key storage; YubiHSM slots reject that request.
 
-- the object has `CKA_TOKEN=CK_FALSE` and belongs to the creating PKCS #11
-  session;
-- requesting `CKA_TOKEN=CK_TRUE` is rejected;
-- the value is currently readable and extractable, matching the established
-  hardware-ECDH compatibility-object behavior; and
-- the object disappears when its creating PKCS #11 session closes.
-
-This is a real PKCS #11 object but not a YubiHSM object. The reusable raw ECDH
-secret remains inside the HSM; the final, session-specific KDF output is
-visible to the trusted provider process and to the PKCS #11 caller.
+The reusable raw ECDH secret remains inside the HSM. The final KDF output is
+visible to the trusted provider process; the object's policy controls whether
+the PKCS #11 caller can read or export it. See the
+[shared session layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
 
 ## YubiHSM asymmetric-authentication mapping
 

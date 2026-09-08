@@ -4,9 +4,10 @@
 
 `pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
 applications, YubiHSM devices, and explicitly configured in-memory software
-tokens. Hardware private-key operations remain on the device. Dedicated
-software slots support login-gated session keys and, when local token storage
-is configured, encrypted persistent private-key objects.
+tokens. Every slot supports common software session objects and keys;
+operations with hardware-held private keys remain on the device. Dedicated
+software slots also support encrypted persistent keys when local token storage
+is configured. See the [shared session layer](docs/architecture.md#shared-software-session-objects-and-mechanism-discovery).
 
 The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
@@ -24,7 +25,8 @@ explicit exceptions. See the [authentication secret retention policy](docs/authe
 The short version is that one PKCS #11 module can present YubiKey applets,
 local and remote YubiHSMs, FIDO authenticators, and full software tokens through
 the same ABI. The implementation is deliberately capability-driven: hardware
-and firmware decide which objects and mechanisms appear on each slot.
+and firmware determine native token capabilities, merged with the common
+software mechanism list for session keys.
 
 ### Standards and provider architecture
 

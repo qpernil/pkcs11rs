@@ -1,5 +1,158 @@
 use super::*;
 
+#[test]
+fn data_session_objects_share_visibility_and_follow_creator_and_login_lifetimes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for kind in [
+        crate::SlotKind::Software,
+        crate::SlotKind::YubiHsm,
+        crate::SlotKind::Fido2,
+        crate::SlotKind::Ccid(crate::CcidApplication::Piv),
+        crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp),
+    ] {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let mut slot = test_slot(true);
+        slot.kind = kind;
+        install_test_slot_with_backend(82, Box::new(slot));
+        install_test_session(82, 8201);
+        install_test_session(82, 8202);
+        install_test_session(83, 8301);
+        let create = |private: bool| {
+            let mut class = CKO_DATA as CK_OBJECT_CLASS;
+            let mut private = private as CK_BBOOL;
+            let mut value = *b"session payload";
+            let mut application = *b"test application";
+            let mut object_id = [6, 2, 42, 3];
+            let mut template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+                bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+                bytes_attribute(CKA_APPLICATION as CK_ATTRIBUTE_TYPE, &mut application),
+                bytes_attribute(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE, &mut object_id),
+            ];
+            let mut object = 0;
+            assert_eq!(
+                crate::api::C_CreateObject(
+                    8201,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut object
+                ),
+                CKR_OK as CK_RV,
+                "{kind:?}"
+            );
+            object
+        };
+        let public = create(false);
+        let private = create(true);
+        assert_eq!(
+            read_bytes_attribute(8202, public, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            b"session payload"
+        );
+        assert_eq!(
+            read_bytes_attribute(8202, private, CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+            b"test application"
+        );
+        assert_eq!(
+            read_bytes_attribute(8202, public, CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+            [6, 2, 42, 3]
+        );
+        assert_eq!(
+            find_by_bytes_attribute(
+                8202,
+                CKO_DATA as CK_OBJECT_CLASS,
+                CKA_VALUE as CK_ATTRIBUTE_TYPE,
+                b"session payload"
+            )
+            .len(),
+            2
+        );
+        let mut size = 0;
+        assert_eq!(
+            crate::api::C_GetObjectSize(8301, public, &mut size),
+            CKR_OBJECT_HANDLE_INVALID as CK_RV
+        );
+
+        let mut copy = 0;
+        assert_eq!(
+            crate::api::C_CopyObject(8202, public, std::ptr::null_mut(), 0, &mut copy),
+            CKR_OK as CK_RV
+        );
+        let mut changed = *b"copy content";
+        let mut attribute = bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut changed);
+        assert_eq!(
+            crate::api::C_SetAttributeValue(8202, copy, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            read_bytes_attribute(8201, public, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            b"session payload"
+        );
+        assert_eq!(
+            read_bytes_attribute(8201, copy, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            b"copy content"
+        );
+
+        // Neither an impossible input length nor unsupported persistence can publish an object.
+        attribute.ulValueLen = CK_ULONG::MAX;
+        assert_eq!(
+            crate::api::C_SetAttributeValue(8202, copy, &mut attribute, 1),
+            CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+        );
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut attribute = scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token);
+        let mut rejected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_CopyObject(8202, public, &mut attribute, 1, &mut rejected),
+            CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+        );
+        assert_eq!(rejected, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+        assert_eq!(crate::api::C_Logout(8201), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_GetObjectSize(8202, private, &mut size),
+            CKR_OBJECT_HANDLE_INVALID as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_GetObjectSize(8202, public, &mut size),
+            CKR_OK as CK_RV
+        );
+        let mut pin = *b"1234";
+        assert_eq!(
+            crate::api::C_Login(
+                8202,
+                CKU_USER as CK_USER_TYPE,
+                pin.as_mut_ptr(),
+                pin.len() as CK_ULONG
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_GetObjectSize(8202, private, &mut size),
+            CKR_OBJECT_HANDLE_INVALID as CK_RV
+        );
+        assert_eq!(crate::api::C_CloseSession(8201), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_GetObjectSize(8202, public, &mut size),
+            CKR_OBJECT_HANDLE_INVALID as CK_RV
+        );
+        assert_eq!(
+            read_bytes_attribute(8202, copy, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            b"copy content"
+        );
+        assert_eq!(crate::api::C_DestroyObject(8202, copy), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_GetObjectSize(8202, copy, &mut size),
+            CKR_OBJECT_HANDLE_INVALID as CK_RV
+        );
+    }
+    finalize_for_test();
+}
+
 fn initialize_contract_slot() {
     finalize_for_test();
     assert_eq!(
@@ -18,6 +171,7 @@ fn initialize_contract_slot() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 }
+
 
 #[test]
 fn rsa_pss_init_validates_parameters_for_raw_and_composite_mechanisms() {
@@ -206,7 +360,6 @@ fn copy_object_enforces_reported_immutable_material_policy() {
         crate::KeyMaterial::FidoResidentPrivate {
             credential_id: vec![1, 2, 3],
         },
-        crate::KeyMaterial::DerivedSecret(zeroize::Zeroizing::new(vec![0x42; 32])),
     ];
     for material in materials {
         let handle = with_test_slot_context(TEST_SLOT_ID, |context| {

@@ -42,7 +42,9 @@ fn generate_key(
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_GENERATE as CK_FLAGS)?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
+        let token = optional_bool_template_attribute(templ, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
+        if token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
             let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
             validate_new_object_access(&object, flags, logged_in)?;
             let response = ctx
@@ -75,16 +77,9 @@ fn generate_key(
             *key_handle = handle;
             return Ok(());
         }
-        let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
-        let mut key = generate_key_object(mechanism, templ, software_secret)?;
+        let key = generate_key_object(mechanism, templ)?;
         validate_new_object_access(&key, flags, logged_in)?;
-        if software_secret {
-            *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, key)?;
-            return Ok(());
-        }
-        key.set_creator(session_handle, slot_id);
-        let handle = ctx.insert_object(key)?;
-        *key_handle = handle;
+        *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, key)?;
         Ok(())
     })
 }
@@ -177,14 +172,13 @@ fn yubihsm_generate_key_command(
 fn generate_key_object(
     mechanism: &CK_MECHANISM,
     templ: &[CK_ATTRIBUTE],
-    software_secret: bool,
 ) -> Result<TokenObject, Error> {
     let aes_generation =
-        software_secret && mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
+        mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
     let des3_generation =
-        software_secret && mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
+        mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
     let pbkdf2_generation =
-        software_secret && mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
+        mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
     if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
         && !aes_generation
         && !des3_generation
@@ -228,18 +222,11 @@ fn generate_key_object(
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    let mut key = if software_secret {
-        key_template.into_software_secret_object()
-    } else {
-        key_template.into_object()
-    }
-    .map_err(Error::from)?;
+    let mut key = key_template.into_software_secret_object().map_err(Error::from)?;
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-        || (!software_secret && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE)
         || (aes_generation && key.key_type != CKK_AES as CK_KEY_TYPE)
         || (des3_generation && key.key_type != CKK_DES3 as CK_KEY_TYPE)
-        || (software_secret
-            && !aes_generation
+        || (!aes_generation
             && !des3_generation
             && !pbkdf2_generation
             && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
@@ -252,17 +239,7 @@ fn generate_key_object(
     let value_len = value_len
         .or(des3_generation.then_some(24))
         .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
-    if software_secret {
-        validate_software_secret_length(key.key_type, value_len as usize)?;
-    } else {
-        let key_size_bits = value_len
-            .checked_mul(8)
-            .ok_or(CKR_KEY_SIZE_RANGE as CK_RV)?;
-        let details = mechanism_details(&MECHANISMS, mechanism.mechanism)?;
-        if key_size_bits < details.min_key_size || key_size_bits > details.max_key_size {
-            return Err(CKR_KEY_SIZE_RANGE.into());
-        }
-    }
+    validate_software_secret_length(key.key_type, value_len as usize)?;
     let mut value = vec![0; value_len as usize];
     if let Some(parameters) = pbkdf2_parameters {
         derive_pbkdf2(&parameters, &mut value)?;
@@ -275,11 +252,7 @@ fn generate_key_object(
             *byte = (*byte & 0xfe) | (((*byte & 0xfe).count_ones() as u8 & 1) ^ 1);
         }
     }
-    key.material = if software_secret {
-        KeyMaterial::SoftwareSecret(Zeroizing::new(value))
-    } else {
-        KeyMaterial::Secret(Zeroizing::new(value))
-    };
+    key.material = KeyMaterial::SoftwareSecret(Zeroizing::new(value));
     key.local = true;
     key.key_gen_mechanism = Some(mechanism.mechanism);
     Ok(key)
@@ -413,9 +386,7 @@ fn generate_key_pair(
         let private_token =
             optional_bool_template_attribute(private_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
                 .unwrap_or(false);
-        if ctx
-            .get_slot(slot_id)?
-            .supports_software_private_operations()
+        if (!private_token || ctx.get_slot(slot_id)?.stores_software_token_keys())
             && matches!(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
@@ -2001,14 +1972,13 @@ fn derive_key(
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
         let maximum_length = if matches!(kdf, EcdhKdf::Null) {
             expected_length
         } else {
             1024
         };
         let (mut derived_object, requested_length) =
-            derived_secret_object(templ, expected_length, maximum_length, software_secret)?;
+            derived_secret_object(templ, expected_length, maximum_length)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
         let kdf_selector = if protected {
@@ -2077,22 +2047,12 @@ fn derive_key(
                 }
             }
         }
-        derived_object.material = if software_secret {
-            KeyMaterial::SoftwareSecret(derived)
-        } else {
-            KeyMaterial::DerivedSecret(derived)
-        };
+        derived_object.material = KeyMaterial::SoftwareSecret(derived);
         derived_object.always_sensitive = object.always_sensitive && derived_object.sensitive;
         derived_object.never_extractable = object.never_extractable && !derived_object.extractable;
         derived_object.local = false;
         derived_object.key_gen_mechanism = Some(mechanism.mechanism);
-        if software_secret {
-            *key_handle =
-                publish_software_secret_object(ctx, session_handle, slot_id, derived_object)?;
-            return Ok(());
-        }
-        derived_object.set_creator(session_handle, slot_id);
-        *key_handle = ctx.insert_object(derived_object)?;
+        *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, derived_object)?;
         Ok(())
     })
 }
@@ -2156,9 +2116,6 @@ fn derive_hkdf_key(
 
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if !ctx.get_slot(slot_id)?.supports_software_secret_operations() {
-            return Err(CKR_MECHANISM_INVALID.into());
-        }
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
         let base = ctx
             .resolve_object(base_key)?
@@ -2184,7 +2141,7 @@ fn derive_hkdf_key(
             return Err(CKR_KEY_SIZE_RANGE.into());
         }
         let (mut object, material_length) =
-            derived_secret_object(templ, output_length, output_length, true)?;
+            derived_secret_object(templ, output_length, output_length)?;
         if material_length != output_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -2313,14 +2270,12 @@ pub(super) fn derived_secret_object(
     templ: &[CK_ATTRIBUTE],
     default_length: usize,
     maximum_length: usize,
-    software_secret: bool,
 ) -> Result<(TokenObject, usize), Error> {
     let mut object_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
         key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
-        private: !software_secret,
-        sensitive: Some(!software_secret),
-        extractable: Some(software_secret),
+        sensitive: Some(false),
+        extractable: Some(true),
         ..TokenObjectTemplate::default()
     };
     let mut requested_length = None;
@@ -2338,40 +2293,22 @@ pub(super) fn derived_secret_object(
     if requested_length == 0 || requested_length > maximum_length {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
-    let mut object = if software_secret {
-        object_template.into_software_secret_object()
-    } else {
-        object_template.into_object()
-    }
-    .map_err(Error::from)?;
+    let object = object_template
+        .into_software_secret_object()
+        .map_err(Error::from)?;
     if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    if software_secret {
-        if object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
-            && object.key_type != CKK_AES as CK_KEY_TYPE
-            && !is_hmac_key_type(object.key_type)
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-        validate_software_secret_length(object.key_type, requested_length)?;
-        if object.token && !object.private {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-    } else {
-        if object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE || object.token {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-        object.private = false;
-        object.sensitive = false;
-        object.extractable = true;
-        object.always_sensitive = false;
-        object.never_extractable = false;
-        object.encrypt = false;
-        object.decrypt = false;
-        object.sign = false;
-        object.verify = false;
-        object.derive = false;
+    if object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+        && object.key_type != CKK_AES as CK_KEY_TYPE
+        && object.key_type != CKK_DES3 as CK_KEY_TYPE
+        && !is_hmac_key_type(object.key_type)
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    validate_software_secret_length(object.key_type, requested_length)?;
+    if object.token && !object.private {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     Ok((object, requested_length))
 }

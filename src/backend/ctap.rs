@@ -1642,15 +1642,15 @@ mod tests {
         assert_eq!(mechanisms[0].type_, CKM_PKCS11RS_FIDO_ASSERTION);
         assert_eq!(mechanisms[0].flags, (CKF_HW | CKF_SIGN) as CK_FLAGS);
         let mechanisms = slot.mechanisms();
-        for unsupported in HASHED_RSA_PKCS_MECHANISMS
+        for supported in HASHED_RSA_PKCS_MECHANISMS
             .into_iter()
             .chain(HASHED_RSA_PSS_MECHANISMS)
             .chain(HASHED_ECDSA_MECHANISMS)
         {
             assert!(
-                !mechanisms
+                mechanisms
                     .iter()
-                    .any(|mechanism| mechanism.type_ == unsupported)
+                    .any(|mechanism| mechanism.type_ == supported)
             );
         }
     }

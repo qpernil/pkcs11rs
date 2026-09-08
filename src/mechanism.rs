@@ -175,6 +175,7 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
     )
 }
 
+#[cfg(any(test, feature = "abi-tests"))]
 pub(crate) const MECHANISMS: [MechanismDetails; 5] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
