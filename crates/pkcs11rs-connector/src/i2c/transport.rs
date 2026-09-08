@@ -66,6 +66,17 @@ pub(super) async fn register(
         let (device, identity) =
             tokio::task::spawn_blocking(move || YubiHsmI2cDevice::open(endpoint, timeout))
                 .await??;
+        if !registry.should_claim(&identity.serial.to_string()) {
+            drop(device);
+            registry
+                .register_filtered(
+                    identity.serial.to_string(),
+                    Some(identity.version),
+                    DeviceTransportKind::I2c,
+                )
+                .await?;
+            continue;
+        }
         registry
             .register_configured(
                 identity.serial.to_string(),

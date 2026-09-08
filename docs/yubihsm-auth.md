@@ -316,7 +316,9 @@ rediscovery of the same serial and remote transport recovery advance the
 connection epoch, clear the affected slot's caches, and retry public discovery
 automatically. A different direct USB serial becomes a new slot. A configured
 remote endpoint that cannot complete its initial inventory contributes no slot
-until a later `C_GetSlotList` succeeds.
+until a later `C_GetSlotList` succeeds. Modern connector discovery uses only
+`claimed` inventory entries: `filtered`, `legacy_only`, and `unclaimed` devices
+remain visible in the connector inventory but contribute no PKCS #11 slot.
 
 The retained discovery session has a distinct transport role from the PKCS #11
 user-login session and is never used for private or mutating operations.

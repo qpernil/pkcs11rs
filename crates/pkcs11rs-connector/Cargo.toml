@@ -17,7 +17,7 @@ embedded-virtual-yubihsm = ["dep:usb-gadget-worker", "dep:virtual-yubihsm-core"]
 axum = "0.8.9"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 bytes = "1"
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive", "env"] }
 futures-util = "0.3.31"
 hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 pkcs11rs-local-hardware = { path = "../pkcs11rs-local-hardware", default-features = false, features = ["async-tokio"] }

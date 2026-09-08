@@ -2897,6 +2897,8 @@ mod tests {
         for encoded in [
             br#"{"serial":"12345678","usb_version":"2.5","status":"busy"}"#.as_slice(),
             br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"","status":"filtered"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2.5","status":"legacy_only"}"#.as_slice(),
             br#"{"serial":"","usb_version":"2.5","status":"claimed"}"#.as_slice(),
             br#"{"serial":"12345678","usb_version":"2","status":"claimed"}"#.as_slice(),
             br#"{"serial":"12345678","usb_version":"2.x","status":"claimed"}"#.as_slice(),
@@ -2916,7 +2918,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"claimed"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"12345678","usb_version":"2.4","status":"claimed"}]}"#,
+                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"claimed"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"44444444","usb_version":"","status":"filtered"},{"serial":"33333333","usb_version":"2.5","status":"legacy_only"},{"serial":"12345678","usb_version":"2.4","status":"claimed"}]}"#,
                 true,
             );
         });

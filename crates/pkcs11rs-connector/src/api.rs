@@ -173,7 +173,21 @@ async fn device_command(
     body: Bytes,
 ) -> Response {
     let Some(entry) = state.registry.get(&serial).await else {
-        if state.registry.view(&serial).await.is_some() {
+        if let Some(view) = state.registry.view(&serial).await {
+            if view.status == crate::registry::DeviceStatus::LegacyOnly {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    "device_legacy_only",
+                    format!("YubiHSM {serial} is reserved for the legacy connector API"),
+                );
+            }
+            if view.status == crate::registry::DeviceStatus::Filtered {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    "device_filtered",
+                    format!("YubiHSM {serial} is excluded by the connector serial filter"),
+                );
+            }
             return problem(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "device_unclaimed",
@@ -434,6 +448,142 @@ mod tests {
             .unwrap();
         assert!(enumeration_log.contains("http_request_elapsed_ms="));
         assert!(!enumeration_log.contains("hsm_command_elapsed_ms="));
+    }
+
+    #[tokio::test]
+    async fn filtered_devices_are_inventory_only_and_missing_serials_are_not_listed() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1))
+            .with_serials(Some("12345678,99999999".parse().unwrap()))
+            .with_legacy_serial(Some("99999999".into()));
+        registry
+            .register_filtered(
+                "87654321".into(),
+                Some([2, 5, 0]),
+                crate::registry::DeviceTransportKind::Usb,
+            )
+            .await
+            .unwrap();
+        assert!(registry.get("87654321").await.is_none());
+        assert!(registry.select_legacy(None).await.is_err());
+        registry.insert_test_echo("12345678").await;
+        assert_eq!(
+            registry.select_legacy(None).await.unwrap().view().serial,
+            "12345678"
+        );
+        let app = router(
+            AppState {
+                registry,
+                legacy_serial: Some("99999999".into()),
+            },
+            64,
+        );
+        for uri in ["/v1/devices", "/v1/devices/87654321"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let content = String::from_utf8(body(response).await).unwrap();
+            assert!(content.contains(r#""serial":"87654321""#));
+            assert!(content.contains(r#""status":"filtered""#));
+            assert!(!content.contains("99999999"));
+        }
+        for (uri, status, code) in [
+            (
+                "/v1/devices/87654321/commands",
+                StatusCode::FORBIDDEN,
+                "device_filtered",
+            ),
+            (
+                "/connector/api",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no_device",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::from(command_frame(&[])))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert!(
+                String::from_utf8(body(response).await)
+                    .unwrap()
+                    .contains(code)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_reservation_outside_allowlist_is_only_available_through_legacy_api() {
+        for (serials, expected_status, modern_status) in [
+            (None, "claimed", StatusCode::OK),
+            (Some("12345678"), "claimed", StatusCode::OK),
+            (Some("87654321"), "legacy_only", StatusCode::FORBIDDEN),
+            (Some(""), "legacy_only", StatusCode::FORBIDDEN),
+        ] {
+            let registry = DeviceRegistry::new(Duration::from_secs(1))
+                .with_serials(serials.map(|value| value.parse().unwrap()))
+                .with_legacy_serial(Some("12345678".into()));
+            assert!(registry.should_claim("12345678"));
+            assert!(registry.list().await.is_empty());
+            registry.insert_test_echo("12345678").await;
+            let app = router(
+                AppState {
+                    registry,
+                    legacy_serial: Some("12345678".into()),
+                },
+                64,
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/devices")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let inventory: serde_json::Value =
+                serde_json::from_slice(&body(response).await).unwrap();
+            assert_eq!(inventory["devices"][0]["status"], expected_status);
+            for (uri, status) in [
+                ("/v1/devices/12345678/commands", modern_status),
+                ("/connector/api", StatusCode::OK),
+            ] {
+                let frame = command_frame(&[]);
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .body(Body::from(frame.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                let content = body(response).await;
+                if status == StatusCode::OK {
+                    assert_eq!(content, frame);
+                } else {
+                    assert!(
+                        String::from_utf8(content)
+                            .unwrap()
+                            .contains("device_legacy_only")
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

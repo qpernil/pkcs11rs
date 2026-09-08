@@ -124,6 +124,17 @@ impl VirtualHsmActors {
         };
         let mut actors = Self { actors: Vec::new() };
         for spec in specs {
+            let serial = spec.serial.to_string();
+            if !registry.should_claim(&serial) {
+                if let Err(error) = registry
+                    .register_filtered(serial, None, DeviceTransportKind::Embedded)
+                    .await
+                {
+                    let _ = actors.shutdown().await;
+                    return Err(error.into());
+                }
+                continue;
+            }
             let (actor, transport, version) =
                 match ActorController::start(spec.clone(), persistence).await {
                     Ok(started) => started,
@@ -421,6 +432,65 @@ mod tests {
             b"second response"
         );
         worker.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn filtered_virtual_hsm_is_visible_without_opening_its_state() {
+        let directory = temporary_directory();
+        let registry =
+            DeviceRegistry::new(Duration::from_secs(1)).with_serials(Some("".parse().unwrap()));
+        let actors = VirtualHsmActors::start(
+            &registry,
+            &[VirtualYubiHsmSpec {
+                serial: 12_345_678,
+                state_directory: directory.clone(),
+            }],
+            VirtualPersistence::Immediate,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+        assert!(actors.actors.is_empty());
+        assert!(!directory.exists());
+        let view = registry.view("12345678").await.unwrap();
+        assert_eq!(view.status, crate::registry::DeviceStatus::Filtered);
+        assert_eq!(view.transport.kind, DeviceTransportKind::Embedded);
+        assert_eq!(view.usb_version, "");
+        assert!(registry.get("12345678").await.is_none());
+        assert!(registry.select_legacy(Some("12345678")).await.is_err());
+        actors.shutdown().await.unwrap();
+        assert!(!directory.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_reserved_virtual_hsm_starts_outside_the_allowlist() {
+        let directory = temporary_directory();
+        let registry = DeviceRegistry::new(Duration::from_secs(1))
+            .with_serials(Some("".parse().unwrap()))
+            .with_legacy_serial(Some("12345678".into()));
+        let actors = VirtualHsmActors::start(
+            &registry,
+            &[VirtualYubiHsmSpec {
+                serial: 12_345_678,
+                state_directory: directory.clone(),
+            }],
+            VirtualPersistence::Immediate,
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            registry.view("12345678").await.unwrap().status,
+            crate::registry::DeviceStatus::LegacyOnly
+        );
+        assert!(registry.get("12345678").await.is_none());
+        let entry = registry.select_legacy(Some("12345678")).await.unwrap();
+        assert_eq!(
+            entry.command(&[0x06, 0x00, 0x00]).await.0.unwrap().first(),
+            Some(&0x86)
+        );
+        actors.shutdown().await.unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

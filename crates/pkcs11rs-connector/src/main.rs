@@ -11,7 +11,7 @@ use clap::{Parser, ValueEnum};
 use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
 use i2c::I2cYubiHsmSpec;
-use registry::{DeviceRegistry, spawn_discovery};
+use registry::{DeviceRegistry, SerialAllowlist, spawn_discovery};
 use std::{
     future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc,
     time::Duration,
@@ -129,9 +129,13 @@ struct Args {
     #[arg(long, requires = "tls_certificate")]
     tls_client_ca: Option<PathBuf>,
 
-    /// Serial exposed through the single-device legacy connector protocol.
+    /// Serial exposed through the legacy protocol; reserved for legacy if outside --serials.
     #[arg(long)]
     legacy_serial: Option<String>,
+
+    /// Modern API serial allowlist (comma-separated). Omitted allows all; empty allows none.
+    #[arg(long, env = "PKCS11RS_CONNECTOR_SERIALS", value_name = "SERIALS")]
+    serials: Option<SerialAllowlist>,
 
     /// Maximum time waiting for a YubiHSM USB command response.
     #[arg(long, default_value_t = 60)]
@@ -193,7 +197,9 @@ async fn main() -> Result<(), BoxError> {
 }
 
 async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
-    let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
+    let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds))
+        .with_serials(args.serials.clone())
+        .with_legacy_serial(args.legacy_serial.clone());
     let virtual_hsms = VirtualHsmRuntime::start(args, &registry).await?;
     if let Err(error) = i2c::register(
         &registry,
@@ -603,6 +609,7 @@ mod tests {
             tls_client_ca: None,
             legacy_serial: None,
             command_timeout_seconds: 30,
+            serials: None,
             http_max_in_flight_requests: 64,
             hardware_discovery: true,
             i2c_yubihsms: Vec::new(),
@@ -611,6 +618,59 @@ mod tests {
             virtual_yubihsm_batch_delay_ms: DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS,
         };
         assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn serial_allowlist_cli_and_environment() {
+        const CASE: &str = "PKCS11RS_CONNECTOR_SERIALS_TEST_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            let mut arguments = vec!["pkcs11rs-connector"];
+            match case.as_str() {
+                "override" => arguments.extend(["--serials", "123, 456,123"]),
+                "empty_override" => arguments.extend(["--serials", ""]),
+                _ => {}
+            }
+            let args = Args::try_parse_from(arguments).unwrap();
+            let filter = args.serials;
+            assert_eq!(filter.is_none(), case == "absent");
+            let registry = DeviceRegistry::new(Duration::from_secs(1)).with_serials(filter);
+            match case.as_str() {
+                "absent" => assert!(registry.allows_serial("anything")),
+                "empty" | "empty_override" => assert!(!registry.allows_serial("123")),
+                _ => {
+                    assert!(registry.allows_serial("123"));
+                    assert!(registry.allows_serial("456"));
+                    assert!(!registry.allows_serial("789"));
+                }
+            }
+            return;
+        }
+        for (case, value) in [
+            ("absent", None),
+            ("environment", Some("123,456")),
+            ("override", Some(",")),
+            ("empty", Some("")),
+            ("empty_override", Some("789")),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "tests::serial_allowlist_cli_and_environment"])
+                .env(CASE, case)
+                .env_remove("PKCS11RS_CONNECTOR_SERIALS");
+            if let Some(value) = value {
+                child.env("PKCS11RS_CONNECTOR_SERIALS", value);
+            }
+            let result = child.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        for value in [",", "123,", "123,,456"] {
+            assert!(Args::try_parse_from(["pkcs11rs-connector", "--serials", value]).is_err());
+        }
     }
 
     #[test]

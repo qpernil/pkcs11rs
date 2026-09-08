@@ -200,8 +200,8 @@ the entry completes with a transport error if the USB transfer fails; a newly
 attached device receives a new entry even when it has the same serial. Duplicate
 simultaneously attached serials are rejected rather than routed ambiguously.
 Every identifiable device appears in `/v1/devices`; devices the connector
-successfully claimed are `claimed`, while devices owned elsewhere are
-`unclaimed`.
+successfully claimed are `claimed` or `legacy_only` according to the serial
+configuration; excluded devices are `filtered`, and failed claims are `unclaimed`.
 
 System suspend pauses the process but does not trigger connector
 reconstruction. The HTTP listener, accepted connections, USB discovery
@@ -371,14 +371,22 @@ GET /v1/devices
 }
 ```
 
-The inventory contains every identifiable YubiHSM seen by USB enumeration.
-`claimed` means that the connector owns the device interface and can execute
-commands. `unclaimed` means that the device is physically present but was not
-claimed by this connector, for example because another process owns it. This
-makes the endpoint useful as remote USB inventory even when some attached
-devices cannot be used through this connector. An unclaimed device is left
-alone until it is physically detached and reattached; sleep/wake does not retry
-the claim. Clients create slots only for `claimed` devices and
+The USB inventory contains every identifiable YubiHSM seen by enumeration,
+regardless of the serial filter. Serial allowlists and `--legacy-serial` may name
+devices that are not connected; those names do not create inventory entries.
+USB disconnect events remove entries, with no retained missing-device record.
+Reattachment evaluates the same configuration again.
+
+| Status | Meaning |
+| --- | --- |
+| `claimed` | The connector owns the interface and serves modern and legacy commands. |
+| `legacy_only` | The connector owns the interface for the configured legacy serial, which is outside the modern serial allowlist. |
+| `filtered` | The serial is excluded and not reserved for legacy; no claim was attempted. |
+| `unclaimed` | The device is present but claiming failed, for example because another process owns it. |
+
+All statuses are visible through both inventory endpoints. An unclaimed device
+is left alone until it is physically detached and reattached; sleep/wake does
+not retry the claim. Modern clients create slots only for `claimed` devices and
 ignore all other, including unknown future, status values.
 
 `transport.kind` is `usb` for enumerated USB hardware, `i2c` for a configured
@@ -408,6 +416,10 @@ returns the native response frame as `application/octet-stream`, including
 ordinary device-level error frames. Transport failures use a structured JSON
 HTTP error. A command addressed to an enumerated `unclaimed` device returns
 `503 Service Unavailable` with error code `device_unclaimed`.
+A command addressed to a `filtered` device returns `403 Forbidden` with error
+code `device_filtered`, without any device I/O. A modern command addressed to
+a `legacy_only` device returns `403 Forbidden` with `device_legacy_only`; its
+commands are available only through `/connector/api`.
 
 The HTTP middleware accepts request bodies up to 8,192 bytes. This deliberately
 generic resource ceiling leaves room for a future firmware generation while
@@ -442,10 +454,11 @@ POST /connector/api
 Selection follows these rules:
 
 1. `--legacy-serial SERIAL` always selects that serial or reports it absent.
-2. Without configuration, the serial of the first successfully discovered
+2. Without configuration, the serial of the first successfully claimed
    device is latched for the connector process lifetime.
-3. The legacy routes then behave as if a client addressed that serial through
-   `/v1/devices/{serial}` and `/v1/devices/{serial}/commands`.
+3. A configured legacy serial outside `--serials` is claimed for legacy use
+   only and advertised as `legacy_only`. If it is allowed by the list, or no
+   list is configured, it is `claimed` and usable through both APIs.
 4. Later attachments and changes to the device's transient USB identifier do
    not change the latched serial.
 5. While that serial is absent, the endpoint reports `NO_DEVICE`; it does not
@@ -629,8 +642,37 @@ firmware-specific rules even when an HTTP layer is bypassed.
 
 ## Operational options
 
+`--serials SERIAL,SERIAL` restricts which devices the connector serves through
+the modern API. Its environment fallback is `PKCS11RS_CONNECTOR_SERIALS`; the
+command-line value replaces the environment value. Omit both to allow all
+devices, or pass `--serials ''` (an empty environment value also works) to
+allow none through the modern API. Entries are trimmed, duplicates ignored,
+and matching is exact; empty entries inside a
+nonempty list are invalid. The list is fixed for the connector process lifetime.
+
+USB enumeration still identifies devices for remote inventory, but an excluded
+serial that is not reserved by `--legacy-serial` is registered as `filtered`
+before opening or claiming its interface.
+No HSM command is sent to it. Explicit I2C and embedded virtual-device definitions
+are sources subject to the same filter: I2C sends only its initial `DeviceInfo`
+request before deciding, then closes an excluded endpoint; an excluded virtual
+device is reported without starting an actor or opening its state directory.
+Its unknown `usb_version` is the empty string. An excluded USB device remains
+in inventory until detachment; reconnecting it reapplies the filter.
+
+`--legacy-serial SERIAL` reserves that device for the legacy endpoint even if
+it is outside `--serials`, yielding `legacy_only` when successfully claimed.
+For example, `--serials 11111111 --legacy-serial 22222222` serves `11111111`
+through the modern API and `22222222` only through legacy. Other attached
+serials remain visible as `filtered`. Neither option requires the named devices
+to exist at startup. While the legacy device is absent, status is `NO_DEVICE`
+and legacy commands return `503` with `no_device`, with no fallback.
+Client-side pkcs11rs `slots.serials` further narrows the devices used by that
+client and does not change the connector's inventory or policy.
+
 ```text
 --listen ADDRESS
+--serials SERIALS
 --legacy-serial SERIAL
 --command-timeout-seconds SECONDS
 --http-max-in-flight-requests COUNT
