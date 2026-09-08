@@ -238,6 +238,11 @@ pub(crate) enum KeyMaterial {
     Profile {
         profile_id: CK_PROFILE_ID,
     },
+    Data {
+        application: Vec<u8>,
+        object_id: Vec<u8>,
+        value: Zeroizing<Vec<u8>>,
+    },
     Public(PublicKeyMaterial),
     SoftwarePrivate(SoftwarePrivateKeyMaterial),
     PivPrivate {
@@ -328,7 +333,6 @@ pub(crate) enum KeyMaterial {
     #[allow(dead_code)]
     SoftwareSecret(Zeroizing<Vec<u8>>),
     Secret(Zeroizing<Vec<u8>>),
-    DerivedSecret(Zeroizing<Vec<u8>>),
 }
 
 impl std::fmt::Debug for KeyMaterial {
@@ -390,8 +394,17 @@ impl std::fmt::Debug for KeyMaterial {
             Self::SoftwareSecret(key) => {
                 fmt.debug_tuple("SoftwareSecret").field(&key.len()).finish()
             }
+            Self::Data {
+                application,
+                object_id,
+                value,
+            } => fmt
+                .debug_struct("Data")
+                .field("application_length", &application.len())
+                .field("object_id_length", &object_id.len())
+                .field("value_length", &value.len())
+                .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
-            Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
             Self::PivCertificate {
                 value,
                 algorithm,
@@ -1518,6 +1531,7 @@ impl TokenObject {
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
             x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE => Some(bool_attribute(false)),
             x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Data { application, .. } => Some(application.clone()),
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => {
                     Some(b"Opaque object".to_vec())
                 }
@@ -1537,6 +1551,7 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Data { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
                 KeyMaterial::YubiHsm { .. } => Some(Vec::new()),
                 KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
@@ -1570,9 +1585,7 @@ impl TokenObject {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwareSecret(value)
-                | KeyMaterial::Secret(value)
-                | KeyMaterial::DerivedSecret(value) => {
+                KeyMaterial::SoftwareSecret(value) | KeyMaterial::Secret(value) => {
                     Some(ulong_attribute(value.len() as CK_ULONG))
                 }
                 KeyMaterial::HsmAuthCredential { .. } => Some(ulong_attribute(32)),
@@ -1854,9 +1867,9 @@ impl TokenObject {
                     {
                         Some(public_key.clone())
                     }
-                    KeyMaterial::SoftwareSecret(value)
+                    KeyMaterial::Data { value, .. }
+                    | KeyMaterial::SoftwareSecret(value)
                     | KeyMaterial::Secret(value)
-                    | KeyMaterial::DerivedSecret(value)
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
                         Some(value.to_vec())
@@ -1960,7 +1973,6 @@ impl TokenObject {
     pub(crate) fn is_nonextractable_key_object(&self) -> bool {
         (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
-            && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
             && !matches!(&self.material, KeyMaterial::SoftwarePrivate(_))
             && !matches!(&self.material, KeyMaterial::SoftwareSecret(_))
             && !matches!(
@@ -2011,12 +2023,36 @@ impl TokenObject {
                 | KeyMaterial::FidoResidentPrivate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::YubiHsmAttestation { .. }
-                | KeyMaterial::DerivedSecret(_)
         )
     }
 
     pub(crate) fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         let value = read_attribute_value(attribute)?;
+        if let KeyMaterial::Data {
+            application,
+            object_id,
+            value: data,
+        } = &mut self.material
+        {
+            match attribute.type_ {
+                x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => {
+                    *application = value;
+                    return Ok(());
+                }
+                x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => {
+                    *object_id = value;
+                    return Ok(());
+                }
+                x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                    *data = Zeroizing::new(value);
+                    return Ok(());
+                }
+                x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                    return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+                _ => {}
+            }
+        }
         match attribute.type_ {
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
                 self.label =
@@ -2300,6 +2336,10 @@ impl TokenObjectTemplate {
 }
 
 pub(crate) fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
+    // CK_UNAVAILABLE_INFORMATION is a length sentinel, never an input slice size.
+    if attribute.ulValueLen as u128 > isize::MAX as u128 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
     if attribute.ulValueLen > 0 && attribute.pValue.is_null() {
         return Err(CKR_ARGUMENTS_BAD as CK_RV);
     }

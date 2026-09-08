@@ -2223,9 +2223,11 @@ mod fido2_hardware {
                     crate::ctap_hid::CtapHidTransport::connect(Box::new(io)).ok()?;
                 let transport = Rc::new(transport);
                 let device_info = crate::YubiKeyClient
-                    .discover_from_config_pages(Some(init.firmware_version), |page| {
-                        transport.command(0x42, &[page])
-                    })
+                    .discover_from_config_pages_for_inventory(
+                        Some(init.firmware_version),
+                        |_| false,
+                        |page| transport.command(0x42, &[page]),
+                    )
                     .ok();
                 let serial = device_info
                     .as_ref()

@@ -213,7 +213,7 @@ ffi_entry_point! {
                 return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV));
             }
             let value = match &object.material {
-                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => value.to_vec(),
+                KeyMaterial::Secret(value) | KeyMaterial::SoftwareSecret(value) => value.to_vec(),
                 _ => return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV)),
             };
             let operation = ctx.get_session_context_mut(session_handle)?

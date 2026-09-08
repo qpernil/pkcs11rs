@@ -269,8 +269,17 @@ fn create_object(
             )?;
             return Ok(());
         }
-        let software_secret = class == Some(CKO_SECRET_KEY as CK_OBJECT_CLASS)
-            && ctx.get_slot(slot_id)?.supports_software_secret_operations();
+        if class == Some(CKO_DATA as CK_OBJECT_CLASS) {
+            let mut object = parse_data_object_template(templ)?;
+            validate_new_object_access(&object, flags, logged_in)?;
+            if object.token {
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            object.set_creator(session_handle, slot_id);
+            *object_handle = ctx.insert_object(object)?;
+            return Ok(());
+        }
+        let software_secret = class == Some(CKO_SECRET_KEY as CK_OBJECT_CLASS);
         let mut object = if software_secret {
             parse_software_secret_create_object_template(templ)?
         } else {
@@ -280,13 +289,11 @@ fn create_object(
         if software_secret && object.token && !object.private {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        let yubihsm_public_wrap = ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm
+        let yubihsm_public_wrap = object.token
+            && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm
             && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
             && object.key_type == CKK_RSA as CK_KEY_TYPE
             && object.wrap;
-        if yubihsm_public_wrap && !object.token {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
         if crate::backed_object::supports_backed_object(&object) && !yubihsm_public_wrap {
             *object_handle = ctx.store_backed_object(session_handle, object)?;
             return Ok(());
@@ -294,13 +301,6 @@ fn create_object(
         if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm && object.token {
             *object_handle = import_yubihsm_token_object(ctx, session_handle, slot_id, &object)?;
             return Ok(());
-        }
-        if matches!(object.material, KeyMaterial::SoftwarePrivate(_))
-            && !ctx
-                .get_slot(slot_id)?
-                .supports_software_private_operations()
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         if matches!(object.material, KeyMaterial::SoftwareSecret(_)) {
             *object_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
@@ -1134,7 +1134,9 @@ fn yubihsm_import_command(
                 YUBIHSM_ASYMMETRIC_KEY,
             ))
         }
-        KeyMaterial::Secret(value) if object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS => {
+        KeyMaterial::Secret(value) | KeyMaterial::SoftwareSecret(value)
+            if object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+        {
             let (code, algorithm) = if object.key_type == CKK_AES as CK_KEY_TYPE {
                 let algorithm = match value.len() {
                     16 => YUBIHSM_ALGO_AES128,
@@ -1216,6 +1218,55 @@ fn yubihsm_import_command(
         }
         _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
     }
+}
+
+fn parse_data_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    validate_unique_template(templ)?;
+    let mut common = TokenObjectTemplate {
+        class: Some(CKO_DATA as CK_OBJECT_CLASS),
+        // TokenObject shares its representation with keys; this field is not exposed for data.
+        key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        ..TokenObjectTemplate::default()
+    };
+    let mut application = Vec::new();
+    let mut object_id = Vec::new();
+    let mut value = Zeroizing::new(Vec::new());
+    for attribute in templ {
+        match attribute.type_ {
+            x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => {
+                application = read_attribute_value(attribute).map_err(Error::from)?
+            }
+            x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => {
+                object_id = read_attribute_value(attribute).map_err(Error::from)?
+            }
+            x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                value = Zeroizing::new(read_attribute_value(attribute).map_err(Error::from)?)
+            }
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE
+                || x == CKA_TOKEN as CK_ATTRIBUTE_TYPE
+                || x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_LABEL as CK_ATTRIBUTE_TYPE =>
+            {
+                common.apply_attribute(attribute).map_err(Error::from)?
+            }
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE =>
+            {
+                if !read_bool_template_attribute(attribute).map_err(Error::from)? {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+            _ => return Err(CKR_ATTRIBUTE_TYPE_INVALID.into()),
+        }
+    }
+    let mut object = common.into_object().map_err(Error::from)?;
+    object.material = KeyMaterial::Data {
+        application,
+        object_id,
+        value,
+    };
+    Ok(object)
 }
 
 pub(crate) fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
@@ -1629,6 +1680,9 @@ fn copy_object(
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
         }
+        if copied_object.token && matches!(copied_object.material, KeyMaterial::Data { .. }) {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
         if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwarePrivate(_))
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
@@ -2023,7 +2077,10 @@ fn object_attribute_value(
     if object.attribute_is_sensitive(attribute_type) {
         return Ok(None);
     }
-    if attribute_type == CKA_COPYABLE as CK_ATTRIBUTE_TYPE && ctx.slot.kind() == SlotKind::YubiHsm {
+    if attribute_type == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+        && ctx.slot.kind() == SlotKind::YubiHsm
+        && object.token
+    {
         return Ok(Some(bool_attribute(false)));
     }
     if let KeyMaterial::YubiHsm {

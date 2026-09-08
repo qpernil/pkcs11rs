@@ -317,16 +317,10 @@ pub(crate) trait Slot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
-    fn supports_software_public_operations(&self) -> bool {
-        true
-    }
     fn supports_public_projection(&self) -> bool {
         true
     }
-    fn supports_software_private_operations(&self) -> bool {
-        false
-    }
-    fn supports_software_secret_operations(&self) -> bool {
+    fn stores_software_token_keys(&self) -> bool {
         false
     }
     fn store_software_private_object(
@@ -342,76 +336,35 @@ pub(crate) trait Slot {
     fn private_objects_require_login(&self) -> bool {
         true
     }
+    /// Select host software mechanisms for this slot. Native capabilities remain
+    /// separate. Backends can override this policy without changing key storage
+    /// or the PKCS #11 entry points.
+    fn software_mechanism_enabled(&self, _mechanism: CK_MECHANISM_TYPE) -> bool {
+        true
+    }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
-        let mut software_mechanisms = Vec::new();
-        if self.supports_software_private_operations() {
-            software_mechanisms.extend(software_private_mechanisms());
-        }
-        if self.supports_software_secret_operations() {
-            software_mechanisms.extend(software_secret_mechanisms());
-        }
-        let mut combined_software_mechanisms: Vec<MechanismDetails> = Vec::new();
-        for software in software_mechanisms {
-            if let Some(existing) = combined_software_mechanisms
-                .iter_mut()
-                .find(|mechanism| mechanism.type_ == software.type_)
-            {
-                existing.min_key_size = existing.min_key_size.min(software.min_key_size);
-                existing.max_key_size = existing.max_key_size.max(software.max_key_size);
-                existing.flags |= software.flags;
-            } else {
-                combined_software_mechanisms.push(software);
-            }
-        }
-        for software in combined_software_mechanisms {
+        let software_mechanisms = software_private_mechanisms()
+            .into_iter()
+            .chain(software_secret_mechanisms())
+            .chain(software_public_mechanisms())
+            .chain(SOFTWARE_DIGEST_MECHANISMS);
+        for software in software_mechanisms.filter(|mechanism| {
+            self.software_mechanism_enabled(mechanism.type_)
+                && (mechanism.type_ != CKM_PKCS11RS_PROJECT_PUBLIC_KEY
+                    || self.supports_public_projection())
+        }) {
             if let Some(existing) = mechanisms
                 .iter_mut()
                 .find(|mechanism| mechanism.type_ == software.type_)
             {
+                // This is the slot's combined envelope. CKF_HW remains the
+                // backend's indication; it cannot qualify individual sizes or
+                // operation flags. Token requests still obey backend limits.
+                existing.min_key_size = existing.min_key_size.min(software.min_key_size);
+                existing.max_key_size = existing.max_key_size.max(software.max_key_size);
                 existing.flags |= software.flags;
             } else {
-                mechanisms.push(software);
-            }
-        }
-        if self.supports_software_public_operations() {
-            for software in software_public_mechanisms() {
-                if let Some(existing) = mechanisms
-                    .iter_mut()
-                    .find(|mechanism| mechanism.type_ == software.type_)
-                {
-                    // Add a software public operation only when the backend
-                    // exposes its corresponding private operation.
-                    let mut flags = software.flags & !(CKF_ENCRYPT | CKF_VERIFY) as CK_FLAGS;
-                    if existing.flags & CKF_DECRYPT as CK_FLAGS != 0 {
-                        flags |= software.flags & CKF_ENCRYPT as CK_FLAGS;
-                    }
-                    if existing.flags & CKF_SIGN as CK_FLAGS != 0 {
-                        flags |= software.flags & CKF_VERIFY as CK_FLAGS;
-                    }
-                    existing.flags |= flags;
-                }
-            }
-        }
-        if self.supports_public_projection()
-            && !mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
-        {
-            // Public projection is an operation on a private key, independent
-            // of whether the backend supports other software public operations.
-            if let Some(projection) = software_public_mechanisms()
-                .into_iter()
-                .find(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
-            {
-                mechanisms.push(projection);
-            }
-        }
-        for software in SOFTWARE_DIGEST_MECHANISMS {
-            if !mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == software.type_)
-            {
                 mechanisms.push(software);
             }
         }

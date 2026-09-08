@@ -1618,7 +1618,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert!(mechanisms.contains(&(CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE)));
     assert!(mechanisms.contains(&(CKM_AES_CBC as CK_MECHANISM_TYPE)));
     assert!(mechanisms.contains(&(CKM_AES_GCM as CK_MECHANISM_TYPE)));
-    assert!(!mechanisms.contains(&(CKM_RSA_X_509 as CK_MECHANISM_TYPE)));
+    assert!(mechanisms.contains(&(CKM_RSA_X_509 as CK_MECHANISM_TYPE)));
     let mut mechanism_info = CK_MECHANISM_INFO {
         ulMinKeySize: 0,
         ulMaxKeySize: 0,
@@ -6875,6 +6875,22 @@ fn yubihsm_montgomery_two_way_derive(
     assert_eq!(verify, CK_FALSE as CK_BBOOL);
     assert_eq!(derive, CK_FALSE as CK_BBOOL);
 
+    // Hardware ECDH output is an ordinary copyable software key; hashing
+    // its value locally must not issue another hardware command.
+    let mut copy = 0;
+    assert_eq!(crate::api::C_CopyObject(session, derived_key, std::ptr::null_mut(),
+        0, &mut copy), CKR_OK as CK_RV);
+    let command_count = commands.borrow().len();
+    let mut digest_mechanism = CK_MECHANISM { mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+    let mut digest = [0; 32];
+    let mut digest_length = 32;
+    assert_eq!(crate::api::C_DigestInit(session, &mut digest_mechanism), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_DigestKey(session, copy), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_length), CKR_OK as CK_RV);
+    assert_eq!(digest.as_slice(), crate::hash(crate::MessageDigest::Sha256, &value).unwrap().as_slice());
+    assert_eq!(commands.borrow().len(), command_count);
+
     let mut reverse_public_data = read_ec_point(public_key_one);
     if let Some(expected) = expected_first_public {
         assert_eq!(&reverse_public_data[2..], expected);
@@ -7085,12 +7101,12 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         crate::Slot::mechanisms(&piv),
         CKM_EDDSA as CK_MECHANISM_TYPE,
     );
-    assert_eq!((piv_eddsa.min_key_size, piv_eddsa.max_key_size), (255, 255));
+    assert_eq!((piv_eddsa.min_key_size, piv_eddsa.max_key_size), (255, 448));
     let piv_ecdh = mechanism(
         crate::Slot::mechanisms(&piv),
         CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
     );
-    assert_eq!((piv_ecdh.min_key_size, piv_ecdh.max_key_size), (255, 384));
+    assert_eq!((piv_ecdh.min_key_size, piv_ecdh.max_key_size), (224, 521));
 
     let openpgp = crate::OpenPgpSlot {
         connector,
@@ -7124,7 +7140,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
     );
     assert_eq!(
         (openpgp_eddsa.min_key_size, openpgp_eddsa.max_key_size),
-        (255, 255)
+        (255, 448)
     );
     let openpgp_ecdh = mechanism(
         crate::Slot::mechanisms(&openpgp),
@@ -7132,7 +7148,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
     );
     assert_eq!(
         (openpgp_ecdh.min_key_size, openpgp_ecdh.max_key_size),
-        (255, 521)
+        (224, 521)
     );
 }
 
@@ -7772,7 +7788,9 @@ struct TestSlot {
     present: std::cell::Cell<bool>,
     remove_on_refresh: bool,
     login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
-    software_private_operations: bool,
+    stores_software_token_keys: bool,
+    kind: crate::SlotKind,
+    software_allowlist: Option<Vec<CK_MECHANISM_TYPE>>,
     mechanisms: Vec<crate::MechanismDetails>,
     token_objects: Vec<crate::TokenObject>,
     session_objects: Vec<crate::TokenObject>,
@@ -8354,11 +8372,11 @@ impl crate::Slot for TestSlot {
         self
     }
     fn kind(&self) -> crate::SlotKind {
-        crate::SlotKind::Synthetic
+        self.kind
     }
 
-    fn supports_software_private_operations(&self) -> bool {
-        self.software_private_operations
+    fn stores_software_token_keys(&self) -> bool {
+        self.stores_software_token_keys
     }
 
     fn name(&self) -> String {
@@ -8491,6 +8509,10 @@ impl crate::Slot for TestSlot {
         Ok(())
     }
 
+    fn software_mechanism_enabled(&self, mechanism: CK_MECHANISM_TYPE) -> bool {
+        self.software_allowlist.as_ref().is_none_or(|allowed| allowed.contains(&mechanism))
+    }
+
     fn backend_mechanisms(&self) -> Vec<crate::MechanismDetails> {
         self.mechanisms.clone()
     }
@@ -8515,7 +8537,9 @@ fn test_slot(present: bool) -> TestSlot {
         present: std::cell::Cell::new(present),
         remove_on_refresh: false,
         login_active: None,
-        software_private_operations: false,
+        stores_software_token_keys: false,
+        kind: crate::SlotKind::Synthetic,
+        software_allowlist: None,
         mechanisms: crate::MECHANISMS.to_vec(),
         token_objects: Vec::new(),
         session_objects: Vec::new(),
@@ -8541,9 +8565,40 @@ fn test_slot_with_mechanisms(
 }
 
 #[test]
-fn software_capabilities_preserve_native_hardware_range_and_flag() {
+fn per_slot_software_filter_preserves_native_details_and_removes_unselected_mechanisms() {
     let mut slot = test_slot(true);
-    slot.software_private_operations = true;
+    slot.mechanisms = vec![crate::MechanismDetails {
+        type_: CKM_ECDSA as CK_MECHANISM_TYPE,
+        min_key_size: 256,
+        max_key_size: 384,
+        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+    }];
+    slot.software_allowlist = Some(vec![CKM_AES_ECB as CK_MECHANISM_TYPE]);
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    assert_eq!(mechanisms.len(), 2);
+    let native = &mechanisms[0];
+    assert_eq!((native.min_key_size, native.max_key_size), (256, 384));
+    assert_eq!(native.flags, (CKF_HW | CKF_SIGN) as CK_FLAGS);
+    let software = &mechanisms[1];
+    assert_eq!(software.type_, CKM_AES_ECB as CK_MECHANISM_TYPE);
+    assert_eq!(software.flags, (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
+    slot.software_allowlist = Some(Vec::new());
+    assert_eq!(crate::Slot::mechanisms(&slot).len(), 1);
+    slot.software_allowlist = None;
+    let maximum = crate::Slot::mechanisms(&slot);
+    let types = maximum
+        .iter()
+        .map(|mechanism| mechanism.type_)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(types.len(), maximum.len());
+    assert!(types.contains(&(CKM_SHA256 as CK_MECHANISM_TYPE)));
+}
+
+
+#[test]
+fn software_capabilities_expand_ranges_and_preserve_hardware_capability() {
+    let mut slot = test_slot(true);
+    slot.stores_software_token_keys = true;
     slot.mechanisms = vec![crate::MechanismDetails {
         type_: CKM_ECDSA as CK_MECHANISM_TYPE,
         min_key_size: 256,
@@ -8556,7 +8611,7 @@ fn software_capabilities_preserve_native_hardware_range_and_flag() {
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_ECDSA as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (256, 384));
+    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (224, 521));
     assert_ne!(ecdsa.flags & CKF_HW as CK_FLAGS, 0);
     assert_ne!(ecdsa.flags & CKF_SIGN as CK_FLAGS, 0);
     assert_ne!(ecdsa.flags & CKF_VERIFY as CK_FLAGS, 0);
@@ -8571,7 +8626,7 @@ fn software_capabilities_preserve_native_hardware_range_and_flag() {
 }
 
 #[test]
-fn software_public_operations_do_not_introduce_backend_unsupported_mechanisms() {
+fn common_software_operations_extend_hardware_mechanisms() {
     let mut slot = test_slot(true);
     slot.mechanisms = vec![
         crate::MechanismDetails {
@@ -8593,7 +8648,7 @@ fn software_public_operations_do_not_introduce_backend_unsupported_mechanisms() 
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_ECDSA as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (256, 384));
+    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (224, 521));
     assert_eq!(
         ecdsa.flags,
         (CKF_HW | CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS
@@ -8604,10 +8659,10 @@ fn software_public_operations_do_not_introduce_backend_unsupported_mechanisms() 
         .unwrap();
     assert_eq!(
         rsa_pkcs.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
-        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+        (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
     );
     assert!(
-        !mechanisms
+        mechanisms
             .iter()
             .any(|mechanism| mechanism.type_ == CKM_RSA_X_509 as CK_MECHANISM_TYPE)
     );
@@ -8936,9 +8991,19 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
             pParameter: std::ptr::null_mut(),
             ulParameterLen: 0,
         };
+        let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+            hashAlg: crate::pss_hash_mechanism(mechanism_type)
+                .unwrap_or(CKM_SHA256 as CK_MECHANISM_TYPE),
+            mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+            sLen: 17,
+        };
+        if crate::HASHED_RSA_PSS_MECHANISMS.contains(&mechanism_type) {
+            mechanism.pParameter = (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast();
+            mechanism.ulParameterLen = std::mem::size_of_val(&parameters) as CK_ULONG;
+        }
         assert_eq!(
             crate::api::C_SignInit(904, &mut mechanism, CK_INVALID_HANDLE as CK_OBJECT_HANDLE,),
-            CKR_MECHANISM_INVALID as CK_RV
+            CKR_KEY_HANDLE_INVALID as CK_RV
         );
     }
     finalize_for_test();

@@ -915,7 +915,7 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
     let mut label = *b"Created private key";
     let mut id = [7u8, 8, 9, 10];
-    let mut token = CK_TRUE as CK_BBOOL;
+    let mut token = CK_FALSE as CK_BBOOL;
     let mut private = CK_TRUE as CK_BBOOL;
     let mut encrypt = CK_FALSE as CK_BBOOL;
     let mut decrypt = CK_TRUE as CK_BBOOL;
@@ -1067,7 +1067,7 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     assert_eq!(read_key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
     assert_eq!(&read_label, b"Created private key");
     assert_eq!(read_id, id);
-    assert_eq!(read_token, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_token, CK_FALSE as CK_BBOOL);
     assert_eq!(read_private, CK_TRUE as CK_BBOOL);
     assert_eq!(read_encrypt, CK_FALSE as CK_BBOOL);
     assert_eq!(read_decrypt, CK_TRUE as CK_BBOOL);

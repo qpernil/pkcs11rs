@@ -268,11 +268,7 @@ impl Slot for SoftwareSlot {
         Vec::new()
     }
 
-    fn supports_software_private_operations(&self) -> bool {
-        true
-    }
-
-    fn supports_software_secret_operations(&self) -> bool {
+    fn stores_software_token_keys(&self) -> bool {
         true
     }
 
@@ -460,7 +456,7 @@ mod tests {
     #[test]
     fn mechanisms_are_the_exact_software_union_without_hardware_flags() {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
-        assert!(slot.supports_software_secret_operations());
+        assert!(slot.stores_software_token_keys());
         let mechanisms = Slot::mechanisms(&slot);
         assert_eq!(mechanisms.len(), 83);
         assert_eq!(

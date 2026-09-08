@@ -23,7 +23,7 @@ impl Slot for AbiTestSlot {
         SlotKind::Synthetic
     }
 
-    fn supports_software_private_operations(&self) -> bool {
+    fn stores_software_token_keys(&self) -> bool {
         true
     }
 
