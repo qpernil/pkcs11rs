@@ -19,8 +19,9 @@ local-discovery switch also skips native USB/HID discovery, but does not affect
 configured software slots or opt-in remote YubiHSM HTTP(S) connectors.
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
-can be selected successfully. Every `C_GetSlotList` asks the selected provider
-for its current reader inventory. Reader names only locate candidates long
+can be selected successfully. Each fresh `C_GetSlotList` enumeration asks the
+selected provider for its current reader inventory. A matching buffer call reuses
+the [count-query snapshot](architecture.md#discovery-lifecycle-and-stable-slots). Reader names only locate candidates long
 enough to identify their physical YubiKey serial. They are not stable identity:
 different PC/SC implementations apply different naming and disambiguation
 rules, USB re-enumeration can rename the same reader, and CryptoTokenKit NFC

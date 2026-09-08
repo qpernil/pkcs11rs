@@ -227,12 +227,14 @@ The system NFC UI can be opened at two distinct stages:
    for the already bound YubiKey. The presented serial must match before
    presence is restored or APDUs are allowed.
 
-The `CK_TRUE` argument to `C_GetSlotList` does not itself cause the UI. Every
-slot-list call refreshes registered transports before applying the
+The `CK_TRUE` argument to `C_GetSlotList` does not itself cause the UI. Each
+fresh slot-list enumeration refreshes registered transports before applying the
 token-present filter, so either `C_GetSlotList(CK_FALSE, ...)` or
 `C_GetSlotList(CK_TRUE, ...)` can request reacquisition after removal. Calls
 that merely read retained metadata without refreshing or preparing the NFC
-transport do not open the UI.
+transport do not open the UI. A matching buffer call reuses the
+[count-query snapshot](architecture.md#discovery-lifecycle-and-stable-slots)
+without refreshing transports or requesting NFC reacquisition.
 
 On every later slot-list refresh, USB reconciliation likewise runs before
 registered slots are refreshed. Moving an NFC-discovered YubiKey to USB can

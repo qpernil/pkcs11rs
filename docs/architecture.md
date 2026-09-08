@@ -61,8 +61,9 @@ synchronized `Arc` handles instead.
 ## Discovery lifecycle and stable slots
 
 `C_Initialize` creates the module context from configuration, but normal slot
-discovery begins lazily when the application first calls `C_GetSlotList`.
-That first listing establishes the initial slot registry:
+discovery begins lazily on the first `C_GetSlotList` or slot-ID lookup.
+The initial discovery establishes the slot registry; slot listing also refreshes
+registered transports and performs any opt-in iOS NFC discovery:
 
 - configured software slots are created and their stored objects are loaded;
 - current PC/SC or CryptoTokenKit readers are enumerated, their configured
@@ -83,7 +84,7 @@ That first listing establishes the initial slot registry:
 - direct USB and configured HTTP YubiHSM inventories are reconciled and all
   registered transports and presence states are refreshed.
 
-Later `C_GetSlotList` calls refresh the established model rather than repeating
+Fresh `C_GetSlotList` enumerations refresh the established model rather than repeating
 the complete initial pass. Reader inventory is enumerated again, but reader
 names are only transient locators. A newly encountered locator is identified
 by its physical serial: a known serial is rebound to its existing slots without
@@ -95,6 +96,19 @@ is not repeated; a registered NFC transport may still reacquire and verify its
 bound serial when a slot-list refresh or device operation needs the card. The
 [iOS integration guide](ios-integration.md#when-the-nfc-ui-appears) distinguishes
 the exact UI triggers from the no-prompt reuse path.
+
+A count-only `C_GetSlotList` always performs fresh enumeration and saves the
+sorted slot IDs as a thread-local snapshot. The next buffered slot-list call with
+the same `tokenPresent` filter and module lifetime copies that snapshot without
+another discovery refresh. A successful copy consumes it; `CKR_BUFFER_TOO_SMALL`
+retains it for another buffer retry. A new count query or a different filter
+discards the pending snapshot. Unrelated API calls do not inspect or invalidate
+it; snapshot management is confined to `C_GetSlotList`. Calls on other threads
+enumerate independently. A weak module identity prevents reuse
+across finalization/reinitialization, including lifecycle changes on another
+thread, without retaining the old module. This is a paired-call snapshot without
+a time limit: device changes between the query and its matching copy appear
+in the next fresh enumeration. Even an empty snapshot avoids a second refresh.
 
 An inventory provider reports an opaque, provider-defined identity and current
 presence. Reconciliation combines that identity with the provider instance:
