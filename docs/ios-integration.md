@@ -232,9 +232,9 @@ fresh slot-list enumeration refreshes registered transports before applying the
 token-present filter, so either `C_GetSlotList(CK_FALSE, ...)` or
 `C_GetSlotList(CK_TRUE, ...)` can request reacquisition after removal. Calls
 that merely read retained metadata without refreshing or preparing the NFC
-transport do not open the UI. A matching buffer call reuses the
-[count-query snapshot](architecture.md#discovery-lifecycle-and-stable-slots)
-without refreshing transports or requesting NFC reacquisition.
+transport do not open the UI. Calls within the module-wide
+[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+skip reconciliation without refreshing transports or requesting NFC reacquisition.
 
 On every later slot-list refresh, USB reconciliation likewise runs before
 registered slots are refreshed. Moving an NFC-discovered YubiKey to USB can

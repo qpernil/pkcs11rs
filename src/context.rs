@@ -36,12 +36,13 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
+const DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub(crate) struct TokenStorageConfig {
@@ -280,7 +281,7 @@ pub(crate) struct ModuleContext {
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
-    discovery_refresh: Mutex<()>,
+    discovery_refresh: Mutex<Option<Instant>>,
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
@@ -974,7 +975,7 @@ impl ModuleContext {
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
             hsmauth_providers,
-            discovery_refresh: Mutex::new(()),
+            discovery_refresh: Mutex::new(None),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
         #[cfg(feature = "abi-tests")]
@@ -3149,20 +3150,46 @@ impl ModuleContext {
 
     #[cfg(all(test, not(feature = "abi-tests")))]
     pub(crate) fn refresh_discovery(&self) -> Result<(), Error> {
-        self.refresh_discovery_after_init(false)
+        // Discovery tests deliberately change providers between calls.
+        self.refresh_discovery_with_interval(false, Duration::ZERO)
+    }
+
+    pub(crate) fn refresh_discovery_after_init(&self, initialized: bool) -> Result<(), Error> {
+        self.refresh_discovery_with_interval(initialized, DISCOVERY_REFRESH_INTERVAL)
+    }
+
+    fn refresh_discovery_with_interval(
+        &self,
+        initialized: bool,
+        interval: Duration,
+    ) -> Result<(), Error> {
+        let mut last_completed = self
+            .discovery_refresh
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        // Hold the existing refresh lock through the check and the pass so
+        // concurrent callers share one refresh. Skipped calls do not slide
+        // the window forward, and a returned error leaves the pass retryable.
+        if last_completed.is_some_and(|completed| completed.elapsed() < interval) {
+            return Ok(());
+        }
+        self.refresh_discovery_inner(initialized)?;
+        *last_completed = Some(Instant::now());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_discovery_refresh_for_test(&self) {
+        *self.discovery_refresh.lock().unwrap() = Some(Instant::now() - DISCOVERY_REFRESH_INTERVAL);
     }
 
     #[allow(unreachable_code)]
-    pub(crate) fn refresh_discovery_after_init(&self, initialized: bool) -> Result<(), Error> {
+    fn refresh_discovery_inner(&self, initialized: bool) -> Result<(), Error> {
         let _operation = crate::logging::Operation::info(tracing::info_span!(
             target: "pkcs11rs::discovery",
             "module.refresh_discovery",
             initialized
         ));
-        let _refresh = self
-            .discovery_refresh
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         #[cfg(feature = "abi-tests")]
         {
             let _ = initialized;
@@ -3866,11 +3893,23 @@ mod discovery_tests {
                 std::ffi::OsString::new(),
             )),
             hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
-            discovery_refresh: Mutex::new(()),
+            discovery_refresh: Mutex::new(None),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
 
         context.init().unwrap();
+
+        // Empty registries also share a refresh window. Reading during that
+        // window must not slide its completion timestamp forward.
+        context.refresh_discovery_after_init(true).unwrap();
+        let completed = *context.discovery_refresh.lock().unwrap();
+        assert!(completed.is_some());
+        context.refresh_discovery_after_init(false).unwrap();
+        assert_eq!(*context.discovery_refresh.lock().unwrap(), completed);
+        context.expire_discovery_refresh_for_test();
+        let expired = *context.discovery_refresh.lock().unwrap();
+        context.refresh_discovery_after_init(false).unwrap();
+        assert_ne!(*context.discovery_refresh.lock().unwrap(), expired);
 
         let slots = context.slot_contexts.read().unwrap();
         assert!(slots.discovered);

@@ -31,8 +31,9 @@ before operating a remote connector service.
 Each returned serial creates a separate slot, so one connector host with two
 attached YubiHSMs produces two slots from one URL. Each fresh `C_GetSlotList`
 enumeration reconciles configured HTTP inventories and direct USB inventory by
-serial. The matching buffer call reuses the
-[count-query snapshot](architecture.md#discovery-lifecycle-and-stable-slots). A
+serial. Calls within the module-wide
+[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+skip reconciliation. A
 new serial gets a new slot; an absent serial keeps its stable slot ID and
 becomes present again when rediscovered. Remote slots are additive; they do
 not disable direct USB discovery. An unreachable connector contributes no new

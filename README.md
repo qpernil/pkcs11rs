@@ -668,7 +668,7 @@ as an independent TLS trust anchor.
 
 Remote connector slots are added alongside directly attached USB devices.
 Each fresh `C_GetSlotList` enumeration reconciles each configured connector
-inventory. The matching buffered call reuses the count-query snapshot; see
+inventory. Calls share a module-wide 500 ms reconciliation window; see
 [slot discovery lifecycle](docs/architecture.md#discovery-lifecycle-and-stable-slots). A newly
 reported serial gets a new slot; a known serial keeps its slot ID, remains
 registered while absent, and becomes present again when it reappears. A
