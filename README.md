@@ -501,8 +501,10 @@ POST /v1/devices/{serial}/commands
 PKCS11RS uses this API directly. Each URL in `PKCS11RS_YUBIHSM_URLS`
 identifies one connector service, and each device returned with status
 `claimed` becomes an independent PKCS #11 slot. Enumerated devices that the
-connector did not claim remain visible as `unclaimed` and are ignored by the
-client. Each v1 inventory entry also reports whether its transport is `usb` or
+connector did not claim remain visible as `unclaimed`; devices excluded by its
+`--serials` allowlist are visible as `filtered`. A serial reserved by
+`--legacy-serial` outside that list is claimed as `legacy_only`. All three
+statuses are ignored by the client. Each v1 inventory entry also reports whether its transport is `usb` or
 `embedded` and a process-local connection generation. Those fields support
 passive diagnostics; PKCS11RS does not use them for slot identity. PKCS11RS
 does not use the legacy single-device endpoints.

@@ -4,7 +4,8 @@ use pkcs11rs_local_hardware::{
 };
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,11 +13,38 @@ use tokio::sync::{Mutex, RwLock};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SerialAllowlist(HashSet<String>);
+
+impl FromStr for SerialAllowlist {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim().is_empty() {
+            return Ok(Self(HashSet::new()));
+        }
+        value
+            .split(',')
+            .map(|serial| {
+                let serial = serial.trim();
+                if serial.is_empty() {
+                    Err(String::from("serial allowlist contains an empty entry"))
+                } else {
+                    Ok(serial.to_owned())
+                }
+            })
+            .collect::<Result<HashSet<_>, _>>()
+            .map(Self)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStatus {
     Claimed,
     Unclaimed,
+    Filtered,
+    LegacyOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -297,6 +325,7 @@ impl CommandTransportFactory for UsbTransportFactory {
 
 pub struct DeviceEntry {
     id: Option<UsbDeviceId>,
+    legacy_only: bool,
     metadata: DeviceMetadata,
     device_transport: DeviceTransportView,
     command_transport: Mutex<Box<dyn CommandTransport>>,
@@ -304,8 +333,14 @@ pub struct DeviceEntry {
 
 impl DeviceEntry {
     pub fn view(&self) -> DeviceView {
-        self.metadata
-            .view(DeviceStatus::Claimed, self.device_transport.clone())
+        self.metadata.view(
+            if self.legacy_only {
+                DeviceStatus::LegacyOnly
+            } else {
+                DeviceStatus::Claimed
+            },
+            self.device_transport.clone(),
+        )
     }
 
     pub fn usb_device_id(&self) -> Option<String> {
@@ -326,13 +361,17 @@ enum DeviceRecord {
         metadata: DeviceMetadata,
         transport: DeviceTransportView,
     },
+    Filtered {
+        metadata: DeviceMetadata,
+        transport: DeviceTransportView,
+    },
 }
 
 impl DeviceRecord {
     fn metadata(&self) -> &DeviceMetadata {
         match self {
             Self::Claimed(entry) => &entry.metadata,
-            Self::Unclaimed { metadata, .. } => metadata,
+            Self::Unclaimed { metadata, .. } | Self::Filtered { metadata, .. } => metadata,
         }
     }
 
@@ -343,13 +382,17 @@ impl DeviceRecord {
                 metadata,
                 transport,
             } => metadata.view(DeviceStatus::Unclaimed, transport.clone()),
+            Self::Filtered {
+                metadata,
+                transport,
+            } => metadata.view(DeviceStatus::Filtered, transport.clone()),
         }
     }
 
     fn claimed(&self) -> Option<&Arc<DeviceEntry>> {
         match self {
             Self::Claimed(entry) => Some(entry),
-            Self::Unclaimed { .. } => None,
+            Self::Unclaimed { .. } | Self::Filtered { .. } => None,
         }
     }
 }
@@ -366,6 +409,8 @@ struct RegistryState {
 pub struct DeviceRegistry {
     state: Arc<RwLock<RegistryState>>,
     command_timeout: Duration,
+    serials: Option<Arc<SerialAllowlist>>,
+    configured_legacy_serial: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,7 +423,70 @@ impl DeviceRegistry {
         Self {
             state: Arc::new(RwLock::new(RegistryState::default())),
             command_timeout,
+            serials: None,
+            configured_legacy_serial: None,
         }
+    }
+
+    pub(crate) fn with_serials(mut self, serials: Option<SerialAllowlist>) -> Self {
+        self.serials = serials.map(Arc::new);
+        self
+    }
+
+    pub(crate) fn allows_serial(&self, serial: &str) -> bool {
+        self.serials
+            .as_ref()
+            .is_none_or(|serials| serials.0.contains(serial))
+    }
+
+    pub(crate) fn with_legacy_serial(mut self, serial: Option<String>) -> Self {
+        self.configured_legacy_serial = serial.map(Arc::from);
+        self
+    }
+
+    pub(crate) fn should_claim(&self, serial: &str) -> bool {
+        self.allows_serial(serial) || self.configured_legacy_serial.as_deref() == Some(serial)
+    }
+
+    #[cfg(any(
+        test,
+        all(feature = "experimental-i2c", target_os = "linux"),
+        all(feature = "embedded-virtual-yubihsm", unix)
+    ))]
+    pub(crate) async fn register_filtered(
+        &self,
+        serial: String,
+        version: Option<[u8; 3]>,
+        kind: DeviceTransportKind,
+    ) -> Result<(), TransportError> {
+        let mut state = self.state.write().await;
+        if state.records.contains_key(&serial) {
+            return Err(TransportError::device(format!(
+                "duplicate YubiHSM serial {serial}"
+            )));
+        }
+        let generation = state
+            .connection_generations
+            .entry(serial.clone())
+            .or_default();
+        *generation = generation.saturating_add(1);
+        let record = DeviceRecord::Filtered {
+            metadata: DeviceMetadata {
+                serial: serial.clone(),
+                manufacturer: "Yubico".into(),
+                product: "YubiHSM".into(),
+                usb_version: version
+                    .map(|version| format!("{}.{}", version[0], version[1]))
+                    .unwrap_or_default(),
+            },
+            transport: DeviceTransportView {
+                kind,
+                connection_generation: *generation,
+            },
+        };
+        state.records.insert(serial.clone(), record);
+        tracing::info!(%serial, "configured YubiHSM excluded by serial filter");
+        Ok(())
     }
 
     pub async fn list(&self) -> Vec<DeviceView> {
@@ -410,6 +518,7 @@ impl DeviceRegistry {
             .records
             .get(serial)
             .and_then(DeviceRecord::claimed)
+            .filter(|entry| !entry.legacy_only)
             .cloned()
     }
 
@@ -490,6 +599,9 @@ impl DeviceRegistry {
         kind: DeviceTransportKind,
         transport: Box<dyn CommandTransport>,
     ) -> Result<(), TransportError> {
+        if !self.should_claim(&serial) {
+            return self.register_filtered(serial, Some(version), kind).await;
+        }
         let mut state = self.state.write().await;
         if state.records.contains_key(&serial) {
             return Err(TransportError::device(format!(
@@ -503,6 +615,7 @@ impl DeviceRegistry {
         *connection_generation = connection_generation.saturating_add(1);
         let entry = Arc::new(DeviceEntry {
             id: None,
+            legacy_only: !self.allows_serial(&serial),
             metadata: DeviceMetadata {
                 serial: serial.clone(),
                 manufacturer: String::from("Yubico"),
@@ -549,6 +662,12 @@ impl DeviceRegistry {
             }
         };
         let unclaimed_metadata = Self::candidate_metadata(&candidate, serial.clone());
+        if self
+            .reject_filtered_usb(id, unclaimed_metadata.clone())
+            .await
+        {
+            return;
+        }
         let mut device = match candidate.open().await {
             Ok(device) => device,
             Err(error) => {
@@ -577,6 +696,7 @@ impl DeviceRegistry {
         let connection_generation = self.next_connection_generation(&serial).await;
         let entry = Arc::new(DeviceEntry {
             id: Some(id),
+            legacy_only: !self.allows_serial(&serial),
             metadata,
             device_transport: DeviceTransportView {
                 kind: DeviceTransportKind::Usb,
@@ -599,6 +719,26 @@ impl DeviceRegistry {
         }
     }
 
+    async fn reject_filtered_usb(&self, id: UsbDeviceId, metadata: DeviceMetadata) -> bool {
+        if self.should_claim(&metadata.serial) {
+            return false;
+        }
+        let connection_generation = self.next_connection_generation(&metadata.serial).await;
+        tracing::info!(serial = %metadata.serial, ?id, "USB YubiHSM excluded by serial filter");
+        self.register(
+            id,
+            DeviceRecord::Filtered {
+                metadata,
+                transport: DeviceTransportView {
+                    kind: DeviceTransportKind::Usb,
+                    connection_generation,
+                },
+            },
+        )
+        .await;
+        true
+    }
+
     async fn detach(&self, id: UsbDeviceId) {
         let mut state = self.state.write().await;
         let Some(serial) = state.serial_by_id.remove(&id) else {
@@ -618,6 +758,7 @@ impl DeviceRegistry {
         let connection_generation = self.next_connection_generation(serial).await;
         let entry = Arc::new(DeviceEntry {
             id: None,
+            legacy_only: !self.allows_serial(serial),
             metadata: DeviceMetadata {
                 serial: serial.to_owned(),
                 manufacturer: String::from("Test"),
