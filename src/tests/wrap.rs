@@ -2001,12 +2001,25 @@ pub(super) fn rsa_public_wrap_round_trip(slot_id: CK_SLOT_ID, pin: &[u8]) -> Res
         let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(true);
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
         let mut denied_length = 0;
+        checked_rv(
+            "C_WrapKey size query with a private RSA wrap key",
+            crate::api::C_WrapKey(
+                session,
+                &mut mechanism,
+                wrapper_private,
+                target_private,
+                std::ptr::null_mut(),
+                &mut denied_length,
+            ),
+        )?;
+        // Device-enforced key-type policy is checked by the output call.
+        let mut denied_output = vec![0; denied_length as usize];
         let denied_rv = crate::api::C_WrapKey(
             session,
             &mut mechanism,
             wrapper_private,
             target_private,
-            std::ptr::null_mut(),
+            denied_output.as_mut_ptr(),
             &mut denied_length,
         );
         if denied_rv != CKR_OBJECT_HANDLE_INVALID as CK_RV {
@@ -2805,6 +2818,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         pParameter: std::ptr::null_mut(),
         ulParameterLen: 0,
     };
+    let commands_before = commands.borrow().len();
     let mut wrapped_len = 0;
     assert_eq!(
         crate::api::C_WrapKey(
@@ -2818,12 +2832,10 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         CKR_OK as CK_RV
     );
     assert!(wrapped_len > 0);
-    assert_eq!(
-        commands.borrow().last().unwrap().0,
-        crate::YubiHsmCommandCode::ExportWrapped as u8
-    );
+    assert_eq!(commands.borrow().len(), commands_before);
 
     for (target, target_type, target_id) in &wrap_targets {
+        let commands_before = commands.borrow().len();
         let mut length = 0;
         assert_eq!(
             crate::api::C_WrapKey(
@@ -2836,6 +2848,20 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
             ),
             CKR_OK as CK_RV
         );
+        let mut output = vec![0; length as usize];
+        assert_eq!(commands.borrow().len(), commands_before);
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut ccm_mechanism,
+                ccm_wrapper,
+                *target,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(commands.borrow().len(), commands_before + 1);
         let last = commands.borrow().last().cloned().unwrap();
         assert_eq!(last.0, crate::YubiHsmCommandCode::ExportWrapped as u8);
         assert_eq!(
@@ -2911,6 +2937,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     ] {
         let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(full_object);
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
+        let commands_before = commands.borrow().len();
         let mut length = 0;
         assert_eq!(
             crate::api::C_WrapKey(
@@ -2923,6 +2950,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
             ),
             CKR_OK as CK_RV
         );
+        assert_eq!(commands.borrow().len(), commands_before);
         let mut output = vec![0; length as usize];
         assert_eq!(
             crate::api::C_WrapKey(
@@ -2935,6 +2963,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
             ),
             CKR_OK as CK_RV
         );
+        assert_eq!(commands.borrow().len(), commands_before + 1);
         assert_eq!(commands.borrow().last().unwrap().0, expected_command as u8);
     }
 
@@ -2955,6 +2984,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let (mut full_rsa, mut full_parameters, mut full_oaep) = rsa_wrap_mechanism(true);
     initialize_rsa_wrap_mechanism(&mut full_rsa, &mut full_parameters, &mut full_oaep);
     for (target, target_type, target_id) in &wrap_targets {
+        let commands_before = commands.borrow().len();
         let mut length = 0;
         assert_eq!(
             crate::api::C_WrapKey(
@@ -2967,6 +2997,20 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
             ),
             CKR_OK as CK_RV
         );
+        let mut output = vec![0; length as usize];
+        assert_eq!(commands.borrow().len(), commands_before);
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut full_rsa,
+                rsa_public_wrap,
+                *target,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(commands.borrow().len(), commands_before + 1);
         let last = commands.borrow().last().cloned().unwrap();
         assert_eq!(last.0, crate::YubiHsmCommandCode::ExportRsaWrapped as u8);
         assert_eq!(last.1[2], *target_type);
@@ -2976,6 +3020,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let (mut key_rsa, mut key_parameters, mut key_oaep) = rsa_wrap_mechanism(false);
     initialize_rsa_wrap_mechanism(&mut key_rsa, &mut key_parameters, &mut key_oaep);
     for (target, target_type, target_id) in &wrap_targets {
+        let commands_before = commands.borrow().len();
         let mut length = 0;
         assert_eq!(
             crate::api::C_WrapKey(
@@ -2988,6 +3033,20 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
             ),
             CKR_OK as CK_RV
         );
+        let mut output = vec![0; length as usize];
+        assert_eq!(commands.borrow().len(), commands_before);
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut key_rsa,
+                rsa_private,
+                *target,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(commands.borrow().len(), commands_before + 1);
         let last = commands.borrow().last().cloned().unwrap();
         assert_eq!(last.0, crate::YubiHsmCommandCode::GetRsaWrappedKey as u8);
         assert_eq!(last.1[2], *target_type);

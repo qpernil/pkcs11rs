@@ -55,16 +55,16 @@ fn digest_init(
 
 fn copy_digest(
     session: &mut SessionContext,
-    operation: &DigestOperation,
     data: &[u8],
     digest: *mut u8,
     digest_len: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     let digest_len = unsafe { as_mut(digest_len) }?;
-    let mut input = operation.buffer.clone();
-    input.extend_from_slice(data);
-    let value = hash(operation.algorithm, &input)?;
-    let required = value.len() as CK_ULONG;
+    let operation = session
+        .digest_operation
+        .as_ref()
+        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+    let required = operation.algorithm.size() as CK_ULONG;
     if digest.is_null() {
         *digest_len = required;
         return Ok(());
@@ -73,11 +73,18 @@ fn copy_digest(
         *digest_len = required;
         return Err(Error::from(CKR_BUFFER_TOO_SMALL as CK_RV));
     }
+    // Query and short-buffer calls only inspect the algorithm's fixed size.
+    // Move the accumulated input only when the caller can receive the digest.
+    let mut operation = session
+        .digest_operation
+        .take()
+        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+    operation.buffer.extend_from_slice(data);
+    let value = hash(operation.algorithm, &operation.buffer)?;
     unsafe {
         ptr::copy_nonoverlapping(value.as_ptr(), digest, value.len());
     }
     *digest_len = required;
-    session.digest_operation = None;
     Ok(())
 }
 
@@ -119,23 +126,19 @@ ffi_entry_point! {
                 return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
             }
             with_session_context_mut(session_handle, |ctx| {
-                let operation = ctx
-                    .get_session_context(session_handle)?
-                    .digest_operation
-                    .as_ref()
-                    .cloned()
-                    .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
+                let session = ctx.get_session_context_mut(session_handle)?;
+                if session.digest_operation.is_none() {
+                    return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+                }
                 let data = match unsafe { from_raw_parts(data, data_len as usize) } {
                     Ok(data) => data,
                     Err(error) => {
-                        ctx.get_session_context_mut(session_handle)?
-                            .digest_operation = None;
+                        session.digest_operation = None;
                         return Err(error);
                     }
                 };
                 copy_digest(
-                    ctx.get_session_context_mut(session_handle)?,
-                    &operation,
+                    session,
                     data,
                     digest,
                     digest_len,
@@ -244,15 +247,8 @@ ffi_entry_point! {
                 return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
             }
             with_session_context_mut(session_handle, |ctx| {
-                let operation = ctx
-                    .get_session_context(session_handle)?
-                    .digest_operation
-                    .as_ref()
-                    .cloned()
-                    .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
                 copy_digest(
                     ctx.get_session_context_mut(session_handle)?,
-                    &operation,
                     &[],
                     digest,
                     digest_len,

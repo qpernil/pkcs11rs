@@ -165,6 +165,19 @@ on a private key. Generic software private-key support is an explicit slot
 capability and is disabled for all
 hardware and applet slots.
 
+Digest output-length queries and short-buffer calls use the algorithm's fixed
+digest size without copying accumulated input or computing a hash. They leave
+the operation available for a later output call or further multipart input.
+
+YubiHSM `C_WrapKey` output-length queries return a conservative upper bound of
+65,535 bytes without issuing a wrap/export command. This is the wire format's
+16-bit response payload limit, independent of firmware-specific message limits;
+a successful wrapped result cannot exceed it. A buffered call performs the
+command, copies the result, and returns its actual length. Device-enforced
+policy errors are therefore reported on that call. A caller supplying less
+than the query bound may receive `CKR_BUFFER_TOO_SMALL` after the command and
+must retry; the usual query/allocate/fill sequence issues one command.
+
 Every advertised mechanism flag is a tested slot contract. Deterministic tests
 must execute each advertised operation with compatible key material for every
 slot family that exposes it. Exact mechanism-set tests guard slots that expose

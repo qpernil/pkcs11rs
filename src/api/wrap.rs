@@ -775,14 +775,18 @@ fn wrap_key(
                 YubiHsmCommand::rsa_pkcs_wrap_key(wrapping_key_id, target_type, target_id)?
             }
         };
+        if wrapped_key.is_null() {
+            // PKCS #11 permits a sufficient upper bound for a length query.
+            // Every response is parsed from a frame with a u16 payload length.
+            // Use that wire-format bound, independent of device firmware or
+            // transport, instead of exporting an object to learn its size.
+            *output_len = u16::MAX as CK_ULONG;
+            return Ok(());
+        }
         let response = ctx
             ._get_session(session_handle)?
             .1
             .yubihsm_command(&command)?;
-        if wrapped_key.is_null() {
-            *output_len = response.len() as CK_ULONG;
-            return Ok(());
-        }
         if *output_len < response.len() as CK_ULONG {
             *output_len = response.len() as CK_ULONG;
             return Err(CKR_BUFFER_TOO_SMALL.into());
