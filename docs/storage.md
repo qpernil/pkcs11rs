@@ -63,7 +63,7 @@ PIN, permissions, corruption, durability, and concurrency semantics.
 ## Backed-key metadata
 
 The public `key_metadata` module defines the provider-neutral canonical schema
-for one backing key and its potential PKCS #11 key aspects. Storage location is
+for one backing object and its PKCS #11 aspects. Storage location is
 not part of the record, so identical model bytes can be held by a local
 provider, the YubiHSM opaque-object provider, or a future FIDO large-blob
 provider.
@@ -76,7 +76,7 @@ The outer canonical CBOR map is:
 | `2` | schema version `1` |
 | `3` | provider identifier |
 | `4` | exact provider-owned backing CBOR, wrapped as a byte string |
-| `5` | map from `CKO_PUBLIC_KEY`, `CKO_PRIVATE_KEY`, or `CKO_SECRET_KEY` to an attribute map |
+| `5` | map from `CKO_DATA`, `CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`, `CKO_PRIVATE_KEY`, or `CKO_SECRET_KEY` to an attribute map |
 
 An aspect map uses numeric `CKA_*` values as keys and architecture-independent
 CBOR values. Booleans are CBOR booleans, Cryptoki unsigned values and
@@ -204,7 +204,7 @@ backend-native rather than being reconstructed by the generic provider
 decoder.
 
 The provider-owned backing inside the canonical record identifies the native
-object by type, ID, sequence, and domains and records its primary PKCS #11 key
+object by type, ID, sequence, and domains and records its primary PKCS #11 object
 class. These fields are checked against the live target and companion label
 before a record is accepted. A stale record cannot attach to a newly created
 object that reuses the same ID.
@@ -287,3 +287,20 @@ protection are deployment responsibilities. The provider has no garbage
 collector, so deleting backed objects can leave unreferenced dependency blobs.
 The current PKCS #11 mapping is documented in [Experimental FIDO previewSign
 boundary](preview-sign.md).
+
+## Stored data and certificate records
+
+Standalone public data and certificate objects use a canonical CBOR array:
+`["pkcs11rs.data-object", 1, class, label, id, private, application, object_id, value, instance]`.
+Class is an unsigned PKCS #11 class number, label is text, private is a boolean,
+and the remaining attributes are byte strings. The 16-byte random instance
+identity keeps separate creations and copies distinct even when their visible
+attributes are identical. Attribute updates preserve this identity. Certificate records require
+empty application/object-ID fields and valid DER X.509 in value. Decoders
+reject unsupported versions, classes, trailing bytes, and noncanonical input.
+Public providers reject records declaring private visibility. Software USER
+storage encrypts private records separately; see [software slots](software.md).
+
+Native YubiHSM data and certificates do not use this payload wrapper. They
+store raw opaque data or DER with the corresponding native opaque algorithm;
+canonical companion metadata preserves extended labels and certificate IDs.

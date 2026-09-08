@@ -852,7 +852,7 @@ impl YubiHsmPkcs11Metadata {
         {
             return Err(CKR_DATA_INVALID.into());
         }
-        if !is_key_class(primary_class) {
+        if !is_metadata_class(primary_class) {
             return Err(CKR_ATTRIBUTE_TYPE_INVALID.into());
         }
         let backing = KeyBacking::new(
@@ -959,10 +959,12 @@ struct YubiHsmKeyBacking {
     primary_class: u64,
 }
 
-fn is_key_class(class: u64) -> bool {
+fn is_metadata_class(class: u64) -> bool {
     matches!(
         class,
-        x if x == u64::from(CKO_PUBLIC_KEY)
+        x if x == u64::from(CKO_DATA)
+            || x == u64::from(CKO_CERTIFICATE)
+            || x == u64::from(CKO_PUBLIC_KEY)
             || x == u64::from(CKO_PRIVATE_KEY)
             || x == u64::from(CKO_SECRET_KEY)
     )
@@ -1110,7 +1112,7 @@ fn decode_yubihsm_key_backing(encoded: &[u8]) -> Result<YubiHsmKeyBacking, Error
         domains: domains.ok_or(CKR_DATA_INVALID)?,
         primary_class: primary_class.ok_or(CKR_DATA_INVALID)?,
     };
-    if !is_key_class(backing.primary_class)
+    if !is_metadata_class(backing.primary_class)
         || encode_yubihsm_key_backing(
             &YubiHsmObjectInfo {
                 capabilities: [0; 8],

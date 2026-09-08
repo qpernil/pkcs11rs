@@ -44,6 +44,7 @@ const PUBLIC_DIRECTORY: &str = "public-objects-v1";
 const PUBLIC_RECORD_SCHEMA: &str = "pkcs11rs-software-public-object";
 const HEADER_SCHEMA: &str = "pkcs11rs-software-token-key";
 const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
+const DATA_RECORD_SCHEMA: &str = "pkcs11rs-software-private-data";
 const SECRET_RECORD_SCHEMA: &str = "pkcs11rs-software-secret-key";
 const FORMAT_VERSION: u64 = 4;
 const HEADER_FORMAT_VERSION: u64 = 3;
@@ -1042,6 +1043,10 @@ fn encode_record(
         KeyMaterial::SoftwareSecret(_) if object.private => {
             (SECRET_RECORD_SCHEMA, encode_stored_secret_key_info(object)?)
         }
+        KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. } if object.private => (
+            DATA_RECORD_SCHEMA,
+            crate::backed_object::encode_data_object(object)?,
+        ),
         _ => return Err(CKR_DATA_INVALID.into()),
     };
     let mut nonce = [0u8; NONCE_LENGTH];
@@ -1067,8 +1072,10 @@ fn decode_record(
         return Err(CKR_DATA_INVALID.into());
     }
     let schema = outer.str().map_err(|_| CKR_DATA_INVALID)?;
-    if !matches!(schema, RECORD_SCHEMA | SECRET_RECORD_SCHEMA)
-        || outer.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
+    if !matches!(
+        schema,
+        RECORD_SCHEMA | SECRET_RECORD_SCHEMA | DATA_RECORD_SCHEMA
+    ) || outer.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
     {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -1086,6 +1093,14 @@ fn decode_record(
     }
     let plaintext = decrypt(master_key, &nonce, &record_aad(name, schema), ciphertext)
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    if schema == DATA_RECORD_SCHEMA {
+        let object =
+            crate::backed_object::decode_data_object(slot_id, true, unique_id, plaintext.as_ref())?;
+        if !object.private {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return Ok(object);
+    }
     if schema == SECRET_RECORD_SCHEMA {
         if !stored_secret_key_info(plaintext.as_ref()) {
             return Err(CKR_DATA_INVALID.into());

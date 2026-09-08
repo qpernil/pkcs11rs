@@ -112,6 +112,29 @@ are stored only in the USER realm. Generation, import, copy, derivation,
 unwrapping, destruction, and restart restoration share the same publication
 and rollback boundary as asymmetric private keys.
 
+## Data and certificates
+
+`C_CreateObject` accepts `CKO_DATA` and DER X.509 `CKO_CERTIFICATE` objects.
+Session objects use the shared lifecycle on every slot. With token storage
+configured, `CKA_TOKEN=true` persists them across module and process restarts.
+Public objects use the encrypted public realm; `CKA_PRIVATE=true` objects use
+the separate USER realm and are unavailable to SO or public discovery.
+
+Data preserves `CKA_APPLICATION`, `CKA_OBJECT_ID`, and `CKA_VALUE`; all three
+can be updated. Certificates preserve `CKA_ID` and expose subject, issuer,
+serial number, public-key information, and check value from the DER. Creation
+requires `CKA_CERTIFICATE_TYPE=CKC_X_509` and a valid `CKA_VALUE`. Supplied
+descriptive attributes must agree with the DER; trusted certificates and
+nondefault certificate-category/URL metadata are unsupported. Both classes
+support label updates, independent copies to session or token storage, and
+durable deletion. Certificate values are immutable after creation.
+
+Public data records use canonical `pkcs11rs.data-object` CBOR inside the public
+provider's encrypted envelope. Private data records use the same plaintext
+schema inside a `pkcs11rs-software-private-data` envelope under the private
+master key. Payload buffers and private plaintext encodings use zeroizing
+storage. Logout releases private token payloads; the encrypted records remain.
+
 ## Encrypted storage format
 
 Persistent private records use envelope encryption. A PIN is not applied

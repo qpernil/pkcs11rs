@@ -261,8 +261,113 @@ fn encode_record(object: &TokenObject, provider: &str, backing: Vec<u8>) -> Resu
     record.to_cbor().map_err(metadata_error)
 }
 
+const DATA_OBJECT_SCHEMA: &str = "pkcs11rs.data-object";
+
+pub(crate) fn encode_data_object(object: &TokenObject) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let (instance, application, object_id, value) = match &object.material {
+        KeyMaterial::Data {
+            instance,
+            application,
+            object_id,
+            value,
+        } if object.class == CKO_DATA as CK_OBJECT_CLASS => (
+            instance,
+            application.as_slice(),
+            object_id.as_slice(),
+            value.as_slice(),
+        ),
+        KeyMaterial::Certificate { instance, value }
+            if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS =>
+        {
+            (instance, &[][..], &[][..], value.as_slice())
+        }
+        _ => return Err(CKR_DATA_INVALID.into()),
+    };
+    let mut encoded = Zeroizing::new(Vec::new());
+    let mut encoder = Encoder::new(&mut *encoded);
+    encoder
+        .array(10)
+        .and_then(|e| e.str(DATA_OBJECT_SCHEMA))
+        .and_then(|e| e.u64(1))
+        .and_then(|e| e.u64(cryptoki_ulong_to_u64(object.class)))
+        .and_then(|e| e.str(&object.label))
+        .and_then(|e| e.bytes(&object.id))
+        .and_then(|e| e.bool(object.private))
+        .and_then(|e| e.bytes(application))
+        .and_then(|e| e.bytes(object_id))
+        .and_then(|e| e.bytes(value))
+        .and_then(|e| e.bytes(instance))
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(encoded)
+}
+
+pub(crate) fn decode_data_object(
+    slot_id: CK_SLOT_ID,
+    token: bool,
+    unique_id: &str,
+    encoded: &[u8],
+) -> Result<TokenObject, Error> {
+    let decode = || -> Result<TokenObject, Box<dyn std::error::Error>> {
+        let mut d = Decoder::new(encoded);
+        if d.array()? != Some(10) || d.str()? != DATA_OBJECT_SCHEMA || d.u64()? != 1 {
+            return Err("invalid data record".into());
+        }
+        let class = d.u64()?;
+        if class != u64::from(CKO_DATA) && class != u64::from(CKO_CERTIFICATE) {
+            return Err("invalid class".into());
+        }
+        let common = TokenObjectTemplate {
+            class: Some(class as CK_OBJECT_CLASS),
+            key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+            label: d.str()?.to_owned(),
+            id: d.bytes()?.to_vec(),
+            private: d.bool()?,
+            token,
+            ..TokenObjectTemplate::default()
+        };
+        let application = d.bytes()?.to_vec();
+        let object_id = d.bytes()?.to_vec();
+        let value = Zeroizing::new(d.bytes()?.to_vec());
+        let instance: [u8; 16] = d.bytes()?.try_into()?;
+        if d.position() != encoded.len() {
+            return Err("trailing data".into());
+        }
+        let mut object = common.into_object().map_err(|_| "invalid attributes")?;
+        object.material = if class == u64::from(CKO_CERTIFICATE) {
+            if !application.is_empty()
+                || !object_id.is_empty()
+                || crate::certificate_chain::subject(&value).is_err()
+            {
+                return Err("invalid certificate".into());
+            }
+            KeyMaterial::Certificate { instance, value }
+        } else {
+            KeyMaterial::Data {
+                instance,
+                application,
+                object_id,
+                value,
+            }
+        };
+        object.slot_id = Some(slot_id);
+        object.unique_id = unique_id.to_owned();
+        Ok(object)
+    };
+    let object = decode().map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    if encode_data_object(&object)?.as_slice() != encoded {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(object)
+}
+
 pub(crate) fn encode_backed_object(object: &TokenObject) -> Result<EncodedBackedObject, Error> {
     match &object.material {
+        KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. } if !object.private => {
+            Ok(EncodedBackedObject {
+                object: encode_data_object(object)?.to_vec(),
+                dependencies: Vec::new(),
+            })
+        }
         KeyMaterial::Public(_) if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS => {
             Ok(EncodedBackedObject {
                 object: encode_record(
@@ -315,6 +420,14 @@ pub(crate) fn encode_backed_object(object: &TokenObject) -> Result<EncodedBacked
 }
 
 pub(crate) fn supports_backed_object(object: &TokenObject) -> bool {
+    if !object.private
+        && matches!(
+            object.material,
+            KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
+        )
+    {
+        return true;
+    }
     matches!(
         (&object.material, object.class),
         (
@@ -659,6 +772,15 @@ pub(crate) fn decode_backed_object(
     reference: &ContentReference,
     encoded: &[u8],
 ) -> Result<Option<TokenObject>, Error> {
+    let mut prefix = Decoder::new(encoded);
+    if prefix.array().is_ok() && prefix.str().ok() == Some(DATA_OBJECT_SCHEMA) {
+        let object =
+            decode_data_object(slot_id, token, &backed_object_unique_id(reference), encoded)?;
+        if object.private {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return Ok(Some(object));
+    }
     let record = match BackedKeyMetadata::from_cbor(encoded) {
         Ok(record) => record,
         Err(_) if declares_backed_key_schema(encoded) => return Err(CKR_DATA_INVALID.into()),
