@@ -141,59 +141,39 @@ source HSM.
 
 ## Future protected-key composition
 
-The main missing abstraction is a true HSM-side `C_DeriveKey`: a protected base
-key plus mechanism parameters and an output template should atomically create
-a new protected, chainable HSM key object instead of returning bytes. A
-persistent generic-secret object type is the natural foundation for that
-abstraction and is realistic for physical hardware: it is an ordinary,
-non-extractable NVM object with tightly scoped derivation capabilities, not a
-large or long-lived RAM allocation.
+The [SCP03/SCP11 key-operation plan](scp-key-provider/README.md) uses one protocol
+implementation with interchangeable software and native key providers. The
+native goal includes all AES and MAC operations for protected traffic, with
+intermediates and working keys retained by the device. This is planned support;
+the existing command returns KDF bytes to the host.
 
-A token-output form of this mechanism could create the 64-byte generic secret
-directly in virtual-YubiHSM NVM. Native `CKM_EXTRACT_KEY_FROM_KEY` could then
-derive four persistent, non-extractable AES objects at bit offsets 0, 128, 256,
-and 384. Existing standard PKCS #11 AES-CMAC, ECB, and CBC mechanisms could use
-those objects without any key bytes leaving the HSM.
+The missing abstraction is a protected base object plus derivation parameters
+and an output template atomically creating another chainable device key object.
+Generic-secret intermediates, extraction into AES working keys, and the required
+agreement, composition, and KDF operations should be generic building blocks,
+without introducing an SCP-specific object model. Select the initial mechanism
+set from the actual SCP03/SCP11 operation matrix; broader HKDF, SP 800-108,
+composition, or other derivation families can use the same foundation.
 
-The output need not be AES. A generic secret is itself directly usable as an
-HMAC or KDF base key, while a subsequent mechanism can create an AES key or
-another supported symmetric key type selected by the output template. The
-same foundation naturally covers these common `C_DeriveKey` families:
+Prefer bounded volatile native session objects for intermediates and working
+AES keys. For the four-key construction described above, a protected 64-byte
+result can feed extraction of receipt, S-ENC, S-MAC, and S-RMAC objects without
+exposing any bytes or persisting ephemeral keys. The capacity and identifiers
+must cover the complete operation graph, not assume that only the intermediate
+needs session lifetime. Persistent generic-secret and AES output remain useful
+for deliberate token-object requests; they are not the default channel-key
+lifetime. Any persistent temporary-key fallback requires explicit deletion,
+storage bounds, and crash/orphan recovery.
 
-- ECDH and finite-field DH into a generic secret;
-- HKDF and the SP 800-108 counter, feedback, and double-pipeline KDFs;
-- `CKM_EXTRACT_KEY_FROM_KEY`, concatenate-base/data, and XOR-base/data
-  composition;
-- digest-based key derivation; and
-- protocol-specific TLS derivations where their multi-output semantics can be
-  mapped without exposing intermediate keys.
+Native session objects must be scoped to authenticated device authority, carry
+appropriate capabilities and domain policy, and be cleared on session close,
+timeout, authentication replacement or failure, and protocol invalidation. The
+provider must retain the native session while dependent PKCS #11 handles exist,
+then invalidate those handles when their backing session is lost. Exact command
+and object encoding is part of the planned implementation.
 
-Password-based derivation starts from caller-supplied input rather than an
-existing protected key and is closer to key generation, but it can produce the
-same persistent output objects. Legacy SSL/TLS and obsolete cipher key types
-should not drive the initial hardware design.
-
-Ordinary derived token objects would remain NVM-backed, generation-tracked,
-and explicitly deleted. The first useful hardware-sized subset is persistent
-generic-secret output, extraction into persistent AES keys, protected ECDH,
-HKDF, and SP 800-108; those primitives cover SCP11 and many
-non-protocol-specific uses without baking SCP11 into the object model.
-
-The SCP11 flow needs only one transient intermediate, so a native session
-object is also realistic on constrained hardware. Each authenticated HSM
-session can own one optional, zeroizing generic-secret buffer of at most 64
-bytes. It has sequence zero, is never persisted, and is invisible outside that
-HSM session. Authentication clears it before establishing new authority;
-close, timeout, authentication failure, protocol invalidation, and reset also
-clear it. `pkcs11rs` must retain the underlying HSM session for as long as its
-PKCS #11 session-object handle exists. Four subsequent
-`CKM_EXTRACT_KEY_FROM_KEY` calls can create ordinary persistent AES objects
-without exposing the intermediate bytes. This avoids NVM session-object
-ownership and orphan-cleanup machinery entirely.
-
-For physical or older devices without native generic secrets, a separate
-compatibility design may allow a non-extractable host-memory session secret to
-use `CKM_EXTRACT_KEY_FROM_KEY` solely to import persistent AES token objects.
-That would hide values from the PKCS #11 application but not from the trusted
-provider process, and is intentionally future work rather than part of the
-current mechanism.
+`CKA_TOKEN=CK_FALSE` alone does not promise device residence. Current hardware
+ECDH outputs use the common host software session layer, which can also perform
+AES and MAC operations locally. Native placement and dispatch must be explicit
+for the full device-side workflow. Existing physical firmware needs equivalent
+native support before that stronger boundary can be claimed.

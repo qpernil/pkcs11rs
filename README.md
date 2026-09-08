@@ -1237,6 +1237,21 @@ AES-256-CBC and retains the inner PKCS #9 label and ID attributes.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader
   configuration are not yet provided by this repository.
 
+## Planned: SCP03/SCP11 through PKCS #11 key operations
+
+The [staged implementation plan](docs/scp-key-provider/README.md) starts with
+the completed common session-object layer and ends with a virtual YubiHSM
+performing all secret-key operations for complete SCP03/SCP11 exchanges,
+including AES encryption/decryption and CMAC for the protected traffic.
+
+The protocol uses PKCS #11 key handles and operations. A software slot supplies
+them first; native virtual-YubiHSM commands then supply the same contract while
+keeping intermediate and working keys inside the device. The plan records the
+missing derivations, provider and locking boundaries, native object lifetimes,
+capability checks, and end-to-end completion criteria. Implementing a software
+mechanism in the common layer makes it available to every slot by default,
+subject to the per-slot mechanism filter.
+
 ## Vendored Headers
 
 [`pkcs11.h`](pkcs11.h), [`pkcs11f.h`](pkcs11f.h), and
