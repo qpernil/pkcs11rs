@@ -269,6 +269,11 @@ impl JsonConfiguration {
         if reserved.is_null() {
             return Ok(ReservedConfiguration::Empty);
         }
+        // Reject small integer sentinels before inspecting configuration text.
+        // They are invalid pointers, not the valid NULL/default-config input.
+        if reserved.addr() <= u8::MAX as usize {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
         let pointer = reserved.cast::<c_char>().cast::<u8>();
         let mut length = None;
         for offset in 0..MAX_CONFIGURATION_STRING_BYTES {
@@ -925,6 +930,16 @@ mod tests {
         ));
         let mut invalid = b"{not json\0".to_vec();
         assert!(unsafe { JsonConfiguration::from_reserved(invalid.as_mut_ptr().cast()) }.is_err());
+    }
+
+    #[test]
+    fn reserved_integer_sentinels_are_rejected_without_dereferencing() {
+        for address in 1..=255 {
+            assert!(matches!(
+                unsafe { JsonConfiguration::from_reserved(std::ptr::without_provenance_mut(address)) },
+                Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as crate::CK_RV
+            ));
+        }
     }
 
     #[test]
