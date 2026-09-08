@@ -18,6 +18,8 @@ mod hardware_provisioning {
     use super::*;
     use std::rc::Rc;
 
+    mod shared_symmetric;
+
     const ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH";
     const AUTHKEY_ID_ENV: &str = "PKCS11RS_TEST_YUBIHSM_AUTHKEY_ID";
     const TOUCH_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_TOUCH_ASYMMETRIC_HSMAUTH";

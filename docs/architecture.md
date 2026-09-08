@@ -332,6 +332,12 @@ without copying the credential protocol. Applet discovery, reader selection,
 PKCS #11 error mapping, and target-session policy remain in their respective
 callers.
 
+Symmetric authentication obtains the host challenge from the selected applet.
+Its calculation request contains the challenge context and credential password;
+the asymmetric receipt field is omitted. The host verifies the HSM card
+cryptogram with the returned session MAC key before accepting the secure
+session. See [YubiHSM authentication](yubihsm-auth.md).
+
 An asymmetric credential's public point may be persisted as an ordinary public
 object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
 The optional `C_LoginUser` wildcard selector asks the target YubiHSM slot to
