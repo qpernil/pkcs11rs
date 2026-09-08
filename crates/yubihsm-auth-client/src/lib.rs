@@ -155,22 +155,18 @@ impl Client {
         self.command(transport, INS_GET_CHALLENGE, 0, 0, data)
     }
 
+    /// Derive keys for the applet-generated host challenge and HSM challenge.
+    /// The caller must verify the HSM card cryptogram with the returned MAC key
+    /// before accepting the target session; symmetric calculation does not send
+    /// the asymmetric receipt TLV to the applet.
     pub fn calculate_session_keys_symmetric<T: Transport>(
         &self,
         transport: &T,
         label: &str,
         context: &[u8],
-        card_cryptogram: &[u8],
         credential_password: &[u8],
     ) -> Result<SessionKeys, Error<T::Error>> {
-        self.calculate_session_keys(
-            transport,
-            label,
-            context,
-            None,
-            card_cryptogram,
-            credential_password,
-        )
+        self.calculate_session_keys(transport, label, context, None, &[], credential_password)
     }
 
     pub fn calculate_session_keys_asymmetric<T: Transport>(
@@ -209,7 +205,11 @@ impl Client {
         if let Some(public_key) = public_key {
             data.extend(encode_tlv(TAG_PUBLIC_KEY, public_key)?);
         }
-        data.extend(encode_tlv(TAG_RESPONSE, response)?);
+        // The response tag is an asymmetric receipt. Symmetric credentials
+        // return session keys; the host verifies the HSM card cryptogram.
+        if public_key.is_some() {
+            data.extend(encode_tlv(TAG_RESPONSE, response)?);
+        }
         let password = padded_password(credential_password)?;
         data.extend(encode_tlv(TAG_CREDENTIAL_PASSWORD, password.as_ref())?);
         let response = Zeroizing::new(self.command(transport, INS_CALCULATE, 0, 0, data)?);

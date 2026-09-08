@@ -138,6 +138,13 @@ impl Transport for ConnectorTransport<'_> {
         let response = self.0.send_short_apdu(&command);
         command.data.zeroize();
         let response = response?;
+        log!(
+            2,
+            "YubiHSM Auth {} returned status {} with {} data bytes",
+            hsmauth_command_name(command.ins),
+            hsmauth_status_diagnostic(response.status),
+            response.data.len()
+        );
         Ok(ProtocolResponse {
             data: response.data,
             status: response.status,
@@ -254,7 +261,6 @@ impl Client {
         connector: &dyn Connector,
         label: &str,
         context: &[u8],
-        card_cryptogram: &[u8],
         credential_password: &[u8],
     ) -> Result<SessionKeys, Error> {
         ProtocolClient
@@ -262,7 +268,6 @@ impl Client {
                 &ConnectorTransport(connector),
                 label,
                 context,
-                card_cryptogram,
                 credential_password,
             )
             .map_err(map_protocol_error)
@@ -935,13 +940,7 @@ mod tests {
         let challenge = Client.get_challenge(&connector, "symmetric", None).unwrap();
         assert_eq!(challenge, vec![0x11; 8]);
         let symmetric = Client
-            .calculate_session_keys_symmetric(
-                &connector,
-                "symmetric",
-                &[0x44; 16],
-                &[0x55; 8],
-                b"password",
-            )
+            .calculate_session_keys_symmetric(&connector, "symmetric", &[0x44; 16], b"password")
             .unwrap();
         assert_eq!(symmetric.enc.as_slice(), &[0x22; 16]);
 
@@ -970,7 +969,7 @@ mod tests {
             [4, 3, 4, 3]
         );
         assert!(
-            commands[1]
+            !commands[1]
                 .data
                 .windows(2)
                 .any(|value| value == [TAG_RESPONSE, 8])

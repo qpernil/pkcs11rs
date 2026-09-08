@@ -1659,7 +1659,7 @@ impl Connector for ProtocolPeer {
 }
 
 #[derive(Debug)]
-struct SymmetricHsmAuthPeer(bool);
+struct SymmetricHsmAuthPeer(bool, Option<bool>);
 
 impl Connector for SymmetricHsmAuthPeer {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
@@ -1684,16 +1684,39 @@ impl Connector for SymmetricHsmAuthPeer {
         4096
     }
     fn send_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        const CHALLENGE: [u8; 8] = [0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01];
+        if command.ins == 0x04 {
+            let password = test_tlv_value(&command.data, 0x73).ok();
+            if let Some(expected) = self.1 {
+                assert_eq!(password.is_some(), expected);
+            }
+            if password.is_some_and(|p| p != [PASSWORD, &[0; 8]].concat()) {
+                return Ok(crate::ResponseApdu {
+                    data: Vec::new(),
+                    status: 0x63c7,
+                });
+            }
+            return Ok(crate::ResponseApdu {
+                data: CHALLENGE.to_vec(),
+                status: 0x9000,
+            });
+        }
         if command.ins != 0x03 {
             return Err(CKR_DEVICE_ERROR.into());
         }
         let context = test_tlv_value(&command.data, 0x77)?;
-        let card_cryptogram = test_tlv_value(&command.data, 0x78)?;
+        if context.get(..8) != Some(CHALLENGE.as_slice()) {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x6a80,
+            });
+        }
+        assert!(
+            test_tlv_value(&command.data, 0x78).is_err(),
+            "symmetric calculation must omit the asymmetric receipt tag"
+        );
         let password = test_tlv_value(&command.data, 0x73)?;
-        if context.len() != 16
-            || card_cryptogram.len() != 8
-            || password != [PASSWORD, &[0; 8]].concat()
-        {
+        if context.len() != 16 || password != [PASSWORD, &[0; 8]].concat() {
             return Ok(crate::ResponseApdu {
                 data: Vec::new(),
                 status: 0x63c7,
@@ -1703,12 +1726,6 @@ impl Connector for SymmetricHsmAuthPeer {
         let s_enc = derive_key(&static_keys[..16], 0x04, context)?;
         let s_mac = derive_key(&static_keys[16..], 0x06, context)?;
         let s_rmac = derive_key(&static_keys[16..], 0x07, context)?;
-        if card_cryptogram != derive_cryptogram(&s_mac, 0x00, context)? {
-            return Ok(crate::ResponseApdu {
-                data: Vec::new(),
-                status: 0x6a80,
-            });
-        }
         Ok(crate::ResponseApdu {
             data: [s_enc, s_mac, s_rmac].concat(),
             status: 0x9000,
@@ -2094,7 +2111,7 @@ fn symmetric_hsmauth_provider_with_presence(
     present: bool,
 ) -> crate::HsmAuthProvider {
     crate::HsmAuthProvider {
-        connector: Rc::new(SymmetricHsmAuthPeer(present)).into(),
+        connector: Rc::new(SymmetricHsmAuthPeer(present, None)).into(),
         credential: crate::HsmAuthCredential {
             label: label.to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -2119,7 +2136,7 @@ pub(crate) enum YubiHsmAuthFailure {
 impl YubiHsmAuthFailure {
     pub(crate) fn expected_login_error(self) -> crate::CK_RV {
         match self {
-            Self::SecureChannel => crate::CKR_DATA_INVALID as crate::CK_RV,
+            Self::SecureChannel => crate::CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV,
             _ => crate::CKR_PIN_INCORRECT as crate::CK_RV,
         }
     }
@@ -5029,6 +5046,48 @@ fn device_public_key_uses_the_asymmetric_authentication_algorithm() {
 }
 
 #[test]
+fn symmetric_hsmauth_uses_applet_challenges_with_versioned_password_authentication() {
+    for (version, password_required) in [((5, 4, 3), false), ((5, 7, 1), true), ((0, 0, 1), true)] {
+        let target = ProtocolPeer::new();
+        let mut provider = symmetric_hsmauth_provider("12345678");
+        provider.version = version;
+        provider.connector = Rc::new(SymmetricHsmAuthPeer(true, Some(password_required))).into();
+        let mut session = provider.authenticate(&target, 1, PASSWORD).unwrap();
+        assert_eq!(
+            session
+                .send_command(&target, &Command::echo(b"challenge checked").unwrap())
+                .unwrap(),
+            b"challenge checked"
+        );
+        session
+            .send_command(&target, &Command::close_session())
+            .unwrap();
+        assert!(!target.has_active_session());
+        if password_required {
+            target.commands.borrow_mut().clear();
+            assert!(
+                matches!(provider.authenticate(&target, 1, b"incorrect"), Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as crate::CK_RV)
+            );
+            assert!(
+                target.commands.borrow().is_empty(),
+                "failed challenge authentication must not create an HSM session"
+            );
+        }
+    }
+}
+
+#[test]
+fn hsmauth_rejects_bad_card_cryptogram_and_closes_the_session() {
+    let target = ProtocolPeer::with_bad_card_cryptogram();
+    let provider = symmetric_hsmauth_provider("12345678");
+    assert!(
+        matches!(provider.authenticate(&target, 1, PASSWORD), Err(Error::Generic(rv)) if rv == crate::CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV)
+    );
+    assert!(!target.has_active_session());
+    assert_eq!(target.closed_sessions.get(), 1);
+}
+
+#[test]
 fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     #[cfg(unix)]
     let _guard = crate::test::TEST_LOCK.lock().unwrap();
@@ -5036,7 +5095,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     let pinentry = crate::test::TestPinentry::new("password");
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true)).into(),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true, None)).into(),
         credential: crate::HsmAuthCredential {
             label: "default key".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -5049,7 +5108,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         source: String::from("12345678"),
     };
     let duplicate = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true)).into(),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true, None)).into(),
         source: String::from("87654321"),
         ..provider.clone()
     };
@@ -5316,7 +5375,7 @@ fn hsmauth_wildcard_tries_duplicate_public_projections_until_authentication_succ
 fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
     let yubihsm = ProtocolPeer::new();
     let provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true)).into(),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true, None)).into(),
         credential: crate::HsmAuthCredential {
             label: "default key".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -5324,7 +5383,7 @@ fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
             touch_required: false,
             public_key: None,
         },
-        version: (5, 7, 1),
+        version: (5, 4, 3),
         trust_prefix: None,
         source: String::from("12345678"),
     };
@@ -5420,7 +5479,7 @@ fn hsmauth_algorithm_mismatches_fail_without_probing() {
     let asymmetric_target = ProtocolPeer::new();
     asymmetric_target.use_asymmetric_authentication(1);
     let symmetric_provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true)).into(),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer(true, None)).into(),
         credential: crate::HsmAuthCredential {
             label: "symmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,

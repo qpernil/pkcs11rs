@@ -1,5 +1,18 @@
 # YubiHSM and YubiHSM Auth
 
+For additive provisioning of the same symmetric credential onto multiple
+YubiKeys and local HSMs, see [shared HSM Auth provisioning](shared-hsmauth-provisioning.md).
+
+Symmetric HSM Auth login obtains its eight-byte host challenge from the
+credential's applet before creating the HSM session. Firmware 5.7.1 and later
+also requires the credential password on that challenge request; earlier
+firmware receives the request without a password. The applet then derives
+session keys for that challenge, and the host verifies the HSM cryptogram using
+the returned session MAC key. The symmetric calculation APDU omits the response
+tag used for asymmetric receipts. A failed
+challenge request does not create an HSM session. Login retains the resulting
+session keys under the [authentication secret policy](authentication-secrets.md).
+
 ## Slot layout
 
 The module exposes one slot for every selectable CCID applet, one slot for

@@ -235,8 +235,18 @@ impl HsmAuthProvider {
                     yubihsm_connector.name(),
                     authkey_id
                 );
-                let mut challenge = [0; 8];
-                getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+                // The applet binds calculation to its own challenge. Firmware
+                // 5.7.1+ also authenticates this request with the credential password.
+                let challenge_password = (self.version.0 == 0 || self.version >= (5, 7, 1))
+                    .then_some(credential_password);
+                let challenge = HsmAuthClient
+                    .get_challenge(
+                        self.connector.as_ref(),
+                        &self.credential.label,
+                        challenge_password,
+                    )?
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
                 let handshake = YubiHsmSecureSession::begin_symmetric(
                     yubihsm_connector,
                     authkey_id,
@@ -257,7 +267,6 @@ impl HsmAuthProvider {
                     self.connector.as_ref(),
                     &self.credential.label,
                     &handshake.context,
-                    &handshake.card_cryptogram,
                     credential_password,
                 );
                 let keys = match keys {

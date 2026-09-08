@@ -598,7 +598,15 @@ impl SecureSession {
         s_mac: Zeroizing<[u8; AES_BLOCK_SIZE]>,
         s_rmac: Zeroizing<[u8; AES_BLOCK_SIZE]>,
     ) -> Result<Self, Error> {
-        Self::complete_symmetric(connector, handshake, s_enc, s_mac, s_rmac, None)
+        let expected_card = derive_cryptogram(&s_mac[..], 0x00, &handshake.context)?;
+        Self::complete_symmetric(
+            connector,
+            handshake,
+            s_enc,
+            s_mac,
+            s_rmac,
+            Some(expected_card),
+        )
     }
 
     pub(crate) fn finish_failed_symmetric_handshake(
