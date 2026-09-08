@@ -107,6 +107,11 @@ class ClientTests(unittest.TestCase):
                 self.secrets.append(pin)
                 self.env["PKCS11RS_YUBIHSM_DISCOVERY"] = pin
                 configuration["yubihsm"]["public_discovery"] = pin
+            if self.options.hardware_login_pin_env:
+                pin = os.environ[self.options.hardware_login_pin_env]
+                self.secrets.extend(value for value in (pin, pin.split(":", 2)[-1]) if value)
+                self.env["CLIENT_USER_PIN"] = pin
+                self.env["PKCS11_PIN"] = pin
             self.env["CLIENT_CONFIG"] = json.dumps(configuration)
         if self.options.provider:
             self.env["CLIENT_PROVIDER"] = str(self.options.provider)
@@ -124,7 +129,7 @@ class ClientTests(unittest.TestCase):
         self.message = self.directory / "message.bin"
         self.message.write_bytes(b"pkcs11rs external client integration\x00\xff\n" * 2048)
         if self.options.hardware_token:
-            return  # Hardware cases must never initialize a token or provision objects.
+            return  # Hardware fixtures never initialize a token or change its PIN.
         self.p11("--init-token", "--label", TOKEN, "--so-pin", "env:CLIENT_SO_PIN")
         self.p11("--login", "--login-type", "so", "--so-pin", "env:CLIENT_SO_PIN",
                  "--init-pin", "--pin", "env:CLIENT_USER_PIN")
@@ -395,6 +400,101 @@ class HardwareTests(ClientTests):
         self.openssl("pkey", "-pubin", "-inform", "DER", "-in", exported, "-pubcheck", "-noout")
 
 
+class HardwareCryptoTests(ClientTests):
+    """Explicit HSM Auth login, temporary keys, and verified object cleanup."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ids: dict[str, str] = {}
+        self.owned: list[tuple[str, str, str]] = []
+        self.label_prefix = f"client-{secrets.token_hex(8)}"
+        self.before = self.inventory()
+        self.addCleanup(self.cleanup_hardware)
+
+    def inventory(self) -> set[str]:
+        output = super().p11("--list-objects", login=True)
+        uris = set(re.findall(r"^\s*uri:\s*(\S+)\s*$", output, re.MULTILINE))
+        if re.search(r"\bObject\b", output):
+            self.assertTrue(uris, "pkcs11-tool must report object URIs for inventory verification")
+        return uris
+
+    def hardware_id(self, logical: str) -> str:
+        if logical not in self.ids:
+            # Long PKCS #11 IDs use persisted metadata; the HSM allocates the
+            # underlying physical ID, avoiding collisions with existing keys.
+            actual = secrets.token_hex(16)
+            output = super().p11("--list-objects", "--id", actual, login=True)
+            self.assertNotRegex(output, r"\bObject\b", "temporary ID already exists")
+            self.ids[logical] = actual
+        return self.ids[logical]
+
+    def p11(self, *args: str | Path, login: bool = False, **kwargs) -> str:
+        args = list(args)
+        forbidden = {"--init-token", "--init-pin", "--change-pin", "--unlock-pin",
+                     "--delete-object", "--reset"}
+        self.assertFalse(forbidden.intersection(args), "unsafe hardware test operation")
+        logical = None
+        if "--id" in args:
+            index = args.index("--id") + 1
+            logical = str(args[index])
+            args[index] = self.hardware_id(logical)
+        creating = "--keypairgen" in args or "--write-object" in args
+        if creating:
+            self.assertIsNotNone(logical, "hardware key creation needs an explicit ID")
+            actual = self.ids[logical]
+            self.assertFalse(any(key_id == actual for key_id, _, _ in self.owned),
+                             "refusing to reuse a created hardware ID")
+            label = f"{self.label_prefix}-{logical}"
+            if "--label" in args:
+                args[args.index("--label") + 1] = label
+            else:
+                args += ["--label", label]
+            kinds = ("privkey", "pubkey") if "--keypairgen" in args else ("secrkey",)
+            if "--write-object" in args:
+                self.assertEqual(args[args.index("--type") + 1], "secrkey")
+            # Register before dispatch so a timed-out command can still clean up
+            # its own uniquely labelled additions. Never delete by ID alone.
+            self.owned.extend((actual, label, kind) for kind in kinds)
+        return super().p11(*args, login=login, **kwargs)
+
+    def uri(self, key_id: str = "01", kind: str = "private") -> str:
+        return super().uri(self.hardware_id(key_id), kind)
+
+    def cleanup_hardware(self) -> None:
+        failures = []
+        for key_id, label, kind in self.owned:
+            try:
+                selector = ("--type", kind, "--id", key_id, "--label", label)
+                output = super().p11("--list-objects", *selector, login=True)
+                if re.search(r"\bObject\b", output):
+                    super().p11("--delete-object", *selector, login=True)
+                output = super().p11("--list-objects", *selector, login=True)
+                self.assertNotRegex(output, r"\bObject\b", "temporary object remains")
+            except (AssertionError, OSError) as error:
+                failures.append(f"{kind} id={key_id} label={label}: {error}")
+        try:
+            self.assertEqual(self.inventory(), self.before,
+                             "hardware object inventory differs after cleanup")
+        except (AssertionError, OSError) as error:
+            failures.append(str(error))
+        self.assertFalse(failures, "Hardware cleanup failed:\n" + "\n".join(failures))
+
+    def test_hardware_opensc_login_and_random(self) -> None:
+        self.assertIn(self.token, self.p11("--list-slots"))
+        random = self.directory / "random.bin"
+        self.p11("--generate-random", "64", "--output-file", random, login=True)
+        self.assertEqual(len(random.read_bytes()), 64)
+
+    test_hardware_opensc_rsa_signatures = OpenSCTests.test_rsa_signatures
+    test_hardware_opensc_ecdsa_signature = OpenSCTests.test_ecdsa_signature
+    test_hardware_opensc_rsa_oaep_decrypt = OpenSCTests.test_rsa_oaep_decrypt
+    test_hardware_opensc_aes_encrypt_decrypt = OpenSCTests.test_aes_import_encrypt_decrypt
+    test_hardware_provider_uri_selection = OpenSSLTests.test_provider_and_uri_selection
+    test_hardware_provider_signatures = OpenSSLTests.test_provider_signatures
+    test_hardware_provider_rsa_decrypt = OpenSSLTests.test_provider_rsa_decrypt
+    test_hardware_provider_certificate_request = OpenSSLTests.test_certificate_request
+
+
 class RecordedResult(unittest.TextTestResult):
     def startTest(self, test):
         super().startTest(test)
@@ -435,16 +535,26 @@ def main() -> int:
     parser.add_argument("--pkcs11-tool", default="pkcs11-tool")
     parser.add_argument("--openssl", default="openssl")
     parser.add_argument("--case", action="append", help="Run a named method, e.g. test_provider_signatures")
-    parser.add_argument("--hardware-token", help="Opt-in public discovery of this exact token label; requires --module")
+    parser.add_argument("--hardware-token", help="Select this exact hardware token; defaults to public discovery, requires --module")
     parser.add_argument("--hardware-public-id", help="Hex CKA_ID of an existing public key for OpenSSL discovery")
     parser.add_argument("--discovery-pin-env", help="Environment variable holding a confirmed YubiHSM public-discovery selector")
+    parser.add_argument("--hardware-login-pin-env", help="Opt in to hardware crypto and temporary key creation using the HSM Auth login selector in this environment variable")
     parser.add_argument("--timeout", type=float, default=60, help="Per-command timeout in seconds")
     parser.add_argument("--results", type=Path, default=ROOT / "target/client-results.json")
     options = parser.parse_args()
     if options.hardware_token and not options.module:
         parser.error("--hardware-token requires an explicitly built native --module")
-    if options.hardware_token and options.client != "opensc" and not options.hardware_public_id:
+    if (options.hardware_token and options.client != "opensc"
+            and not options.hardware_public_id and not options.hardware_login_pin_env):
         parser.error("Hardware OpenSSL discovery requires --hardware-public-id")
+    if options.hardware_login_pin_env:
+        if not options.hardware_token:
+            parser.error("--hardware-login-pin-env requires --hardware-token")
+        if options.discovery_pin_env or options.hardware_public_id:
+            parser.error("Select authenticated hardware crypto or public discovery, not both")
+        pin = os.environ.get(options.hardware_login_pin_env, "")
+        if not re.fullmatch(r":[0-9a-fA-F]{4}[^:]+:.*", pin):
+            parser.error("Hardware login requires an explicit :AAAA<label>[@source]:password HSM Auth selector")
     if options.hardware_public_id:
         if not options.hardware_token:
             parser.error("--hardware-public-id requires --hardware-token")
@@ -481,7 +591,7 @@ def main() -> int:
     classes = {"opensc": [OpenSCTests], "openssl": [OpenSSLTests],
                "all": [OpenSCTests, OpenSSLTests]}[options.client]
     if options.hardware_token:
-        classes = [HardwareTests]
+        classes = [HardwareCryptoTests if options.hardware_login_pin_env else HardwareTests]
     tests = [test for cls in classes for test in unittest.defaultTestLoader.loadTestsFromTestCase(cls)]
     if options.hardware_token and options.client != "all":
         selected = "opensc" if options.client == "opensc" else "provider"
@@ -507,6 +617,7 @@ def main() -> int:
         "openssl_sha256": hashlib.sha256(Path(options.openssl).read_bytes()).hexdigest(),
         "pkcs11_tool_sha256": hashlib.sha256(Path(options.pkcs11_tool).read_bytes()).hexdigest(),
         "hardware_token": options.hardware_token,
+        "hardware_mode": ("crypto" if options.hardware_login_pin_env else "discovery") if options.hardware_token else None,
         "cases": ClientTests.records,
         "successful": result.wasSuccessful(),
     }

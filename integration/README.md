@@ -98,7 +98,67 @@ removed from OpenSSL's environment so the test depends on `init_args` reaching
 per-fixture USER PIN. PINs are absent from command arguments and configuration
 files; diagnostic output is redacted before it is retained.
 
-## Existing hardware: public discovery only
+## Hardware crypto with YubiHSM Auth
+
+`--hardware-login-pin-env` enables nine hardware crypto cases using an existing
+YubiHSM Auth credential. It exercises fresh authenticated sessions through
+OpenSC and OpenSSL/libp11, with the configuration JSON passed through the
+OpenSSL provider's `init_args`. It does not use a separate discovery password,
+platform credential, session-recreation opt-in, or a test authentication key.
+
+For the [shared local credential](../docs/shared-hsmauth-provisioning.md), supply
+`HSM_LOGIN` through your credential input mechanism with the value
+`:1006shared@37070618:<credential-password>`, then run:
+
+```sh
+cargo build --locked -p pkcs11rs
+python3 integration/run_clients.py \
+  --module target/debug/libpkcs11rs.dylib \
+  --hardware-token 'YubiHSM #1238075073' \
+  --hardware-login-pin-env HSM_LOGIN \
+  --results target/client-hardware-crypto-1238075073.json
+```
+
+The same credential works on local HSM `2545354682`; select its exact token
+label and a separate report filename. YubiKey `37987918` is also provisioned;
+use its serial in the login selector when selecting that source. Only the
+selected local HSM is used. Remote connector URLs are excluded. The runner
+requires an explicit HSM Auth selector and never guesses credentials.
+
+| Client | Hardware cases |
+| --- | --- |
+| OpenSC | Login and authenticated random generation |
+| OpenSC | RSA PKCS #1 v1.5, RSA-PSS, and ECDSA signing with independent verification and tamper rejection |
+| OpenSC | RSA-OAEP/SHA-256 decryption |
+| OpenSC | AES ECB/CBC/CBC-PAD encryption and decryption, including boundary sizes through 72 KiB |
+| OpenSSL/libp11 | URI selection and public-key export |
+| OpenSSL/libp11 | RSA PKCS #1 v1.5, RSA-PSS, and ECDSA signing, verified independently |
+| OpenSSL/libp11 | RSA PKCS #1 v1.5 and OAEP/SHA-256 decryption |
+| OpenSSL/libp11 | RSA and EC certificate requests, independently verified |
+
+This mode creates temporary RSA/EC keys and imports a public AES test vector.
+Every key receives a random 128-bit PKCS #11 ID and unique label; pkcs11rs lets
+the HSM allocate its underlying physical ID. Cleanup selects each test object
+by ID, label, and class, checks that it disappeared, and compares the complete
+visible object-URI inventory with the case's starting inventory. Cleanup runs
+even after a test fails or a command times out, and cleanup failures fail the
+case and appear in the JSON report. No token initialization, reset, PIN change,
+or authentication-key modification is part of these tests. Do not run unrelated
+object administration concurrently with the inventory comparisons.
+
+An interrupted process or disconnected device can leave temporary objects.
+Their exact IDs and labels are in the report's command records when a report
+can be written. Inspect those objects before manual cleanup; do not delete
+objects by ID alone. Clear the login environment variable after the run.
+
+The hardware fixture's timeout cleanup, ownership filters, inventory checking,
+and mutation restrictions have hardware-independent regressions:
+
+```sh
+python3 -m unittest discover -s integration -p 'test_*.py'
+```
+
+## Existing hardware: public discovery
 
 The optional hardware mode contains no token initialization, PIN changes, key
 generation, import, deletion, or reset. It selects an exact token label and can
@@ -128,8 +188,8 @@ discovery credential, the OpenSC case checks discovery without requiring public
 objects. Hardware runs need normal OS USB access, which can be unavailable
 inside a sandbox.
 
-Hardware signing and platform-credential login are not claimed by these two
-public-discovery cases. Apple's `reserve` credential is scoped to the signed
+Hardware signing is covered separately by the HSM Auth crypto mode above.
+Platform-credential login is not covered. Apple's `reserve` credential is scoped to the signed
 pkcs11rs tool's Keychain access group; ordinary Homebrew executables do not
 inherit that entitlement by loading the module. See
 [platform credential hosting](../docs/pkcs11rs-tool.md#platform-credentials).
@@ -146,3 +206,18 @@ Linux CI runs the OpenSC cases. macOS CI runs both clients and requires the
 libp11 provider. Each job uploads its JSON report on success or failure.
 Local verification covers OpenSC 0.27.1, libp11 0.4.21, and OpenSSL 3.6.4 on
 macOS; the two public-discovery cases also pass on YubiHSM serial 1238075073.
+
+Hardware crypto qualification uses YubiKey 37070618's `shared` credential:
+
+| Local HSM | Verified result |
+| --- | --- |
+| 1238075073 | All nine hardware cases pass in one run |
+| 2545354682 | Eight cases pass in the full run; the provider-signature case passes in a separate run |
+
+The second HSM's full run encountered `C_GetSlotList` returning
+`CKR_BUFFER_TOO_SMALL` during public-key export, before the affected signature
+operation. The failure remains recorded, without automatic command retries
+or suppression.
+The cryptographic cases require stable smart-card discovery even though the
+target HSM and credential source are selected explicitly. Object cleanup and
+starting-inventory comparisons pass on both HSMs.
