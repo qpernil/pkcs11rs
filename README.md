@@ -960,6 +960,21 @@ The Python ABI suite builds the shared library with its deterministic test
 backend, loads the resulting `.so`, `.dylib`, or `.dll`, and exercises its
 exported PKCS #11 entry points.
 
+Run the production-module external client suite with OpenSC and libp11's
+OpenSSL 3 provider:
+
+```sh
+python3 integration/run_clients.py
+```
+
+It uses disposable persistent software tokens to test RSA/ECDSA signing,
+RSA decryption, streaming AES, PIN and object lifecycles, JSON initialization
+through OpenSSL, and certificate requests. `--client opensc` runs the OpenSC
+cases without requiring the OpenSSL PKCS #11 provider. An opt-in hardware mode
+performs public discovery and public-key comparison without modifying token
+objects. See [external client integration tests](integration/README.md) for
+dependencies, case selection, safety boundaries, and JSON result reports.
+
 The four final OASIS PKCS #11 3.2 mandatory provider profile artifacts are
 also executable as four separate tests against either the deterministic ABI
 backend or a selected production module and slot:
