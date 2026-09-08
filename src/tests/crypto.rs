@@ -1,6 +1,102 @@
 use super::*;
 
 #[test]
+fn digest_sizing_does_not_consume_or_freeze_input() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(crate::SoftwareSlot::new("digest-sizing".into(), 0)),
+    );
+    let session = open_test_session(TEST_SLOT_ID);
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let expected = test_hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(
+        crate::api::C_DigestInit(session, &mut mechanism),
+        CKR_OK as CK_RV
+    );
+    let mut sizing_input = vec![0x5a; 1024 * 1024];
+    let mut length = 0;
+    assert_eq!(
+        crate::api::C_Digest(
+            session,
+            sizing_input.as_mut_ptr(),
+            sizing_input.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut length
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(length, 32);
+    let mut data = *b"abc";
+    let mut output = [0x5a; 32];
+    length = 1;
+    assert_eq!(
+        crate::api::C_Digest(
+            session,
+            data.as_mut_ptr(),
+            3,
+            output.as_mut_ptr(),
+            &mut length
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(output, [0x5a; 32]);
+    assert_eq!(length, 32);
+    assert_eq!(
+        crate::api::C_Digest(
+            session,
+            data.as_mut_ptr(),
+            3,
+            output.as_mut_ptr(),
+            &mut length
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(output.as_slice(), expected);
+
+    assert_eq!(
+        crate::api::C_DigestInit(session, &mut mechanism),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DigestUpdate(session, data.as_mut_ptr(), 1),
+        CKR_OK as CK_RV
+    );
+    length = 0;
+    assert_eq!(
+        crate::api::C_DigestFinal(session, std::ptr::null_mut(), &mut length),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(length, 32);
+    length = 1;
+    assert_eq!(
+        crate::api::C_DigestFinal(session, output.as_mut_ptr(), &mut length),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(length, 32);
+    assert_eq!(
+        crate::api::C_DigestUpdate(session, data[1..].as_mut_ptr(), 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DigestFinal(session, output.as_mut_ptr(), &mut length),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(output.as_slice(), expected);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
 pub fn mechanism_list_reports_supported_mechanisms() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
