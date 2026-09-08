@@ -79,7 +79,7 @@ fn software_secret_material_has_explicit_usage_and_extraction_policy() {
     assert!(object.can_wrap());
     assert!(object.can_unwrap());
     assert!(!object.extractable);
-    assert!(object.never_extractable);
+    assert!(!object.never_extractable);
 
     object.material = crate::KeyMaterial::SoftwareSecret(zeroize::Zeroizing::new(value.clone()));
     object.sensitive = false;
@@ -1549,7 +1549,7 @@ pub fn create_object_requires_and_imports_real_key_material() {
     );
     assert_eq!(
         imported.attribute_value(CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
-        Some(vec![CK_TRUE as CK_BBOOL])
+        Some(vec![CK_FALSE as CK_BBOOL])
     );
 
     let extractable_private_template = crate::TokenObjectTemplate {

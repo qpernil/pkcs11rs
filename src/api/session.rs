@@ -374,7 +374,6 @@ session_unsupported_stub!(C_SetOperationState(
 
 fn login_role(
     ctx: &mut SlotContext,
-    session_handle: CK_SESSION_HANDLE,
     slot_id: CK_SLOT_ID,
     role: LoginRole,
     authenticate: impl FnOnce(&mut dyn Slot) -> Result<(), Error>,
@@ -387,17 +386,13 @@ fn login_role(
             CKR_USER_ANOTHER_ALREADY_LOGGED_IN.into()
         });
     }
-    if role == LoginRole::So {
-        let flags = ctx._get_session(session_handle)?.1.flags();
-        if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
-            return Err(CKR_SESSION_READ_ONLY.into());
-        }
-        if ctx.sessions.values().any(|session| {
+    if role == LoginRole::So
+        && ctx.sessions.values().any(|session| {
             session.backend().slotID() == slot_id
                 && session.backend().flags() & CKF_RW_SESSION as CK_FLAGS == 0
-        }) {
-            return Err(CKR_SESSION_READ_ONLY_EXISTS.into());
-        }
+        })
+    {
+        return Err(CKR_SESSION_READ_ONLY_EXISTS.into());
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
     ctx.login_role = Some(role);
@@ -474,7 +469,7 @@ fn login(
             _ => return Err(CKR_USER_TYPE_INVALID.into()),
         };
         with_optional_pin(pin, pin_len, |pin| {
-            login_role(ctx, session_handle, slot_id, role, |slot| match role {
+            login_role(ctx, slot_id, role, |slot| match role {
                 LoginRole::User => match pin {
                     Some(pin) => slot.login_with_pinentry(pin, pinentry.as_ref()),
                     None => slot.login_without_pin(pinentry.as_ref()),
@@ -562,7 +557,7 @@ fn login_user(
             Vec::new()
         };
         with_optional_pin(pin, pin_len, |pin| {
-            login_role(ctx, session_handle, slot_id, LoginRole::User, |slot| {
+            login_role(ctx, slot_id, LoginRole::User, |slot| {
                 if let Some(pin) = pin {
                     return slot.login_user(slot_id, username.as_bytes(), pin, &token_objects);
                 }
