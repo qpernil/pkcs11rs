@@ -162,12 +162,33 @@ ffi_entry_point! {
     }
 }
 
+fn discover_slot_ids(ctx: &ModuleContext, token_present: bool) -> Result<Vec<CK_SLOT_ID>, Error> {
+    let initialized = ctx.init()?;
+    ctx.refresh_discovery_after_init(initialized)?;
+    let slot_contexts = ctx
+        .slot_contexts
+        .read()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let mut keys = Vec::new();
+    for (slot_id, child) in slot_contexts.iter() {
+        if !token_present
+            || child.lock().map_err(|_| CKR_MUTEX_BAD)?.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS
+                != 0
+        {
+            keys.push(*slot_id);
+        }
+    }
+    keys.sort();
+    Ok(keys)
+}
+
 ffi_entry_point! {
     pub fn C_GetSlotList(
         token_present: ::std::os::raw::c_uchar,
         slot_list: *mut CK_SLOT_ID,
         count: *mut ::std::os::raw::c_ulong,
     ) -> CK_RV {
+        let pending = crate::slot_list::take_snapshot();
         unsafe {
             log!(
                 2,
@@ -179,39 +200,34 @@ ffi_entry_point! {
                 Err(error) => return error.into(),
             };
             match with_context(|ctx| {
-                let initialized = ctx.init()?;
-                ctx.refresh_discovery_after_init(initialized)?;
-                let slot_contexts = ctx
-                    .slot_contexts
-                    .read()
-                    .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-                let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
-                    slot_contexts.keys().copied().collect()
-                } else {
-                    let mut keys = Vec::new();
-                    for (slot_id, child) in slot_contexts.iter() {
-                        let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
-                        if child.slot.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0 {
-                            keys.push(*slot_id);
-                        }
+                let snapshot = match pending.filter(|snapshot| {
+                    !slot_list.is_null() && snapshot.matches(&ctx.handles, token_present != 0)
+                }) {
+                    Some(snapshot) => snapshot,
+                    None => {
+                        crate::slot_list::Snapshot::new(
+                            &ctx.handles, token_present != 0,
+                            discover_slot_ids(ctx, token_present != 0)?,
+                        )
                     }
-                    keys
                 };
+                let keys = &snapshot.slots;
                 if slot_list.is_null() {
                     *count = keys.len() as CK_ULONG;
+                    snapshot.save();
                     log!(2, "C_GetSlotList returning {:?}", *count);
                     return Ok(CKR_OK as CK_RV);
                 }
 
                 if *count < keys.len() as CK_ULONG {
                     *count = keys.len() as CK_ULONG;
+                    snapshot.save();
                     log!(2, "C_GetSlotList returning {:?}", *count);
                     return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
                 }
 
-                keys.sort();
                 let output = _from_raw_parts_mut(slot_list, keys.len())?;
-                output.copy_from_slice(&keys);
+                output.copy_from_slice(keys);
                 *count = keys.len() as CK_ULONG;
                 log!(2, "C_GetSlotList returning {:?}", (keys, *count));
                 Ok(CKR_OK as CK_RV)

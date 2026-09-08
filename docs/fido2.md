@@ -57,10 +57,11 @@ label; `C_GetTokenInfo` reports the stored discovery failure.
 For USB HID, a slot is created after the HID interface can be opened, a
 CTAPHID channel can be allocated, and the CBOR capability is advertised. The
 endpoint can reopen the same HID path and allocate a new channel after device
-reinsertion. Every `C_GetSlotList` refreshes the presence of registered HID and
-CCID FIDO slots. Native HID device inventory remains initial-only, so a new HID
+reinsertion. Each fresh `C_GetSlotList` enumeration refreshes the presence of
+registered HID and CCID FIDO slots. The matching buffer call reuses the
+[count-query snapshot](architecture.md#discovery-lifecycle-and-stable-slots). Native HID device inventory remains initial-only, so a new HID
 authenticator requires module reinitialization. CCID reader inventory is
-enumerated on every listing. A newly identified physical serial can append a
+enumerated on each fresh listing. A newly identified physical serial can append a
 FIDO smart-card slot without reinitialization; a new reader name for a known
 serial merely rebinds its established applet topology and does not create
 another slot.

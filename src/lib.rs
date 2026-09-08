@@ -77,6 +77,7 @@ use error::*;
 mod apple;
 mod configuration;
 mod logging;
+mod slot_list;
 use configuration::{
     JsonConfiguration, ModuleConfiguration, ReservedConfiguration, Scp03KeyMaterialConfiguration,
     SecureChannelConfiguration,

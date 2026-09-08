@@ -667,7 +667,9 @@ Create this bundle with the `yubihsm-tls-ca` purpose so every entry is checked
 as an independent TLS trust anchor.
 
 Remote connector slots are added alongside directly attached USB devices.
-Every `C_GetSlotList` reconciles each configured connector inventory. A newly
+Each fresh `C_GetSlotList` enumeration reconciles each configured connector
+inventory. The matching buffered call reuses the count-query snapshot; see
+[slot discovery lifecycle](docs/architecture.md#discovery-lifecycle-and-stable-slots). A newly
 reported serial gets a new slot; a known serial keeps its slot ID, remains
 registered while absent, and becomes present again when it reappears. A
 connector that is unreachable before its first successful inventory contributes
@@ -677,7 +679,7 @@ Repeated URL entries intentionally remain separate endpoints, each with its own
 slots, connector client, and YubiHSM secure session.
 
 Direct YubiHSM USB discovery follows the same serial-based reconciliation on
-every `C_GetSlotList`: a newly attached serial gets a slot, detaching it marks
+each fresh `C_GetSlotList` enumeration: a newly attached serial gets a slot, detaching it marks
 that slot absent, and reattaching the same serial refreshes the existing slot's
 transport even if the operating system assigned a different USB device ID.
 
@@ -800,7 +802,7 @@ and FIDO2. Each selectable applet is exposed as its own PKCS #11 slot. Native
 builds enumerate readers through PC/SC on desktop platforms and CryptoTokenKit
 on iOS.
 
-Every `C_GetSlotList` enumerates the current native reader
+Each fresh `C_GetSlotList` enumeration queries the current native reader
 names, but uses them only to locate candidates. PC/SC names are not portable or
 persistent: implementations use different naming and disambiguation rules, and
 USB re-enumeration can rename the same reader. The validated YubiKey serial
