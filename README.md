@@ -972,7 +972,9 @@ RSA decryption, streaming AES, PIN and object lifecycles, JSON initialization
 through OpenSSL, and certificate requests. `--client opensc` runs the OpenSC
 cases without requiring the OpenSSL PKCS #11 provider. An opt-in hardware mode
 performs public discovery and public-key comparison without modifying token
-objects. See [external client integration tests](integration/README.md) for
+objects. Selecting `--hardware-login-pin-env` instead runs authenticated RSA,
+EC, and AES cases using an existing YubiHSM Auth credential, with temporary
+keys and verified cleanup. See [external client integration tests](integration/README.md) for
 dependencies, case selection, safety boundaries, and JSON result reports.
 
 The four final OASIS PKCS #11 3.2 mandatory provider profile artifacts are
