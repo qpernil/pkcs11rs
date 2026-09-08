@@ -27,11 +27,15 @@ struct SoftwareSession {
 }
 
 impl SoftwareSlot {
+    pub(crate) fn serial_for_ordinal(ordinal: usize) -> String {
+        format!("SOFTWARE{ordinal:08}")
+    }
+
     #[cfg(test)]
     pub(crate) fn new(name: String, ordinal: usize) -> Self {
         Self {
             name,
-            serial: format!("SOFTWARE{ordinal:08}"),
+            serial: Self::serial_for_ordinal(ordinal),
             store: None,
             public_provider: None,
             active_public_key: Rc::new(RefCell::new(None)),
@@ -66,7 +70,7 @@ impl SoftwareSlot {
             .transpose()?;
         Ok(Self {
             name,
-            serial: format!("SOFTWARE{ordinal:08}"),
+            serial: Self::serial_for_ordinal(ordinal),
             store,
             public_provider,
             active_public_key,

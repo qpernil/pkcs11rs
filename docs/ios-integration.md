@@ -233,7 +233,7 @@ token-present filter, so either `C_GetSlotList(CK_FALSE, ...)` or
 `C_GetSlotList(CK_TRUE, ...)` can request reacquisition after removal. Calls
 that merely read retained metadata without refreshing or preparing the NFC
 transport do not open the UI. Calls within the module-wide
-[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+[configurable refresh window (500 ms by default)](architecture.md#discovery-lifecycle-and-stable-slots)
 skip reconciliation without refreshing transports or requesting NFC reacquisition.
 
 On every later slot-list refresh, USB reconciliation likewise runs before

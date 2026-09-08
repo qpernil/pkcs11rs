@@ -59,7 +59,7 @@ CTAPHID channel can be allocated, and the CBOR capability is advertised. The
 endpoint can reopen the same HID path and allocate a new channel after device
 reinsertion. Each fresh `C_GetSlotList` enumeration refreshes the presence of
 registered HID and CCID FIDO slots. Calls within the module-wide
-[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+[configurable refresh window (500 ms by default)](architecture.md#discovery-lifecycle-and-stable-slots)
 skip reconciliation. Native HID device inventory remains initial-only, so a new HID
 authenticator requires module reinitialization. CCID reader inventory is
 enumerated on each fresh listing. A newly identified physical serial can append a

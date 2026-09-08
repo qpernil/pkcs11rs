@@ -32,13 +32,18 @@ Each returned serial creates a separate slot, so one connector host with two
 attached YubiHSMs produces two slots from one URL. Each fresh `C_GetSlotList`
 enumeration reconciles configured HTTP inventories and direct USB inventory by
 serial. Calls within the module-wide
-[500 ms refresh window](architecture.md#discovery-lifecycle-and-stable-slots)
+[configurable refresh window (500 ms by default)](architecture.md#discovery-lifecycle-and-stable-slots)
 skip reconciliation. A
 new serial gets a new slot; an absent serial keeps its stable slot ID and
 becomes present again when rediscovered. Remote slots are additive; they do
 not disable direct USB discovery. An unreachable connector contributes no new
 slots and marks its registered slots absent for that refresh. The URL scheme
 selects plain HTTP or rustls-backed HTTPS.
+
+The optional [`slots.serials` allowlist](configuration.md) discards other
+devices once identified, before HSM object or applet discovery. When using
+YubiHSM Auth, include both the target HSM serial and the helper YubiKey's
+Management serial; excluded YubiKeys do not contribute credentials.
 
 HTTPS verifies the server certificate and hostname against the Mozilla root
 snapshot embedded through the locked `webpki-roots` dependency. It does not

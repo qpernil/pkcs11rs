@@ -47,6 +47,12 @@ a public key or CA certificate.
   "hardware": {
     "discovery": true
   },
+  "discovery": {
+    "refresh_interval_ms": 500
+  },
+  "slots": {
+    "serials": ["1238075073", "2545354682", "37070618"]
+  },
   "storage": {
     "tokens": "/var/lib/pkcs11rs",
     "fido2_compatibility": "/var/lib/pkcs11rs-fido2"
@@ -123,6 +129,48 @@ and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 The first-pass and later-refresh behavior is summarized in
 [Discovery lifecycle and stable slots](architecture.md#discovery-lifecycle-and-stable-slots).
 
+`discovery.refresh_interval_ms` sets the module-wide reconciliation batching
+period in milliseconds (default `500`). It accepts a nonnegative integer;
+`0` disables batching, so every `C_GetSlotList` call reconciles discovery.
+The period starts when a successful pass completes and polling does not extend
+it. JSON takes precedence over `PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS`;
+the resolved setting lasts until `C_Finalize`. Invalid values fail initialization
+with `CKR_ARGUMENTS_BAD`.
+
+`slots.serials` is an optional allowlist of serial strings exposed through
+PKCS #11. Omitting it allows every slot; `[]` allows none. Its environment
+fallback, `PKCS11RS_SLOTS_SERIALS`, is comma-separated; an empty value allows
+none. Surrounding whitespace is trimmed and duplicates are ignored. Matching
+is otherwise exact and case-sensitive, preserving leading zeroes. Use strings
+in JSON, including for numeric serials. Empty entries are invalid.
+
+For a YubiKey, the filter uses its official whole-device serial from the
+Management applet, registered during discovery. Other devices use their
+registered device serial when available, otherwise the backend's full serial
+string before PKCS #11 token-info padding or truncation.
+All applet slots sharing a device serial match together, even when an applet
+reports it differently; software tokens match by their generated serial.
+Hidden slots are omitted from
+both count and buffered `C_GetSlotList` calls, regardless of `tokenPresent`, and
+direct slot-ID calls return `CKR_SLOT_ID_INVALID` for them.
+
+Source and applet controls determine where to look and which applets to probe;
+`slots.serials` narrows that selection. An excluded device stops at serial
+identification: no further applet probes, HSM commands, object loading, or
+HSM Auth credential discovery are performed. Identified excluded CCID devices
+are remembered so repeated enumeration does not restart applet discovery;
+a reconnected transport still needs serial verification. Management information
+pages stop once an excluded serial is found. An empty allowlist skips discovery
+entirely. A filtered CCID reader without a discoverable Management serial is
+omitted rather than probing applets to guess an identity.
+
+For YubiHSM Auth login, include both the HSM serial and the helper YubiKey
+serial. Local hardware discovery and the `hsmauth` applet must also be enabled.
+There is no implicit helper-device exception. Serial selection never enables
+a disabled source or applet. Explicit JSON lists replace their environment
+fallback rather than intersecting with it. `ccid.applications` restricts CCID
+applet probes; native FIDO HID discovery is a separate path.
+
 On iOS, `nfc.discovery` opts into one NFC card request during the first
 `C_GetSlotList` after initialization. It defaults to `false`. Successful
 discovery registers stable, applet-specific slots whose token presence is
@@ -143,6 +191,8 @@ from their main UI thread. Later UI triggers are summarized in
 | `logging.level` | `PKCS11RS_LOG` |
 | `pinentry` | `PKCS11RS_PINENTRY` |
 | `hardware.discovery` | `PKCS11RS_HARDWARE_DISCOVERY` |
+| `discovery.refresh_interval_ms` | `PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS` |
+| `slots.serials` | `PKCS11RS_SLOTS_SERIALS` |
 | `storage.tokens` | `PKCS11RS_TOKEN_STORAGE` |
 | `storage.fido2_compatibility` | `PKCS11RS_FIDO2_STORAGE` |
 | `software.slots` | `PKCS11RS_SOFTWARE_SLOTS` and each slot's `PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>` |

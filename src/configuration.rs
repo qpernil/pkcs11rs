@@ -5,9 +5,10 @@ use crate::{
 };
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsString, c_char},
     path::PathBuf,
+    time::Duration,
 };
 use zeroize::Zeroizing;
 
@@ -22,6 +23,10 @@ pub(crate) struct JsonConfiguration {
     pinentry: Option<String>,
     #[serde(default)]
     hardware: JsonHardwareConfiguration,
+    #[serde(default)]
+    discovery: JsonDiscoveryConfiguration,
+    #[serde(default)]
+    slots: JsonSlotsConfiguration,
     #[serde(default)]
     storage: JsonStorageConfiguration,
     #[serde(default)]
@@ -48,6 +53,18 @@ struct JsonLoggingConfiguration {
 #[serde(deny_unknown_fields)]
 struct JsonHardwareConfiguration {
     discovery: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonDiscoveryConfiguration {
+    refresh_interval_ms: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonSlotsConfiguration {
+    serials: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -210,6 +227,8 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) logging_level: Option<LogLevel>,
     pub(crate) pinentry: Option<OsString>,
     pub(crate) hardware_discovery: bool,
+    pub(crate) discovery_refresh_interval: Duration,
+    pub(crate) slot_serials: Option<HashSet<String>>,
     pub(crate) token_storage: Option<OsString>,
     pub(crate) fido2_storage: Option<OsString>,
     pub(crate) software_slots: Vec<String>,
@@ -325,6 +344,40 @@ impl ModuleConfiguration {
                 .transpose()?,
         };
 
+        let discovery_refresh_interval =
+            Duration::from_millis(match explicit.discovery.refresh_interval_ms {
+                Some(interval) => interval,
+                None => {
+                    environment_text("PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS", &mut environment)?
+                        .map(|value| value.parse::<u64>().map_err(|_| CKR_ARGUMENTS_BAD))
+                        .transpose()?
+                        .unwrap_or(500)
+                }
+            });
+        let slot_serials = match explicit.slots.serials {
+            Some(serials) => Some(serials),
+            None => environment_text("PKCS11RS_SLOTS_SERIALS", &mut environment)?.map(|value| {
+                if value.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    value.split(',').map(str::to_owned).collect()
+                }
+            }),
+        }
+        .map(|serials| {
+            serials
+                .into_iter()
+                .map(|serial| {
+                    let serial = serial.trim();
+                    if serial.is_empty() || serial.contains(',') {
+                        Err(CKR_ARGUMENTS_BAD)
+                    } else {
+                        Ok(serial.to_owned())
+                    }
+                })
+                .collect::<Result<HashSet<_>, _>>()
+        })
+        .transpose()?;
         let hardware_discovery = explicit
             .hardware
             .discovery
@@ -438,6 +491,8 @@ impl ModuleConfiguration {
             logging_level,
             pinentry: resolve_os(explicit.pinentry, "PKCS11RS_PINENTRY", &mut environment)?,
             hardware_discovery,
+            discovery_refresh_interval,
+            slot_serials,
             token_storage: resolve_os(
                 explicit.storage.tokens,
                 "PKCS11RS_TOKEN_STORAGE",
@@ -812,6 +867,96 @@ mod tests {
             .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
             .collect::<HashMap<_, _>>();
         ModuleConfiguration::resolve_with(explicit, |name| Ok(environment.get(name).cloned()))
+    }
+
+    #[test]
+    fn discovery_refresh_interval_defaults_and_overrides() {
+        const ENV: &str = "PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS";
+        assert_eq!(
+            resolve(None, &[]).unwrap().discovery_refresh_interval,
+            Duration::from_millis(500)
+        );
+        for interval in [0, 1200, u64::MAX] {
+            let value = interval.to_string();
+            assert_eq!(
+                resolve(None, &[(ENV, &value)])
+                    .unwrap()
+                    .discovery_refresh_interval,
+                Duration::from_millis(interval)
+            );
+            let explicit = serde_json::from_value(serde_json::json!({
+                "version": 1, "discovery": {"refresh_interval_ms": interval}
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve(Some(explicit), &[(ENV, "invalid")])
+                    .unwrap()
+                    .discovery_refresh_interval,
+                Duration::from_millis(interval)
+            );
+        }
+        for value in ["", "-1", "0.5", "invalid", "18446744073709551616"] {
+            assert!(
+                matches!(resolve(None, &[(ENV, value)]), Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as crate::CK_RV)
+            );
+        }
+        for value in ["-1", "0.5", "\"500\"", "18446744073709551616"] {
+            assert!(
+                serde_json::from_str::<JsonConfiguration>(&format!(
+                    r#"{{"version":1,"discovery":{{"refresh_interval_ms":{value}}}}}"#
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn slot_serial_allowlist_defaults_overrides_and_validation() {
+        const ENV: &str = "PKCS11RS_SLOTS_SERIALS";
+        assert!(resolve(None, &[]).unwrap().slot_serials.is_none());
+        let expected = HashSet::from(["00123".to_owned(), "TEST0001".to_owned()]);
+        assert_eq!(
+            resolve(None, &[(ENV, "00123, TEST0001,00123")])
+                .unwrap()
+                .slot_serials,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            resolve(
+                Some(json(
+                    r#"{"version":1,"slots":{"serials":["00123","TEST0001"]}}"#
+                )),
+                &[(ENV, ",")]
+            )
+            .unwrap()
+            .slot_serials,
+            Some(expected)
+        );
+        assert_eq!(
+            resolve(None, &[(ENV, "")]).unwrap().slot_serials,
+            Some(HashSet::new())
+        );
+        assert_eq!(
+            resolve(
+                Some(json(r#"{"version":1,"slots":{"serials":[]}}"#)),
+                &[(ENV, "123")]
+            )
+            .unwrap()
+            .slot_serials,
+            Some(HashSet::new())
+        );
+        for value in [",", "123,", "123,,456"] {
+            assert!(
+                matches!(resolve(None, &[(ENV, value)]), Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as crate::CK_RV)
+            );
+        }
+        for serial in ["", " ", "123,456"] {
+            let explicit = serde_json::from_value(
+                serde_json::json!({"version":1,"slots":{"serials":[serial]}}),
+            )
+            .unwrap();
+            assert!(resolve(Some(explicit), &[]).is_err());
+        }
     }
 
     #[test]

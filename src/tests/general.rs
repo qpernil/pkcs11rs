@@ -3331,6 +3331,167 @@ fn slot_list_reconciliation_is_batched_across_buffers_filters_and_threads() {
 }
 
 #[test]
+fn slot_list_reconciliation_respects_configured_interval() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    for interval in [0, 60_000] {
+        assert_eq!(
+            initialize_with_configuration(serde_json::json!({
+                "version": 1,
+                "hardware": {"discovery": false},
+                "yubihsm": {"urls": []},
+                "discovery": {"refresh_interval_ms": interval}
+            })),
+            CKR_OK as CK_RV
+        );
+        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(test_slot(true)));
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        let mut slot = test_slot(true);
+        slot.remove_on_refresh = true;
+        install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
+        assert_eq!(
+            crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            with_test_slot_context(TEST_SLOT_ID, |ctx| ctx.slot.is_present()),
+            interval != 0
+        );
+        crate::with_context(|ctx| {
+            ctx.expire_discovery_refresh_for_test();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::api::C_GetSlotList(1, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        assert!(!with_test_slot_context(TEST_SLOT_ID, |ctx| ctx
+            .slot
+            .is_present()));
+        finalize_for_test();
+    }
+}
+
+#[test]
+fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let software = crate::SoftwareSlot::new("serial-filter".into(), 0);
+    let software_serial = crate::Slot::serial(&software).to_owned();
+    for serials in [
+        None,
+        Some(vec![]),
+        Some(vec!["TEST0001"]),
+        Some(vec!["missing"]),
+        Some(vec!["TEST0001", software_serial.as_str()]),
+    ] {
+        let mut configuration = serde_json::json!({
+            "version": 1, "hardware": {"discovery": false},
+            "software": {"slots": []}, "yubihsm": {"urls": []}
+        });
+        if let Some(serials) = &serials {
+            configuration["slots"] = serde_json::json!({"serials": serials});
+        }
+        assert_eq!(
+            initialize_with_configuration(configuration),
+            CKR_OK as CK_RV
+        );
+        install_test_slot_with_backend(100, Box::new(test_slot(true)));
+        install_test_slot_with_backend(101, Box::new(test_slot(false)));
+        install_test_slot_with_backend(
+            102,
+            Box::new(crate::SoftwareSlot::new("serial-filter".into(), 0)),
+        );
+        install_test_slot_with_backend(103, Box::new(test_slot(true)));
+        // This applet reports TEST0001, but belongs to another registered
+        // device. Selection must follow its physical device identity.
+        with_test_slot_context(103, |ctx| {
+            ctx.device = Some(std::sync::Arc::new(crate::device::DeviceContext::new(
+                crate::device::DeviceIdentity {
+                    manufacturer: "Test".into(),
+                    product: "Test device".into(),
+                    serial: software_serial.clone(),
+                    hardware_version: None,
+                    firmware_version: None,
+                },
+            )));
+        });
+        let allowed = |serial: &str| {
+            serials
+                .as_ref()
+                .is_none_or(|serials| serials.contains(&serial))
+        };
+        // Guessing a hidden slot ID cannot bypass the allowlist, even before
+        // enumeration. Present and absent slots on a selected device match.
+        for (id, serial) in [
+            (100, "TEST0001"),
+            (101, "TEST0001"),
+            (102, software_serial.as_str()),
+            (103, software_serial.as_str()),
+        ] {
+            let mut info = std::mem::MaybeUninit::<CK_SLOT_INFO>::uninit();
+            assert_eq!(
+                crate::api::C_GetSlotInfo(id, info.as_mut_ptr()),
+                if allowed(serial) {
+                    CKR_OK
+                } else {
+                    CKR_SLOT_ID_INVALID
+                } as CK_RV
+            );
+            if !allowed(serial) {
+                let mut session = 0;
+                assert_eq!(
+                    crate::api::C_OpenSession(
+                        id,
+                        CKF_SERIAL_SESSION as CK_FLAGS,
+                        std::ptr::null_mut(),
+                        None,
+                        &mut session
+                    ),
+                    CKR_SLOT_ID_INVALID as CK_RV
+                );
+            }
+        }
+        for present in [CK_FALSE, CK_TRUE] {
+            let expected = [
+                (100, "TEST0001"),
+                (101, "TEST0001"),
+                (102, software_serial.as_str()),
+                (103, software_serial.as_str()),
+            ]
+            .into_iter()
+            .filter(|(id, serial)| allowed(serial) && (present == CK_FALSE || *id != 101))
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+            let mut count = 0;
+            assert_eq!(
+                crate::api::C_GetSlotList(present as CK_BBOOL, std::ptr::null_mut(), &mut count),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(count as usize, expected.len());
+            let mut ids = vec![0; count as usize];
+            assert_eq!(
+                crate::api::C_GetSlotList(present as CK_BBOOL, ids.as_mut_ptr(), &mut count),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(ids, expected);
+        }
+        // Visibility does not remove internal discovery or helper state.
+        crate::with_context(|ctx| {
+            assert_eq!(ctx.slot_contexts.read().unwrap().len(), 4);
+            Ok(())
+        })
+        .unwrap();
+        finalize_for_test();
+    }
+}
+
+#[test]
 fn slot_list_reconciliation_window_resets_with_module_lifetime() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

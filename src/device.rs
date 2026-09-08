@@ -105,6 +105,11 @@ impl DeviceContext {
             .unwrap_or_else(|| self.fallback.clone())
     }
 
+    pub(crate) fn registered_serial(&self) -> Option<&str> {
+        let serial = self.fallback.serial.as_str();
+        (!serial.is_empty() && serial.bytes().any(|byte| byte != b'0')).then_some(serial)
+    }
+
     pub(crate) fn replace(
         &self,
         connection_epoch: u64,
