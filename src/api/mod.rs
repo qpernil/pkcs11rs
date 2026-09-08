@@ -9,17 +9,6 @@ macro_rules! session_unsupported_stub {
     };
 }
 
-macro_rules! non_session_unsupported_stub {
-    ($name:ident ( $($arg:ident : $typ:ty),* $(,)? )) => {
-        ffi_entry_point! {
-            pub fn $name($($arg: $typ),*) -> CK_RV {
-                $(let _ = $arg;)*
-                CKR_FUNCTION_NOT_SUPPORTED.into()
-            }
-        }
-    };
-}
-
 mod crypt;
 mod general;
 mod hsmauth;

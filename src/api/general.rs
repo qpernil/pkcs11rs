@@ -277,8 +277,12 @@ ffi_entry_point! {
     }
 }
 
-non_session_unsupported_stub!(C_WaitForSlotEvent(
-    _flags: CK_FLAGS,
-    _slot: *mut CK_SLOT_ID,
-    _pReserved: *mut ::std::os::raw::c_void,
-));
+ffi_entry_point! {
+    pub fn C_WaitForSlotEvent(
+        _flags: CK_FLAGS,
+        _slot: *mut CK_SLOT_ID,
+        _pReserved: *mut ::std::os::raw::c_void,
+    ) -> CK_RV {
+        map(with_context(|_| Err::<(), Error>(CKR_FUNCTION_NOT_SUPPORTED.into())))
+    }
+}

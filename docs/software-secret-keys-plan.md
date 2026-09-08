@@ -28,7 +28,10 @@ Destruction removes the durable record and the live object.
 
 Software AES keys support ECB, CBC, CBC-PAD, CTR, CCM, GCM, key wrap, KWP,
 CMAC, CMAC-GENERAL, and GMAC. Software 24-byte 3DES keys support generation,
-ECB, CBC, and CBC-PAD. Generic and hash-specific HMAC keys support one-shot and
+ECB, CBC, and CBC-PAD. Generation uses the fixed 24-byte representation with
+odd parity, without requiring `CKA_VALUE_LEN`. AES and 3DES block modes emit
+complete blocks during Update and retain partial blocks; padded decryption
+also retains the final block for padding validation. Generic and hash-specific HMAC keys support one-shot and
 multipart SHA-1, SHA-224, SHA-256, SHA-384, and SHA-512 signing and
 verification, including the corresponding `*_HMAC_GENERAL` mechanisms.
 

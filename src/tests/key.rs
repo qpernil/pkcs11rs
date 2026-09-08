@@ -1214,9 +1214,7 @@ fn software_des3_key_generation_and_ciphers_match_reference_vectors() {
         &crate::parse_hex("61550078292c8e3f75d37cbb9e2d344a").unwrap(),
     );
 
-    let mut value_length = 24 as CK_ULONG;
     let mut generate_template = [
-        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut value_length),
         scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
         scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
     ];
@@ -1241,9 +1239,27 @@ fn software_des3_key_generation_and_ciphers_match_reference_vectors() {
         assert_eq!(object.key_type, CKK_DES3 as CK_KEY_TYPE);
         assert!(matches!(
             object.material,
-            crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 24
+            crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 24 && value.iter().all(|byte| byte.count_ones() % 2 == 1)
         ));
     });
+    // An explicitly supplied length must still agree with the fixed key size.
+    for (mut length, expected) in [(16 as CK_ULONG, CKR_KEY_SIZE_RANGE), (24, CKR_OK)] {
+        let mut attribute = scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length);
+        let mut handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut key_generation,
+                &mut attribute,
+                1,
+                &mut handle
+            ),
+            expected as CK_RV
+        );
+        if expected != CKR_OK {
+            assert_eq!(handle, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        }
+    }
     let plaintext = crate::parse_hex("0123456789abcdef").unwrap();
     let mut ciphertext = [0u8; 8];
     let mut ciphertext_length = ciphertext.len() as CK_ULONG;
