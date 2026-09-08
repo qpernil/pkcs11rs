@@ -585,14 +585,17 @@ fn wrap_key(
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let mechanism = unsafe { _as_ref(mechanism) }?;
         let output_len = unsafe { as_mut(wrapped_key_len) }?;
-        let software_wrapper = ctx.resolve_object(wrapping_key)?.is_some_and(|object| {
-            matches!(
-                object.material,
-                KeyMaterial::SoftwareSecret(_)
-                    | KeyMaterial::SoftwarePrivate(_)
-                    | KeyMaterial::Public(_)
-            )
-        });
+        // Backend selection requires an existing key. A missing handle must
+        // not fall through to the native backend's mechanism parser.
+        let wrapper = ctx
+            .resolve_object(wrapping_key)?
+            .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+        let software_wrapper = matches!(
+            &wrapper.material,
+            KeyMaterial::SoftwareSecret(_)
+                | KeyMaterial::SoftwarePrivate(_)
+                | KeyMaterial::Public(_)
+        );
         if software_wrapper {
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_WRAP as CK_FLAGS)?;
@@ -619,10 +622,9 @@ fn wrap_key(
             {
                 return Err(CKR_KEY_NOT_WRAPPABLE.into());
             }
-            let wrapper = ctx
-                .resolve_object(wrapping_key)?
-                .filter(|object| object.is_visible_to(logged_in))
-                .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+            if !wrapper.is_visible_to(logged_in) {
+                return Err(CKR_WRAPPING_KEY_HANDLE_INVALID.into());
+            }
             if wrapper
                 .policy_templates
                 .wrap
@@ -720,10 +722,9 @@ fn wrap_key(
         if target_type & 0x80 != 0 {
             return Err(CKR_KEY_NOT_WRAPPABLE.into());
         }
-        let wrapper = ctx
-            .resolve_object(wrapping_key)?
-            .filter(|object| object.is_visible_to(logged_in))
-            .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+        if !wrapper.is_visible_to(logged_in) {
+            return Err(CKR_WRAPPING_KEY_HANDLE_INVALID.into());
+        }
         if wrapper
             .policy_templates
             .wrap
@@ -844,19 +845,21 @@ fn unwrap_key(
         let wrapped =
             unsafe { from_raw_parts(wrapped_key as *const u8, wrapped_key_len as usize) }?;
         let template = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-        let software_wrapper = ctx.resolve_object(unwrapping_key)?.is_some_and(|object| {
-            matches!(
-                object.material,
-                KeyMaterial::SoftwareSecret(_) | KeyMaterial::SoftwarePrivate(_)
-            )
-        });
+        // Backend selection requires an existing key. A missing handle must
+        // not fall through to the native backend's mechanism parser.
+        let wrapper = ctx
+            .resolve_object(unwrapping_key)?
+            .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+        let software_wrapper = matches!(
+            &wrapper.material,
+            KeyMaterial::SoftwareSecret(_) | KeyMaterial::SoftwarePrivate(_)
+        );
         if software_wrapper {
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
-            let wrapper = ctx
-                .resolve_object(unwrapping_key)?
-                .filter(|object| object.is_visible_to(logged_in))
-                .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+            if !wrapper.is_visible_to(logged_in) {
+                return Err(CKR_UNWRAPPING_KEY_HANDLE_INVALID.into());
+            }
             let mut merged =
                 merge_policy_template(template, wrapper.policy_templates.unwrap.as_ref())?;
             let mut object = software_unwrap_template(merged.as_slice())?;
@@ -942,10 +945,9 @@ fn unwrap_key(
             return Err(CKR_SESSION_READ_ONLY.into());
         }
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
-        let wrapper = ctx
-            .resolve_object(unwrapping_key)?
-            .filter(|object| object.is_visible_to(logged_in))
-            .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+        if !wrapper.is_visible_to(logged_in) {
+            return Err(CKR_UNWRAPPING_KEY_HANDLE_INVALID.into());
+        }
         let mut merged = merge_policy_template(template, wrapper.policy_templates.unwrap.as_ref())?;
         let template = merged.as_slice();
         require_key_mechanism(&wrapper, mechanism.mechanism)?;

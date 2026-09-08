@@ -81,8 +81,8 @@ PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
 The verified macOS run uses the local `pkcs11test` fork at
-`c3b8f4915a4313960ce0909e4589e11e6a7b6577`: **342 cases, 276 passed,
-66 unsupported/skipped, zero failures, crashes, or timeouts**. This inventory
+`fd117c9e793f87362234f0d609118e322617b0b7`: **342 cases, 274 passed,
+68 unsupported/skipped, zero failures, crashes, or timeouts**. This inventory
 includes six parameterized encryption/decryption cancellation cases. The
 [fixture contracts](../../pkcs11test/README.md#fixture-contracts) describe its
 standards-based corrections and explicit key-policy requirements. These
@@ -91,7 +91,8 @@ cross-vendor conformance or native hardware support for every passing case.
 
 | Skip reason | Cases |
 | --- | ---: |
-| Single-DES generation unavailable | 42 |
+| Single-DES generation unavailable | 40 |
+| IV validation inapplicable to supported ECB mechanisms | 4 |
 | MD5 digest unavailable | 12 |
 | MD5-with-RSA unavailable | 3 |
 | Combined digest/encryption API unsupported | 4 |
@@ -100,11 +101,31 @@ cross-vendor conformance or native hardware support for every passing case.
 | Slot-event waiting unsupported | 1 |
 | RSA sign/verify recovery unsupported | 1 |
 
-The DES group includes 36 cipher cases, three wrap/unwrap cases, one
-Tookan-derived wrap-policy case, and two dual-operation cases blocked by DES
-setup. Four further dual-operation cases reach the unsupported combined API.
+The DES group includes 38 cipher cases and two dual-operation cases blocked by
+DES setup. Four further dual-operation cases reach the unsupported combined
+API. ECB cases cannot exercise IV validation and are explicitly skipped.
 Triple-DES and AES are supported and tested independently. Unsupported cases
-remain explicitly identified in the report rather than counted as passes.
+remain identified in the report rather than counted as passes.
+
+The general `WrapUnwrap`, `WrapInvalid`, `UnwrapInvalid`, and `TookanAttackA1`
+cases select every compatible standard symmetric-wrapping profile from the
+fork's catalog. They check advertised generation, operation flags, and AES key
+sizes without token-specific conditions. All four cases pass with both
+`CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP`; other candidates are not executed
+unless their prerequisites are advertised. Each executed profile appears in
+command output and failure traces. No compatible profile yields a named skip;
+errors from advertised operations remain failures. The round-trip test compares
+unwrapped bytes and, when available, direct decryption. The security test first
+wraps an extractable control key, then checks rejection of a protected key.
+Seven independent selector/discovery regressions pass with `make check` in the
+fork. A focused run of the final wrapping and IV fixtures covers 16 cases:
+eight pass and eight are unsupported/inapplicable skips.
+
+`C_WrapKey` and `C_UnwrapKey` resolve the wrapping key before choosing the
+software or native backend. Zero, unknown, and destroyed handles return
+`CKR_WRAPPING_KEY_HANDLE_INVALID` or `CKR_UNWRAPPING_KEY_HANDLE_INVALID`,
+respectively, rather than falling through to native mechanism parsing. The
+resolved object is reused for policy validation.
 
 All nine generic session data-object cases pass, including creation, independent
 copying, destruction, search, multi-attribute queries, and invalid lengths.
@@ -159,6 +180,18 @@ Slot-based API calls initialize the slot registry even when the client has not
 called `C_GetSlotList` since `C_Initialize`. The upstream invalid-reserved-pointer
 test returns `CKR_ARGUMENTS_BAD` for `(void *)1`; JSON initialization remains a
 supported pkcs11rs extension.
+
+For the Rust suite on macOS with attached devices, use:
+
+```sh
+PKCS11RS_HARDWARE_DISCOVERY=0 cargo test
+```
+
+Automatic HID discovery can abort inside macOS `IOHIDManager`/`CFRunLoop` with
+`SIGTRAP`; it is a separate native-discovery validation constraint. The full
+Cargo suite passes with discovery disabled, including 728 main-library tests
+and 27 ignored tests. This does not validate native HID discovery.
+The 11 wrapping regressions and Clippy with warnings denied also pass.
 
 Run the fixture/report regressions without external clients or hardware:
 

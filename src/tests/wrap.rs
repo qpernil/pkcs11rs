@@ -3290,3 +3290,82 @@ fn yubihsm_wrap_rejects_incompatible_keys_and_parameters() {
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
 }
+
+#[test]
+fn wrapping_rejects_missing_keys_before_backend_dispatch() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let target = create_software_wrap_test_key(
+        TEST_SESSION_HANDLE,
+        CKK_AES as CK_KEY_TYPE,
+        &mut [0x31; 16],
+        false,
+        false,
+        true,
+    );
+    let deleted = create_software_wrap_test_key(
+        TEST_SESSION_HANDLE,
+        CKK_AES as CK_KEY_TYPE,
+        &mut [0x41; 16],
+        true,
+        true,
+        true,
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, deleted),
+        CKR_OK as CK_RV
+    );
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_AES as CK_KEY_TYPE;
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+    ];
+    for mechanism in [CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        for missing in [
+            CK_INVALID_HANDLE as CK_OBJECT_HANDLE,
+            CK_OBJECT_HANDLE::MAX,
+            deleted,
+        ] {
+            let mut buffer = [0u8; 32];
+            let mut length = buffer.len() as CK_ULONG;
+            assert_eq!(
+                crate::api::C_WrapKey(
+                    TEST_SESSION_HANDLE,
+                    &mut mechanism,
+                    missing,
+                    target,
+                    buffer.as_mut_ptr(),
+                    &mut length
+                ),
+                CKR_WRAPPING_KEY_HANDLE_INVALID as CK_RV
+            );
+            let mut output = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_UnwrapKey(
+                    TEST_SESSION_HANDLE,
+                    &mut mechanism,
+                    missing,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as CK_ULONG,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut output
+                ),
+                CKR_UNWRAPPING_KEY_HANDLE_INVALID as CK_RV
+            );
+            assert_eq!(output, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        }
+    }
+    finalize_for_test();
+}
