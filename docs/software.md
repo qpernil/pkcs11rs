@@ -253,6 +253,14 @@ backend does not duplicate cryptography.
   RSA-AES. Secret keys and, where the representation permits it, canonical
   bare-PKCS #8 asymmetric private keys can be wrapped and unwrapped.
 
+AES ECB, CBC, and CBC-PAD encryption and decryption emit complete blocks during
+`C_EncryptUpdate` and `C_DecryptUpdate`. CBC chaining carries across updates;
+partial blocks remain buffered. CBC-PAD decryption additionally retains the
+last ciphertext block until `C_DecryptFinal` validates padding. Length queries
+and `CKR_BUFFER_TOO_SMALL` do not consume input or advance the IV. GCM and CCM
+remain buffered until Final, so decryption releases no unauthenticated
+plaintext. Other cipher mechanisms retain their buffered multipart behavior.
+
 The slot advertises these exact mechanism groups:
 
 Both raw and hashed RSA-PSS mechanisms require `CK_RSA_PKCS_PSS_PARAMS`.

@@ -4319,41 +4319,7 @@ fn assert_pkcs11_aes_mechanism_vector(
     );
     assert_eq!(&output[..output_len as usize], ciphertext);
 
-    assert_eq!(
-        crate::api::C_EncryptInit(session, mechanism, key),
-        CKR_OK as CK_RV
-    );
-    let split = plaintext.len().min(17);
-    let mut update_len = output.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_EncryptUpdate(
-            session,
-            input.as_mut_ptr(),
-            split as CK_ULONG,
-            output.as_mut_ptr(),
-            &mut update_len,
-        ),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(update_len, 0);
-    update_len = output.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_EncryptUpdate(
-            session,
-            input[split..].as_mut_ptr(),
-            (input.len() - split) as CK_ULONG,
-            output.as_mut_ptr(),
-            &mut update_len,
-        ),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(update_len, 0);
-    output_len = output.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_EncryptFinal(session, output.as_mut_ptr(), &mut output_len),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(&output[..output_len as usize], ciphertext);
+    assert_pkcs11_multipart_cipher(session, key, mechanism, plaintext, ciphertext, true);
 
     let mut input = ciphertext.to_vec();
     let mut output = vec![0; plaintext.len()];
@@ -4374,41 +4340,113 @@ fn assert_pkcs11_aes_mechanism_vector(
     );
     assert_eq!(&output[..output_len as usize], plaintext);
 
+    assert_pkcs11_multipart_cipher(session, key, mechanism, ciphertext, plaintext, false);
+}
+
+fn assert_pkcs11_multipart_cipher(
+    session: CK_SESSION_HANDLE,
+    key: CK_OBJECT_HANDLE,
+    mechanism: &mut CK_MECHANISM,
+    input: &[u8],
+    expected: &[u8],
+    encrypting: bool,
+) {
+    let init = if encrypting {
+        crate::api::C_EncryptInit
+    } else {
+        crate::api::C_DecryptInit
+    };
+    let update = if encrypting {
+        crate::api::C_EncryptUpdate
+    } else {
+        crate::api::C_DecryptUpdate
+    };
+    let finish = if encrypting {
+        crate::api::C_EncryptFinal
+    } else {
+        crate::api::C_DecryptFinal
+    };
+    assert_eq!(init(session, mechanism, key), CKR_OK as CK_RV);
+    let mut actual = Vec::new();
+    // Cross block boundaries and repeat length queries and undersized calls;
+    // neither may advance the IV or consume buffered input.
+    let mut offset = 0;
+    for chunk_size in [1, 15, 17, 31].into_iter().chain(std::iter::repeat(4097)) {
+        if offset == input.len() {
+            break;
+        }
+        let end = (offset + chunk_size).min(input.len());
+        let mut part = input[offset..end].to_vec();
+        let mut required = 0;
+        for _ in 0..2 {
+            assert_eq!(
+                update(
+                    session,
+                    part.as_mut_ptr(),
+                    part.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut required
+                ),
+                CKR_OK as CK_RV
+            );
+        }
+        let mut output = part.clone();
+        output.resize((required as usize).max(part.len()).max(1), 0);
+        if required != 0 {
+            let mut short = required - 1;
+            assert_eq!(
+                update(
+                    session,
+                    part.as_mut_ptr(),
+                    part.len() as CK_ULONG,
+                    output.as_mut_ptr(),
+                    &mut short
+                ),
+                CKR_BUFFER_TOO_SMALL as CK_RV
+            );
+            assert_eq!(short, required);
+            assert_eq!(&output[..part.len()], part.as_slice());
+        }
+        let mut length = output.len() as CK_ULONG;
+        assert_eq!(
+            update(
+                session,
+                output.as_mut_ptr(),
+                part.len() as CK_ULONG,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(length, required);
+        actual.extend_from_slice(&output[..length as usize]);
+        offset = end;
+    }
+    let mut required = 0;
     assert_eq!(
-        crate::api::C_DecryptInit(session, mechanism, key),
+        finish(session, std::ptr::null_mut(), &mut required),
         CKR_OK as CK_RV
     );
-    let split = input.len().min(19);
-    update_len = output.len() as CK_ULONG;
+    if matches!(mechanism.mechanism, x if x == CKM_AES_ECB as CK_MECHANISM_TYPE
+        || x == CKM_AES_CBC as CK_MECHANISM_TYPE || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE)
+    {
+        assert!(
+            required <= 16,
+            "AES block-mode Final must retain at most one block"
+        );
+    }
+    let mut output = vec![0; (required as usize).max(1)];
+    let mut length = output.len() as CK_ULONG;
     assert_eq!(
-        crate::api::C_DecryptUpdate(
-            session,
-            input.as_mut_ptr(),
-            split as CK_ULONG,
-            output.as_mut_ptr(),
-            &mut update_len,
-        ),
+        finish(session, output.as_mut_ptr(), &mut length),
         CKR_OK as CK_RV
     );
-    assert_eq!(update_len, 0);
-    update_len = output.len() as CK_ULONG;
+    actual.extend_from_slice(&output[..length as usize]);
+    assert_eq!(actual, expected);
     assert_eq!(
-        crate::api::C_DecryptUpdate(
-            session,
-            input[split..].as_mut_ptr(),
-            (input.len() - split) as CK_ULONG,
-            output.as_mut_ptr(),
-            &mut update_len,
-        ),
-        CKR_OK as CK_RV
+        finish(session, output.as_mut_ptr(), &mut length),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
-    assert_eq!(update_len, 0);
-    output_len = output.len() as CK_ULONG;
-    assert_eq!(
-        crate::api::C_DecryptFinal(session, output.as_mut_ptr(), &mut output_len),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(&output[..output_len as usize], plaintext);
 }
 
 #[test]
@@ -4672,6 +4710,39 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
         Some(&mut iv),
         &plaintext,
         &cbc_padded_ciphertext,
+    );
+
+    // An Update larger than one device command must preserve CBC chaining
+    // across command boundaries as well as across application updates.
+    let long_plaintext = plaintext.repeat(129);
+    let raw_key = test_hex("2b7e151628aed2a6abf7158809cf4f3c");
+    let long_ciphertext = crate::secure_channel_crypto::aes_cbc(
+        &raw_key,
+        &iv,
+        &long_plaintext,
+        crate::secure_channel_crypto::Direction::Encrypt,
+    )
+    .unwrap();
+    let mut long_cbc = CK_MECHANISM {
+        mechanism: CKM_AES_CBC as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_pkcs11_multipart_cipher(
+        session,
+        key,
+        &mut long_cbc,
+        &long_plaintext,
+        &long_ciphertext,
+        true,
+    );
+    assert_pkcs11_multipart_cipher(
+        session,
+        key,
+        &mut long_cbc,
+        &long_ciphertext,
+        &long_plaintext,
+        false,
     );
 
     // NIST SP 800-38A, Appendix F.5.1.

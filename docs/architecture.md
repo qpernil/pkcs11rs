@@ -46,6 +46,14 @@ shared by its sessions. Operation state itself lives in `SessionContext`, so
 two sessions do not share an in-progress find, digest, encrypt, decrypt, sign,
 or verify operation.
 
+AES ECB/CBC/CBC-PAD multipart operations emit complete blocks from Update for
+both software keys and YubiHSM keys. The runtime retains partial blocks and
+the CBC chaining value; padded decryption also retains its final ciphertext
+block for padding validation. Length queries and short-buffer retries do not
+advance this state. YubiHSM updates split large inputs into bounded device
+commands and preserve chaining across those commands. GCM/CCM keep their
+buffered authenticated-final behavior and release no unauthenticated plaintext.
+
 Backend slots contain an `Rc`-based graph for slot-local state. That graph is
 confined behind its `SlotContext` mutex. State shared between slots uses
 synchronized `Arc` handles instead.

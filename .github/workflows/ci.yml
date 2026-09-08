@@ -60,6 +60,17 @@ jobs:
       - name: Run Python ABI tests
         run: python test_pkcs11.py
 
+      - name: Run OpenSC client integration tests
+        run: python integration/run_clients.py --client opensc
+
+      - name: Upload client integration results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-integration-linux
+          path: target/client-results.json
+          if-no-files-found: warn
+
       - name: Run OASIS PKCS #11 3.2 profile cases
         run: python conformance/run_oasis.py --results target/oasis-results
 
@@ -154,7 +165,7 @@ jobs:
 
       - name: Install native dependencies
         run: |
-          brew install pkg-config
+          brew install pkg-config opensc libp11 openssl@3
 
       - name: Install iOS Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
@@ -200,6 +211,20 @@ jobs:
 
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests
+
+      - name: Run OpenSC and OpenSSL provider integration tests
+        run: |
+          python integration/run_clients.py \
+            --openssl "$(brew --prefix openssl@3)/bin/openssl" \
+            --provider "$(brew --prefix libp11)/lib/ossl-modules/pkcs11prov.dylib"
+
+      - name: Upload client integration results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-integration-macos
+          path: target/client-results.json
+          if-no-files-found: warn
 
       - name: Run Python ABI tests
         run: python test_pkcs11.py

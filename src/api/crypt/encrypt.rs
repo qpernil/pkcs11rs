@@ -1093,7 +1093,13 @@ fn crypt(
             *output_len = required as CK_ULONG;
             return Ok(());
         }
-        let result = if let Some(result) = operation.result {
+        let result = if finalizing
+            && input.is_empty()
+            && matches!(operation.mechanism, x if x == CKM_AES_ECB as CK_MECHANISM_TYPE
+                || x == CKM_AES_CBC as CK_MECHANISM_TYPE)
+        {
+            Vec::new()
+        } else if let Some(result) = operation.result {
             result.to_vec()
         } else {
             let result = (|| -> Result<Vec<u8>, Error> {
@@ -1537,6 +1543,28 @@ fn crypt_update(
                 return Err(error);
             }
         };
+        if matches!(operation.mechanism, x if x == CKM_AES_ECB as CK_MECHANISM_TYPE
+            || x == CKM_AES_CBC as CK_MECHANISM_TYPE
+            || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE)
+        {
+            let operation = operation.clone();
+            let result = crypt_update_aes_blocks(
+                ctx,
+                session_handle,
+                operation,
+                input,
+                output,
+                output_len,
+                encrypting,
+            );
+            if let Err(error) = &result
+                && !matches!(error, Error::Generic(rv) if *rv == CKR_BUFFER_TOO_SMALL as CK_RV)
+            {
+                ctx.get_session_context_mut(session_handle)?
+                    .take_crypt_operation(encrypting);
+            }
+            return result;
+        }
         *output_len = 0;
         if output.is_null() {
             return Ok(());
@@ -1554,4 +1582,112 @@ fn crypt_update(
         operation.multipart = true;
         Ok(())
     })
+}
+
+// ECB/CBC publish complete blocks during Update. Padded decryption retains the
+// final ciphertext block so Final can validate padding. AEAD stays buffered:
+// unauthenticated plaintext must not be released by this path.
+fn crypt_update_aes_blocks(
+    ctx: &mut SlotContext,
+    session_handle: CK_SESSION_HANDLE,
+    mut operation: CryptOperation,
+    input: &[u8],
+    output: *mut u8,
+    output_len: &mut CK_ULONG,
+    encrypting: bool,
+) -> Result<(), Error> {
+    let total = operation
+        .buffer
+        .len()
+        .checked_add(input.len())
+        .ok_or(CKR_HOST_MEMORY)?;
+    let retained =
+        usize::from(!encrypting && operation.mechanism == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE);
+    let produced = (total / AES_BLOCK_LENGTH).saturating_sub(retained) * AES_BLOCK_LENGTH;
+    let capacity = *output_len;
+    *output_len = produced as CK_ULONG;
+    if output.is_null() {
+        return Ok(());
+    }
+    if capacity < produced as CK_ULONG {
+        return Err(CKR_BUFFER_TOO_SMALL.into());
+    }
+    operation
+        .buffer
+        .try_reserve(input.len())
+        .map_err(|_| CKR_HOST_MEMORY)?;
+    operation.buffer.extend_from_slice(input);
+    if produced != 0 {
+        let blocks = &operation.buffer[..produced];
+        let cbc = operation.mechanism != CKM_AES_ECB as CK_MECHANISM_TYPE;
+        let transformed = Zeroizing::new(match &operation.key {
+            KeyMaterial::SoftwareSecret(key) if cbc => software_aes_cbc(
+                key,
+                operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                blocks,
+                encrypting,
+            )?,
+            KeyMaterial::SoftwareSecret(key) => software_crypt_ecb_blocks(key, blocks, encrypting)?,
+            KeyMaterial::YubiHsm { id, .. } if cbc => {
+                let mut iv = operation.iv.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                let mut result = Zeroizing::new(Vec::with_capacity(produced));
+                for chunk in blocks.chunks(YUBIHSM_CBC_CHUNK_LENGTH) {
+                    let command = YubiHsmCommand::crypt_cbc(
+                        if encrypting {
+                            YubiHsmCommandCode::EncryptCbc
+                        } else {
+                            YubiHsmCommandCode::DecryptCbc
+                        },
+                        *id,
+                        &iv,
+                        chunk,
+                    )?;
+                    let response = Zeroizing::new(
+                        ctx._get_session(session_handle)?
+                            .1
+                            .yubihsm_command(&command)?,
+                    );
+                    if response.len() != chunk.len() {
+                        return Err(CKR_DEVICE_ERROR.into());
+                    }
+                    let tail = if encrypting {
+                        response.as_slice()
+                    } else {
+                        chunk
+                    };
+                    iv.copy_from_slice(&tail[tail.len() - AES_BLOCK_LENGTH..]);
+                    result.extend_from_slice(&response);
+                }
+                std::mem::take(&mut *result)
+            }
+            KeyMaterial::YubiHsm { id, .. } => {
+                yubihsm_crypt_ecb_blocks(ctx, session_handle, *id, blocks, encrypting)?
+            }
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        });
+        if transformed.len() != produced {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        if cbc {
+            let tail = if encrypting {
+                transformed.as_slice()
+            } else {
+                blocks
+            };
+            operation.iv = Some(
+                tail[produced - AES_BLOCK_LENGTH..]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            );
+        }
+        // Copy only after consuming input, including when the application uses
+        // the same allocation for its input and output.
+        unsafe { ptr::copy_nonoverlapping(transformed.as_ptr(), output, produced) };
+        let remainder = Zeroizing::new(operation.buffer[produced..].to_vec());
+        operation.buffer = remainder;
+    }
+    operation.multipart = true;
+    ctx.get_session_context_mut(session_handle)?
+        .set_crypt_operation(encrypting, operation);
+    Ok(())
 }
