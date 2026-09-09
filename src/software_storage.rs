@@ -27,7 +27,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use zeroize::Zeroizing;
 
@@ -2001,7 +2004,7 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
             .map_err(|_| CKR_DATA_INVALID)?;
         key.precompute().map_err(|_| CKR_DATA_INVALID)?;
         return Ok(SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::Rsa(Box::new(key)),
+            SoftwareSigningKey::Rsa(Arc::new(key)),
         ));
     }
     if info.algorithm.oid == EC_PUBLIC_KEY_OID {
@@ -2216,7 +2219,7 @@ mod tests {
             )
         };
         let materials = vec![
-            SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(Box::new(rsa))),
+            SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(Arc::new(rsa))),
             signing(SignatureScheme::EcdsaP224Sha224, scalar(28)),
             signing(SignatureScheme::EcdsaP256Sha256, scalar(32)),
             signing(SignatureScheme::EcdsaP384Sha384, scalar(48)),

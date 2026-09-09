@@ -206,7 +206,8 @@ fn shared_ml_dsa_sign(
             MlDsaError::InvalidSeedLength => Error::from(CKR_KEY_TYPE_INCONSISTENT),
             MlDsaError::InvalidPublicKey
             | MlDsaError::InvalidSignature
-            | MlDsaError::SigningFailed => Error::from(CKR_FUNCTION_FAILED),
+            | MlDsaError::SigningFailed
+            | MlDsaError::KeyConstructionFailed => Error::from(CKR_FUNCTION_FAILED),
         })
 }
 

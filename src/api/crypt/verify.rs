@@ -380,9 +380,9 @@ fn ml_dsa_verify(
         }
         MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),
         MlDsaError::InvalidSignature => Error::from(CKR_SIGNATURE_INVALID),
-        MlDsaError::RandomnessUnavailable | MlDsaError::SigningFailed => {
-            Error::from(CKR_FUNCTION_FAILED)
-        }
+        MlDsaError::RandomnessUnavailable
+        | MlDsaError::SigningFailed
+        | MlDsaError::KeyConstructionFailed => Error::from(CKR_FUNCTION_FAILED),
     })
 }
 

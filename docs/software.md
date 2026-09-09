@@ -260,6 +260,12 @@ The private-key material and cryptographic operations are the shared typed
 implementations also used by the module's projection code; the software-slot
 backend does not duplicate cryptography.
 
+RSA, ML-DSA, and ML-KEM private-key handles share immutable key material through
+`Arc`. Cloning a PKCS #11 object copies its metadata and policy while sharing
+the parsed key and its precomputed values. Each object's authorization and
+lifecycle remain independent; the key allocation is released and zeroized when
+its last owner is dropped. This does not change persisted key encodings.
+
 - RSA: 1024 through 4096 bits in 256-bit increments; PKCS #1 v1.5, raw RSA,
   OAEP decryption, PKCS #1 signatures, and PSS signatures.
 - Weierstrass EC: NIST P-224, P-256, P-384, P-521, secp256k1,
