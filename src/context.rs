@@ -280,6 +280,7 @@ pub(crate) struct ModuleContext {
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+    private_instance: bool,
     discovery_refresh: Mutex<Option<Instant>>,
     discovery_refresh_interval: Duration,
     slot_serials: Option<HashSet<String>>,
@@ -889,6 +890,56 @@ impl ModuleContext {
     pub(crate) fn new_with_configuration(
         configuration: ModuleConfiguration,
     ) -> Result<ModuleContext, Error> {
+        Self::new_configured(configuration, true)
+    }
+
+    pub(crate) fn private_slot(slot: Box<dyn Slot>) -> Result<Self, Error> {
+        let mut context = Self::new_configured(ModuleConfiguration::private_software()?, false)?;
+        context.private_instance = true;
+        let registry = context
+            .slot_contexts
+            .get_mut()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        registry.insert_slot_contexts(
+            vec![(1, slot, Vec::new())],
+            context.handles.clone(),
+            context.pinentry.clone(),
+            context.trust_store.clone(),
+            None,
+            None,
+        )?;
+        registry.discovered = true;
+        Ok(context)
+    }
+
+    /// A routing view of an existing slot, sharing its backend, authorization,
+    /// objects and handle allocator. It owns only sessions opened through it.
+    pub(crate) fn for_auth_slot(child: Arc<Mutex<SlotContext>>) -> Result<Self, Error> {
+        let mut context = Self::new_configured(ModuleConfiguration::private_software()?, false)?;
+        context.private_instance = true;
+        let slot_id;
+        {
+            // Preparation must happen outside an operation on this source slot.
+            // In particular, a slot cannot bootstrap authentication using itself.
+            let slot = child
+                .try_lock()
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            slot_id = slot.slot_id;
+            context.handles = slot.handles.clone();
+            context.pinentry = slot.pinentry.clone();
+            context.trust_store = slot.trust_store.clone();
+        }
+        let registry = context
+            .slot_contexts
+            .get_mut()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        registry.slots.insert(slot_id, child);
+        registry.discovered = true;
+        Ok(context)
+    }
+
+    #[allow(unused_mut)]
+    fn new_configured(configuration: ModuleConfiguration, _fixtures: bool) -> Result<Self, Error> {
         #[cfg(feature = "abi-tests")]
         let _ = (configuration.yubihsm_public_discovery.as_ref(),);
         let logging = crate::logging::configured_dispatch(configuration.logging_level);
@@ -902,23 +953,29 @@ impl ModuleContext {
             configuration.yubihsm_device_trust_prefix.clone(),
         ));
         #[cfg(feature = "abi-tests")]
-        let mut slots = HashMap::from([
-            (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
-            (
-                ABI_TEST_PIV_SLOT_ID,
-                Box::new(abi_test_piv_slot()?) as Box<dyn Slot>,
-            ),
-            (
-                ABI_TEST_SCP03_SLOT_ID,
-                Box::new(AbiScp03Slot::new("SCP03")?) as Box<dyn Slot>,
-            ),
-            (
-                ABI_TEST_SCP11_SLOT_ID,
-                Box::new(AbiScp03Slot::new("SCP11A")?) as Box<dyn Slot>,
-            ),
-        ]);
+        let mut slots = if _fixtures {
+            HashMap::from([
+                (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
+                (
+                    ABI_TEST_PIV_SLOT_ID,
+                    Box::new(abi_test_piv_slot()?) as Box<dyn Slot>,
+                ),
+                (
+                    ABI_TEST_SCP03_SLOT_ID,
+                    Box::new(AbiScp03Slot::new("SCP03")?) as Box<dyn Slot>,
+                ),
+                (
+                    ABI_TEST_SCP11_SLOT_ID,
+                    Box::new(AbiScp03Slot::new("SCP11A")?) as Box<dyn Slot>,
+                ),
+            ])
+        } else {
+            HashMap::new()
+        };
         #[cfg(feature = "abi-tests")]
-        slots.extend(abi_test_yubihsm_slots()?);
+        if _fixtures {
+            slots.extend(abi_test_yubihsm_slots()?);
+        }
         let hardware_discovery = configuration.hardware_discovery;
         let yubihsm_urls = configuration.yubihsm_urls;
         let software_slots = configuration.software_slots;
@@ -976,6 +1033,7 @@ impl ModuleContext {
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
             hsmauth_providers,
+            private_instance: false,
             discovery_refresh: Mutex::new(None),
             discovery_refresh_interval: configuration.discovery_refresh_interval,
             slot_serials: configuration.slot_serials,
@@ -3227,6 +3285,9 @@ impl ModuleContext {
         initialized: bool,
         interval: Duration,
     ) -> Result<(), Error> {
+        if self.private_instance {
+            return Ok(());
+        }
         let mut last_completed = self
             .discovery_refresh
             .lock()
@@ -4070,6 +4131,7 @@ mod discovery_tests {
                 std::ffi::OsString::new(),
             )),
             hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
+            private_instance: false,
             discovery_refresh: Mutex::new(None),
             discovery_refresh_interval: Duration::from_millis(500),
             slot_serials: None,

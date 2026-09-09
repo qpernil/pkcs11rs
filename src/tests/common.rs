@@ -6192,7 +6192,8 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
         zeroize::Zeroizing::new(session_keys[16..32].try_into().unwrap()),
         zeroize::Zeroizing::new(session_keys[32..48].try_into().unwrap()),
         zeroize::Zeroizing::new(session_keys[48..64].try_into().unwrap()),
-    );
+    )
+    .unwrap();
     assert_eq!(
         target_session
             .send_command(
@@ -10073,5 +10074,104 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
         crate::api::C_CloseSession(TEST_SESSION_HANDLE + 1),
         CKR_OK as CK_RV
     );
+    finalize_for_test();
+}
+
+#[test]
+fn pkcs11_auth_prepares_an_existing_yubihsm_slot_without_copying_its_credential() {
+    use crate::key_scope::{BoundKey, Pkcs11KeyScope};
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+    let source_session =
+        crate::api::rust::open_session(SLOT_ID, (CKF_SERIAL_SESSION | CKF_RW_SESSION) as _)
+            .unwrap();
+    let source = insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::NIST_AES_KEY_ID);
+    with_test_slot_context(SLOT_ID, |ctx| {
+        let key = ctx.memory_objects.get_mut(&source).unwrap();
+        key.derive = true;
+        key.sign = false;
+        key.encrypt = false;
+        key.allowed_mechanisms = Some(vec![CKM_SP800_108_COUNTER_KDF as _]);
+    });
+    let provider = Pkcs11Provider::from_slot(test_slot_context(SLOT_ID)).unwrap();
+    let session = ProviderSession::open(provider.clone()).unwrap();
+    let fields = [CounterKdfField::Counter(IntegerFormat {
+        width_bits: 8,
+        little_endian: false,
+    })];
+    let output = || crate::TokenObjectTemplate {
+        class: Some(CKO_SECRET_KEY as _),
+        key_type: Some(CKK_AES as _),
+        private: true,
+        sensitive: Some(false),
+        extractable: Some(true),
+        ..Default::default()
+    };
+    // Preparation neither logs in nor changes authorization on the existing slot.
+    assert!(
+        session
+            .derive(
+                source,
+                crate::pkcs11_auth::Derivation::Counter(&fields),
+                output(),
+                16
+            )
+            .is_err()
+    );
+    crate::api::rust::login(source_session, CKU_USER as _, b"0001password".as_ptr(), 12).unwrap();
+    let credential = BoundKey::from_session(session.clone(), source).unwrap();
+    let mut scope = Pkcs11KeyScope::for_key(&credential).unwrap();
+    let base = scope.bind(&credential).unwrap();
+    commands.borrow_mut().clear();
+    // This path must not reacquire the public module lock during source crypto.
+    let global = crate::lock_context().unwrap();
+    let derived = scope.derive_counter(&base, &fields, output(), 16).unwrap();
+    let result = scope.read_aes128(&derived).unwrap();
+    let expected = crate::software_key_ops::software_aes_cmac(
+        &crate::parse_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap(),
+        &[1],
+    )
+    .unwrap();
+    assert_eq!(result.as_slice(), expected.as_slice());
+    assert!(!commands.borrow().is_empty());
+    assert!(
+        commands
+            .borrow()
+            .iter()
+            .all(|(command, _)| *command == crate::YubiHsmCommandCode::EncryptEcb as u8)
+    );
+    assert!(session.attribute(source, CKA_VALUE).is_err());
+    drop(scope);
+    drop(credential);
+    assert_eq!(
+        session.attribute(source, CKA_TOKEN).unwrap().as_slice(),
+        &[CK_TRUE as u8]
+    );
+    drop(session);
+    drop(provider);
+    drop(global);
+    // The public session and token credential survive the temporary auth sessions.
+    with_test_slot_context(SLOT_ID, |ctx| {
+        assert!(ctx.sessions.contains_key(&source_session));
+        assert_eq!(ctx.sessions.len(), 1);
+        assert!(ctx.resolve_object(source).unwrap().is_some());
+        assert!(
+            ctx.memory_objects
+                .values()
+                .all(|object| object.creator_session.is_none())
+        );
+    });
+    crate::api::rust::close_session(source_session).unwrap();
     finalize_for_test();
 }

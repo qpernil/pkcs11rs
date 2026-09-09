@@ -68,6 +68,13 @@ cannot unwrap that token's public master key; reinitialize the token to adopt
 the new credential. A missing or incorrect discovery credential never blocks
 SO or USER login.
 
+The internal direct YubiHSM authentication provider uses this same software-slot
+implementation with no backing store. It is hidden from the public slot registry
+and uses session objects for both credentials and derivation intermediates. A
+credential-owning session outlives separate handshake sessions; closing each
+session performs ordinary creator-object cleanup. It has no special in-memory
+token-object mode. See [SCP provider preparation](scp-key-provider/README.md).
+
 ## Key lifecycle
 
 The software session-key implementation is shared by every slot, including

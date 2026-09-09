@@ -328,6 +328,16 @@ pub(crate) enum ReservedConfiguration {
 }
 
 impl ModuleConfiguration {
+    /// Isolated, in-memory provider configuration. Never consult application
+    /// configuration, environment variables, storage paths, or device discovery.
+    pub(crate) fn private_software() -> Result<Self, Error> {
+        let mut explicit = JsonConfiguration::default();
+        explicit.hardware.discovery = Some(false);
+        let mut configuration = Self::resolve_with(Some(explicit), |_| Ok(None))?;
+        configuration.software_slots = vec!["private authentication".to_owned()];
+        Ok(configuration)
+    }
+
     pub(crate) fn resolve(explicit: Option<JsonConfiguration>) -> Result<Self, Error> {
         Self::resolve_with(explicit, |name| Ok(std::env::var_os(name)))
     }

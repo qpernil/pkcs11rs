@@ -103,7 +103,7 @@ ffi_entry_point! {
     }
 }
 
-fn create_object(
+pub(crate) fn create_object(
     session_handle: CK_SESSION_HANDLE,
     templ: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
@@ -1777,7 +1777,7 @@ ffi_entry_point! {
     }
 }
 
-fn copy_object(
+pub(crate) fn copy_object(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     templ: CK_ATTRIBUTE_PTR,
@@ -1866,7 +1866,7 @@ ffi_entry_point! {
     }
 }
 
-fn destroy_object(
+pub(crate) fn destroy_object(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
@@ -2059,7 +2059,7 @@ ffi_entry_point! {
     }
 }
 
-fn get_attribute_value(
+pub(crate) fn get_attribute_value(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     templ: CK_ATTRIBUTE_PTR,

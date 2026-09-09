@@ -1,230 +1,183 @@
-# Plan: complete SCP03/SCP11 with interchangeable key providers
+# Plan: SCP03/SCP11 derivation through PKCS #11
 
-## Goal and division of responsibility
+## Goal and boundary
 
-Use one SCP03/SCP11 protocol implementation with PKCS #11 key operations,
-first supplied by a software slot and then by native virtual-YubiHSM commands.
-The final milestone is complete secure-channel exchanges with the virtual
-YubiHSM performing all required secret-key cryptography and retaining the
-intermediate and working keys behind its device interface.
+Keep long-term credentials in a selected PKCS #11 token, derive channel-specific
+working keys through the shared Rust PKCS #11 API, then read those final keys once and perform
+message encryption, decryption, and MAC locally in the SCP client. This is one
+execution path, with no message-crypto placement option.
 
-This includes the actual AES encryption/decryption and CMAC for each protected
-message, not only handshake derivation or receipt generation.
+The SCP client owns the handshake, trust decisions, public transcripts, counters,
+framing, and local message crypto. The derivation provider owns the long-term
+credential, protected agreement inputs, and intermediate objects. After an
+established channel obtains S-ENC, S-MAC, and S-RMAC, message processing does not
+call the provider. The working bytes use zeroizing storage for the channel
+lifetime; they are never reusable login credentials.
 
-The SCP code owns handshake sequencing, public transcripts, trust decisions,
-counters, and secure-message framing. Its key provider owns generation,
-derivation, AES/MAC execution, key policy, and key lifetime. Choosing a capable
-native provider must not require another implementation of the SCP protocol.
-The virtual HSM supplies generic key operations, not an SCP-specific object model.
+The provider and the target receiving protected commands have distinct roles.
+A virtual YubiHSM can supply the client's derivation operations over an
+independently authorized connection. The target also performs its own end of
+secure messaging. YubiHSM key imports travel inside the channel and require no
+DEK. GlobalPlatform card administration has a separate DEK requirement.
 
-“Full SCP” here means establishment and subsequent protected request/response
-traffic, including authentication, receipts or cryptograms, encryption, and
-MAC verification. Initial scope preserves the supported SCP03 S8 and SCP11a,
-SCP11b, and SCP11c profiles. Adding SCP03 S16 or unrelated protocol families is
-separate work. This is a forward plan; the complete native workflow is not
-implemented yet.
+Protecting long-term credentials is the main objective. Local working keys
+avoid per-message provider/device round trips, but compromise of client memory
+can expose that channel's keys. No performance numbers or physical isolation
+are implied by software providers. A PKCS #11 session object describes lifetime,
+not execution location.
 
-## Why both providers remain useful
+## Implemented foundation
 
-This resembles TLS-oriented HSM key operations: protocol-defined derivation
-and composition create protected keys that feed later cryptographic operations.
-The reusable interface is key operations, so a protocol does not need a second
-implementation for each provider.
+All slot kinds share common software session objects: software, YubiHSM, PIV,
+OpenPGP, and FIDO2. Supported software keys, data objects, derivation outputs,
+and operations use this common layer. A software slot has no native mechanisms;
+each hardware slot's native list is merged with a filtered software list.
+The union combines operation flags and size ranges and preserves native
+`CKF_HW`; this does not establish where a particular operation executes.
 
-Protecting long-term credentials is generally the larger benefit. Device-held
-session keys additionally resist extraction and copying out of the provider
-process, but they do not make an actively compromised host trustworthy: it may
-still request permitted operations and normally has access to the application
-plaintext. Short-lived software session keys with explicit cleanup therefore
-remain a valid operating choice, not merely a test scaffold.
+Public PKCS #11 entry points implement protected concatenation, bit extraction,
+SHA-256 key derivation, and AES-CMAC SP 800-108 counter KDF. Existing ECDH,
+EC generation, AES, and CMAC complete the required generic primitives.
+Tests exercise protected and readable derivation graphs through the actual
+public API on all slot kinds. See the [operation matrix](operation-matrix.md)
+and [integration baseline](../../integration/README.md).
 
-Full native SCP execution is the qualification goal and a stronger key-retention
-option, not a requirement that every deployment use hardware for every AES/MAC
-operation. Measure the command-latency and throughput costs as well as cleanup
-and isolation. Native volatile keys avoid NVM churn; they do not remove transport
-round trips or automatically outperform host software.
+The YubiHSM client uses the ergonomic `Pkcs11Auth` session API for direct
+symmetric and asymmetric derivation. Its implementation calls the same Rust
+handlers as the public C entry points, including session routing, object policy,
+and mechanism dispatch. It does not cross the C ABI or emit internal FFI traces.
 
-## 0. Completed foundation: common session objects on every slot
+Preparation supplies a session on either a temporary software slot or an existing
+slot. The existing-slot adapter shares the backend, authorization, objects, and
+handle allocator; it never copies the token or its credentials. Direct password
+authentication creates an isolated, nonpersistent software slot and imports its
+credential as a session object. It uses the ordinary `SoftwareSlot` without a
+backing store; token-object creation remains write-protected. A dedicated
+credential session and separate handshake sessions provide the required lifetimes.
+Both preparation paths use the same derivation and session cleanup operations.
+Configured provider selection and named lookup remain planned; native chainable
+protected-object commands remain unimplemented.
 
-All slot kinds share the software session-object layer: named software,
-YubiHSM, PIV, OpenPGP, and FIDO2. Supported session data objects, imported or
-generated software keys, derivation results, and operations use that common
-implementation. Hardware ECDH results are ordinary software secret keys rather
-than a special synthetic-result type. This does not claim support for every
-PKCS #11 object attribute or mechanism.
+The [complete-channel tests](../../src/yubihsm/tests/pkcs11_auth.rs) run the same
+symmetric and asymmetric establishment sequence with a private slot and an
+existing persistent software slot registered in the public module. A separate
+YubiHSM protocol fixture covers native protected AES counter derivation. These
+are distinct checks: complete authentication with a hardware-backed source
+credential and configured source lookup still need end-to-end qualification.
 
-Supported software operations on session objects are available on every slot
-by default. Implementing another mechanism in the common layer therefore
-benefits all slots, including a named software slot without additional
-SCP-specific backend work. A software slot has an empty native mechanism list;
-its backend still supplies identity, login/PIN management, and encrypted token
-storage.
+## Current YubiHSM flow
 
-Each slot contributes a native mechanism list. A per-slot policy filters the
-maximum common software list before merging the two by mechanism ID. The
-merge combines size ranges and operation flags and retains native `CKF_HW`.
-This reports total slot capabilities; it cannot describe which individual
-sizes and operations run on hardware. Actual backend limits still apply to
-token objects. Keep the filter and merge easy to change as client testing
-reveals compatibility constraints.
+Symmetric authentication binds one protected 32-byte generic secret containing
+K-ENC followed by K-MAC. Protected extraction produces the two static AES
+objects. Counter KDF produces three explicitly readable AES working objects.
+Their values are read once into the client's zeroizing storage, and the
+entire derivation scope is destroyed. Host/card cryptograms use local S-MAC.
 
-Verified foundation: 718 library tests pass, one is ignored, and all 12
-OpenSC/OpenSSL client cases pass. Full pkcs11test has 230 passed, 57 skipped,
-and 49 failed, with no new failures from the shared layer. The nine former
-generic data-object failures pass. See the [integration baseline](../../integration/README.md)
-and [architecture](../architecture.md#shared-software-session-objects-and-mechanism-discovery).
+Asymmetric authentication binds a protected P-256 private credential, generates
+an ephemeral private key, and performs both ECDH agreements into protected
+generic-secret objects. Their concatenation and the per-block counter/shared-info
+inputs remain protected. SHA-256 derivation explicitly creates readable final
+KDF blocks, which concatenate into readable material. This is necessary because
+concatenation and extraction inherit source sensitivity/non-extractability.
+No existing object's protection is weakened.
 
-## 1. Specify the key-operation contract and required mechanisms
+The receipt key is extracted as a protected AES object and verifies the complete
+receipt before working keys are released. S-ENC, S-MAC, and S-RMAC are extracted
+as readable AES objects and read once. The provider scope, including the
+receipt key, ephemeral key, KDF blocks, and agreements, is destroyed on success
+or failure. Only the final three AES values cross into message processing.
 
-- Trace existing SCP03/SCP11 key generation, diversification, agreement,
-  derivation, receipt/cryptogram checks, and secure messaging. Record the exact
-  inputs, output key types, lengths, usage flags, and secret dependencies for
-  each supported profile.
-- Map those steps to existing PKCS #11 operations. Reuse ECDH/X9.63, HKDF,
-  AES, and CMAC where appropriate. Identify the missing generic derivations,
-  especially required CMAC-based SP 800-108 layouts, extraction of working
-  keys, and composition of secret inputs. Do not implement every derivation
-  family merely because it might be useful later.
-- Define provider selection and ownership. The protocol uses opaque key
-  handles and explicitly sensitive, non-extractable key templates. No
-  intermediate secret is obtained through `CKA_VALUE` or equivalent export.
-- Decide the internal calling boundary before refactoring: the secure-channel
-  code must not recursively acquire an already-held slot lock or require the
-  channel being established to access its own key provider. Use PKCS #11
-  operation semantics without requiring unsafe re-entry through the C ABI.
+The existing platform prefixed-X9.63 byte contract requires the ephemeral ECDH
+output to be created explicitly readable and read through the session API. The
+adapter imports its returned KDF material as explicitly readable before receipt
+verification and extraction. YubiHSM Auth returns the three working keys directly
+and the client copies them into the same zeroizing storage. Neither workflow
+adds an ordinary password cache. The explicit session-recreation exception can
+retain the existing credential/agreement references as documented in
+[authentication secrets](../authentication-secrets.md).
 
-Exit criterion: a reviewed operation matrix covers every secret-bearing step
-in the supported profiles, including existing static-key and DEK-dependent
-workflows where applicable. Every step has an implementation or a specific gap.
+All YubiHSM channels use local AES ECB/CBC and CMAC. Response authentication
+precedes decryption. Successful close and failed exchanges erase working keys;
+authenticated device-command errors advance the channel and preserve its keys.
+Local command-validation errors leave it intact. Card SCP03/SCP11 message crypto
+also runs locally; their derivation graphs still need migration.
 
-## 2. Complete the common software derivation primitives
+## 1. Connect configured provider selection and named lookup
 
-Implement the identified missing `C_DeriveKey` operations in the common layer,
-using the shared crypto core where the primitive belongs. Produce ordinary
-typed keys whose handles feed directly into later derivations, AES, and CMAC.
-Keep protocol-specific transcript layouts in the SCP consumer wherever generic
-primitives suffice.
+Connect discovery/configuration to the existing `Pkcs11Provider::from_slot`
+preparation path and `BoundKey::from_session` binding. Authorize provider sessions
+before acquiring target slot/device locks. The prepared view avoids recursive
+public-module locking and suppresses internal tracing; it does not remove the
+need to reject direct and indirect provider dependency cycles. Preparation of a
+source slot whose mutex is already held fails rather than waiting on itself.
 
-Enforce output-template validation, sensitivity/extractability inheritance,
-allowed mechanisms, usage policy, length/offset bounds, and failure atomicity.
-Failed derivation must leave no published key or usable partial result. Reuse
-the existing creator-session, logout, and zeroization rules. Verify extraction
-and composition with protected base keys as well as readable test fixtures.
+Use the [named credential design](credential-lookup.md): one exact label within
+one provider identifies a protected generic32 symmetric credential or P-256
+private credential. Missing or duplicate matches, wrong types, and incompatible
+output policies fail explicitly. Do not retain ordinary provider PINs to recover
+lost sessions; define authorization leases and revocation before integration.
 
-Exit criterion: known-answer vectors and PKCS #11 entry-point tests pass;
-representative hardware slots and named software slots expose the same common
-session behavior. The full external suite is rerun, with unsupported mechanisms
-and outdated expectations reported explicitly rather than hidden by exclusions.
+Derivation templates must permit the intended final value reads from creation.
+Use `CKA_SENSITIVE=false` and `CKA_EXTRACTABLE=true` on readable outputs, and
+honor all source restrictions. A provider that prohibits those outputs is
+incompatible with this client path; do not silently change policy or fall back
+to a different execution mode. Release intermediate objects after use and read
+only final working keys in the generic path, never long-term keys. The existing
+platform byte-prefix contract has the explicit ephemeral-ECDH boundary above.
 
-## 3. Run the existing SCP protocols through a software slot
+Acceptance: the YubiHSM client completes symmetric/asymmetric authentication
+through a separately configured slot. Instrumented tests show derivation and
+final value reads at establishment, with no provider calls during message processing.
+Tests cover missing credentials, duplicates, policy denial, failed receipts,
+partial reads, source revocation, cleanup, and unchanged wire vectors.
 
-Replace protocol-owned raw working keys and direct secret crypto calls with
-the key-operation contract. A software slot is the first complete provider;
-there must not be a parallel SCP-specific software crypto implementation.
-Trust validation and transport/framing retain their established responsibilities.
+## 2. Migrate card derivation
 
-Bind intermediate and working objects to the secure-channel lifetime. The
-current CCID channels belong to native smart-card transactions; preserve that
-boundary unless a separately reviewed change deliberately alters it. Tear down
-objects on successful completion, failed establishment, receipt/MAC rejection,
-and transport failure. Ordinary PIN/password retention policy remains unchanged.
+Route the existing card SCP03 S8 and SCP11a/b/c derivation graphs through the
+same API adapter while preserving their distinct transcripts, IV direction bit,
+security levels, and native smart-card transaction lifetime. Local encryption
+and MAC continue to use the derived channel keys.
 
-Exit criterion: supported SCP03 and SCP11 profiles complete establishment and
-protected exchanges using only key handles for secrets. Existing protocol
-vectors and transaction-lifetime tests still pass; the protocol never reads
-back intermediate or working key values.
+Card SCP11 derives a fifth key, DEK. Card SCP03 has a static administration DEK;
+its access policy must be handled separately rather than exporting a long-term
+key as if it were a disposable channel key. Existing caller-supplied provisioning
+material and KCV calculation remain an explicit input workflow. SCP03 S16 and
+unrelated protocol families are outside this plan.
 
-## 4. Implement protected derivation inside virtual-yubihsm
+Acceptance: card protocol vectors, receipt validation, provisioning, and
+transaction-lifetime regressions pass. No long-term credential is exported to
+implement derivation or administration.
 
-Add native commands and object support for the complete operation matrix,
-reusing software-key-core primitives inside the device implementation. Native
-derivations must atomically create protected, chainable device objects and
-return their identifiers, not derived bytes. The existing prefixed-ECDH
-command returns KDF bytes and alone does not satisfy this milestone.
+## 3. Implement native virtual-YubiHSM derivation
 
-Start with the [protected-key composition design](../prefixed-ecdh-derive.md#future-protected-key-composition):
-generic-secret intermediates, extraction into AES working keys, protected
-agreement/KDF operations, and the required symmetric derivations. Finalize the
-object model against the entire SCP operation matrix before choosing its
-limits. Prefer bounded, volatile native session objects for both intermediates
-and AES working keys. Channel establishment and teardown should not require NVM
-writes for ephemeral keys. Long-term credentials retain their appropriate
-persistent storage; any persistent temporary-key fallback needs explicit
-justification and cleanup.
+Add generic protected-object commands using software-key-core: agreement,
+composition, extraction, and counter/hash KDF. Reuse the same operation graph
+and source policies as the software provider. The existing prefixed-ECDH command
+returns KDF bytes and alone does not provide the generic chainable contract.
 
-Define capability and domain checks, delegated output permissions, attribute
-inheritance, identifiers/generations, output-template validation, and audit
-behavior together with each command. Device sessions, timeouts, authentication
-replacement, and invalidation must have explicit cleanup semantics. If temporary
-working keys are persistent, specify crash/orphan recovery and storage bounds;
-if session-owned, specify capacity and loss-of-session behavior.
+Provide persistent generic-secret/private-key storage with exact label lookup,
+and bounded volatile intermediate/output objects. Define capabilities, domains,
+policy inheritance, identifiers, atomic creation, audit behavior, expiration,
+and cleanup together. Avoid NVM writes for channel establishment and teardown.
+Native backing-session loss invalidates dependent handles without rebinding
+stale identifiers. Only policy-permitted final working values are exported.
 
-Exit criterion: device-command tests chain protected outputs into subsequent
-derivations and crypto operations, deny export and unauthorized use, and prove
-cleanup and atomic failure. No runtime secret is returned in a derivation response.
+Map these native operations into the PKCS #11 provider. A merged mechanism list
+or `CKF_HW` alone is insufficient proof of native derivation; verify object
+placement and command traces. Unsupported native operations fail explicitly.
+The provider needs no per-message AES/CMAC traffic for this client workflow.
 
-## 5. Map native operations into pkcs11rs and qualify provider selection
+## 4. Qualify complete channels with virtual-HSM derivation
 
-Map the device commands and objects to the same PKCS #11 operations used by the
-software provider. Preserve device ownership and retain any native session
-needed by the lifetime of its handles. Reconcile reconnect, expiration, and
-session recreation with transient objects; stale handles must never silently
-refer to replacement keys.
+Use a virtual YubiHSM as the client's derivation provider and a compatible peer
+as the target. After provisioning, long-term credentials and ECDH secrets stay
+behind the provider interface; only final working keys are read into the client.
+Exercise establishment, multiple locally protected exchanges, and teardown for
+the supported YubiHSM and card profiles.
 
-Selecting full device-side execution requires the complete native capability
-set, appropriate object placement, and authorization. The merged public
-mechanism list and `CKF_HW` alone cannot establish that guarantee. Keep an
-explicit native-capability check and fail unsupported selection without silently
-performing a missing secret operation in host software. Avoid implicit key
-movement between slots or changes in execution boundary after authentication.
-
-Exit criterion: the same protocol consumer works through either provider;
-native operation traces prove that agreement, composition, derivation,
-extraction, encryption/decryption, and MAC generation/verification use
-device-held keys throughout, including every protected message.
-
-### Session lifetime does not determine execution location
-
-`CKA_TOKEN=CK_FALSE` describes session-object lifetime, not whether the key is
-held by the host or the device. The current common software layer places these
-keys in host memory. A physical YubiHSM slot can therefore provide fast local
-session-key crypto through pkcs11rs, without implying that the AES/CMAC ran
-inside the HSM.
-
-The native provider must be able to produce and address device-held transient
-keys and dispatch operations on their actual native material. Define that
-placement/selection explicitly; do not infer it from `CKA_TOKEN=CK_FALSE` or
-from the combined mechanism list. Full device-side execution cannot be claimed
-for existing physical firmware merely because pkcs11rs supports host session
-objects. Volatile native keys avoid NVM churn, but device-command latency still
-needs measurement against the software provider; no hardware speed claim is
-assumed by this plan.
-
-## 6. Ultimate milestone: complete SCP through a virtual YubiHSM
-
-Run the common SCP implementation against a compatible peer, using a virtual
-YubiHSM as the provider for all required secret-key operations. Use disposable
-virtual fixtures for destructive and exhaustion tests. Qualify each supported
-SCP03/SCP11 profile through establishment and multiple protected exchanges,
-including the relevant command/response security levels and failure paths.
-
-The milestone is complete only when:
-
-- The software-provider and native-provider paths both satisfy the same
-  protocol vectors and peer interoperability checks.
-- After credential provisioning, native intermediate and working keys remain
-  device-held and non-extractable; the protocol receives only handles and
-  legitimate public/protocol results such as public keys, MACs, and ciphertext.
-- Unsupported native capabilities, wrong authority, tampered receipts/MACs,
-  partial derivation, object exhaustion, disconnect, and timeout fail cleanly.
-- Teardown leaves no usable stale handles, leaked channel keys, or unbounded
-  persistent temporary objects. Traces and diagnostics contain no secrets.
-- Documentation and tests in pkcs11rs and virtual-yubihsm agree on commands,
-  capabilities, object policy, and lifetime. The full PKCS #11/client regression
-  suites are run and remaining compatibility failures are accounted for.
-
-At this point the virtual YubiHSM provides native device-side support from
-pkcs11rs's perspective. It exercises a real device-protocol and authorization
-boundary, while remaining a software device rather than physical tamper-resistant
-hardware. A physical HSM implementing the required primitives could supply the
-same key-provider role without changing the SCP protocol implementation.
+Completion requires identical protocol results with software and native
+providers; explicit policy and authorization failures; no leaked transient
+objects or usable stale handles; no provider/device message-crypto calls; and
+passing PKCS #11/client regressions. Reconcile commands, object policy, and
+lifetime documentation in both repositories. Use disposable virtual fixtures
+for destructive/exhaustion tests and keep physical devices intact.

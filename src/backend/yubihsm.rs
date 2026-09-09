@@ -405,7 +405,7 @@ impl HsmAuthProvider {
                 let session_id = handshake.sid;
                 let session = YubiHsmSecureSession::complete_asymmetric_with_session_keys(
                     handshake, keys.enc, keys.mac, keys.rmac,
-                );
+                )?;
                 log!(
                     2,
                     "YubiHSM Auth accepted the asymmetric receipt for target session {}",

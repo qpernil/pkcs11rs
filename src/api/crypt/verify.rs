@@ -26,7 +26,7 @@ ffi_entry_point! {
     }
 }
 
-fn verify_init(
+pub(crate) fn verify_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -209,7 +209,7 @@ ffi_entry_point! {
     }
 }
 
-fn verify(
+pub(crate) fn verify(
     session_handle: CK_SESSION_HANDLE,
     data: *const ::std::os::raw::c_uchar,
     data_len: CK_ULONG,

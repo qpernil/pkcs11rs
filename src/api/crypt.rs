@@ -32,3 +32,5 @@ pub use sign::{C_Sign, C_SignFinal, C_SignInit, C_SignRecover, C_SignRecoverInit
 pub use verify::{
     C_Verify, C_VerifyFinal, C_VerifyInit, C_VerifyRecover, C_VerifyRecoverInit, C_VerifyUpdate,
 };
+
+pub(crate) use verify::{verify, verify_init};
