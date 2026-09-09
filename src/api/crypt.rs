@@ -27,6 +27,7 @@ pub(crate) use shared::{
     RsaOaepParameters, parse_rsa_oaep_parameters, rsa_oaep_pad, rsa_oaep_unpad,
     rsa_pkcs1_v1_5_unpad, yubihsm_ec_coordinate_length,
 };
+pub(crate) use sign::yubihsm_aes_cmac;
 pub use sign::{C_Sign, C_SignFinal, C_SignInit, C_SignRecover, C_SignRecoverInit, C_SignUpdate};
 pub use verify::{
     C_Verify, C_VerifyFinal, C_VerifyInit, C_VerifyRecover, C_VerifyRecoverInit, C_VerifyUpdate,

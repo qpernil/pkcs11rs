@@ -458,7 +458,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.stores_software_token_keys());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 83);
+        assert_eq!(mechanisms.len(), 88);
         assert_eq!(
             mechanisms
                 .iter()
@@ -586,6 +586,14 @@ mod tests {
                 x if x == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE => (24, 24, CKF_GENERATE),
                 x if x == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE => (1, 1024, CKF_GENERATE),
                 x if x == CKM_HKDF_DERIVE as CK_MECHANISM_TYPE => (20, 64, CKF_DERIVE),
+                x if x == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE => (128, 256, CKF_DERIVE),
+                x if x == CKM_CONCATENATE_BASE_AND_KEY as CK_MECHANISM_TYPE
+                    || x == CKM_CONCATENATE_BASE_AND_DATA as CK_MECHANISM_TYPE
+                    || x == CKM_EXTRACT_KEY_FROM_KEY as CK_MECHANISM_TYPE
+                    || x == CKM_SHA256_KEY_DERIVATION as CK_MECHANISM_TYPE =>
+                {
+                    (1, 1024, CKF_DERIVE)
+                }
                 x if [
                     CKM_AES_ECB,
                     CKM_AES_CBC,

@@ -2869,7 +2869,9 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
         crate::YUBIHSM_ALGO_AES128,
         &capabilities,
     );
-    assert!(effective.encrypt && effective.decrypt && effective.sign && effective.verify);
+    assert!(
+        effective.encrypt && effective.decrypt && effective.sign && effective.verify && effective.derive
+    );
 
     let private_wrap_capabilities = crate::yubihsm_capabilities(&[0x0c, 0x0d]);
     let synthetic_public = crate::yubihsm_capabilities_to_attributes(
@@ -2997,6 +2999,7 @@ fn yubihsm_capability_mapping_ignores_meaningless_capabilities() {
                 decrypt: true,
                 sign: true,
                 verify: true,
+                derive: true,
                 extractable: true,
                 ..crate::YubiHsmPkcs11Attributes::default()
             },

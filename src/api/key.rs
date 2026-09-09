@@ -4,9 +4,12 @@ use super::object::{
     required_template_value, validate_software_secret_length, validate_unique_template,
     yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
 };
+use crate::software_key_ops::agreement::software_ecdh;
 use crate::*;
-use software_key_core::software_key_agreement::derive_with_signing_key;
 use zeroize::Zeroize;
+
+mod counter_kdf;
+mod secret_derive;
 
 ffi_entry_point! {
     pub fn C_GenerateKey(
@@ -1538,20 +1541,6 @@ fn project_public_key_object(
     Ok(projected)
 }
 
-fn software_ecdh(
-    key: &SoftwarePrivateKeyMaterial,
-    public_data: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, Error> {
-    match key {
-        SoftwarePrivateKeyMaterial::Signing(key) => derive_with_signing_key(key, public_data)
-            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
-        SoftwarePrivateKeyMaterial::Montgomery(key) => key
-            .derive(public_data)
-            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-    }
-}
-
 fn derive_key(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -1562,6 +1551,26 @@ fn derive_key(
 ) -> Result<(), Error> {
     let key_handle = unsafe { as_mut(key) }?;
     let mechanism = unsafe { _as_ref(mechanism) }?;
+    if mechanism.mechanism == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE {
+        return counter_kdf::derive(
+            session_handle,
+            mechanism,
+            base_key,
+            templ,
+            attribute_count,
+            key_handle,
+        );
+    }
+    if secret_derive::supports(mechanism.mechanism) {
+        return secret_derive::derive(
+            session_handle,
+            mechanism,
+            base_key,
+            templ,
+            attribute_count,
+            key_handle,
+        );
+    }
     if mechanism.mechanism == CKM_HKDF_DERIVE as CK_MECHANISM_TYPE {
         return derive_hkdf_key(
             session_handle,

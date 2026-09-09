@@ -2,6 +2,8 @@ use super::shared::{
     parse_rsa_oaep_parameters, rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad,
 };
 use crate::backed_object::projected_public_key_material;
+use crate::software_key_ops::software_aes_cbc;
+pub(crate) use crate::software_key_ops::software_crypt_ecb_blocks;
 use crate::*;
 use software_key_core::software_symmetric::CcmOperation;
 
@@ -452,26 +454,6 @@ const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 const YUBIHSM_CBC_CHUNK_LENGTH: usize = 2000;
 const YUBIHSM_CCM_WRAP_OVERHEAD: usize = 1 + 13 + 16;
 
-pub(crate) fn software_crypt_ecb_blocks(
-    key: &[u8],
-    blocks: &[u8],
-    encrypting: bool,
-) -> Result<Vec<u8>, Error> {
-    use software_key_core::software_symmetric::{
-        SoftwareSymmetricError, decrypt_aes_ecb, encrypt_aes_ecb,
-    };
-    let result = if encrypting {
-        encrypt_aes_ecb(key, blocks)
-    } else {
-        decrypt_aes_ecb(key, blocks)
-    };
-    result.map_err(|error| match error {
-        SoftwareSymmetricError::InvalidKeyLength => CKR_KEY_SIZE_RANGE.into(),
-        SoftwareSymmetricError::InvalidDataLength => CKR_DATA_LEN_RANGE.into(),
-        _ => CKR_FUNCTION_FAILED.into(),
-    })
-}
-
 fn software_tdes_ecb_blocks(key: &[u8], blocks: &[u8], encrypting: bool) -> Result<Vec<u8>, Error> {
     use software_key_core::software_symmetric::{
         SoftwareSymmetricError, decrypt_tdes_ecb, encrypt_tdes_ecb,
@@ -531,47 +513,6 @@ fn software_tdes_cbc_pad(
         )
         .map_err(|_| CKR_ENCRYPTED_DATA_INVALID.into())
     }
-}
-
-fn software_aes_cbc(
-    key: &[u8],
-    iv: &[u8; AES_BLOCK_LENGTH],
-    input: &[u8],
-    encrypting: bool,
-) -> Result<Vec<u8>, Error> {
-    if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
-        return Err(if encrypting {
-            CKR_DATA_LEN_RANGE.into()
-        } else {
-            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
-        });
-    }
-    let mut output = Vec::with_capacity(input.len());
-    let mut previous = *iv;
-    for input_block in input.as_chunks::<AES_BLOCK_LENGTH>().0 {
-        if encrypting {
-            let block = Zeroizing::new(
-                input_block
-                    .iter()
-                    .zip(previous)
-                    .map(|(value, previous)| value ^ previous)
-                    .collect::<Vec<_>>(),
-            );
-            let encrypted = software_crypt_ecb_blocks(key, &block, true)?;
-            previous.copy_from_slice(&encrypted);
-            output.extend_from_slice(&encrypted);
-        } else {
-            let decrypted = Zeroizing::new(software_crypt_ecb_blocks(key, input_block, false)?);
-            output.extend(
-                decrypted
-                    .iter()
-                    .zip(previous)
-                    .map(|(value, previous)| value ^ previous),
-            );
-            previous.copy_from_slice(input_block);
-        }
-    }
-    Ok(output)
 }
 
 fn software_aes_cbc_pad(
