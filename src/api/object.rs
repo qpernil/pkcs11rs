@@ -1638,7 +1638,7 @@ fn build_imported_key_material(
             key.precompute()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
-                SoftwareSigningKey::Rsa(Box::new(key)),
+                SoftwareSigningKey::Rsa(Arc::new(key)),
             ))
         }
         (class, key_type)

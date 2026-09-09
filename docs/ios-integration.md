@@ -131,6 +131,20 @@ and remote connector requests can take noticeable time. Run calls on a serial
 background queue or another executor that keeps blocking work away from the
 main UI thread.
 
+On iOS, ML-DSA key construction in `software-key-core` uses a temporary 4 MiB worker
+stack, including private-key import and public-key construction for
+verification. The worker is joined before the call returns and transfers the
+completed heap-backed key by move. This accommodates RustCrypto's large
+construction temporaries in unoptimized builds without changing the app's
+dispatch queues or moving work onto its main thread. Signing and verification
+run on the caller's thread; public-key metadata encoding avoids matrix expansion.
+Other platforms construct keys directly on the calling thread.
+Cloned RSA, ML-DSA, and ML-KEM object handles share immutable key material, without
+copying matrices or creating a worker. The last owner releases and zeroizes it.
+The Swift smoke flow is verified with unoptimized Rust and Xcode Debug builds,
+including persisted ML-DSA-87 key loading, signing/verification, and ML-KEM-1024
+encapsulation/decapsulation on the app's ordinary dispatch queue.
+
 A serial queue also gives an application a simple place to own the module
 lifecycle:
 
