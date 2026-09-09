@@ -279,7 +279,14 @@ backend does not duplicate cryptography.
   SHA-384, or SHA-512.
 - Derivation: ECDH with `CKD_NULL` or SHA-1/SHA-2/SHA-3 X9.63 KDFs, and HKDF
   extract, expand, or extract-and-expand with SHA-1, SHA-256, SHA-384, or
-  SHA-512.
+  SHA-512. Secret-key composition supports `CKM_CONCATENATE_BASE_AND_KEY`,
+  `CKM_CONCATENATE_BASE_AND_DATA`, `CKM_EXTRACT_KEY_FROM_KEY`, and
+  `CKM_SHA256_KEY_DERIVATION` through the common session layer on every slot.
+  `CKM_SP800_108_COUNTER_KDF` supports AES-CMAC with one output key per call,
+  ordered public input fields, and explicit counter/length encodings. The same
+  KDF engine accepts software keys and protected YubiHSM AES keys via a CMAC
+  callback. YubiHSM bases use device AES-ECB; derived session objects use the
+  common module layer. See the [KDF profile](scp-key-provider/operation-matrix.md#implemented-cmac-counter-kdf-profile).
 - Wrapping: AES-KW, AES-KWP, RSA PKCS #1 v1.5, RSA-OAEP, and hybrid
   RSA-AES. Secret keys and, where the representation permits it, canonical
   bare-PKCS #8 asymmetric private keys can be wrapped and unwrapped.
@@ -325,6 +332,9 @@ For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 | `CKM_DES3_ECB`, `CKM_DES3_CBC`, `CKM_DES3_CBC_PAD` | 24 bytes | `CKF_ENCRYPT \| CKF_DECRYPT` |
 | SHA-1, SHA-224, SHA-256, SHA-384, and SHA-512 HMAC and `*_HMAC_GENERAL` | 1–1024 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_HKDF_DERIVE` | 20–64 bytes | `CKF_DERIVE` |
+| `CKM_SP800_108_COUNTER_KDF` (AES-CMAC) | 128–256 bits | `CKF_DERIVE` |
+| `CKM_CONCATENATE_BASE_AND_KEY`, `CKM_CONCATENATE_BASE_AND_DATA` | 1–1024 bytes | `CKF_DERIVE` |
+| `CKM_EXTRACT_KEY_FROM_KEY`, `CKM_SHA256_KEY_DERIVATION` | 1–1024 bytes | `CKF_DERIVE` |
 | `CKM_RSA_AES_KEY_WRAP` | 1024–4096 | `CKF_WRAP \| CKF_UNWRAP` |
 | SHA-1, SHA-2, and SHA-3 digest mechanisms | 0 | `CKF_DIGEST` |
 

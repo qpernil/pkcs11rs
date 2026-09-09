@@ -84,6 +84,7 @@ use configuration::{
 
 mod platform_crypto;
 mod secure_channel_crypto;
+mod software_key_ops;
 mod software_storage;
 pub(crate) use software_storage::SoftwareTokenStore;
 
@@ -458,6 +459,7 @@ fn yubihsm_capabilities_to_attributes(
                 yubihsm_capability(capabilities, 0x32) || yubihsm_capability(capabilities, 0x34);
             attributes.sign = yubihsm_capability(capabilities, 0x33);
             attributes.verify = attributes.sign;
+            attributes.derive = attributes.sign;
         }
         _ => {}
     }
@@ -544,7 +546,7 @@ fn yubihsm_attributes_to_capabilities(
             if attributes.decrypt {
                 bits.extend([0x32, 0x34]);
             }
-            if attributes.sign || attributes.verify {
+            if attributes.sign || attributes.verify || attributes.derive {
                 bits.push(0x33);
             }
         }

@@ -6,6 +6,7 @@ use super::{
         encode_pkcs1_v1_5_signature_input, yubihsm_ec_coordinate_length, yubihsm_ecdsa_signature,
     },
 };
+pub(crate) use crate::software_key_ops::software_aes_cmac;
 use crate::*;
 use software_key_core::post_quantum::{MlDsaError, MlDsaRandomization};
 
@@ -451,10 +452,6 @@ pub(crate) fn yubihsm_aes_gmac(
     aes_gcm(&parameters, &[], true, |blocks| {
         yubihsm_encrypt_ecb_blocks(ctx, session_handle, key_id, blocks)
     })
-}
-
-pub(crate) fn software_aes_cmac(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
-    cmac_with_encryptor(data, |block| software_crypt_ecb_blocks(key, block, true))
 }
 
 pub(crate) fn software_aes_gmac(

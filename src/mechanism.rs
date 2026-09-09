@@ -164,6 +164,11 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_SHA512_HMAC,
         CKM_SHA512_HMAC_GENERAL,
         CKM_HKDF_DERIVE,
+        CKM_CONCATENATE_BASE_AND_KEY,
+        CKM_CONCATENATE_BASE_AND_DATA,
+        CKM_EXTRACT_KEY_FROM_KEY,
+        CKM_SHA256_KEY_DERIVATION,
+        CKM_SP800_108_COUNTER_KDF,
         CKM_YUBICO_AES_CCM_WRAP,
         CKM_YUBICO_RSA_WRAP,
         CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
@@ -473,6 +478,37 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             flags: CKF_DERIVE as CK_FLAGS,
         },
         MechanismDetails {
+            type_: CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE,
+            // SP800-108 mechanism information reports base-key sizes in bits.
+            min_key_size: 128,
+            max_key_size: 256,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_CONCATENATE_BASE_AND_KEY as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_CONCATENATE_BASE_AND_DATA as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_EXTRACT_KEY_FROM_KEY as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_SHA256_KEY_DERIVATION as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
             type_: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
             min_key_size: 1024,
             max_key_size: 4096,
@@ -550,7 +586,13 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
     mechanisms
 }
 
-pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 31] = [
+pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 32] = [
+    MechanismDetails {
+        type_: CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE,
+        min_key_size: 128,
+        max_key_size: 256,
+        flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+    },
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -865,17 +907,26 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                     || y == CKM_AES_GCM as CK_MECHANISM_TYPE
                     || y == CKM_AES_GMAC as CK_MECHANISM_TYPE
                     || y == CKM_AES_CMAC as CK_MECHANISM_TYPE
-                    || y == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
+                    || y == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
+                    || y == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE =>
                 {
                     &aes_sizes
                 }
                 _ => &[],
             };
             if let (Some(minimum), Some(maximum)) = (sizes.iter().min(), sizes.iter().max()) {
-                details.min_key_size = *minimum;
-                details.max_key_size = *maximum;
+                let scale = if details.type_ == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE {
+                    8
+                } else {
+                    1
+                };
+                details.min_key_size = *minimum * scale;
+                details.max_key_size = *maximum * scale;
             }
             let supported = match details.type_ {
+                x if x == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE => {
+                    !aes_sizes.is_empty() && algorithms.contains(&YUBIHSM_ALGO_AES_ECB)
+                }
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_rsa,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
                     details.flags = CKF_HW as CK_FLAGS;
