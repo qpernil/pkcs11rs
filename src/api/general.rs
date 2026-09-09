@@ -188,40 +188,22 @@ ffi_entry_point! {
         slot_list: *mut CK_SLOT_ID,
         count: *mut ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        unsafe {
-            log!(
-                2,
-                "C_GetSlotList called with {:?}",
-                (token_present, slot_list, count)
-            );
-            let count = match as_mut(count) {
-                Ok(count) => count,
-                Err(error) => return error.into(),
-            };
-            match with_context(|ctx| {
-                let keys = discover_slot_ids(ctx, token_present != 0)?;
-                if slot_list.is_null() {
-                    *count = keys.len() as CK_ULONG;
-                    log!(2, "C_GetSlotList returning {:?}", *count);
-                    return Ok(CKR_OK as CK_RV);
-                }
-
-                if *count < keys.len() as CK_ULONG {
-                    *count = keys.len() as CK_ULONG;
-                    log!(2, "C_GetSlotList returning {:?}", *count);
-                    return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
-                }
-
-                let output = _from_raw_parts_mut(slot_list, keys.len())?;
-                output.copy_from_slice(&keys);
+        log!(2, "C_GetSlotList called with {:?}", (token_present, slot_list, count));
+        map::<(), Error>((|| {
+            let count = unsafe { as_mut(count) }?;
+            let keys = get_slot_list(token_present != 0)?;
+            if slot_list.is_null() {
                 *count = keys.len() as CK_ULONG;
-                log!(2, "C_GetSlotList returning {:?}", (keys, *count));
-                Ok(CKR_OK as CK_RV)
-            }) {
-                Ok(rv) => rv,
-                Err(e) => e.into(),
+                return Ok(());
             }
-        }
+            if *count < keys.len() as CK_ULONG {
+                *count = keys.len() as CK_ULONG;
+                return Err(CKR_BUFFER_TOO_SMALL.into());
+            }
+            unsafe { _from_raw_parts_mut(slot_list, keys.len()) }?.copy_from_slice(&keys);
+            *count = keys.len() as CK_ULONG;
+            Ok(())
+        })())
     }
 }
 
@@ -285,4 +267,8 @@ ffi_entry_point! {
     ) -> CK_RV {
         map(with_context(|_| Err::<(), Error>(CKR_FUNCTION_NOT_SUPPORTED.into())))
     }
+}
+
+pub(crate) fn get_slot_list(token_present: bool) -> Result<Vec<CK_SLOT_ID>, Error> {
+    with_context(|ctx| discover_slot_ids(ctx, token_present))
 }

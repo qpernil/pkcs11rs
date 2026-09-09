@@ -13,6 +13,37 @@ tag used for asymmetric receipts. A failed
 challenge request does not create an HSM session. Login retains the resulting
 session keys under the [authentication secret policy](authentication-secrets.md).
 
+## Secure-channel working keys
+
+YubiHSM channels retain S-ENC, S-MAC, and S-RMAC as local AES bytes in
+zeroizing storage. Message encryption/decryption and CMAC run directly in the
+client, with no provider calls or placement option. The full command MAC
+maintains chaining; the response's eight-byte MAC is verified before decryption.
+Closing or invalidating the channel immediately clears all three working keys.
+
+Direct symmetric authentication extracts protected K-ENC/K-MAC objects from one
+32-byte credential and uses counter KDF to create explicitly readable working
+keys. Direct asymmetric authentication uses protected P-256/ECDH objects and
+composition, makes the final SHA-256 KDF blocks readable, and extracts AES keys.
+The receipt key remains protected and verifies the receipt before the working
+keys are read. All derivation objects are destroyed on completion or failure.
+Long-term credential and raw agreement values are never read into message code.
+Readability is chosen in output templates; existing protected objects cannot be
+weakened to make an export succeed.
+
+YubiHSM Auth supplies working bytes directly. The platform adapter imports its
+KDF bytes for receipt verification and extraction. Both feed the same local
+working-key storage, without adding an ordinary login-password cache.
+
+Derivation uses `Pkcs11Auth`, an ergonomic Rust session API sharing the handlers
+behind the public C exports. Preparation supplies either a temporary software
+slot for direct credentials or a session view sharing an existing slot's
+backend, objects, and login state. Internal calls avoid C FFI tracing and the
+public module lock. Existing slot/device locking and authorization still apply.
+Configured provider selection and named lookup remain planned. See the
+[SCP key-provider plan](scp-key-provider/README.md) for preparation, session
+ownership, card derivation, and native virtual-HSM support.
+
 ## Slot layout
 
 YubiHSM slots provide the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
@@ -297,9 +328,10 @@ interrupted command once. It never recreates or replays after an ambiguous
 transport, framing, encryption, or response-MAC failure, and it does not run a
 keepalive or background timer.
 
-While opted in, direct symmetric authentication retains the derived static AES
-keys in zeroizing memory. Direct asymmetric authentication retains only the
-static ECDH shared secret, not the password-derived private key. YubiHSM Auth
+While opted in, direct symmetric authentication retains its protected 32-byte
+credential object. Direct asymmetric authentication retains only a protected
+static ECDH shared-secret object, not the password-derived private key. These
+are opaque references to zeroizing in-module objects. YubiHSM Auth
 authentication retains the selected provider and its zeroizing credential
 password; recreation invokes the applet's session-key calculation again. A
 credential requiring touch therefore waits for touch in the ordinary applet
@@ -990,8 +1022,11 @@ Z_ephemeral = ECDH(host ephemeral private, device ephemeral public)
 Z_static    = ECDH(platform static private, device static public)
 ```
 
-The common software crypto layer calculates `Z_ephemeral`. The platform
-provider calculates `Z_static` while keeping the long-term private key inside
+The private slot generates the ephemeral key and calculates
+`Z_ephemeral` as an explicitly readable generic-secret session object. The adapter
+reads its value through `Pkcs11Auth` for the existing platform byte-prefix contract;
+it never weakens an existing protected object. The
+platform provider calculates `Z_static` while keeping the long-term private key inside
 its protected store. The prefixed X9.63 construction expands 64 bytes as:
 
 ```text
@@ -1009,9 +1044,12 @@ zeroizing buffer, performs the prefixed KDF in Rust, and drops the intermediate
 immediately. A provider capable of applying the complete construction behind
 its key boundary may avoid exposing even that shared secret.
 
-PKCS11RS verifies the device receipt as a constant-time AES-CMAC comparison
-over the device and host ephemeral points. If trust, derivation, or receipt
-verification fails, it sends a best-effort invalid close for the pending
+The adapter imports the KDF result as a readable private generic-secret object.
+The scope extracts a protected verify-only receipt key and verifies the device receipt with
+constant-time AES-CMAC comparison over the device and host ephemeral points.
+After verification, it extracts and reads S-ENC, S-MAC, and S-RMAC into local
+zeroizing storage, then releases the receipt key and all temporary objects.
+If trust, derivation, or receipt verification fails, it sends a best-effort invalid close for the pending
 session and discards all derived material. Asymmetric authentication needs no
 separate host-cryptogram step after a valid receipt.
 

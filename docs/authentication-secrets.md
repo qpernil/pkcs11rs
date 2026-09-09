@@ -18,8 +18,12 @@ lifetime is distinct from retaining the login secret to authenticate again.
 - FIDO previewSign uses the same per-operation signing authorization. User
   login may retain a one-shot administration token for registration or deletion,
   but not the PIN needed to obtain another token. See [previewSign](preview-sign.md).
-- YubiHSM login retains secure-session keys, not the login password, by default.
-  Transparent session recreation is an explicit exception described below.
+- YubiHSM login retains only its three channel working keys as local AES bytes
+  in zeroizing storage for message encryption and MAC. Successful close or
+  channel invalidation drops that storage. Readable derivation outputs are
+  transient; long-term credentials remain protected. This does not retain the
+  login password. Transparent session recreation is an explicit exception
+  described below.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
   they are not a cache populated from ordinary user login.
@@ -30,9 +34,16 @@ lifetime is distinct from retaining the login secret to authenticate again.
 
 `yubihsm.recreate_sessions = true`, or
 `PKCS11RS_YUBIHSM_RECREATE_SESSIONS=1`, opts into retaining slot-local
-reauthentication material. Direct symmetric authentication retains derived
-static AES keys; direct asymmetric authentication retains a static ECDH shared
-secret. YubiHSM Auth retains its selected provider and credential password.
+reauthentication material. Direct symmetric authentication retains a protected
+32-byte generic-secret credential containing the static AES pair; direct
+asymmetric authentication retains a protected static ECDH shared-secret object.
+These are provider-session handles. Each retained direct credential or agreement
+has a dedicated owning session; handshake sessions own the transient derivation
+objects. Closing the owning session deletes its session objects, and dropping
+the last private-provider reference releases the temporary software slot.
+Software key storage is zeroizing. No ordinary login PIN is retained to reopen
+these sessions. YubiHSM Auth retains its selected provider and
+credential password.
 Secret material uses zeroizing storage and is dropped on logout, invalidation,
 finalization, or session replacement. A platform-backed credential may instead
 retain a protected-key reference. See [YubiHSM authentication](yubihsm-auth.md)

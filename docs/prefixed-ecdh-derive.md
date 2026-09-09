@@ -143,9 +143,17 @@ source HSM.
 
 The [SCP03/SCP11 key-operation plan](scp-key-provider/README.md) uses one protocol
 implementation with interchangeable software and native key providers. The
-native goal includes all AES and MAC operations for protected traffic, with
-intermediates and working keys retained by the device. This is planned support;
-the existing command returns KDF bytes to the host.
+native goal protects long-term credentials and agreement inputs during
+derivation, then permits final working-key reads for local message crypto.
+There is no message-crypto placement option. Generic chainable device objects
+remain planned; the existing command returns KDF bytes to the host.
+
+The [client operation matrix](scp-key-provider/operation-matrix.md) specifies
+the initial generic mechanism set and distinguishes the YubiHSM and
+GlobalPlatform card profiles. YubiHSM uses four asymmetric-derived keys and
+imports keys through its encrypted channel, with no DEK. Card SCP11 uses the
+same X9.63 construction but takes a fifth key for its administration DEK;
+its receipt transcript and secure-message framing also differ.
 
 The missing abstraction is a protected base object plus derivation parameters
 and an output template atomically creating another chainable device key object.
@@ -158,7 +166,9 @@ composition, or other derivation families can use the same foundation.
 Prefer bounded volatile native session objects for intermediates and working
 AES keys. For the four-key construction described above, a protected 64-byte
 result can feed extraction of receipt, S-ENC, S-MAC, and S-RMAC objects without
-exposing any bytes or persisting ephemeral keys. The capacity and identifiers
+persisting ephemeral keys. For the local-message client, final KDF outputs must
+permit readable working keys from creation, while long-term keys and raw
+agreements remain protected; extraction cannot weaken source policy. The capacity and identifiers
 must cover the complete operation graph, not assume that only the intermediate
 needs session lifetime. Persistent generic-secret and AES output remain useful
 for deliberate token-object requests; they are not the default channel-key
@@ -175,5 +185,5 @@ and object encoding is part of the planned implementation.
 `CKA_TOKEN=CK_FALSE` alone does not promise device residence. Current hardware
 ECDH outputs use the common host software session layer, which can also perform
 AES and MAC operations locally. Native placement and dispatch must be explicit
-for the full device-side workflow. Existing physical firmware needs equivalent
+for device-side derivation. Established channels use local working bytes. Existing physical firmware needs equivalent
 native support before that stronger boundary can be claimed.

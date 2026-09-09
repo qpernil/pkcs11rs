@@ -226,9 +226,16 @@ PKCS11RS_HARDWARE_DISCOVERY=0 cargo test
 
 Automatic HID discovery can abort inside macOS `IOHIDManager`/`CFRunLoop` with
 `SIGTRAP`; it is a separate native-discovery validation constraint. The full
-Cargo suite passes with discovery disabled, including 728 main-library tests
+Cargo suite passes with discovery disabled, including 758 main-library tests
 and 27 ignored tests. This does not validate native HID discovery.
 The 11 wrapping regressions and Clippy with warnings denied also pass.
+Complete YubiHSM channel tests cover symmetric and asymmetric authentication
+through private-slot and existing persistent software-slot `Pkcs11Auth`
+preparation, including failed establishment, encrypted messages, and cleanup.
+Run that matrix alone with `PKCS11RS_HARDWARE_DISCOVERY=0 cargo test --lib complete_channel_uses`.
+A separate registered YubiHSM protocol fixture tests protected native AES
+counter derivation; the complete-channel matrix does not use a hardware-backed
+source credential.
 
 Run the fixture/report regressions without external clients or hardware:
 

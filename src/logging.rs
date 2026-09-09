@@ -74,8 +74,7 @@ pub(crate) fn configured_dispatch(level: Option<LogLevel>) -> Option<Dispatch> {
 }
 
 fn module_dispatch() -> Option<Dispatch> {
-    crate::MODULE_CONTEXT
-        .try_read()
+    crate::lock_context_read()
         .ok()
         .and_then(|module| module.as_ref().and_then(|context| context.logging.clone()))
 }

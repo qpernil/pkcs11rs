@@ -1,3 +1,5 @@
+mod pkcs11_auth;
+
 use super::*;
 use crate::{
     CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_RV, CK_TOKEN_INFO, CKA_LABEL,
@@ -4836,6 +4838,7 @@ fn authenticates_and_exchanges_encrypted_session_messages() {
         .send_command(&peer, &Command::close_session())
         .unwrap();
     assert_eq!(peer.commands.borrow().len(), 5);
+    assert!(session.keys.is_empty());
 }
 
 fn wire_bytes(encoded: &str) -> Vec<u8> {
@@ -5888,6 +5891,7 @@ fn oversized_commands_do_not_mutate_session_state() {
     let peer = ProtocolPeer::new();
     let mut session =
         SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE).unwrap();
+    assert!(!session.keys.is_empty());
     let counter = session.counter;
     let chaining_value = session.mac_chaining_value;
     let command = Command::raw(CommandCode::Echo, &[0; 3_117]).unwrap();
@@ -5923,6 +5927,7 @@ fn rejects_invalid_response_mac() {
             .is_err()
     );
     assert!(!session.is_valid());
+    assert!(session.keys.is_empty());
     let command_count = peer.commands.borrow().len();
     assert!(matches!(
         session.send_command(&peer, &Command::get_storage_info()),
@@ -5995,4 +6000,22 @@ fn device_command_errors_advance_the_session_counter() {
     assert!(session.is_valid());
     let next = Command::raw(CommandCode::BlinkDevice, &[1]).unwrap();
     assert_eq!(session.send_command(&peer, &next).unwrap(), [1]);
+}
+
+#[test]
+fn cleared_local_keys_invalidate_channel_without_sending_or_recreating_keys() {
+    let peer = ProtocolPeer::new();
+    let mut session =
+        SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE).unwrap();
+    assert!(!session.keys.is_empty()); // Static imports have already been destroyed.
+    session.keys.clear();
+    let commands = peer.commands.borrow().len();
+    assert!(
+        session
+            .send_command(&peer, &Command::get_storage_info())
+            .is_err()
+    );
+    assert!(!session.is_valid());
+    assert!(session.keys.is_empty());
+    assert_eq!(peer.commands.borrow().len(), commands);
 }

@@ -82,6 +82,9 @@ use configuration::{
     SecureChannelConfiguration,
 };
 
+mod key_scope;
+mod pkcs11_auth;
+mod pkcs11_provider;
 mod platform_crypto;
 mod secure_channel_crypto;
 mod software_key_ops;
@@ -677,10 +680,12 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn lock_context_read() -> Result<std::sync::RwLockReadGuard<'static, Option<ModuleContext>>, Error>
-{
+fn lock_context_read() -> Result<pkcs11_provider::ContextRead, Error> {
+    if let Some(context) = pkcs11_provider::selected_context() {
+        return Ok(pkcs11_provider::ContextRead::Private(context));
+    }
     match MODULE_CONTEXT.try_read() {
-        Ok(guard) => Ok(guard),
+        Ok(guard) => Ok(pkcs11_provider::ContextRead::Global(guard)),
         Err(std::sync::TryLockError::WouldBlock) => Err(CKR_CRYPTOKI_NOT_INITIALIZED.into()),
         Err(std::sync::TryLockError::Poisoned(_)) => Err(CKR_MUTEX_BAD.into()),
     }

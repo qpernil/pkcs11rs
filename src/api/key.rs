@@ -360,7 +360,7 @@ ffi_entry_point! {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generate_key_pair(
+pub(crate) fn generate_key_pair(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
     public_template: CK_ATTRIBUTE_PTR,
@@ -1541,7 +1541,7 @@ fn project_public_key_object(
     Ok(projected)
 }
 
-fn derive_key(
+pub(crate) fn derive_key(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
     base_key: CK_OBJECT_HANDLE,

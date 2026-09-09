@@ -2463,7 +2463,7 @@ pub(crate) struct OwnedPolicyTemplate {
 }
 
 impl OwnedPolicyTemplate {
-    fn from_semantic(template: &KeyAttributes) -> Result<Self, CK_RV> {
+    pub(crate) fn from_semantic(template: &KeyAttributes) -> Result<Self, CK_RV> {
         let mut attributes = Vec::with_capacity(template.iter().count());
         for (type_, value) in template.iter() {
             let type_ = policy_u64_to_ulong(*type_).ok_or(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;

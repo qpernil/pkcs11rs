@@ -55,3 +55,14 @@ pub(crate) use object::{openpgp_private_import, parse_create_object_template};
 pub(crate) use wrap::parse_yubihsm_wrap_mechanism;
 #[cfg(test)]
 pub(crate) use yubihsm::{YubiHsmEnrollment, yubihsm_enroll_device};
+
+/// The same Rust handlers used by the C entry points. Callers own the ABI-shaped
+/// input buffers and select a module instance before invoking these operations.
+/// Session routing, object policy, and mechanism execution remain in the handlers.
+pub(crate) mod rust {
+    pub(crate) use super::crypt::{verify, verify_init};
+    pub(crate) use super::general::get_slot_list;
+    pub(crate) use super::key::{derive_key, generate_key_pair};
+    pub(crate) use super::object::{copy_object, create_object, destroy_object, get_attribute_value};
+    pub(crate) use super::session::{close_session, login, open_session};
+}
