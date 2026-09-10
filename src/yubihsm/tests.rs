@@ -5621,6 +5621,57 @@ fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
 }
 
 #[test]
+fn password_credentials_authenticate_both_target_key_types() {
+    let trust = TestTrustEntry::new();
+    let credentials = PasswordCredentials::new(PASSWORD).unwrap();
+    let symmetric_peer = ProtocolPeer::new();
+    let mut symmetric = SecureSession::authenticate_symmetric_detect_format(
+        &symmetric_peer,
+        1,
+        &credentials.symmetric().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    let asymmetric_peer = ProtocolPeer::new();
+    asymmetric_peer.use_asymmetric_authentication(1);
+    let (mut asymmetric, material) = SecureSession::authenticate_asymmetric_detect_format(
+        &asymmetric_peer,
+        1,
+        &credentials.asymmetric().unwrap(),
+        Some(&trust.prefix),
+    )
+    .unwrap()
+    .unwrap();
+    drop(credentials);
+    // Established channels own working keys, independently of the temporary
+    // password credentials. Only the asymmetric agreement remains for replay.
+    for (session, peer) in [
+        (&mut symmetric, &symmetric_peer),
+        (&mut asymmetric, &asymmetric_peer),
+    ] {
+        assert_eq!(
+            session
+                .send_command(peer, &Command::get_storage_info())
+                .unwrap(),
+            [0xaa, 0xbb, 0xcc]
+        );
+        session
+            .send_command(peer, &Command::close_session())
+            .unwrap();
+    }
+    let mut recreated = material.authenticate(&asymmetric_peer, 1).unwrap();
+    assert_eq!(
+        recreated
+            .send_command(&asymmetric_peer, &Command::get_storage_info())
+            .unwrap(),
+        [0xaa, 0xbb, 0xcc]
+    );
+    recreated
+        .send_command(&asymmetric_peer, &Command::close_session())
+        .unwrap();
+}
+
+#[test]
 fn direct_authentication_probes_symmetric_then_caches_asymmetric() {
     let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();

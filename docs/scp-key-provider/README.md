@@ -50,9 +50,12 @@ and mechanism dispatch. It does not cross the C ABI or emit internal FFI traces.
 Preparation supplies a session on either a temporary software slot or an existing
 slot. The existing-slot adapter shares the backend, authorization, objects, and
 handle allocator; it never copies the token or its credentials. Direct password
-authentication creates an isolated, nonpersistent software slot and imports its
-credential as a session object. It uses the ordinary `SoftwareSlot` without a
-backing store; token-object creation remains write-protected. A dedicated
+authentication creates an isolated, nonpersistent software slot containing
+two protected AES-128 keys and a protected P-256 private key, derived using
+the existing Yubico password conventions. All three are session objects
+owned by one preparation session; authentication selects the target key type.
+The unused credential is discarded after the attempt. The ordinary
+`SoftwareSlot` is used without a backing store; token-object creation remains write-protected. A dedicated
 credential session and separate handshake sessions provide the required lifetimes.
 Both preparation paths use the same derivation and session cleanup operations.
 The enabled platform slot supports exact label lookup and public-key matching;
@@ -68,10 +71,11 @@ credential and configured source lookup still need end-to-end qualification.
 
 ## Current YubiHSM flow
 
-Symmetric authentication binds one protected 32-byte generic secret containing
-K-ENC followed by K-MAC. Protected extraction produces the two static AES
-objects. Counter KDF produces three explicitly readable AES working objects.
-Their values are read once into the client's zeroizing storage, and the
+Symmetric authentication binds two protected AES-128 objects, Key-ENC and
+Key-MAC. Counter KDF uses the source AES objects directly and produces three
+explicitly readable AES working objects. No source value read or extraction
+is needed, including for native YubiHSM AES keys. The resulting working-key
+values are read once into the client's zeroizing storage, and the
 entire derivation scope is destroyed. Host/card cryptograms use local S-MAC.
 
 Asymmetric authentication binds a protected P-256 private credential, generates
@@ -114,8 +118,8 @@ need to reject direct and indirect provider dependency cycles. Preparation of a
 source slot whose mutex is already held fails rather than waiting on itself.
 
 Use the [named credential design](credential-lookup.md): one exact label within
-one provider identifies a protected generic32 symmetric credential or P-256
-private credential. Missing or duplicate matches, wrong types, and incompatible
+one provider identifies either a pair of protected AES keys labelled
+`<label>.enc` and `<label>.mac`, or a P-256 private credential. Missing or duplicate matches, wrong types, and incompatible
 output policies fail explicitly. Do not retain ordinary provider PINs to recover
 lost sessions; define authorization leases and revocation before integration.
 

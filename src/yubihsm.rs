@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 #[allow(dead_code)]
 mod commands;
 mod key_provider;
-use crate::key_scope::BoundKey;
+use crate::key_scope::{BoundKey, PasswordCredentials, SymmetricCredential};
 use key_provider::{AsymmetricKeys, SessionKeys};
 pub(crate) mod trust;
 #[cfg(all(test, not(feature = "abi-tests")))]
@@ -239,7 +239,7 @@ pub(crate) enum Pkcs11AuthenticationMaterial {
         password: Zeroizing<Vec<u8>>,
         trust_prefix: Option<std::ffi::OsString>,
     },
-    Symmetric(BoundKey),
+    Symmetric(SymmetricCredential),
     Asymmetric(BoundKey),
     AsymmetricCredential {
         credential: BoundKey,
@@ -476,48 +476,55 @@ impl SecureSession {
         ),
         Error,
     > {
+        let mut credentials = PasswordCredentials::new(password)?;
         let first = cached_algorithm.unwrap_or(DirectAuthenticationAlgorithm::Symmetric);
-        match first {
-            DirectAuthenticationAlgorithm::Symmetric => {
-                if let Some((session, material)) =
-                    Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
-                {
-                    return Ok((session, DirectAuthenticationAlgorithm::Symmetric, material));
+        let second = match first {
+            DirectAuthenticationAlgorithm::Symmetric => DirectAuthenticationAlgorithm::Asymmetric,
+            DirectAuthenticationAlgorithm::Asymmetric => DirectAuthenticationAlgorithm::Symmetric,
+        };
+        for algorithm in [first, second] {
+            let authenticated = match algorithm {
+                DirectAuthenticationAlgorithm::Symmetric => {
+                    Self::authenticate_symmetric_detect_format(
+                        connector,
+                        authkey_id,
+                        &credentials.symmetric()?,
+                    )?
+                    .map(|session| -> Result<_, Error> {
+                        Ok((
+                            session,
+                            Pkcs11AuthenticationMaterial::Symmetric(
+                                credentials.retain_symmetric()?,
+                            ),
+                        ))
+                    })
+                    .transpose()?
                 }
-                log!(
-                    2,
-                    "YubiHSM Authentication Key {:04x} rejected symmetric CREATE SESSION with wrong length; trying asymmetric authentication",
-                    authkey_id
-                );
-                let (session, material) = Self::authenticate_asymmetric_detect_format(
-                    connector,
-                    authkey_id,
-                    password,
-                    trust_prefix,
-                )?
-                .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
-                Ok((session, DirectAuthenticationAlgorithm::Asymmetric, material))
+                DirectAuthenticationAlgorithm::Asymmetric => {
+                    Self::authenticate_asymmetric_detect_format(
+                        connector,
+                        authkey_id,
+                        &credentials.asymmetric()?,
+                        trust_prefix,
+                    )?
+                }
+            };
+            if let Some((session, material)) = authenticated {
+                return Ok((session, algorithm, material));
             }
-            DirectAuthenticationAlgorithm::Asymmetric => {
-                if let Some((session, material)) = Self::authenticate_asymmetric_detect_format(
-                    connector,
-                    authkey_id,
-                    password,
-                    trust_prefix,
-                )? {
-                    return Ok((session, DirectAuthenticationAlgorithm::Asymmetric, material));
-                }
+            // Only a request-format mismatch permits trying the other key type.
+            // Authentication failures must never trigger a second attempt.
+            if algorithm == first {
                 log!(
                     2,
-                    "YubiHSM Authentication Key {:04x} rejected asymmetric CREATE SESSION with wrong length; trying symmetric authentication",
-                    authkey_id
+                    "YubiHSM Authentication Key {:04x} rejected {:?} CREATE SESSION with wrong length; trying {:?} authentication",
+                    authkey_id,
+                    first,
+                    second
                 );
-                let (session, material) =
-                    Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
-                        .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
-                Ok((session, DirectAuthenticationAlgorithm::Symmetric, material))
             }
         }
+        Err(CKR_DATA_LEN_RANGE.into())
     }
 
     #[cfg(test)]
@@ -527,29 +534,15 @@ impl SecureSession {
         password: &[u8],
         host_challenge: [u8; CHALLENGE_LENGTH],
     ) -> Result<Self, Error> {
+        let credentials = PasswordCredentials::new(password)?;
         let handshake = Self::begin_symmetric(connector, authkey_id, host_challenge)?;
-        Self::complete_symmetric_with_password(connector, handshake, password)
-            .map(|(session, _)| session)
-    }
-
-    fn complete_symmetric_with_password(
-        connector: &dyn Connector,
-        handshake: SymmetricHandshake,
-        password: &[u8],
-    ) -> Result<(Self, Pkcs11AuthenticationMaterial), Error> {
-        let static_keys = BoundKey::symmetric_password(password)?;
-        let session =
-            Self::complete_symmetric_with_static_keys(connector, handshake, &static_keys)?;
-        Ok((
-            session,
-            Pkcs11AuthenticationMaterial::Symmetric(static_keys),
-        ))
+        Self::complete_symmetric_with_static_keys(connector, handshake, &credentials.symmetric()?)
     }
 
     fn complete_symmetric_with_static_keys(
         connector: &dyn Connector,
         handshake: SymmetricHandshake,
-        static_keys: &BoundKey,
+        static_keys: &SymmetricCredential,
     ) -> Result<Self, Error> {
         let keys = SessionKeys::derive(static_keys, &handshake.context)?;
         let expected_card = keys.cryptogram(0x00, &handshake.context)?;
@@ -559,7 +552,7 @@ impl SecureSession {
     fn authenticate_symmetric_with_static_keys(
         connector: &dyn Connector,
         authkey_id: u16,
-        static_keys: &BoundKey,
+        static_keys: &SymmetricCredential,
     ) -> Result<Self, Error> {
         let mut challenge = [0u8; CHALLENGE_LENGTH];
         getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
@@ -570,8 +563,8 @@ impl SecureSession {
     fn authenticate_symmetric_detect_format(
         connector: &dyn Connector,
         authkey_id: u16,
-        password: &[u8],
-    ) -> Result<Option<(Self, Pkcs11AuthenticationMaterial)>, Error> {
+        static_keys: &SymmetricCredential,
+    ) -> Result<Option<Self>, Error> {
         let mut challenge = [0u8; CHALLENGE_LENGTH];
         getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
         let handshake = match Self::begin_symmetric(connector, authkey_id, challenge) {
@@ -579,7 +572,7 @@ impl SecureSession {
             Err(error) if is_wrong_length_error(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        Self::complete_symmetric_with_password(connector, handshake, password).map(Some)
+        Self::complete_symmetric_with_static_keys(connector, handshake, static_keys).map(Some)
     }
 
     pub(crate) fn begin_symmetric(
@@ -790,11 +783,10 @@ impl SecureSession {
     fn authenticate_asymmetric_detect_format(
         connector: &dyn Connector,
         authkey_id: u16,
-        password: &[u8],
+        credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Option<(Self, Pkcs11AuthenticationMaterial)>, Error> {
-        let credential = BoundKey::p256_password(password)?;
-        let mut exchange = AsymmetricKeys::for_key(&credential)?;
+        let mut exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = match Self::begin_asymmetric(connector, authkey_id, &public) {
             Ok(handshake) => handshake,
@@ -804,11 +796,10 @@ impl SecureSession {
         let result = (|| {
             let device_static = trusted_device_public_key(connector, trust_prefix)?;
             let static_shared = exchange
-                .static_agreement(&credential, &device_static)
+                .static_agreement(credential, &device_static)
                 .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))?;
             // The existing opt-in recreation policy retains only this protected
             // static agreement, not the password or long-term EC private key.
-            drop(credential);
             let keys = exchange
                 .finish(&static_shared, &handshake.context, &handshake.receipt)
                 .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))?;

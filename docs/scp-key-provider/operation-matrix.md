@@ -84,10 +84,11 @@ card APDUs. All working keys are AES-128.
 
 ### Symmetric authentication
 
-Bind one protected 32-byte generic-secret credential holding ENC followed by
-MAC. `CKM_EXTRACT_KEY_FROM_KEY` creates two derive-only AES-128 session objects
-at bit offsets 0 and 128, each with length 16. Existing token objects can be
-bound through an authorized provider-session handle; name resolution is planned.
+Bind two protected AES-128 keys, Key-ENC and Key-MAC, through an authorized
+provider session. Their labels are `<label>.enc` and `<label>.mac`; exact lookup
+requires one `CKO_SECRET_KEY` / `CKK_AES` object for each role on the same slot.
+Counter KDF uses each source handle directly, without extraction or reading
+long-term values. Configured selection of arbitrary source slots remains planned.
 For password login,
 the existing credential-input path uses PBKDF2-HMAC-SHA256 with salt `Yubico`,
 10,000 iterations, and 32 output bytes, split ENC then MAC. Password processing
@@ -360,10 +361,10 @@ derive-only AES token keys receive that device capability; PKCS #11 metadata
 preserves their narrower usage policy. Derived objects live in the common module
 session layer, not native YubiHSM volatile object storage.
 
-Two protected persistent AES keys (ENC/MAC) can therefore be counter-KDF bases
-without first splitting a generic secret. This avoids reading a long-term
-32-byte credential on devices without native protected extraction. The selectable
-PKCS #11 authentication adapter and its paired-key lookup remain planned.
+The PKCS #11 authentication adapter uses two protected AES keys as counter-KDF
+bases directly. Paired-key lookup resolves `<label>.enc` and `<label>.mac`
+through the prepared source session. Configured selection across arbitrary
+source slots remains planned.
 
 Its mechanism information reports the base-key range as
 128–256 **bits**, as required by the standard; object `CKA_VALUE_LEN` and KDF

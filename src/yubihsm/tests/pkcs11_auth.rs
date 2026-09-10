@@ -1,7 +1,7 @@
 //! Complete channel tests using the same client flow after both preparation paths.
 use super::*;
 use crate::{
-    key_scope::BoundKey,
+    key_scope::{BoundKey, SymmetricCredential, authentication_aes_template},
     pkcs11_auth::{P256_PARAMS, Pkcs11Auth, ec_template},
     pkcs11_provider::{Pkcs11Provider, ProviderSession},
     *,
@@ -38,10 +38,14 @@ impl Drop for TemporaryStore {
     }
 }
 
+enum Credential {
+    Symmetric(SymmetricCredential),
+    Asymmetric(BoundKey),
+}
 struct Fixture {
-    credential: BoundKey,
+    credential: Credential,
     owner: Rc<ProviderSession>,
-    key: CK_OBJECT_HANDLE,
+    keys: Vec<CK_OBJECT_HANDLE>,
     baseline: (Vec<CK_SESSION_HANDLE>, Vec<CK_OBJECT_HANDLE>),
     existing: Option<(
         Arc<std::sync::Mutex<SlotContext>>,
@@ -107,14 +111,21 @@ impl Fixture {
         };
         let owner = ProviderSession::open(provider).unwrap();
         let token = matches!(preparation, Preparation::Existing);
-        let key = match protocol {
+        let (credential, keys) = match protocol {
             Protocol::Symmetric => {
                 let value = crate::yubico_password_kdf(PASSWORD).unwrap();
-                let mut template =
-                    crate::key_scope::generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _]);
-                template.token = token;
-                template.label = "SCP credential".to_owned();
-                owner.create(template, &[(CKA_VALUE, &value[..])]).unwrap()
+                let mut keys = Vec::new();
+                // Reverse creation order proves that roles come from labels,
+                // not enumeration order or native object IDs.
+                for (role, value) in [("mac", &value[16..]), ("enc", &value[..16])] {
+                    let mut template = authentication_aes_template();
+                    template.token = token;
+                    template.label = format!("SCP credential.{role}");
+                    keys.push(owner.create(template, &[(CKA_VALUE, value)]).unwrap());
+                }
+                let pair =
+                    SymmetricCredential::find(owner.clone(), "SCP credential", token).unwrap();
+                (Credential::Symmetric(pair), keys)
             }
             Protocol::Asymmetric => {
                 let private = crate::yubico_kdf::yubico_password_p256_key(PASSWORD).unwrap();
@@ -122,20 +133,23 @@ impl Fixture {
                 let mut template = ec_template();
                 template.token = token;
                 template.label = "SCP credential".to_owned();
-                owner
+                let key = owner
                     .create(
                         template,
                         &[(CKA_VALUE, &value), (CKA_EC_PARAMS, P256_PARAMS)],
                     )
-                    .unwrap()
+                    .unwrap();
+                (
+                    Credential::Asymmetric(BoundKey::from_session(owner.clone(), key).unwrap()),
+                    vec![key],
+                )
             }
         };
-        let credential = BoundKey::from_session(owner.clone(), key).unwrap();
         let baseline = Self::snapshot(&owner);
         let fixture = Self {
             credential,
             owner,
-            key,
+            keys,
             baseline,
             existing,
         };
@@ -157,23 +171,23 @@ impl Fixture {
     }
     fn assert_clean(&self) {
         assert_eq!(Self::snapshot(&self.owner), self.baseline);
-        assert_eq!(
-            self.owner
-                .attribute(self.key, CKA_TOKEN)
-                .unwrap()
-                .as_slice(),
-            &[u8::from(self.existing.is_some())]
-        );
-        assert!(
-            matches!(self.owner.attribute(self.key, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
-        );
+        for key in &self.keys {
+            assert_eq!(
+                self.owner.attribute(*key, CKA_TOKEN).unwrap().as_slice(),
+                &[u8::from(self.existing.is_some())]
+            );
+            assert!(
+                matches!(self.owner.attribute(*key, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+            );
+        }
     }
+
     fn release(self) {
         self.assert_clean();
         let Self {
             credential,
             owner,
-            key,
+            keys,
             existing,
             ..
         } = self;
@@ -186,7 +200,9 @@ impl Fixture {
                 let context = child.lock().unwrap();
                 assert_eq!(context.sessions.len(), 1);
                 assert!(context.sessions.contains_key(&original));
-                assert!(context.resolve_object(key).unwrap().is_some());
+                for key in keys {
+                    assert!(context.resolve_object(key).unwrap().is_some());
+                }
                 assert!(context.memory_objects.is_empty());
             }
             api::rust::close_session(original).unwrap();
@@ -205,21 +221,20 @@ fn authenticate(
     peer: &ProtocolPeer,
     bad_receipt: bool,
 ) -> Result<SecureSession, Error> {
-    match protocol {
-        Protocol::Symmetric => {
+    match (&fixture.credential, protocol) {
+        (Credential::Symmetric(credential), Protocol::Symmetric) => {
             let handshake = SecureSession::begin_symmetric(peer, 1, HOST_CHALLENGE)?;
-            SecureSession::complete_symmetric_with_static_keys(peer, handshake, &fixture.credential)
+            SecureSession::complete_symmetric_with_static_keys(peer, handshake, credential)
         }
-        Protocol::Asymmetric => {
-            let mut exchange = AsymmetricKeys::for_key(&fixture.credential)?;
+        (Credential::Asymmetric(credential), Protocol::Asymmetric) => {
+            let mut exchange = AsymmetricKeys::for_key(credential)?;
             let mut handshake = SecureSession::begin_asymmetric(peer, 1, &exchange.public_key()?)?;
             if bad_receipt {
                 handshake.receipt[0] ^= 1;
             }
             let result = (|| {
                 // This fixture's static peer key is the explicitly trusted anchor.
-                let shared =
-                    exchange.static_agreement(&fixture.credential, &peer.device_public_key()?)?;
+                let shared = exchange.static_agreement(credential, &peer.device_public_key()?)?;
                 exchange.finish(&shared, &handshake.context, &handshake.receipt)
             })();
             match result {
@@ -230,8 +245,10 @@ fn authenticate(
                 }
             }
         }
+        _ => panic!("credential protocol mismatch"),
     }
 }
+
 fn target(protocol: Protocol) -> ProtocolPeer {
     let peer = ProtocolPeer::new();
     if matches!(protocol, Protocol::Asymmetric) {

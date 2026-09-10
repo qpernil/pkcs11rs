@@ -21,9 +21,9 @@ client, with no provider calls or placement option. The full command MAC
 maintains chaining; the response's eight-byte MAC is verified before decryption.
 Closing or invalidating the channel immediately clears all three working keys.
 
-Direct symmetric authentication extracts protected K-ENC/K-MAC objects from one
-32-byte credential and uses counter KDF to create explicitly readable working
-keys. Direct asymmetric authentication uses protected P-256/ECDH objects and
+Symmetric authentication binds two protected AES-128 objects, Key-ENC and
+Key-MAC, and uses counter KDF directly on those keys to create explicitly
+readable working keys. The source AES values are neither read nor split. Direct asymmetric authentication uses protected P-256/ECDH objects and
 composition, makes the final SHA-256 KDF blocks readable, and extracts AES keys.
 The receipt key remains protected and verifies the receipt before the working
 keys are read. All derivation objects are destroyed on completion or failure.
@@ -328,8 +328,8 @@ interrupted command once. It never recreates or replays after an ambiguous
 transport, framing, encryption, or response-MAC failure, and it does not run a
 keepalive or background timer.
 
-While opted in, direct symmetric authentication retains its protected 32-byte
-credential object. Direct asymmetric authentication retains only a protected
+While opted in, direct symmetric authentication retains its two protected
+AES-128 credential objects. Direct asymmetric authentication retains only a protected
 static ECDH shared-secret object, not the password-derived private key. These
 are opaque references to zeroizing in-module objects. YubiHSM Auth
 authentication retains the selected provider and its zeroizing credential
@@ -568,6 +568,17 @@ credential provider compiled for the operating system. For example,
 Key `1003`. Platform names are nonempty, nonnumeric UTF-8 strings and cannot
 contain `@` or `:`. This form has no password delimiter and never invokes
 pinentry.
+
+Direct authentication prepares both password-derived credential types in one
+private software slot before opening the secure channel: two protected
+AES-128 `CKK_AES` objects for Key-ENC and Key-MAC, and a protected P-256
+`CKK_EC` private key. All three are session objects. The AES pair uses labels
+`direct.enc` and `direct.mac`, resolved using the same label-suffix lookup
+as an existing-slot pair. Preparation retains no password
+copy. The existing Yubico provisioning derivations are preserved; they do not
+provide domain separation between the two credential types. The unused key is
+discarded after the attempt. Explicit session recreation retains only the
+selected AES pair or static ECDH agreement, as described above.
 
 For direct authentication, the module first checks the ordinary `algorithm`
 field in cached Authentication Key object information. If object information
