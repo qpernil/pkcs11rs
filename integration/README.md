@@ -26,6 +26,11 @@ OpenSC and OpenSSL are required even for the OpenSC cases: OpenSSL's default
 provider independently verifies signatures and supplies reference ciphertext.
 Missing required clients or the selected provider are errors, not skipped tests.
 
+The full OpenSC suite uses OpenSC 0.27.1. Linux CI builds that pinned release
+and verifies the source archive's SHA-256 digest. Older clients can send an
+invalid OAEP source value or truncate large data-object imports before calling
+the module; the tests retain strict OAEP validation and large-payload coverage.
+
 Select a production module, explicit executables, or individual cases:
 
 ```sh

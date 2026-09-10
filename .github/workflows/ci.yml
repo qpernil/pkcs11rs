@@ -32,9 +32,25 @@ jobs:
             clang \
             libclang-dev \
             libpcsclite-dev \
+            libssl-dev \
             libudev-dev \
-            opensc \
             pkg-config
+
+      - name: Build OpenSC 0.27.1
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --location --silent --show-error \
+            https://github.com/OpenSC/OpenSC/releases/download/0.27.1/opensc-0.27.1.tar.gz \
+            --output opensc-0.27.1.tar.gz
+          echo '976f4a23eaf3397a1a2c3a7aac80bf971a8c3d829c9a79f06145bfaeeae5eca7  opensc-0.27.1.tar.gz' | sha256sum --check
+          tar -xzf opensc-0.27.1.tar.gz
+          cd opensc-0.27.1
+          ./configure --prefix="$RUNNER_TEMP/opensc" \
+            --enable-p11_system_config_modules="$RUNNER_TEMP/opensc/share/p11-kit/modules" \
+            --disable-man --disable-tests --disable-notify --disable-readline
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/opensc/bin" >> "$GITHUB_PATH"
 
       - name: Check generated PKCS #11 bindings
         run: cargo xtask bindings --check
