@@ -1785,6 +1785,60 @@ fn software_derive_template_adds_policy_and_rejects_conflicts() {
 }
 
 #[test]
+fn ecdh_preserves_raw_points_that_also_parse_as_der() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+    let mut scalar = [1u8];
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut disabled = CK_FALSE as CK_BBOOL;
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut scalar),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut disabled),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut enabled),
+    ];
+    let mut private = 0;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut private,
+        ),
+        CKR_OK as CK_RV
+    );
+    // Public point for P-256 scalar 111. The first coordinate byte is 0x3f,
+    // so the raw 65-byte point also parses as a DER 63-byte OCTET STRING.
+    let raw = test_hex(
+        "043fc424067a1f679b0fe2c0ae1093724f6233002be8063cb1cad2cccdb85b089e\
+         5bb243009e581be52aedbb47eda98d26cf9fc800f7934c9466aaaef8c6629ecf",
+    );
+    assert_eq!(crate::der_octet_string_value(&raw).unwrap().len(), 63);
+    let mut wrapped = vec![0x04, 65];
+    wrapped.extend_from_slice(&raw);
+    // With private scalar 1, ECDH returns the peer's x coordinate.
+    let expected = raw[1..33].to_vec();
+    for mut peer in [raw, wrapped] {
+        assert_eq!(
+            derive_secret(TEST_SESSION_HANDLE, private, &mut peer),
+            expected
+        );
+    }
+    finalize_for_test();
+}
+
+#[test]
 fn software_ecdh_supports_every_x963_kdf_and_right_truncates_raw_secrets() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
