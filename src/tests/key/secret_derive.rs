@@ -162,7 +162,10 @@ fn x963_graph_on_every_slot_kind(readable: bool) {
             if readable {
                 template.extend([
                     scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut output_sensitive),
-                    scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut output_extractable),
+                    scalar_attribute(
+                        CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+                        &mut output_extractable,
+                    ),
                 ]);
             }
             let key = derive(8201, &mut extract, joined, &mut template);

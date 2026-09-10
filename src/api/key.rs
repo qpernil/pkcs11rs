@@ -176,12 +176,9 @@ fn generate_key_object(
     mechanism: &CK_MECHANISM,
     templ: &[CK_ATTRIBUTE],
 ) -> Result<TokenObject, Error> {
-    let aes_generation =
-        mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
-    let des3_generation =
-        mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
-    let pbkdf2_generation =
-        mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
+    let aes_generation = mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
+    let des3_generation = mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
+    let pbkdf2_generation = mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
     if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
         && !aes_generation
         && !des3_generation
@@ -225,7 +222,9 @@ fn generate_key_object(
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    let mut key = key_template.into_software_secret_object().map_err(Error::from)?;
+    let mut key = key_template
+        .into_software_secret_object()
+        .map_err(Error::from)?;
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
         || (aes_generation && key.key_type != CKK_AES as CK_KEY_TYPE)
         || (des3_generation && key.key_type != CKK_DES3 as CK_KEY_TYPE)
