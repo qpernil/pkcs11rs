@@ -1813,7 +1813,6 @@ pub(crate) fn derive_key(
         }?;
         (kdf, shared_data, public_data, &[][..])
     };
-    let public_data = der_octet_string_value(public_data).unwrap_or(public_data);
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
 
@@ -1971,6 +1970,13 @@ pub(crate) fn derive_key(
                 (coordinate_length, coordinate_length * 2 + 1, true)
             }
             DeriveSource::YubiHsm { .. } => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        // Raw points can coincidentally be valid DER OCTET STRINGs. Prefer
+        // the curve's raw encoding when its length already matches.
+        let public_data = if public_data.len() == expected_public_length {
+            public_data
+        } else {
+            der_octet_string_value(public_data).unwrap_or(public_data)
         };
         if public_data.len() != expected_public_length
             || (requires_uncompressed && public_data.first() != Some(&0x04))

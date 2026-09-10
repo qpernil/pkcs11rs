@@ -292,7 +292,10 @@ its last owner is dropped. This does not change persisted key encodings.
   SHA-384, or SHA-512.
 - Derivation: ECDH with `CKD_NULL` or SHA-1/SHA-2/SHA-3 X9.63 KDFs, and HKDF
   extract, expand, or extract-and-expand with SHA-1, SHA-256, SHA-384, or
-  SHA-512. Secret-key composition supports `CKM_CONCATENATE_BASE_AND_KEY`,
+  SHA-512. ECDH accepts raw peer public keys and DER OCTET STRING wrappers;
+  inputs matching the curve's raw public-key length are interpreted as raw,
+  even if their bytes also resemble a DER wrapper.
+  Secret-key composition supports `CKM_CONCATENATE_BASE_AND_KEY`,
   `CKM_CONCATENATE_BASE_AND_DATA`, `CKM_EXTRACT_KEY_FROM_KEY`, and
   `CKM_SHA256_KEY_DERIVATION` through the common session layer on every slot.
   `CKM_SP800_108_COUNTER_KDF` supports AES-CMAC with one output key per call,
