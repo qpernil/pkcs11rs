@@ -1,9 +1,9 @@
 use super::*;
 
-#[path = "key/secret_derive.rs"]
-mod secret_derive;
 #[path = "key/counter_kdf.rs"]
 mod counter_kdf;
+#[path = "key/secret_derive.rs"]
+mod secret_derive;
 
 fn generate_software_key_pair(
     session: CK_SESSION_HANDLE,

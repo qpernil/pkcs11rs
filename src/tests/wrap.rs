@@ -2542,7 +2542,10 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
         CKR_OK as CK_RV
     );
     assert_ne!(session_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-    assert_eq!(crate::api::C_DestroyObject(session, session_created), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_DestroyObject(session, session_created),
+        CKR_OK as CK_RV
+    );
     let mut default_session_template = session_create_template
         .iter()
         .copied()
@@ -2558,7 +2561,10 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
         CKR_OK as CK_RV
     );
     assert_ne!(session_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
-    assert_eq!(crate::api::C_DestroyObject(session, session_created), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_DestroyObject(session, session_created),
+        CKR_OK as CK_RV
+    );
 
     let mut invalid_generation_public = [
         scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),

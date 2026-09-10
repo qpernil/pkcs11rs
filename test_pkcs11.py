@@ -877,7 +877,7 @@ class MockYubiKeyAbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        self.assertEqual(set(mechanisms), expected_mechanisms)
+        self.assertTrue(expected_mechanisms.issubset(mechanisms))
 
         session = CK_ULONG()
         self.assertEqual(
@@ -6367,7 +6367,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_does_not_advertise_unsupported_private_signing(
+    def test_abi_yubihsm_advertises_software_signing_without_enabling_token_keys(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -6390,7 +6390,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        self.assertNotIn(CKM_SHA224_RSA_PKCS, mechanisms)
+        self.assertIn(CKM_SHA224_RSA_PKCS, mechanisms)
         info = CK_MECHANISM_INFO()
         self.assertEqual(
             self.lib.C_GetMechanismInfo(
@@ -6398,8 +6398,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 CKM_SHA224_RSA_PKCS,
                 ctypes.byref(info),
             ),
-            CKR_MECHANISM_INVALID,
+            CKR_OK,
         )
+        self.assertEqual(info.flags & CKF_HW, 0)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -6757,7 +6758,7 @@ fn main() {
                 else:
                     os.environ["PKCS11RS_PINENTRY"] = previous
 
-    def test_yubihsm_key_pair_generation_rejects_a_session_private_key(self) -> None:
+    def test_yubihsm_session_key_pair_generation_obeys_session_lifetime(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(
             ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
@@ -6794,10 +6795,29 @@ fn main() {
                 ctypes.byref(public_key),
                 ctypes.byref(private_key),
             ),
-            CKR_TEMPLATE_INCONSISTENT,
+            CKR_OK,
         )
-        self.assertEqual(public_key.value, 0)
-        self.assertEqual(private_key.value, 0)
+        self.assertNotEqual(public_key.value, 0)
+        self.assertNotEqual(private_key.value, 0)
+        for key in (public_key, private_key):
+            token = CK_BYTE(1)
+            attribute = CK_ATTRIBUTE(
+                CKA_TOKEN, ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                ctypes.sizeof(token),
+            )
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(session, key, ctypes.byref(attribute), 1),
+                CKR_OK,
+            )
+            self.assertEqual(token.value, 0)
+        self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+        reopened = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        size = CK_ULONG()
+        for key in (public_key, private_key):
+            self.assertEqual(
+                self.lib.C_GetObjectSize(reopened, key, ctypes.byref(size)),
+                CKR_OBJECT_HANDLE_INVALID,
+            )
 
     def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -7649,7 +7669,7 @@ fn main() {
             ),
             CKR_OK,
         )
-        self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 512))
+        self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 1024))
         self.assertEqual(
             info.flags & (CKF_SIGN | CKF_VERIFY),
             CKF_SIGN | CKF_VERIFY,
@@ -8533,6 +8553,11 @@ fn main() {
         slot = CK_ULONG()
 
         self.assertEqual(self.lib.C_InitToken(0, None, 0, None), CKR_ARGUMENTS_BAD)
+        self.assertEqual(
+            self.lib.C_WaitForSlotEvent(0, ctypes.byref(slot), None),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         self.assertEqual(
             self.lib.C_WaitForSlotEvent(0, ctypes.byref(slot), None),
             CKR_FUNCTION_NOT_SUPPORTED,
@@ -9709,7 +9734,7 @@ fn main() {
             finally:
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
 
-    def test_issuer_security_domain_slots_advertise_only_exercised_digests(
+    def test_issuer_security_domain_slots_advertise_software_capabilities(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -9744,7 +9769,16 @@ fn main() {
                     ),
                     CKR_OK,
                 )
-                self.assertEqual(set(mechanisms), expected)
+                self.assertTrue(expected.issubset(mechanisms))
+                for mechanism_type in mechanisms:
+                    info = CK_MECHANISM_INFO()
+                    self.assertEqual(
+                        self.lib.C_GetMechanismInfo(
+                            slot_id, mechanism_type, ctypes.byref(info)
+                        ),
+                        CKR_OK,
+                    )
+                    self.assertEqual(info.flags & CKF_HW, 0)
 
     def test_generate_random_validates_initialization_and_session(self) -> None:
         random_data = (CK_BYTE * 16)()
@@ -10003,7 +10037,7 @@ fn main() {
         bad_pin = (CK_BYTE * 4)(*b"9999")
         self.assertEqual(
             self.lib.C_Login(session, CKU_SO, pin, len(pin)),
-            CKR_SESSION_READ_ONLY,
+            CKR_SESSION_READ_ONLY_EXISTS,
         )
         self.assertEqual(
             self.lib.C_Login(session, CKU_USER, bad_pin, len(bad_pin)),
@@ -10861,7 +10895,7 @@ fn main() {
         mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
         value_len = CK_ULONG(24)
         sensitive = CK_BYTE(0)
-        extractable = CK_BYTE(0)
+        extractable = CK_BYTE(1)
         template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_VALUE_LEN,
@@ -10965,7 +10999,7 @@ fn main() {
         )
         self.assertEqual(
             (always_sensitive.value, never_extractable.value),
-            (0, 1),
+            (0, 0),
         )
 
         value_attribute.pValue = None
@@ -11131,7 +11165,7 @@ fn main() {
             CKR_TEMPLATE_INCOMPLETE,
         )
 
-        for invalid_length in (0, 513):
+        for invalid_length in (0, 1025):
             value_len = CK_ULONG(invalid_length)
             template = (CK_ATTRIBUTE * 1)(
                 CK_ATTRIBUTE(

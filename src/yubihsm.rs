@@ -411,9 +411,7 @@ impl SecureSession {
         let closes_session = request.command == CommandCode::CloseSession as u8;
         let (response_command, response_data) = handler(request.command, &request.data)?;
         let clear_response = Frame::new(response_command, response_data)?.encode();
-        let ciphertext = self
-            .keys
-            .cbc(&iv, &pad(&clear_response), true)?;
+        let ciphertext = self.keys.cbc(&iv, &pad(&clear_response), true)?;
 
         let mut response_data = Vec::with_capacity(1 + ciphertext.len() + MAC_LENGTH);
         response_data.push(self.sid);

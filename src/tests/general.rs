@@ -3415,6 +3415,13 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
             initialize_with_configuration(configuration),
             CKR_OK as CK_RV
         );
+        // This test supplies its own inventory, including absent slots and
+        // physical identities. Remove the optional ABI fixtures first.
+        crate::with_context(|ctx| {
+            ctx.slot_contexts.write().unwrap().clear();
+            Ok(())
+        })
+        .unwrap();
         install_test_slot_with_backend(100, Box::new(test_slot(true)));
         install_test_slot_with_backend(101, Box::new(test_slot(false)));
         install_test_slot_with_backend(

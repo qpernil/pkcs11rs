@@ -2870,7 +2870,11 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
         &capabilities,
     );
     assert!(
-        effective.encrypt && effective.decrypt && effective.sign && effective.verify && effective.derive
+        effective.encrypt
+            && effective.decrypt
+            && effective.sign
+            && effective.verify
+            && effective.derive
     );
 
     let private_wrap_capabilities = crate::yubihsm_capabilities(&[0x0c, 0x0d]);
@@ -6882,17 +6886,33 @@ fn yubihsm_montgomery_two_way_derive(
     // Hardware ECDH output is an ordinary copyable software key; hashing
     // its value locally must not issue another hardware command.
     let mut copy = 0;
-    assert_eq!(crate::api::C_CopyObject(session, derived_key, std::ptr::null_mut(),
-        0, &mut copy), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_CopyObject(session, derived_key, std::ptr::null_mut(), 0, &mut copy),
+        CKR_OK as CK_RV
+    );
     let command_count = commands.borrow().len();
-    let mut digest_mechanism = CK_MECHANISM { mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
-        pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
+    let mut digest_mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
     let mut digest = [0; 32];
     let mut digest_length = 32;
-    assert_eq!(crate::api::C_DigestInit(session, &mut digest_mechanism), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_DigestInit(session, &mut digest_mechanism),
+        CKR_OK as CK_RV
+    );
     assert_eq!(crate::api::C_DigestKey(session, copy), CKR_OK as CK_RV);
-    assert_eq!(crate::api::C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_length), CKR_OK as CK_RV);
-    assert_eq!(digest.as_slice(), crate::hash(crate::MessageDigest::Sha256, &value).unwrap().as_slice());
+    assert_eq!(
+        crate::api::C_DigestFinal(session, digest.as_mut_ptr(), &mut digest_length),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        digest.as_slice(),
+        crate::hash(crate::MessageDigest::Sha256, &value)
+            .unwrap()
+            .as_slice()
+    );
     assert_eq!(commands.borrow().len(), command_count);
 
     let mut reverse_public_data = read_ec_point(public_key_one);
@@ -7356,7 +7376,7 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         minor: 6,
         patch: 0,
     };
-    let mechanisms = crate::Slot::mechanisms(&slot);
+    let mechanisms = crate::Slot::backend_mechanisms(&slot);
     assert!(
         !mechanisms
             .iter()
@@ -7370,6 +7390,24 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         (rsa_generation.min_key_size, rsa_generation.max_key_size),
         (1024, 2048)
     );
+    // Session objects still have the common software capabilities, even
+    // when this firmware cannot perform those operations on token keys.
+    let combined = crate::Slot::mechanisms(&slot);
+    let eddsa = combined
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(eddsa.flags & CKF_HW as CK_FLAGS, 0);
+    let combined_rsa = combined
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(
+        combined_rsa.flags & rsa_generation.flags,
+        rsa_generation.flags
+    );
+    assert!(combined_rsa.min_key_size <= rsa_generation.min_key_size);
+    assert!(combined_rsa.max_key_size > rsa_generation.max_key_size);
 }
 
 #[test]
@@ -8514,7 +8552,9 @@ impl crate::Slot for TestSlot {
     }
 
     fn software_mechanism_enabled(&self, mechanism: CK_MECHANISM_TYPE) -> bool {
-        self.software_allowlist.as_ref().is_none_or(|allowed| allowed.contains(&mechanism))
+        self.software_allowlist
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&mechanism))
     }
 
     fn backend_mechanisms(&self) -> Vec<crate::MechanismDetails> {
@@ -8597,7 +8637,6 @@ fn per_slot_software_filter_preserves_native_details_and_removes_unselected_mech
     assert_eq!(types.len(), maximum.len());
     assert!(types.contains(&(CKM_SHA256 as CK_MECHANISM_TYPE)));
 }
-
 
 #[test]
 fn software_capabilities_expand_ranges_and_preserve_hardware_capability() {
