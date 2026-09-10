@@ -2349,7 +2349,9 @@ impl TokenObjectTemplate {
 
 pub(crate) fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
     // CK_UNAVAILABLE_INFORMATION is a length sentinel, never an input slice size.
-    if attribute.ulValueLen as u128 > isize::MAX as u128 {
+    if attribute.ulValueLen == CK_UNAVAILABLE_INFORMATION as CK_ULONG
+        || attribute.ulValueLen as u128 > isize::MAX as u128
+    {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
     }
     if attribute.ulValueLen > 0 && attribute.pValue.is_null() {

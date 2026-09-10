@@ -307,7 +307,12 @@ jobs:
           python-version: "3.12"
 
       - name: Run Rust tests
+        id: rust-tests
         run: cargo test --locked
+
+      - name: Identify crashing Rust test
+        if: failure() && steps.rust-tests.outcome == 'failure'
+        run: cargo test --locked --lib -- --test-threads=1
 
       - name: Build and exercise PKCS #11 DLL through its exported ABI
         run: |
