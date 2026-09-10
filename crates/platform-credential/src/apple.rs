@@ -1,10 +1,9 @@
 //! Apple Keychain/Secure Enclave backend.
 
 use super::{
-    AuthenticationCredentialProvider, AuthenticationCredentialStore,
+    AuthenticationCredentialProvider, AuthenticationCredentialStore, EcdhCredential,
     PlatformAuthenticationCredential, PlatformCredentialAlgorithm, PlatformCredentialInfo,
-    PlatformCryptoError, PrefixedX963Credential, prefixed_x963_kdf,
-    validate_platform_credential_name,
+    PlatformCryptoError, validate_platform_credential_name,
 };
 use core_foundation::{
     array::CFArray,
@@ -31,10 +30,7 @@ use security_framework_sys::{
     key::{SecKeyCreateRandomKey, SecKeyCreateWithData, SecKeyGetTypeID},
     keychain_item::SecItemCopyMatching,
 };
-use software_key_core::{
-    digest::HashAlgorithm,
-    software_signing::{EcCurve, SoftwarePublicKey},
-};
+use software_key_core::software_signing::{EcCurve, SoftwarePublicKey};
 use std::{ffi::c_void, ptr, sync::Arc};
 use zeroize::Zeroizing;
 
@@ -58,7 +54,10 @@ impl AuthenticationCredentialProvider for ApplePlatformCryptoProvider {
         validate_platform_credential_name(name)?;
         let key = find_secure_enclave_key(name)?;
         Ok(PlatformAuthenticationCredential::Asymmetric(Arc::new(
-            ApplePrefixedX963Credential { key },
+            AppleEcdhCredential {
+                key,
+                name: Some(name.to_owned()),
+            },
         )))
     }
 }
@@ -109,23 +108,28 @@ impl AuthenticationCredentialStore for ApplePlatformCryptoProvider {
     }
 }
 
-struct ApplePrefixedX963Credential {
+struct AppleEcdhCredential {
     key: SecKey,
+    name: Option<String>,
 }
 
-impl PrefixedX963Credential for ApplePrefixedX963Credential {
+impl EcdhCredential for AppleEcdhCredential {
     fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError> {
         public_key(&self.key)
     }
 
-    fn derive_prefixed_x963(
+    fn ecdh(
         &self,
         peer_public_key: &SoftwarePublicKey,
-        hash: HashAlgorithm,
-        prefix: &[u8],
-        shared_info: &[u8],
-        output_length: usize,
     ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError> {
+        // A retained OS handle must not silently outlive deletion or bind to a
+        // replacement under the same label. Check identity before each use.
+        if let Some(name) = &self.name {
+            let current = find_secure_enclave_key(name)?;
+            if public_key(&current)? != public_key(&self.key)? {
+                return Err(PlatformCryptoError::NotFound);
+            }
+        }
         let SoftwarePublicKey::Ec {
             curve: EcCurve::P256,
             uncompressed,
@@ -142,7 +146,7 @@ impl PrefixedX963Credential for ApplePrefixedX963Credential {
                 .key_exchange(Algorithm::ECDHKeyExchangeStandard, &peer, 32, None)
                 .map_err(|error| backend_error(format!("Secure Enclave ECDH failed: {error}")))?,
         );
-        prefixed_x963_kdf(hash, prefix, &shared_secret, shared_info, output_length)
+        Ok(shared_secret)
     }
 }
 
@@ -431,7 +435,9 @@ fn backend_error(message: impl Into<String>) -> PlatformCryptoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefixed_x963_kdf;
     use security_framework::key::{GenerateKeyOptions, KeyType, Token};
+    use software_key_core::digest::HashAlgorithm;
     use software_key_core::{
         software_key_agreement::derive_with_signing_key,
         software_signing::{KeyKind, SoftwareSigningKey},
@@ -445,8 +451,9 @@ mod tests {
             .set_key_type(KeyType::ec_sec_prime_random())
             .set_size_in_bits(256)
             .set_token(Token::SecureEnclave);
-        let credential = ApplePrefixedX963Credential {
+        let credential = AppleEcdhCredential {
             key: SecKey::new(&options).expect("generate ephemeral Secure Enclave key"),
+            name: None,
         };
 
         let enclave_public = credential.public_key().expect("read public key");

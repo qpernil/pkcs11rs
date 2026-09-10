@@ -69,6 +69,7 @@ pub(crate) enum SlotKind {
     #[cfg(any(test, feature = "abi-tests"))]
     Synthetic,
     Software,
+    Platform,
     YubiHsm,
     Fido2,
     Ccid(CcidApplication),
@@ -247,6 +248,16 @@ pub(crate) trait Slot {
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
     fn clear_session(&mut self) {}
+    fn hsmauth_authenticate(
+        &self,
+        _credential: &TokenObject,
+        _target: &dyn Connector,
+        _authkey_id: u16,
+        _password: &[u8],
+        _trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<YubiHsmSecureSession, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn supports_extended_provider_profile(&self) -> bool {
         false
     }
@@ -272,6 +283,9 @@ pub(crate) trait Slot {
     }
     fn backend_token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
+    }
+    fn refresh_token_objects_before_find(&self) -> bool {
+        false
     }
     fn refresh_token_objects_after_login(&self) -> bool {
         false

@@ -32,6 +32,8 @@ pub(crate) struct JsonConfiguration {
     #[serde(default)]
     software: JsonSoftwareConfiguration,
     #[serde(default)]
+    platform: JsonPlatformConfiguration,
+    #[serde(default)]
     yubihsm: JsonYubiHsmConfiguration,
     #[serde(default)]
     ccid: JsonCcidConfiguration,
@@ -85,6 +87,12 @@ struct JsonSoftwareConfiguration {
 struct JsonSoftwareSlotConfiguration {
     name: String,
     discovery_pin: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonPlatformConfiguration {
+    enabled: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -232,6 +240,7 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) token_storage: Option<OsString>,
     pub(crate) fido2_storage: Option<OsString>,
     pub(crate) software_slots: Vec<String>,
+    pub(crate) platform_enabled: bool,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_recreate_sessions: bool,
@@ -396,6 +405,14 @@ impl ModuleConfiguration {
                 &mut environment,
             )?)
             .unwrap_or(true);
+        let platform_enabled = explicit
+            .platform
+            .enabled
+            .or(environment_switch(
+                "PKCS11RS_PLATFORM_ENABLED",
+                &mut environment,
+            )?)
+            .unwrap_or(false);
         let yubihsm_recreate_sessions = explicit
             .yubihsm
             .recreate_sessions
@@ -514,6 +531,7 @@ impl ModuleConfiguration {
                 &mut environment,
             )?,
             software_slots,
+            platform_enabled,
             software_discovery_pins,
             yubihsm_urls,
             yubihsm_recreate_sessions,
@@ -877,6 +895,31 @@ mod tests {
             .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
             .collect::<HashMap<_, _>>();
         ModuleConfiguration::resolve_with(explicit, |name| Ok(environment.get(name).cloned()))
+    }
+
+    #[test]
+    fn platform_slot_is_opt_in_and_json_overrides_environment() {
+        const ENV: &str = "PKCS11RS_PLATFORM_ENABLED";
+        assert!(!resolve(None, &[]).unwrap().platform_enabled);
+        assert!(resolve(None, &[(ENV, "1")]).unwrap().platform_enabled);
+        for enabled in [false, true] {
+            let explicit = serde_json::from_value(serde_json::json!({
+                "version": 1, "platform": { "enabled": enabled }
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve(Some(explicit), &[(ENV, if enabled { "0" } else { "1" })])
+                    .unwrap()
+                    .platform_enabled,
+                enabled
+            );
+        }
+        assert!(
+            !ModuleConfiguration::private_software()
+                .unwrap()
+                .platform_enabled
+        );
+        assert!(resolve(None, &[(ENV, "invalid")]).is_err());
     }
 
     #[test]

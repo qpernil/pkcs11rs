@@ -223,12 +223,6 @@ fn agreement_template() -> TokenObjectTemplate {
 }
 
 impl AsymmetricKeys {
-    pub(super) fn new() -> Result<Self, Error> {
-        let mut scope = Pkcs11KeyScope::new()?;
-        let ephemeral = scope.generate_p256()?;
-        Ok(Self { scope, ephemeral })
-    }
-
     pub(super) fn for_key(key: &BoundKey) -> Result<Self, Error> {
         let mut scope = Pkcs11KeyScope::for_key(key)?;
         let ephemeral = scope.generate_p256()?;
@@ -289,36 +283,6 @@ impl AsymmetricKeys {
         let material = self.scope.append_key(
             &blocks[0],
             &blocks[1],
-            readable(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
-            64,
-        )?;
-        finish_asymmetric(self.scope, material, context, receipt)
-    }
-
-    pub(super) fn finish_platform(
-        mut self,
-        credential: &dyn crate::platform_crypto::PrefixedX963Credential,
-        static_peer: &[u8],
-        context: &[u8; 130],
-        receipt: &[u8; 16],
-    ) -> Result<SessionKeys, Error> {
-        if self.public_key()?.as_slice() != &context[..65] {
-            return Err(CKR_DATA_INVALID.into());
-        }
-        let ephemeral_shared = self.scope.ecdh(
-            &self.ephemeral,
-            &context[65..],
-            readable(agreement_template()),
-        )?;
-        let peer = SoftwarePublicKey::Ec {
-            curve: EcCurve::P256,
-            uncompressed: static_peer.to_vec(),
-        };
-        let material = self.scope.platform_prefixed_x963(
-            credential,
-            &peer,
-            &ephemeral_shared,
-            &super::SCP11_SHARED_INFO,
             readable(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
             64,
         )?;

@@ -363,3 +363,41 @@ fn hsmauth_bool(value: CK_BBOOL) -> Result<bool, Error> {
         _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }
+
+/// Native HSM Auth operation bound to an existing PKCS #11 session and object.
+/// The token credential is borrowed, never copied or exported.
+pub(crate) fn hsmauth_authenticate(
+    session: CK_SESSION_HANDLE,
+    credential: CK_OBJECT_HANDLE,
+    target: &dyn Connector,
+    authkey_id: u16,
+    password: &[u8],
+    trust_prefix: Option<&std::ffi::OsStr>,
+) -> Result<YubiHsmSecureSession, Error> {
+    with_session_context_mut(session, |ctx| {
+        let slot_id = ctx._get_session(session)?.1.slotID();
+        if ctx.get_slot(slot_id)?.kind() != SlotKind::Ccid(CcidApplication::HsmAuth) {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        // Revalidate the handle against the current applet inventory, including
+        // when recreating a target channel through a retained source session.
+        ctx.get_slot(slot_id)?.refresh()?;
+        ctx.refresh_slot_token_objects(slot_id)?;
+        let object = ctx
+            .resolve_object(credential)?
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if object.slot_id != Some(slot_id) || !object.token {
+            return Err(CKR_KEY_HANDLE_INVALID.into());
+        }
+        if !matches!(object.material, KeyMaterial::HsmAuthCredential { .. }) {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        ctx.get_slot(slot_id)?.hsmauth_authenticate(
+            &object,
+            target,
+            authkey_id,
+            password,
+            trust_prefix,
+        )
+    })
+}

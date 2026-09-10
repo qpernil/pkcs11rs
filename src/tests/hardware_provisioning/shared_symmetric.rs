@@ -5,7 +5,7 @@ fn required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
 }
 
-fn provider(connector: Rc<dyn crate::Connector>, label: &str) -> crate::HsmAuthProvider {
+fn provider(connector: Rc<dyn crate::Connector>, label: &str) -> crate::NativeHsmAuth {
     let info = with_ccid_operation(connector.as_ref(), || {
         crate::HsmAuthClient.discover(connector.as_ref())
     })
@@ -15,8 +15,8 @@ fn provider(connector: Rc<dyn crate::Connector>, label: &str) -> crate::HsmAuthP
         .into_iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("credential {label:?} missing on {}", connector.name()));
-    crate::HsmAuthProvider {
-        connector: connector.into(),
+    crate::NativeHsmAuth {
+        connector: connector,
         credential,
         version: info.version,
         trust_prefix: None,

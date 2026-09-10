@@ -62,9 +62,11 @@ pub(crate) use yubihsm::{YubiHsmEnrollment, yubihsm_enroll_device};
 pub(crate) mod rust {
     pub(crate) use super::crypt::{verify, verify_init};
     pub(crate) use super::general::get_slot_list;
+    pub(crate) use super::hsmauth::hsmauth_authenticate;
     pub(crate) use super::key::{derive_key, generate_key_pair};
     pub(crate) use super::object::{
-        copy_object, create_object, destroy_object, get_attribute_value,
+        copy_object, create_object, destroy_object, find_objects, find_objects_final,
+        find_objects_init, get_attribute_value,
     };
     pub(crate) use super::session::{close_session, login, open_session};
 }

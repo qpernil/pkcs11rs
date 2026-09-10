@@ -1952,6 +1952,7 @@ fn every_slot_materializes_typed_session_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     for kind in [
         crate::SlotKind::Software,
+        crate::SlotKind::Platform,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),

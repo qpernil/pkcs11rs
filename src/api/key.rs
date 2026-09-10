@@ -1835,6 +1835,7 @@ pub(crate) fn derive_key(
         #[derive(Clone)]
         enum DeriveSource {
             Software(Box<SoftwarePrivateKeyMaterial>),
+            Platform(Arc<dyn crate::platform_crypto::EcdhCredential>),
             Piv {
                 slot: piv::Slot,
                 algorithm: piv::Algorithm,
@@ -1852,6 +1853,7 @@ pub(crate) fn derive_key(
             },
         }
         let source = match &object.material {
+            KeyMaterial::PlatformPrivate(key) => DeriveSource::Platform(key.clone()),
             KeyMaterial::SoftwarePrivate(key)
                 if key.weierstrass_curve().is_some()
                     || matches!(key, SoftwarePrivateKeyMaterial::Montgomery(_)) =>
@@ -1893,6 +1895,7 @@ pub(crate) fn derive_key(
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
         let source_is_montgomery = match &source {
+            DeriveSource::Platform(_) => false,
             DeriveSource::Software(key) => {
                 matches!(key.as_ref(), SoftwarePrivateKeyMaterial::Montgomery(_))
             }
@@ -1929,6 +1932,7 @@ pub(crate) fn derive_key(
             _ => {}
         }
         let (expected_length, expected_public_length, requires_uncompressed) = match &source {
+            DeriveSource::Platform(_) => (32, 65, true),
             DeriveSource::Software(key) => match key.as_ref() {
                 SoftwarePrivateKeyMaterial::Montgomery(key) => match key.curve() {
                     MontgomeryCurve::X25519 => (32, 32, false),
@@ -1998,6 +2002,12 @@ pub(crate) fn derive_key(
             None
         };
         let mut derived = match source {
+            DeriveSource::Platform(key) => key
+                .ecdh(&SoftwarePublicKey::Ec {
+                    curve: EcCurve::P256,
+                    uncompressed: public_data.to_vec(),
+                })
+                .map_err(crate::backend::platform::platform_error)?,
             DeriveSource::Software(key) => software_ecdh(key.as_ref(), public_data)?,
             DeriveSource::Piv {
                 slot,

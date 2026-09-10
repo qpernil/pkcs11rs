@@ -714,11 +714,11 @@ pub(super) fn abi_test_yubihsm_slots() -> Result<Vec<AbiSlot>, Error> {
         let public_discovery = configured_yubihsm_public_discovery_credential(Some(
             std::ffi::OsString::from("0001password"),
         ))?;
-        let mut slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
             connector,
             (2, 4, 0),
             Vec::new(),
-            Arc::new(HsmAuthProviderRegistry::default()),
+            Arc::new(crate::auth_slots::AuthSlots::default()),
             public_discovery,
         );
         Slot::init_slot(&mut slot)?;

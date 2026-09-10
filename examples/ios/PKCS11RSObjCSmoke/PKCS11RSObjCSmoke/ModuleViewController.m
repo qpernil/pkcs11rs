@@ -386,6 +386,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         @"storage" : @{
             @"tokens" : tokenStoragePath,
         },
+        @"platform" : @{ @"enabled" : @YES },
         @"software" : @{
             @"slots" : @[
                 @{

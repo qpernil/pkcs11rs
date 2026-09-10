@@ -233,27 +233,57 @@ pub(crate) enum DirectAuthenticationAlgorithm {
     Asymmetric,
 }
 
-pub(crate) enum DirectAuthenticationMaterial {
+pub(crate) enum Pkcs11AuthenticationMaterial {
+    HsmAuth {
+        credential: BoundKey,
+        password: Zeroizing<Vec<u8>>,
+        trust_prefix: Option<std::ffi::OsString>,
+    },
     Symmetric(BoundKey),
     Asymmetric(BoundKey),
+    AsymmetricCredential {
+        credential: BoundKey,
+        trust_prefix: Option<std::ffi::OsString>,
+    },
 }
 
-impl std::fmt::Debug for DirectAuthenticationMaterial {
+impl std::fmt::Debug for Pkcs11AuthenticationMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::HsmAuth { .. } => fmt.write_str("HsmAuth([PROTECTED])"),
             Self::Symmetric(_) => fmt.write_str("Symmetric([REDACTED])"),
             Self::Asymmetric(_) => fmt.write_str("Asymmetric([REDACTED])"),
+            Self::AsymmetricCredential { .. } => fmt.write_str("AsymmetricCredential([PROTECTED])"),
         }
     }
 }
 
-impl DirectAuthenticationMaterial {
+impl Pkcs11AuthenticationMaterial {
     pub(crate) fn authenticate(
         &self,
         connector: &dyn Connector,
         authkey_id: u16,
     ) -> Result<SecureSession, Error> {
         match self {
+            Self::HsmAuth {
+                credential,
+                password,
+                trust_prefix,
+            } => credential.hsmauth_authenticate(
+                connector,
+                authkey_id,
+                password,
+                trust_prefix.as_deref(),
+            ),
+            Self::AsymmetricCredential {
+                credential,
+                trust_prefix,
+            } => SecureSession::authenticate_asymmetric_with_credential(
+                connector,
+                authkey_id,
+                credential,
+                trust_prefix.as_deref(),
+            ),
             Self::Symmetric(static_keys) => SecureSession::authenticate_symmetric_with_static_keys(
                 connector,
                 authkey_id,
@@ -442,7 +472,7 @@ impl SecureSession {
         (
             Self,
             DirectAuthenticationAlgorithm,
-            DirectAuthenticationMaterial,
+            Pkcs11AuthenticationMaterial,
         ),
         Error,
     > {
@@ -506,13 +536,13 @@ impl SecureSession {
         connector: &dyn Connector,
         handshake: SymmetricHandshake,
         password: &[u8],
-    ) -> Result<(Self, DirectAuthenticationMaterial), Error> {
+    ) -> Result<(Self, Pkcs11AuthenticationMaterial), Error> {
         let static_keys = BoundKey::symmetric_password(password)?;
         let session =
             Self::complete_symmetric_with_static_keys(connector, handshake, &static_keys)?;
         Ok((
             session,
-            DirectAuthenticationMaterial::Symmetric(static_keys),
+            Pkcs11AuthenticationMaterial::Symmetric(static_keys),
         ))
     }
 
@@ -541,7 +571,7 @@ impl SecureSession {
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<Option<(Self, DirectAuthenticationMaterial)>, Error> {
+    ) -> Result<Option<(Self, Pkcs11AuthenticationMaterial)>, Error> {
         let mut challenge = [0u8; CHALLENGE_LENGTH];
         getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
         let handshake = match Self::begin_symmetric(connector, authkey_id, challenge) {
@@ -714,28 +744,21 @@ impl SecureSession {
         Self::send_invalid_close(connector, handshake.sid, counter, handshake.receipt);
     }
 
-    pub(crate) fn authenticate_asymmetric_with_platform_credential(
+    pub(crate) fn authenticate_asymmetric_with_credential(
         connector: &dyn Connector,
         authkey_id: u16,
-        credential: &dyn crate::platform_crypto::PrefixedX963Credential,
+        credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Self, Error> {
-        let exchange = AsymmetricKeys::new()?;
+        let mut exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = Self::begin_asymmetric(connector, authkey_id, &public)?;
         let result = (|| {
             let device_static = trusted_device_public_key(connector, trust_prefix)?;
-            exchange
-                .finish_platform(
-                    credential,
-                    &device_static,
-                    &handshake.context,
-                    &handshake.receipt,
-                )
-                .map_err(|e| {
-                    map_asymmetric_provider_error(e, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV)
-                })
-        })();
+            let static_shared = exchange.static_agreement(credential, &device_static)?;
+            exchange.finish(&static_shared, &handshake.context, &handshake.receipt)
+        })()
+        .map_err(|e| map_asymmetric_provider_error(e, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV));
         match result {
             Ok(keys) => Ok(Self::complete_asymmetric(handshake, keys)),
             Err(error) => {
@@ -769,7 +792,7 @@ impl SecureSession {
         authkey_id: u16,
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
-    ) -> Result<Option<(Self, DirectAuthenticationMaterial)>, Error> {
+    ) -> Result<Option<(Self, Pkcs11AuthenticationMaterial)>, Error> {
         let credential = BoundKey::p256_password(password)?;
         let mut exchange = AsymmetricKeys::for_key(&credential)?;
         let public = exchange.public_key()?;
@@ -794,7 +817,7 @@ impl SecureSession {
         match result {
             Ok((keys, static_shared)) => Ok(Some((
                 Self::complete_asymmetric(handshake, keys),
-                DirectAuthenticationMaterial::Asymmetric(static_shared),
+                Pkcs11AuthenticationMaterial::Asymmetric(static_shared),
             ))),
             Err(error) => {
                 Self::close_failed_asymmetric_handshake(connector, handshake);

@@ -8202,6 +8202,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
             crate::SlotKind::Software => String::from("Concurrent software token"),
+            crate::SlotKind::Platform => String::from("Platform token"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
             crate::SlotKind::Fido2 => String::from("Concurrent FIDO2"),
             crate::SlotKind::Ccid(application) => {
@@ -8218,6 +8219,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => "Synthetic token",
             crate::SlotKind::Software => "Software token",
+            crate::SlotKind::Platform => "Platform ECDH",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",

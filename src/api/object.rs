@@ -2512,7 +2512,7 @@ ffi_entry_point! {
     }
 }
 
-fn find_objects_init(
+pub(crate) fn find_objects_init(
     session_handle: CK_SESSION_HANDLE,
     templ: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
@@ -2535,6 +2535,10 @@ fn find_objects_init(
             .is_some()
         {
             return Err(CKR_OPERATION_ACTIVE.into());
+        }
+        if ctx.get_slot(slot_id)?.refresh_token_objects_before_find() {
+            ctx.get_slot(slot_id)?.refresh()?;
+            ctx.refresh_slot_token_objects(slot_id)?;
         }
         ctx.insert_session_objects(slot_id, session_handle)?;
         log!(2, "C_FindObjectsInit template {:?}", templ);
@@ -2585,7 +2589,7 @@ ffi_entry_point! {
     }
 }
 
-fn find_objects(
+pub(crate) fn find_objects(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE_PTR,
     max_object_count: CK_ULONG,
@@ -2619,7 +2623,7 @@ ffi_entry_point! {
     }
 }
 
-fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
+pub(crate) fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         ctx.get_session_context_mut(session_handle)?
             .find_operation

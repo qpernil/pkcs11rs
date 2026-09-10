@@ -1,9 +1,8 @@
-//! Platform-protected authentication credentials.
+//! Platform-protected keys and their management lifecycle.
 //!
-//! The public boundary is deliberately independent of Apple Security,
-//! Windows CNG, TPMs, or any other storage mechanism. Backends expose only
-//! the cryptographic operations the authentication protocol needs and a small
-//! lifecycle API used by management tools.
+//! Backends expose ordinary ECDH and public-key access without OS-specific
+//! types. The PKCS #11 adapter owns object policy, session lifetime, and KDFs.
+//! Existing external consumers can use the prefixed-X9.63 convenience method.
 
 use software_key_core::{
     digest::{HashAlgorithm, HashContext},
@@ -50,11 +49,16 @@ impl fmt::Display for PlatformCryptoError {
 
 impl std::error::Error for PlatformCryptoError {}
 
-/// An asymmetric credential capable of the exact construction needed by
-/// YubiHSM asymmetric authentication and SCP11-style handshakes.
-pub trait PrefixedX963Credential: Send + Sync {
+/// A protected P-256 key supporting ordinary ECDH agreement.
+pub trait EcdhCredential: Send + Sync {
     fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError>;
 
+    fn ecdh(
+        &self,
+        peer_public_key: &SoftwarePublicKey,
+    ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError>;
+
+    /// Compatibility convenience for clients using the prefixed X9.63 contract.
     fn derive_prefixed_x963(
         &self,
         peer_public_key: &SoftwarePublicKey,
@@ -62,8 +66,14 @@ pub trait PrefixedX963Credential: Send + Sync {
         prefix: &[u8],
         shared_info: &[u8],
         output_length: usize,
-    ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError>;
+    ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError> {
+        let secret = self.ecdh(peer_public_key)?;
+        prefixed_x963_kdf(hash, prefix, &secret, shared_info, output_length)
+    }
 }
+
+/// Compatibility name for existing users of the prefixed derivation helper.
+pub use EcdhCredential as PrefixedX963Credential;
 
 /// The two independent AES-CMAC keys used by symmetric HSM authentication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,7 +91,7 @@ pub trait CmacPairCredential: Send + Sync {
 /// the credential; it is metadata, not credential-string syntax.
 #[derive(Clone)]
 pub enum PlatformAuthenticationCredential {
-    Asymmetric(Arc<dyn PrefixedX963Credential>),
+    Asymmetric(Arc<dyn EcdhCredential>),
     Symmetric(Arc<dyn CmacPairCredential>),
 }
 

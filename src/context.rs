@@ -19,10 +19,10 @@ use crate::{ABI_TEST_SLOT_ID, KeyMaterial, PublicKeyMaterial, SoftwarePrivateKey
 use crate::{
     BackendSession, CcidApplication, CcidConfiguration, CcidDeviceConnector, CcidProvider,
     CcidReader, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorEndpoint,
-    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot,
-    PcscAppletConnector, PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector,
-    SignatureOperation, Slot, SlotKind, SoftwareSlot, SwitchableFidoEndpoint, TokenObject,
+    HsmAuthSlot, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
+    IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PcscAppletConnector,
+    PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector, SignatureOperation,
+    Slot, SlotKind, SoftwareSlot, SwitchableFidoEndpoint, TokenObject,
     YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad,
@@ -161,6 +161,7 @@ fn slot_storage_directory(kind: SlotKind) -> &'static str {
         #[cfg(any(test, feature = "abi-tests"))]
         SlotKind::Synthetic => "synthetic",
         SlotKind::Software => "software",
+        SlotKind::Platform => "platform",
         SlotKind::YubiHsm => "yubihsm",
         SlotKind::Fido2 | SlotKind::Ccid(CcidApplication::Fido2) => "fido2",
         SlotKind::Ccid(CcidApplication::Piv) => "piv",
@@ -257,6 +258,7 @@ pub(crate) struct ModuleContext {
     pub(crate) logging: Option<tracing::Dispatch>,
     pub(crate) hardware_discovery: bool,
     pub(crate) software_slots: Vec<String>,
+    pub(crate) platform_enabled: bool,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     ccid_readers: Mutex<HashMap<CcidInventoryKey, CcidReaderInventoryEntry>>,
     ccid_provider: CcidProvider,
@@ -279,7 +281,7 @@ pub(crate) struct ModuleContext {
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
-    pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+    pub(crate) auth_slots: Arc<crate::auth_slots::AuthSlots>,
     private_instance: bool,
     discovery_refresh: Mutex<Option<Instant>>,
     discovery_refresh_interval: Duration,
@@ -347,6 +349,7 @@ pub(crate) struct SessionContext {
 }
 
 pub(crate) struct SlotContextRegistry {
+    auth_slots: Arc<crate::auth_slots::AuthSlots>,
     slots: HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>,
     session_slots: HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>,
     discovered_slots: HashMap<DiscoveredSlotIdentity, DiscoveredSlotRegistration>,
@@ -526,8 +529,9 @@ fn hid_device_context(
 }
 
 impl SlotContextRegistry {
-    fn new() -> Self {
+    fn new(auth_slots: Arc<crate::auth_slots::AuthSlots>) -> Self {
         Self {
+            auth_slots,
             slots: HashMap::new(),
             session_slots: HashMap::new(),
             discovered_slots: HashMap::new(),
@@ -637,6 +641,7 @@ impl SlotContextRegistry {
             .map(|(slot_id, _)| *slot_id)
             .collect::<Vec<_>>();
         for (slot_id, context) in contexts {
+            self.auth_slots.register(&context)?;
             self.slots.insert(slot_id, context);
         }
         Ok(inserted_slot_ids)
@@ -658,7 +663,9 @@ impl SlotContextRegistry {
         self.discovered_slots
             .retain(|_, registration| !slot_ids.contains(&registration.slot_id));
         for slot_id in slot_ids {
-            self.slots.remove(&slot_id);
+            if let Some(slot) = self.slots.remove(&slot_id) {
+                self.auth_slots.remove(&slot);
+            }
         }
     }
 }
@@ -1005,11 +1012,12 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_config = None;
         let secure_channels = Arc::new(configuration.secure_channels);
-        let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
+        let auth_slots = Arc::new(crate::auth_slots::AuthSlots::default());
         let mut context = ModuleContext {
             logging: module_logging,
             hardware_discovery,
             software_slots,
+            platform_enabled: configuration.platform_enabled,
             software_discovery_pins,
             ccid_readers: Mutex::new(HashMap::new()),
             ccid_provider: CcidProvider::new(hardware_discovery),
@@ -1032,12 +1040,12 @@ impl ModuleContext {
             handles: handles.clone(),
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
-            hsmauth_providers,
+            auth_slots: auth_slots.clone(),
             private_instance: false,
             discovery_refresh: Mutex::new(None),
             discovery_refresh_interval: configuration.discovery_refresh_interval,
             slot_serials: configuration.slot_serials,
-            slot_contexts: RwLock::new(SlotContextRegistry::new()),
+            slot_contexts: RwLock::new(SlotContextRegistry::new(auth_slots)),
         };
         #[cfg(feature = "abi-tests")]
         for (slot_id, slot) in {
@@ -1930,7 +1938,6 @@ impl ModuleContext {
             }
             Err(error) => {
                 transport.shutdown();
-                let _ = self.hsmauth_providers.remove_device(&device);
                 Err(error)
             }
         }
@@ -2082,8 +2089,6 @@ impl ModuleContext {
                 self.secure_channels.clone(),
                 self.pinentry.clone(),
             );
-            let shared_application_connector: SharedConnector =
-                Arc::new(application_connector.clone());
             let application_connector: Rc<dyn Connector> = Rc::new(application_connector);
             let mut slot: Box<dyn Slot> = match configuration.application {
                 CcidApplication::Piv => Box::new(PivSlot::new_with_device(
@@ -2097,29 +2102,11 @@ impl ModuleContext {
                     reader_state.device.clone(),
                 )),
                 CcidApplication::HsmAuth => {
-                    let hsmauth_slot = HsmAuthSlot::new_shared_with_device(
+                    let hsmauth_slot = HsmAuthSlot::new_with_device(
                         application_connector,
-                        shared_application_connector,
                         application_aid,
                         reader_state.device.clone(),
                     );
-                    match hsmauth_slot.providers() {
-                        Ok(mut providers) => {
-                            for provider in &mut providers {
-                                provider.trust_prefix =
-                                    Some(self.yubihsm_device_trust_prefix.clone());
-                            }
-                            if let Err(error) = self.hsmauth_providers.extend(providers) {
-                                log!(1, "YubiHSM Auth provider registration: {:?}", error);
-                            }
-                        }
-                        Err(error) => tracing::debug!(
-                            target: "pkcs11rs::discovery",
-                            reader = %reader_name,
-                            ?error,
-                            "YubiHSM Auth credential discovery failed"
-                        ),
-                    }
                     Box::new(hsmauth_slot)
                 }
                 CcidApplication::IssuerSecurityDomain => {
@@ -2533,6 +2520,21 @@ impl ModuleContext {
                 )?;
             }
         }
+        if self.platform_enabled
+            && self.serial_is_visible(crate::backend::platform::PLATFORM_SERIAL)
+        {
+            let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
+            let slot = Box::new(crate::backend::platform::PlatformSlot::new()?);
+            let objects = slot.token_objects(slot_id)?;
+            slot_contexts.insert_slot_contexts(
+                vec![(slot_id, slot, objects)],
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+                None,
+                None,
+            )?;
+        }
         #[cfg(feature = "abi-tests")]
         {
             return Ok(true);
@@ -2807,11 +2809,11 @@ impl ModuleContext {
     ) -> Result<PreparedDiscoveredSlot, Error> {
         let discovery_connector = connector.clone();
         let connector = Rc::new(connector);
-        let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        let mut yubihsm_slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
             connector.clone(),
             (0, 0, 0),
             Vec::new(),
-            self.hsmauth_providers.clone(),
+            self.auth_slots.clone(),
             self.yubihsm_public_discovery_config.clone(),
         );
         yubihsm_slot.set_pinentry(self.pinentry.clone());
@@ -2847,11 +2849,11 @@ impl ModuleContext {
         let mut connector = UsbConnector::open_blocking(candidate)?;
         connector.connect_blocking()?;
         let discovery_connector = connector.clone();
-        let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        let mut yubihsm_slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
             Rc::new(connector),
             (0, 0, 0),
             Vec::new(),
-            self.hsmauth_providers.clone(),
+            self.auth_slots.clone(),
             self.yubihsm_public_discovery_config.clone(),
         );
         yubihsm_slot.set_pinentry(self.pinentry.clone());
@@ -3660,6 +3662,24 @@ mod discovery_tests {
         .unwrap()
     }
 
+    #[test]
+    fn platform_serial_filter_disables_source_without_os_discovery() {
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration.software_slots.clear();
+        configuration.platform_enabled = true;
+        configuration.slot_serials = Some(HashSet::new());
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        context.init().unwrap();
+        assert!(
+            context
+                .auth_slots
+                .matching(SlotKind::Platform)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(context.slot_contexts.read().unwrap().is_empty());
+    }
+
     #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
     fn connector_test_context(url: String) -> ModuleContext {
         let mut configuration = ModuleConfiguration::resolve(None).unwrap();
@@ -3732,7 +3752,7 @@ mod discovery_tests {
         let state = Arc::new(PcscReaderState::new(Arc::new(DeviceContext::new(
             registered_identity.clone(),
         ))));
-        let mut slots = SlotContextRegistry::new();
+        let mut slots = SlotContextRegistry::new(Arc::new(crate::auth_slots::AuthSlots::default()));
         let result = context
             .insert_ccid_reader_slots(
                 &mut slots,
@@ -4106,10 +4126,12 @@ mod discovery_tests {
     #[cfg(not(feature = "mock-yubikey"))]
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
         let configuration = ModuleConfiguration::resolve(None).unwrap();
+        let auth_slots = Arc::new(crate::auth_slots::AuthSlots::default());
         let context = ModuleContext {
             logging: None,
             hardware_discovery: false,
             software_slots: Vec::new(),
+            platform_enabled: false,
             software_discovery_pins: HashMap::new(),
             ccid_readers: Mutex::new(HashMap::new()),
             ccid_provider: CcidProvider::new(false),
@@ -4130,12 +4152,12 @@ mod discovery_tests {
             trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
                 std::ffi::OsString::new(),
             )),
-            hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
+            auth_slots: auth_slots.clone(),
             private_instance: false,
             discovery_refresh: Mutex::new(None),
             discovery_refresh_interval: Duration::from_millis(500),
             slot_serials: None,
-            slot_contexts: RwLock::new(SlotContextRegistry::new()),
+            slot_contexts: RwLock::new(SlotContextRegistry::new(auth_slots)),
         };
 
         context.init().unwrap();

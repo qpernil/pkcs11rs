@@ -105,9 +105,10 @@ software mechanism list for session keys.
 
 ### Platform-protected login
 
-- A provider abstraction performs the exact prefixed X9.63 KDF needed for
-  asymmetric YubiHSM authentication without exporting the platform private key
-  or static shared secret. See
+- The configurable [platform ECDH slot](docs/platform.md) exposes protected
+  private keys and matching public-key objects. Enable `platform.enabled=true`
+  to use them for general PKCS #11 operations or YubiHSM authentication through
+  the shared derivation path. See
   [Platform credential architecture](docs/yubihsm-auth.md#platform-credential-login-architecture).
 - macOS and iOS use permanent P-256 keys in Apple's Secure Enclave. Named
   credentials can be generated, listed, inspected, deleted, provisioned into a
@@ -707,6 +708,7 @@ export PKCS11RS_YUBIHSM_DISCOVERY='00a5service-owned-password'
 export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-password'
 
 # Or a named platform-protected P-256 credential (macOS/iOS Secure Enclave)
+export PKCS11RS_PLATFORM_ENABLED=1
 export PKCS11RS_YUBIHSM_DISCOVERY=':00a5@reserve'
 ```
 

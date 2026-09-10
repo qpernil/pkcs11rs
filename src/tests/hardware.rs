@@ -2076,8 +2076,8 @@ mod hardware_provisioning {
             .find(|credential| credential.label == label)
             .expect("generated YubiHSM Auth credential was not rediscovered");
         assert_eq!(credential.touch_required, case.touch_required);
-        let provider = crate::HsmAuthProvider {
-            connector: hsmauth.into(),
+        let provider = crate::NativeHsmAuth {
+            connector: hsmauth,
             credential,
             version: info.version,
             trust_prefix: None,

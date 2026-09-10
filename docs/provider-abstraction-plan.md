@@ -75,7 +75,7 @@ The architecture uses several focused boundary shapes:
 | Component | Focused responsibility | Deliberately retained by its caller |
 | --- | --- | --- |
 | `software-key-core` | Typed, protocol-neutral software key operations and secret ownership | Provider identity, authorization, persistence, PKCS #11 policy, and error mapping |
-| `platform-credential` | Protected prefixed X9.63 and CMAC-pair capabilities plus credential lifecycle | YubiHSM session policy, selectors, provisioning policy, and Cryptoki login behavior |
+| `platform-credential` | Protected ECDH and public-key access, compatibility KDF helper, and key lifecycle | YubiHSM session policy, selectors, provisioning policy, and Cryptoki login behavior |
 | `yubihsm-auth-client` | Transport-independent YubiHSM Auth APDU and TLV exchange | Reader discovery, transport selection, target-session policy, and error projection |
 | `StorageProvider` | Opaque canonical-object storage addressed by content reference | Object meaning, visibility, authentication, handles, and lifecycle policy |
 | `pkcs11rs-local-hardware` | Shared blocking and asynchronous YubiHSM USB mechanics | PKCS #11 slots, connector routing, HTTP policy, and secure sessions |

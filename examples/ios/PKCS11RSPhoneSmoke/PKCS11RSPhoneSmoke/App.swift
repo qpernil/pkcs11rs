@@ -103,6 +103,7 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "storage": [
             "tokens": tokenStoragePath,
         ],
+        "platform": ["enabled": true],
         "software": [
             "slots": [[
                 "name": softwareTokenName,

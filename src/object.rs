@@ -250,6 +250,7 @@ pub(crate) enum KeyMaterial {
     },
     Public(PublicKeyMaterial),
     SoftwarePrivate(SoftwarePrivateKeyMaterial),
+    PlatformPrivate(std::sync::Arc<dyn crate::platform_crypto::EcdhCredential>),
     PivPrivate {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
@@ -349,6 +350,7 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("profile_id", profile_id)
                 .finish(),
             Self::Public(key) => fmt.debug_tuple("Public").field(key).finish(),
+            Self::PlatformPrivate(_) => fmt.write_str("PlatformPrivate([PROTECTED])"),
             Self::SoftwarePrivate(key) => fmt.debug_tuple("SoftwarePrivate").field(key).finish(),
             Self::PivPrivate {
                 slot,
@@ -2021,6 +2023,7 @@ impl TokenObject {
         matches!(
             &self.material,
             KeyMaterial::Profile { .. }
+                | KeyMaterial::PlatformPrivate(_)
                 | KeyMaterial::PivPrivate { .. }
                 | KeyMaterial::PivCertificate { .. }
                 | KeyMaterial::PivAttestation { .. }

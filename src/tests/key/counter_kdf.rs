@@ -169,6 +169,7 @@ fn counter_kdf_scp03_vectors_create_protected_working_keys_on_every_slot() {
     let _guard = TEST_LOCK.lock().unwrap();
     for kind in [
         crate::SlotKind::Software,
+        crate::SlotKind::Platform,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),
