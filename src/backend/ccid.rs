@@ -95,24 +95,18 @@ pub(crate) struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
     device: Arc<DeviceContext>,
     serial: String,
-    shared_connector: Option<SharedConnector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
     management_key: RefCell<Option<HsmAuthManagementKey>>,
     info: RefCell<Option<HsmAuthInfo>>,
+    #[cfg(test)]
+    fixture_info: Option<HsmAuthInfo>,
 }
 
 impl std::fmt::Debug for HsmAuthSlot {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("HsmAuthSlot")
             .field("connector", &self.connector)
-            .field(
-                "shared_connector",
-                &self
-                    .shared_connector
-                    .as_ref()
-                    .map(|connector| connector.as_ref().as_debug()),
-            )
             .field("application_aid", &self.application_aid)
             .field("authenticated", &self.authenticated)
             .field("management_key", &self.management_key)
@@ -138,26 +132,20 @@ impl HsmAuthSlot {
             connector,
             device,
             serial,
-            shared_connector: None,
             application_aid,
             authenticated: Cell::new(false),
             management_key: RefCell::new(None),
             info: RefCell::new(None),
+            #[cfg(test)]
+            fixture_info: None,
         }
     }
 
-    pub(crate) fn new_shared_with_device(
-        connector: Rc<dyn Connector>,
-        shared_connector: SharedConnector,
-        application_aid: Vec<u8>,
-        device: Arc<DeviceContext>,
-    ) -> Self {
-        let mut slot = Self::new_with_device(connector, application_aid, device);
-        slot.shared_connector = Some(shared_connector);
-        slot
-    }
-
     fn discovered_info(&self) -> Result<HsmAuthInfo, Error> {
+        #[cfg(test)]
+        if let Some(info) = &self.fixture_info {
+            return Ok(info.clone());
+        }
         let mut info = self.info.try_borrow_mut()?;
         if info.is_none() {
             *info = Some(HsmAuthClient.discover(self.connector.as_ref())?);
@@ -165,28 +153,17 @@ impl HsmAuthSlot {
         info.clone().ok_or(CKR_DEVICE_ERROR.into())
     }
 
-    pub(crate) fn providers(&self) -> Result<Vec<HsmAuthProvider>, Error> {
-        let info = self.discovered_info()?;
-        let connector = self
-            .shared_connector
-            .as_ref()
-            .cloned()
-            .ok_or(CKR_FUNCTION_NOT_SUPPORTED)?;
-        let source = self
-            .device
-            .identity(self.connector.connection_epoch())
-            .serial;
-        Ok(info
-            .credentials
-            .into_iter()
-            .map(|credential| HsmAuthProvider {
-                connector: connector.clone().into(),
-                credential,
-                version: info.version,
-                trust_prefix: None,
-                source: source.clone(),
-            })
-            .collect())
+    #[cfg(test)]
+    pub(crate) fn from_native_fixture(provider: NativeHsmAuth) -> Self {
+        let connector = provider.connector;
+        let mut slot = Self::new(connector, hsmauth::AID.to_vec());
+        slot.serial = provider.source;
+        slot.fixture_info = Some(HsmAuthInfo {
+            version: provider.version,
+            management_key_retries: 8,
+            credentials: vec![provider.credential],
+        });
+        slot
     }
 }
 
@@ -199,6 +176,36 @@ impl Slot for HsmAuthSlot {
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::HsmAuth)
+    }
+    fn refresh_token_objects_before_find(&self) -> bool {
+        true
+    }
+    fn hsmauth_authenticate(
+        &self,
+        object: &TokenObject,
+        target: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<YubiHsmSecureSession, Error> {
+        if !self.is_present() {
+            return Err(CKR_TOKEN_NOT_PRESENT.into());
+        }
+        let info = self.discovered_info()?;
+        let credential = info
+            .credentials
+            .into_iter()
+            .find(|credential| hsmauth_credential_identity(credential) == object.unique_id)
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        NativeHsmAuth {
+            connector: self.connector.clone(),
+            credential,
+            version: info.version,
+            trust_prefix: trust_prefix.map(ToOwned::to_owned),
+            #[cfg(test)]
+            source: self.serial.clone(),
+        }
+        .authenticate(target, authkey_id, password)
     }
     fn supports_public_projection(&self) -> bool {
         false
@@ -236,6 +243,7 @@ impl Slot for HsmAuthSlot {
         self.connector.is_present()
     }
     fn refresh(&self) -> Result<(), Error> {
+        self.invalidate_token_objects();
         self.connector.refresh()
     }
     fn set_discovery_error(&self, error: &Error) {
@@ -461,13 +469,22 @@ impl Slot for HsmAuthSlot {
     }
 }
 
+fn hsmauth_credential_identity(credential: &HsmAuthCredential) -> String {
+    // The applet supplies no symmetric key fingerprint. Asymmetric replacement
+    // under the same label is distinguishable through its public key.
+    format!(
+        "hsmauth-credential:{}:{:?}:{:?}",
+        credential.label, credential.algorithm, credential.public_key
+    )
+}
+
 pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenObject> {
     let mut objects = Vec::new();
     for credential in &info.credentials {
         let id = credential.label.as_bytes().to_vec();
         objects.push(TokenObject {
             slot_id: Some(slot_id),
-            unique_id: format!("hsmauth-credential:{}", credential.label),
+            unique_id: hsmauth_credential_identity(credential),
             class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
             key_type: CKK_GENERIC_SECRET as CK_KEY_TYPE,
             label: credential.label.clone(),
@@ -504,7 +521,10 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
         if let Some(public_key) = &credential.public_key {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("hsmauth-public:{}", credential.label),
+                unique_id: format!(
+                    "hsmauth-public:{}:{:?}",
+                    credential.label, credential.public_key
+                ),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_EC as CK_KEY_TYPE,
                 label: format!("{} public key", credential.label),

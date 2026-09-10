@@ -845,189 +845,107 @@ YubiHSM Auth credential.
 
 ## Platform-protected authentication credentials
 
-The internal provider boundary describes protocol-neutral protected
-operations rather than Apple or YubiHSM types. An asymmetric provider exposes
-its public key and the prefixed X9.63 construction used by YubiHSM asymmetric
-authentication. A symmetric provider contract represents an atomic K-ENC and
-K-MAC pair through CMAC operations, although no platform symmetric backend is
-enabled yet. The YubiHSM Auth applet remains a higher-level provider because
-its firmware exposes the complete challenge/calculation exchange.
+Platform keys are ordinary PKCS #11 token keys on the configurable
+[platform ECDH slot](platform.md). Enable `platform.enabled=true` or
+`PKCS11RS_PLATFORM_ENABLED=1`; a serial allowlist must also include
+`PLATFORM00000001`. Disabled or filtered slots cannot supply authentication
+credentials. The slot projects each managed key as private and public P-256
+objects with matching `CKA_LABEL` and `CKA_ID`.
 
-On macOS and iOS, the asymmetric backend resolves a permanent Secure Enclave
-P-256 key by the binary Keychain application tag
-`pkcs11rs.yubihsm-auth.<name>` in the signed host application's default
-Keychain access group. Login never creates a missing credential. The public key
-is exportable for provisioning a matching YubiHSM Authentication Key and public
-projection. The private key is not exported.
+On macOS and iOS, the existing management API resolves permanent Secure Enclave
+keys tagged `pkcs11rs.yubihsm-auth.<name>` in the signed host application's
+Keychain access group. Login never creates a missing key. Management tooling
+and the iOS provisioning workflows remain separate from authentication; they
+use the existing names and storage without migration.
 
-Apple's API performs raw ECDH in the Secure Enclave but returns the shared
-secret to the caller. pkcs11rs therefore holds that intermediate only in a
-zeroizing buffer, prepends the independently generated ephemeral ECDH secret,
-derives the session keys, verifies the YubiHSM receipt, and drops the
-intermediate immediately. Session recreation retains the protected key
-reference and device-trust configuration, not private key material.
+### HSM Auth slot discovery and execution
 
-The same source is compiled for macOS and iOS. Code signing, the provisioning
-profile, and the host application's default Keychain access group decide which
-named credentials it can resolve. Device public-key trust is unchanged and is
-checked before the protected static ECDH operation. TLS trust remains a
-separate configuration.
+An HSM Auth applet is one PKCS #11 slot. Its credentials are public metadata
+objects (`CKO_SECRET_KEY`, `CKK_GENERIC_SECRET`, `CKA_TOKEN=true`) with protected,
+non-extractable values and a `CKA_YUBICO_HSMAUTH_ALGORITHM` discriminator.
+Asymmetric credentials have companion EC public-key objects joined by `CKA_ID`;
+the companion label includes a ` public key` suffix. Automatic matching uses
+these public objects, while symmetric credentials require explicit selection.
 
-A Windows implementation can provide the same asymmetric operation through
-CNG/TPM. CNG can keep the ECDH secret behind an `NCRYPT_SECRET_HANDLE` and apply
-the required prepend/hash construction with `NCryptDeriveKey`, so a Windows
-backend may avoid exposing even the intermediate shared secret. No credential
-string changes are needed when that backend is added.
+Authentication lookup searches the slot objects through a `ProviderSession`.
+The module keeps weak references to registered source slots, not an independent
+credential registry. Serial filters apply before opening a source session.
+Object searches refresh the applet inventory. The native authentication operation
+also refreshes it before validating the selected handle, so deletion or
+asymmetric replacement invalidates an old binding. The applet provides no
+symmetric-key fingerprint; replacing a symmetric credential under the same label
+cannot be distinguished from the existing credential by inventory alone.
 
-The `pkcs11rs-tool platform-credential` commands generate, list, inspect and
-delete these credentials. On macOS, `cargo xtask macos-tool` builds an app-like
-CLI bundle so Xcode can embed the development provisioning profile that
-authorizes its Keychain entitlement. On iOS, the embedding application uses
-its normal signed application identity. Symmetric platform authentication
-remains reserved for providers that can keep both AES-128 keys non-exportable
-while offering the required CMAC operations.
+The credential remains a token object throughout authentication. The native
+Rust operation uses a PKCS #11 session and object handle, plus the target HSM,
+authentication-key ID and credential password. It performs the existing
+challenge, receipt and session-key protocol without claiming ordinary ECDH or
+AES support on the applet credential. Shared software session objects retain
+their ordinary mechanisms. No vendor derivation mechanism is defined for this
+operation.
 
 ### Platform credential login architecture
 
-A platform credential login is a complete YubiHSM user login whose long-term
-client private key is held by an operating-system key provider. `keyring` is a
-description of that storage model, not a credential-string mechanism name.
-PKCS11RS selects the provider compiled for the host platform and refers to a
-credential only by its local, nonnumeric name.
+`ClientAuth` owns authentication material bound to a PKCS #11 source session.
+Direct-password authentication creates a private software slot and session
+objects; platform and YubiHSM Auth authentication select token objects from
+existing slots. Platform and direct-password credentials use the shared
+Cryptoki Rust handlers. YubiHSM Auth uses the session's native
+`hsmauth_authenticate` operation, which validates the selected credential handle
+and invokes the existing applet protocol. Internal calls do not enter the C FFI.
+The platform slot knows only ECDH, object identity, and OS key access; it contains
+no SCP protocol logic.
 
 ```text
-PKCS #11 application
-        |
-        | C_Login or C_LoginUser
-        v
-PKCS11RS YubiHSM slot
-        |
-        | authentication-key ID and platform credential name
-        v
-platform-credential provider
-        |
-        | protected static ECDH and public-key access
-        v
-asymmetric YubiHSM handshake
-        |
-        v
-encrypted SessionMessage transport
+YubiHSM login selector
+    -> enabled platform slot: find label / match public-key projection
+    -> bound P-256 token key
+    -> Pkcs11Auth: ECDH, protected session objects, common KDF graph
+    -> receipt verification and final working-key reads
+    -> YubiHSM secure channel: local encryption and MAC
 ```
-
-The architecture has four independent identities and policy sources:
-
-| Component | Purpose |
-| --- | --- |
-| Platform credential | Authenticates the client while keeping its static private key non-exportable. |
-| YubiHSM Authentication Key | Assigns capabilities, delegated capabilities, and domains to the resulting session. |
-| Public credential projection | Maps a provider public key to a YubiHSM Authentication Key ID before login. |
-| YubiHSM device trust | Authenticates the device static key used by the asymmetric handshake. |
-
-The projection has no cryptographic authority. The YubiHSM enforces the policy
-of the actual Authentication Key after authentication; PKCS11RS does not infer
-or reproduce that authorization locally.
 
 #### Login selection
 
-An explicit platform login identifies both sides of the association:
+`:1003@reserve` selects the target Authentication Key ID `1003` and exactly
+`CKA_LABEL=reserve` on the platform slot. `C_LoginUser` supplies this username
+with a null PIN pointer and zero PIN length; the packed `C_Login` form is also
+supported. Nonempty passwords are rejected for platform selectors.
 
-```text
-:1003@reserve
-```
+`:*@reserve` matches that key's public point against the target HSM's discovered
+public authentication-key projections. Universal `:*` enumerates the enabled
+source slot's public-key objects and finds their matching private objects by
+label and ID. Missing or duplicate named private-key matches return
+`CKR_PIN_INCORRECT`; no matching target projection returns
+`CKR_USER_TYPE_INVALID`. A disabled or unsupported explicit platform source
+returns `CKR_FUNCTION_NOT_SUPPORTED`. An unavailable source contributes no
+candidate to automatic lookup when it is disabled.
 
-Here `1003` is the target YubiHSM Authentication Key ID and `reserve` is the
-local platform credential name. This selector contains no password delimiter,
-does not invoke pinentry, and does not encode whether the provider is Apple,
-CNG, TPM, or another implementation.
-
-PKCS #11 3.x callers normally pass the selector separately:
-
-```text
-C_LoginUser(
-    username = ":1003@reserve",
-    PIN pointer = NULL,
-    PIN length = 0
-)
-```
-
-The packed `C_Login` form accepts the same explicit selector. `C_LoginUser`
-additionally supports projection-based resolution:
-
-```text
-:*@reserve
-```
-
-For this form, public discovery must already have produced the selected
-YubiHSM slot's public token-object view. PKCS11RS resolves `reserve`, obtains
-its public point, compares it with eligible projections, and tries only their
-two-byte Authentication Key IDs in projection order. No match returns
-`CKR_USER_TYPE_INVALID`; a missing or ambiguous explicit platform credential
-maps to `CKR_PIN_INCORRECT`; an unavailable platform provider maps to
-`CKR_FUNCTION_NOT_SUPPORTED`. Wildcard login is not itself a public discovery
-credential because that would create a circular dependency.
-
-Before either login form begins authentication, the slot closes any existing
-secure session and clears its private object cache. `C_LoginUser` accepts only
-`CKU_USER`, validates that the session belongs to the selected YubiHSM slot,
-and rejects a nonempty PIN for a platform credential.
+The source label, source public key, target Authentication Key ID, and device
+trust are distinct. Public projection selects a candidate; the target HSM
+enforces capabilities and domains. Device trust is validated before static
+ECDH. Connector TLS trust remains independent.
 
 #### Provider boundary
 
-`platform-credential` separates authentication from persistent lifecycle
-management. `AuthenticationCredentialProvider` resolves a name without
-changing state, while `AuthenticationCredentialStore` explicitly generates,
-lists, reads the public key of, or deletes a credential.
+The platform key capability is `EcdhCredential`: public-key access and ordinary
+P-256 ECDH. The `platform-credential` crate retains its prefixed-X9.63 convenience
+method and compatibility trait name for existing external consumers. The
+PKCS #11 slot and YubiHSM authentication client use ordinary ECDH instead.
 
-The active asymmetric primitive is `PrefixedX963Credential`:
-
-```rust
-pub trait PrefixedX963Credential: Send + Sync {
-    fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError>;
-
-    fn derive_prefixed_x963(
-        &self,
-        peer_public_key: &SoftwarePublicKey,
-        hash: HashAlgorithm,
-        prefix: &[u8],
-        shared_info: &[u8],
-        output_length: usize,
-    ) -> Result<Zeroizing<Vec<u8>>, PlatformCryptoError>;
-}
-```
-
-This boundary does not expose the static private key, a general provider key
-handle, or platform-specific types. The same caller works with the Apple
-provider and a future Windows CNG/TPM provider without changing the credential
-selector or YubiHSM protocol code.
-
-`PlatformAuthenticationCredential` can also contain a `CmacPairCredential`.
-That contract represents two non-exportable AES keys through role-specific
-CMAC operations and leaves room for symmetric platform authentication. The
-current YubiHSM platform-login path deliberately accepts only an asymmetric
-`PrefixedX963Credential`; no symmetric platform backend is enabled.
+Apple returns the ECDH secret from the Secure Enclave to the module. The module
+stores it as a protected, zeroizing session object; the private scalar remains
+in the Secure Enclave. The native key checks its managed identity before use,
+so deletion or replacement does not silently keep an obsolete binding usable.
+OS authorization governs the operation; there is no PKCS #11 login password
+for the platform slot.
 
 #### Asymmetric handshake
 
-PKCS11RS generates a fresh ephemeral P-256 key pair for every login. It sends
-a plain `CreateSession` containing the target Authentication Key ID and the
-host ephemeral public point. The response contains a clear session ID, the
-device ephemeral public point, and a receipt.
-
-The client obtains the device static public key through the YubiHSM protocol
-and validates it against configured device trust before invoking the protected
-credential. It then forms two independent ECDH values:
-
-```text
-Z_ephemeral = ECDH(host ephemeral private, device ephemeral public)
-Z_static    = ECDH(platform static private, device static public)
-```
-
-The private slot generates the ephemeral key and calculates
-`Z_ephemeral` as an explicitly readable generic-secret session object. The adapter
-reads its value through `Pkcs11Auth` for the existing platform byte-prefix contract;
-it never weakens an existing protected object. The
-platform provider calculates `Z_static` while keeping the long-term private key inside
-its protected store. The prefixed X9.63 construction expands 64 bytes as:
+The source slot generates a fresh software ephemeral P-256 session key and
+performs both ECDH agreements through `Pkcs11Auth`. Static and ephemeral
+agreements remain protected session objects. Concatenation and SHA-256
+mechanisms implement the existing X9.63 graph:
 
 ```text
 SHA-256(Z_ephemeral || Z_static || counter || shared_info)
@@ -1038,47 +956,25 @@ bytes 32..48  S-MAC
 bytes 48..64  S-RMAC
 ```
 
-On Apple platforms, Secure Enclave performs raw static ECDH but Apple's API
-returns `Z_static` to the process. The provider therefore keeps it only in a
-zeroizing buffer, performs the prefixed KDF in Rust, and drops the intermediate
-immediately. A provider capable of applying the complete construction behind
-its key boundary may avoid exposing even that shared secret.
-
-The adapter imports the KDF result as a readable private generic-secret object.
-The scope extracts a protected verify-only receipt key and verifies the device receipt with
-constant-time AES-CMAC comparison over the device and host ephemeral points.
-After verification, it extracts and reads S-ENC, S-MAC, and S-RMAC into local
-zeroizing storage, then releases the receipt key and all temporary objects.
-If trust, derivation, or receipt verification fails, it sends a best-effort invalid close for the pending
-session and discards all derived material. Asymmetric authentication needs no
-separate host-cryptogram step after a valid receipt.
+Explicitly readable final KDF outputs permit the intended working-key reads
+without weakening source objects. A protected verify-only receipt key validates
+the complete receipt before releasing S-ENC, S-MAC, and S-RMAC to the channel.
+Trust, derivation, or receipt failure cleans up the handshake's objects and
+attempts to close the pending HSM session.
 
 #### Established session and lifetime
 
-After authentication, the ordinary YubiHSM secure-session implementation owns
-the clear session ID, `S-ENC`, `S-MAC`, `S-RMAC`, request counter, and receipt
-as the initial MAC chaining value. Every protected operation then uses the same
-encrypted `SessionMessage` transport as a symmetrically authenticated session.
-The session keys remain in zeroizing memory and are removed on logout, final
-session close, authentication replacement, or invalidation.
+Established channels own their three working AES keys in zeroizing memory and
+perform message encryption and MAC locally. Handshake sessions release all
+intermediate objects. The platform token key remains owned by the OS store.
 
-If public discovery is active, PKCS11RS reads the authenticated key information
-and requires its domains to equal the public-discovery Authentication Key's
-domains. A mismatch closes the new session instead of combining inconsistent
-public and private object views.
-
-By default, loss of the device or secure session is exposed to the caller and
-requires a new login. When session recreation is explicitly enabled, the slot
-retains an opaque provider credential reference, Authentication Key ID, and
-device-trust configuration. It performs a completely new handshake after
-reconnection or timeout; it never reuses old session keys or retains the
-platform private key as bytes.
-
-Connector TLS trust remains independent of YubiHSM device trust. TLS
-authenticates the connector service and protects the network route. Device
-trust authenticates the static key participating in the YubiHSM handshake.
-Both checks can therefore be required for a remote deployment without merging
-their certificate or key stores.
+With session recreation disabled, the credential binding is released after
+establishment. With `yubihsm.recreate_sessions=true`, `ClientAuth` retains
+the bound token key, its provider session, and device-trust configuration until
+logout, invalidation, finalization, or replacement. Only an explicit invalid
+session response triggers one new handshake and one replay; ambiguous transport
+or authentication failures never trigger replay. No platform private-key bytes
+or password are retained.
 
 ### Provisioning an iPhone platform credential
 

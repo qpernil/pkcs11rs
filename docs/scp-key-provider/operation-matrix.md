@@ -62,8 +62,8 @@ AES keys are readable by inheritance. The receipt key is protected and verifies
 the receipt before the three working keys are read. All scope objects are
 released afterward. Protected inputs are never downgraded or read.
 
-YubiHSM Auth supplies working bytes directly. The platform prefixed-X9.63
-adapter supplies KDF bytes internally for the same receipt/extraction path.
+YubiHSM Auth supplies working bytes directly. Platform keys use native ECDH
+through the platform slot and the common protected session-object graph.
 Card structures retain local working keys and still use direct derivation.
 Hardware ECDH outputs in public PKCS #11 operations use software session objects;
 the native prefixed extension returns KDF bytes. None establishes native retention

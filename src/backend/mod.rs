@@ -6,6 +6,7 @@ mod crypto;
 mod ctap;
 mod openpgp;
 mod piv;
+pub(crate) mod platform;
 mod software;
 mod traits;
 mod yubihsm;
@@ -45,8 +46,8 @@ pub(crate) use piv::{
 pub(crate) use software::SoftwareSlot;
 pub(crate) use traits::{BackendSession, Slot, SlotKind, apply_device_versions, session_state};
 pub(crate) use yubihsm::{
-    HsmAuthProvider, HsmAuthProviderRegistry, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState,
-    YubiHsmSlot, send_yubihsm_secure_command,
+    HsmAuthLogin, HsmAuthWildcardLogin, NativeHsmAuth, YubiHsmPublicDiscoveryConfig,
+    YubiHsmSessionState, YubiHsmSlot, send_yubihsm_secure_command,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -71,10 +72,10 @@ pub(crate) use openpgp::{
 pub(crate) use traits::profile_token_objects;
 #[cfg(test)]
 pub(crate) use yubihsm::{
-    HsmAuthWildcardLogin, PlatformLogin, PlatformWildcardLogin, YubiHsmLoginUsername,
-    YubiHsmPkcs11Metadata, YubiHsmSessionRole, parse_hsmauth_username,
-    parse_yubihsm_login_username, parse_yubihsm_pkcs11_metadata, split_yubihsm_login,
-    yubihsm_object_has_public_key, yubihsm_object_label, yubihsm_token_objects_with_generation,
+    PlatformLogin, PlatformWildcardLogin, YubiHsmLoginUsername, YubiHsmPkcs11Metadata,
+    YubiHsmSessionRole, parse_hsmauth_username, parse_yubihsm_login_username,
+    parse_yubihsm_pkcs11_metadata, split_yubihsm_login, yubihsm_object_has_public_key,
+    yubihsm_object_label, yubihsm_token_objects_with_generation,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]

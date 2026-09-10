@@ -42,11 +42,13 @@ has a dedicated owning session; handshake sessions own the transient derivation
 objects. Closing the owning session deletes its session objects, and dropping
 the last private-provider reference releases the temporary software slot.
 Software key storage is zeroizing. No ordinary login PIN is retained to reopen
-these sessions. YubiHSM Auth retains its selected provider and
-credential password.
+these sessions. YubiHSM Auth retains its selected token-object binding, the
+owning PKCS #11 session, and the credential password. This password is still
+retained only under the explicit recreation opt-in.
 Secret material uses zeroizing storage and is dropped on logout, invalidation,
-finalization, or session replacement. A platform-backed credential may instead
-retain a protected-key reference. See [YubiHSM authentication](yubihsm-auth.md)
+finalization, or session replacement. A platform-backed credential retains a bound token-key reference and its
+PKCS #11 provider session through `ClientAuth`; the key stays in the OS
+store. Platform authentication requires the explicitly enabled platform slot. See [YubiHSM authentication](yubihsm-auth.md)
 for recovery conditions and replay restrictions.
 
 ### Configured discovery credentials

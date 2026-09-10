@@ -56,6 +56,7 @@ fn x963_graph_on_every_slot_kind(readable: bool) {
     let _guard = TEST_LOCK.lock().unwrap();
     for kind in [
         crate::SlotKind::Software,
+        crate::SlotKind::Platform,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),

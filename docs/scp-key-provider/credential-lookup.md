@@ -1,7 +1,9 @@
 # Proposed named SCP credential lookup
 
 This is the next storage/selection layer for the [SCP key-provider plan](README.md).
-It is a design, not an implemented configuration format. The YubiHSM client
+Selection across arbitrary providers is a design, not an implemented configuration
+format. The enabled platform slot already supports exact label lookup and
+public-key projection matching through the existing platform selector syntax. The YubiHSM client
 derives channel keys through the `Pkcs11Auth` Rust session API,
 then reads the final working AES keys for local message crypto; its configured input paths use password-derived credentials,
 YubiHSM Auth, or platform credentials. A resolver must connect stored token

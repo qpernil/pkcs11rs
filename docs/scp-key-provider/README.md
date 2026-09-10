@@ -29,7 +29,7 @@ not execution location.
 ## Implemented foundation
 
 All slot kinds share common software session objects: software, YubiHSM, PIV,
-OpenPGP, and FIDO2. Supported software keys, data objects, derivation outputs,
+OpenPGP, FIDO2, and platform ECDH. Supported software keys, data objects, derivation outputs,
 and operations use this common layer. A software slot has no native mechanisms;
 each hardware slot's native list is merged with a filtered software list.
 The union combines operation flags and size ranges and preserves native
@@ -55,7 +55,8 @@ credential as a session object. It uses the ordinary `SoftwareSlot` without a
 backing store; token-object creation remains write-protected. A dedicated
 credential session and separate handshake sessions provide the required lifetimes.
 Both preparation paths use the same derivation and session cleanup operations.
-Configured provider selection and named lookup remain planned; native chainable
+The enabled platform slot supports exact label lookup and public-key matching;
+selection across arbitrary configured providers remains planned; native chainable
 protected-object commands remain unimplemented.
 
 The [complete-channel tests](../../src/yubihsm/tests/pkcs11_auth.rs) run the same
@@ -87,14 +88,15 @@ as readable AES objects and read once. The provider scope, including the
 receipt key, ephemeral key, KDF blocks, and agreements, is destroyed on success
 or failure. Only the final three AES values cross into message processing.
 
-The existing platform prefixed-X9.63 byte contract requires the ephemeral ECDH
-output to be created explicitly readable and read through the session API. The
-adapter imports its returned KDF material as explicitly readable before receipt
-verification and extraction. YubiHSM Auth returns the three working keys directly
-and the client copies them into the same zeroizing storage. Neither workflow
-adds an ordinary password cache. The explicit session-recreation exception can
-retain the existing credential/agreement references as documented in
-[authentication secrets](../authentication-secrets.md).
+Platform credentials use native ECDH token objects and the same protected
+session-object graph through `Pkcs11Auth`. Only explicitly enabled platform
+slots participate in named or automatic lookup. `ClientAuth` covers temporary
+direct credentials and token bindings on existing source slots. YubiHSM Auth
+credentials are selected through ordinary slot objects; the owning PKCS #11
+session exposes a native Rust operation for the applet protocol. That operation
+returns the three working keys without entering the C FFI.
+The explicit recreation policy retains the applicable credential binding;
+see [authentication secrets](../authentication-secrets.md).
 
 All YubiHSM channels use local AES ECB/CBC and CMAC. Response authentication
 precedes decryption. Successful close and failed exchanges erase working keys;
@@ -122,8 +124,7 @@ Use `CKA_SENSITIVE=false` and `CKA_EXTRACTABLE=true` on readable outputs, and
 honor all source restrictions. A provider that prohibits those outputs is
 incompatible with this client path; do not silently change policy or fall back
 to a different execution mode. Release intermediate objects after use and read
-only final working keys in the generic path, never long-term keys. The existing
-platform byte-prefix contract has the explicit ephemeral-ECDH boundary above.
+only final working keys in the generic path, never long-term keys. Platform ECDH outputs follow the same session-object policy.
 
 Acceptance: the YubiHSM client completes symmetric/asymmetric authentication
 through a separately configured slot. Instrumented tests show derivation and

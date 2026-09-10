@@ -51,7 +51,7 @@ a public key or CA certificate.
     "refresh_interval_ms": 500
   },
   "slots": {
-    "serials": ["1238075073", "2545354682", "37070618"]
+    "serials": ["1238075073", "2545354682", "37070618", "PLATFORM00000001"]
   },
   "storage": {
     "tokens": "/var/lib/pkcs11rs",
@@ -64,6 +64,9 @@ a public key or CA certificate.
         "discovery_pin": "a sufficiently long discovery PIN"
       }
     ]
+  },
+  "platform": {
+    "enabled": true
   },
   "yubihsm": {
     "urls": ["https://connector.example:12345"],
@@ -184,6 +187,14 @@ blocks until the NFC request completes; applications must make that call away
 from their main UI thread. Later UI triggers are summarized in
 [When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears).
 
+## Platform slot
+
+`platform.enabled` opts into the [generic platform ECDH slot](platform.md).
+It defaults to false and also gates platform credentials used for YubiHSM
+login. Native hardware discovery is independent. If `slots.serials` is set,
+include `PLATFORM00000001` to make this source available. Private and public
+key objects share their managed name as `CKA_LABEL` for exact lookup.
+
 ## Environment mapping
 
 | JSON field | Environment fallback |
@@ -196,6 +207,7 @@ from their main UI thread. Later UI triggers are summarized in
 | `storage.tokens` | `PKCS11RS_TOKEN_STORAGE` |
 | `storage.fido2_compatibility` | `PKCS11RS_FIDO2_STORAGE` |
 | `software.slots` | `PKCS11RS_SOFTWARE_SLOTS` and each slot's `PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>` |
+| `platform.enabled` | `PKCS11RS_PLATFORM_ENABLED` |
 | `yubihsm.urls` | `PKCS11RS_YUBIHSM_URLS` |
 | `yubihsm.recreate_sessions` | `PKCS11RS_YUBIHSM_RECREATE_SESSIONS` |
 | `yubihsm.public_discovery` | `PKCS11RS_YUBIHSM_DISCOVERY` |

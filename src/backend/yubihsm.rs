@@ -20,187 +20,16 @@ enum YubiHsmMetadataPhysicalFormat {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct HsmAuthProvider {
-    pub(crate) connector: HsmAuthProviderConnector,
+pub(crate) struct NativeHsmAuth {
+    pub(crate) connector: Rc<dyn Connector>,
     pub(crate) credential: HsmAuthCredential,
     pub(crate) version: (u8, u8, u8),
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
+    #[cfg(test)]
     pub(crate) source: String,
 }
 
-#[derive(Clone)]
-pub(crate) enum HsmAuthProviderConnector {
-    Shared(SharedConnector),
-    #[cfg(test)]
-    Local(Rc<dyn Connector>),
-}
-
-impl std::fmt::Debug for HsmAuthProviderConnector {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.as_ref().as_debug().fmt(fmt)
-    }
-}
-
-impl AsRef<dyn Connector> for HsmAuthProviderConnector {
-    fn as_ref(&self) -> &(dyn Connector + 'static) {
-        match self {
-            Self::Shared(connector) => connector.as_ref(),
-            #[cfg(test)]
-            Self::Local(connector) => connector.as_ref(),
-        }
-    }
-}
-
-impl From<SharedConnector> for HsmAuthProviderConnector {
-    fn from(connector: SharedConnector) -> Self {
-        Self::Shared(connector)
-    }
-}
-
-#[cfg(test)]
-impl From<Rc<dyn Connector>> for HsmAuthProviderConnector {
-    fn from(connector: Rc<dyn Connector>) -> Self {
-        Self::Local(connector)
-    }
-}
-
-#[cfg(test)]
-impl<T: Connector + 'static> From<Rc<T>> for HsmAuthProviderConnector {
-    fn from(connector: Rc<T>) -> Self {
-        Self::Local(connector)
-    }
-}
-
-// Test-only providers may use single-threaded protocol peers. Production
-// providers contain only SharedConnector and derive Send without assistance.
-#[cfg(test)]
-unsafe impl Send for HsmAuthProvider {}
-
-#[derive(Debug, Default)]
-pub(crate) struct HsmAuthProviderRegistry {
-    providers: Mutex<Vec<HsmAuthProvider>>,
-}
-
-impl HsmAuthProviderRegistry {
-    #[cfg(test)]
-    pub(crate) fn new(providers: Vec<HsmAuthProvider>) -> Self {
-        Self {
-            providers: Mutex::new(providers),
-        }
-    }
-
-    pub(crate) fn extend(
-        &self,
-        providers: impl IntoIterator<Item = HsmAuthProvider>,
-    ) -> Result<(), Error> {
-        self.providers
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .extend(providers);
-        Ok(())
-    }
-
-    #[cfg(target_os = "ios")]
-    pub(crate) fn remove_device(
-        &self,
-        device: &Arc<crate::device::DeviceContext>,
-    ) -> Result<(), Error> {
-        self.providers
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .retain(|provider| {
-                provider
-                    .connector
-                    .as_ref()
-                    .device_context()
-                    .is_none_or(|candidate| !Arc::ptr_eq(&candidate, device))
-            });
-        Ok(())
-    }
-
-    fn with_provider<T>(
-        &self,
-        login: &HsmAuthLogin<'_>,
-        operation: impl FnOnce(&HsmAuthProvider) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let providers = self
-            .providers
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        log!(
-            2,
-            "YubiHSM Auth searching {} discovered credential providers",
-            providers.len()
-        );
-        let mut matches = providers.iter().filter(|provider| {
-            provider.credential.label == login.label
-                && login
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| provider.source_identifier() == *source)
-                && provider.connector.as_ref().is_present()
-        });
-        let provider = match matches.next() {
-            Some(provider) => provider,
-            None => {
-                log!(
-                    2,
-                    "YubiHSM Auth found no credential matching label {:?} and source {:?}",
-                    login.label,
-                    login.source
-                );
-                return Err(CKR_PIN_INCORRECT.into());
-            }
-        };
-        if matches.next().is_some() {
-            log!(
-                2,
-                "YubiHSM Auth credential label is ambiguous; add the source serial postfix"
-            );
-            return Err(CKR_PIN_INCORRECT.into());
-        }
-        operation(provider)
-    }
-
-    fn asymmetric_providers(
-        &self,
-        selector: &HsmAuthWildcardLogin<'_>,
-    ) -> Result<Vec<HsmAuthProvider>, Error> {
-        let providers = self
-            .providers
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        Ok(providers
-            .iter()
-            .filter(|provider| {
-                provider.credential.algorithm == HsmAuthAlgorithm::EcP256YubicoAuthentication
-                    && provider.credential.public_key.is_some()
-                    && selector
-                        .label
-                        .is_none_or(|label| provider.credential.label == label)
-                    && selector
-                        .source
-                        .is_none_or(|source| provider.source_identifier() == source)
-                    && provider.connector.as_ref().is_present()
-            })
-            .cloned()
-            .collect())
-    }
-}
-
-impl HsmAuthProvider {
-    fn source_identifier(&self) -> String {
-        if self.source.is_empty() || self.source == "0" {
-            self.connector.as_ref().name()
-        } else {
-            self.source.clone()
-        }
-    }
-
-    fn slot_label(&self) -> String {
-        format!("HSM Auth #{}", self.source_identifier())
-    }
-
+impl NativeHsmAuth {
     pub(crate) fn authenticate(
         &self,
         yubihsm_connector: &dyn Connector,
@@ -417,7 +246,7 @@ impl HsmAuthProvider {
     }
 }
 
-type PlatformWildcardCandidate = (Arc<dyn crate::platform_crypto::PrefixedX963Credential>, u16);
+type PlatformWildcardCandidate = (crate::key_scope::BoundKey, u16);
 
 #[derive(Debug)]
 pub(crate) struct YubiHsmSlot {
@@ -433,7 +262,7 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) model: String,
     pub(crate) serial: String,
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
-    pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+    pub(crate) auth_slots: Arc<crate::auth_slots::AuthSlots>,
     pub(crate) object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
     pub(crate) object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     pub(crate) attestation_cache:
@@ -457,80 +286,18 @@ pub(crate) enum YubiHsmSessionState {
     Active {
         session: YubiHsmSecureSession,
         role: YubiHsmSessionRole,
-        reauthentication: Option<Box<YubiHsmSessionReauthentication>>,
+        reauthentication: Option<Box<ClientAuth>>,
     },
 }
 
-pub(crate) enum YubiHsmSessionReauthentication {
-    Direct {
-        authkey_id: u16,
-        material: YubiHsmDirectAuthenticationMaterial,
-    },
-    HsmAuth {
-        authkey_id: u16,
-        provider: HsmAuthProvider,
-        password: Zeroizing<Vec<u8>>,
-    },
-    Platform {
-        authkey_id: u16,
-        credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
-        trust_prefix: Option<std::ffi::OsString>,
-    },
+#[derive(Debug)]
+pub(crate) struct ClientAuth {
+    authkey_id: u16,
+    material: YubiHsmPkcs11AuthenticationMaterial,
 }
-
-impl std::fmt::Debug for YubiHsmSessionReauthentication {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Direct {
-                authkey_id,
-                material,
-            } => fmt
-                .debug_struct("Direct")
-                .field("authkey_id", &format_args!("{authkey_id:04x}"))
-                .field("material", material)
-                .finish(),
-            Self::HsmAuth {
-                authkey_id,
-                provider,
-                ..
-            } => fmt
-                .debug_struct("HsmAuth")
-                .field("authkey_id", &format_args!("{authkey_id:04x}"))
-                .field("credential", &provider.credential.label)
-                .field("source", &provider.source_identifier())
-                .field("password", &"[REDACTED]")
-                .finish(),
-            Self::Platform { authkey_id, .. } => fmt
-                .debug_struct("Platform")
-                .field("authkey_id", &format_args!("{authkey_id:04x}"))
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-impl YubiHsmSessionReauthentication {
+impl ClientAuth {
     fn authenticate(&self, connector: &dyn Connector) -> Result<YubiHsmSecureSession, Error> {
-        match self {
-            Self::Direct {
-                authkey_id,
-                material,
-            } => material.authenticate(connector, *authkey_id),
-            Self::HsmAuth {
-                authkey_id,
-                provider,
-                password,
-            } => provider.authenticate(connector, *authkey_id, password),
-            Self::Platform {
-                authkey_id,
-                credential,
-                trust_prefix,
-            } => YubiHsmSecureSession::authenticate_asymmetric_with_platform_credential(
-                connector,
-                *authkey_id,
-                credential.as_ref(),
-                trust_prefix.as_deref(),
-            ),
-        }
+        self.material.authenticate(connector, self.authkey_id)
     }
 }
 
@@ -1166,7 +933,7 @@ impl YubiHsmSlot {
             model: String::from("YubiHSM"),
             serial: String::from("0"),
             trust_prefix: None,
-            hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
+            auth_slots: Arc::new(crate::auth_slots::AuthSlots::default()),
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             attestation_cache: RefCell::new(HashMap::new()),
@@ -1176,26 +943,25 @@ impl YubiHsmSlot {
         }
     }
 
-    pub(crate) fn with_hsmauth_providers(
+    pub(crate) fn with_auth_slots(
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
-        hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+        auth_slots: Arc<crate::auth_slots::AuthSlots>,
     ) -> Self {
         let mut slot = Self::new(connector, version, algorithms);
-        slot.hsmauth_providers = hsmauth_providers;
+        slot.auth_slots = auth_slots;
         slot
     }
 
-    pub(crate) fn with_hsmauth_providers_and_public_discovery(
+    pub(crate) fn with_auth_slots_and_public_discovery(
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
-        hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+        auth_slots: Arc<crate::auth_slots::AuthSlots>,
         public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     ) -> Self {
-        let mut slot =
-            Self::with_hsmauth_providers(connector, version, algorithms, hsmauth_providers);
+        let mut slot = Self::with_auth_slots(connector, version, algorithms, auth_slots);
         slot.public_discovery_config = public_discovery_config;
         slot
     }
@@ -1218,9 +984,9 @@ impl YubiHsmSlot {
     fn with_hsmauth_provider<T>(
         &self,
         login: &HsmAuthLogin<'_>,
-        operation: impl FnOnce(&HsmAuthProvider) -> Result<T, Error>,
+        operation: impl FnOnce(&crate::auth_slots::HsmAuthCredentialBinding) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        self.hsmauth_providers.with_provider(login, operation)
+        self.auth_slots.with_hsmauth_credential(login, operation)
     }
 
     fn cache_object_info(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
@@ -1503,7 +1269,7 @@ impl YubiHsmSlot {
         &self,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<(YubiHsmSecureSession, YubiHsmSessionReauthentication), Error> {
+    ) -> Result<(YubiHsmSecureSession, ClientAuth), Error> {
         self.synchronize_caches()?;
         let cached_algorithm = self.cached_authentication_algorithm(authkey_id)?;
         let (session, algorithm, material) = YubiHsmSecureSession::authenticate_direct(
@@ -1534,7 +1300,7 @@ impl YubiHsmSlot {
         }
         Ok((
             session,
-            YubiHsmSessionReauthentication::Direct {
+            ClientAuth {
                 authkey_id,
                 material,
             },
@@ -1543,10 +1309,10 @@ impl YubiHsmSlot {
 
     fn authenticate_hsmauth_provider(
         &self,
-        provider: &HsmAuthProvider,
+        provider: &crate::auth_slots::HsmAuthCredentialBinding,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         log!(
             2,
             "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
@@ -1554,7 +1320,12 @@ impl YubiHsmSlot {
             provider.source_identifier(),
             provider.credential.algorithm
         );
-        let session = match provider.authenticate(self.connector.as_ref(), authkey_id, password) {
+        let session = match provider.authenticate(
+            self.connector.as_ref(),
+            authkey_id,
+            password,
+            self.trust_prefix.as_deref(),
+        ) {
             Ok(session) => session,
             Err(error) => {
                 log!(
@@ -1574,10 +1345,13 @@ impl YubiHsmSlot {
         Ok((
             session,
             authkey_id,
-            YubiHsmSessionReauthentication::HsmAuth {
+            ClientAuth {
                 authkey_id,
-                provider: provider.clone(),
-                password: Zeroizing::new(password.to_vec()),
+                material: YubiHsmPkcs11AuthenticationMaterial::HsmAuth {
+                    credential: provider.key.clone(),
+                    password: Zeroizing::new(password.to_vec()),
+                    trust_prefix: self.trust_prefix.clone(),
+                },
             },
         ))
     }
@@ -1585,7 +1359,7 @@ impl YubiHsmSlot {
     fn authenticate_platform_credential(
         &self,
         login: &PlatformLogin<'_>,
-    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         log!(
             2,
             "YubiHSM authentication requested through platform credential {:?}, authentication key {:04x}",
@@ -1596,56 +1370,49 @@ impl YubiHsmSlot {
         self.authenticate_resolved_platform_credential(login.authkey_id, credential)
     }
 
-    fn resolve_platform_asymmetric(
-        &self,
-        name: &str,
-    ) -> Result<Arc<dyn crate::platform_crypto::PrefixedX963Credential>, Error> {
-        use crate::platform_crypto::PlatformAuthenticationCredential;
-
-        let credential =
-            crate::platform_crypto::resolve_platform_credential(name).map_err(|error| {
-                log!(
-                    1,
-                    "platform authentication credential {:?} could not be resolved: {}",
-                    name,
-                    error
-                );
-                match error {
-                    crate::platform_crypto::PlatformCryptoError::NotFound
-                    | crate::platform_crypto::PlatformCryptoError::Ambiguous
-                    | crate::platform_crypto::PlatformCryptoError::InvalidName => {
-                        Error::from(CKR_PIN_INCORRECT)
-                    }
-                    crate::platform_crypto::PlatformCryptoError::Unsupported => {
-                        Error::from(CKR_FUNCTION_NOT_SUPPORTED)
-                    }
-                    _ => Error::from(CKR_DEVICE_ERROR),
-                }
-            })?;
-        let PlatformAuthenticationCredential::Asymmetric(credential) = credential else {
-            return Err(CKR_MECHANISM_INVALID.into());
+    fn resolve_platform_asymmetric(&self, name: &str) -> Result<crate::key_scope::BoundKey, Error> {
+        use crate::pkcs11_auth::Pkcs11Auth;
+        let session = self.platform_provider_session()?;
+        let handles = session.find(&[
+            (CKA_TOKEN, &[CK_TRUE as u8]),
+            (CKA_CLASS, &(CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes()),
+            (CKA_KEY_TYPE, &(CKK_EC as CK_ULONG).to_ne_bytes()),
+            (CKA_LABEL, name.as_bytes()),
+        ])?;
+        let [handle] = handles.as_slice() else {
+            return Err(CKR_PIN_INCORRECT.into());
         };
-        Ok(credential)
+        crate::key_scope::BoundKey::from_session(session, *handle)
+    }
+
+    fn platform_provider_session(
+        &self,
+    ) -> Result<Rc<crate::pkcs11_provider::ProviderSession>, Error> {
+        let slots = self.auth_slots.matching(SlotKind::Platform)?;
+        let [slot] = slots.as_slice() else {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        };
+        let slot = slot.clone();
+        let provider = crate::pkcs11_provider::Pkcs11Provider::from_slot(slot)?;
+        crate::pkcs11_provider::ProviderSession::open(provider)
     }
 
     fn authenticate_resolved_platform_credential(
         &self,
         authkey_id: u16,
-        credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
-    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
-        let session = YubiHsmSecureSession::authenticate_asymmetric_with_platform_credential(
-            self.connector.as_ref(),
-            authkey_id,
-            credential.as_ref(),
-            self.trust_prefix.as_deref(),
-        )?;
+        credential: crate::key_scope::BoundKey,
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
+        let material = YubiHsmPkcs11AuthenticationMaterial::AsymmetricCredential {
+            credential,
+            trust_prefix: self.trust_prefix.clone(),
+        };
+        let session = material.authenticate(self.connector.as_ref(), authkey_id)?;
         Ok((
             session,
             authkey_id,
-            YubiHsmSessionReauthentication::Platform {
+            ClientAuth {
                 authkey_id,
-                credential,
-                trust_prefix: self.trust_prefix.clone(),
+                material,
             },
         ))
     }
@@ -1655,7 +1422,7 @@ impl YubiHsmSlot {
         slot_id: CK_SLOT_ID,
         selector: &HsmAuthWildcardLogin<'_>,
         token_objects: &[TokenObject],
-    ) -> Result<Vec<(HsmAuthProvider, u16)>, Error> {
+    ) -> Result<Vec<(crate::auth_slots::HsmAuthCredentialBinding, u16)>, Error> {
         if !self.public_discovery_available(slot_id) {
             log!(
                 2,
@@ -1664,7 +1431,7 @@ impl YubiHsmSlot {
             );
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        let providers = self.hsmauth_providers.asymmetric_providers(selector)?;
+        let providers = self.auth_slots.asymmetric_hsmauth_credentials(selector)?;
         let projections = token_objects
             .iter()
             .filter_map(|object| {
@@ -1719,13 +1486,7 @@ impl YubiHsmSlot {
         slot_id: CK_SLOT_ID,
         selector: &PlatformWildcardLogin<'_>,
         token_objects: &[TokenObject],
-    ) -> Result<
-        (
-            Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
-            Vec<u16>,
-        ),
-        Error,
-    > {
+    ) -> Result<(crate::key_scope::BoundKey, Vec<u16>), Error> {
         if !self.public_discovery_available(slot_id) {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
@@ -1745,47 +1506,31 @@ impl YubiHsmSlot {
         if !self.public_discovery_available(slot_id) {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        let mut listed = match crate::platform_crypto::list_platform_credentials() {
-            Ok(listed) => listed,
-            Err(crate::platform_crypto::PlatformCryptoError::Unsupported) => return Ok(Vec::new()),
-            Err(error) => {
-                log!(
-                    1,
-                    "platform credential wildcard could not enumerate credentials: {}",
-                    error
-                );
-                return Ok(Vec::new());
-            }
-        };
-        listed.sort_by(|left, right| left.name.cmp(&right.name));
+        use crate::pkcs11_auth::Pkcs11Auth;
+        if self.auth_slots.matching(SlotKind::Platform)?.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session = self.platform_provider_session()?;
+        let public_keys = session.find(&[
+            (CKA_TOKEN, &[CK_TRUE as u8]),
+            (CKA_CLASS, &(CKO_PUBLIC_KEY as CK_ULONG).to_ne_bytes()),
+            (CKA_KEY_TYPE, &(CKK_EC as CK_ULONG).to_ne_bytes()),
+        ])?;
         let mut matches = Vec::new();
-        for info in listed {
-            let credential = match self.resolve_platform_asymmetric(&info.name) {
-                Ok(credential) => credential,
-                Err(error) => {
-                    log!(
-                        1,
-                        "platform credential wildcard could not resolve {:?}: {:?}",
-                        info.name,
-                        error
-                    );
-                    continue;
-                }
+        for public in public_keys {
+            let id = session.attribute(public, CKA_ID)?;
+            let label = session.attribute(public, CKA_LABEL)?;
+            let private = session.find(&[
+                (CKA_TOKEN, &[CK_TRUE as u8]),
+                (CKA_CLASS, &(CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes()),
+                (CKA_ID, &id),
+                (CKA_LABEL, &label),
+            ])?;
+            let [private] = private.as_slice() else {
+                return Err(CKR_PIN_INCORRECT.into());
             };
-            let authkey_ids = match self.platform_projection_authkey_ids(&credential, token_objects)
-            {
-                Ok(authkey_ids) => authkey_ids,
-                Err(error) => {
-                    log!(
-                        1,
-                        "platform credential wildcard could not read the public key for {:?}: {:?}",
-                        info.name,
-                        error
-                    );
-                    continue;
-                }
-            };
-            for authkey_id in authkey_ids {
+            let credential = crate::key_scope::BoundKey::from_session(session.clone(), *private)?;
+            for authkey_id in self.platform_projection_authkey_ids(&credential, token_objects)? {
                 matches.push((credential.clone(), authkey_id));
             }
         }
@@ -1794,20 +1539,13 @@ impl YubiHsmSlot {
 
     fn platform_projection_authkey_ids(
         &self,
-        credential: &Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+        credential: &crate::key_scope::BoundKey,
         token_objects: &[TokenObject],
     ) -> Result<Vec<u16>, Error> {
-        let public = credential
-            .public_key()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        let SoftwarePublicKey::Ec {
-            curve: EcCurve::P256,
-            uncompressed,
-        } = public
-        else {
-            return Err(CKR_MECHANISM_INVALID.into());
-        };
-        let public = uncompressed.strip_prefix(&[0x04]).ok_or(CKR_DEVICE_ERROR)?;
+        let mut scope = crate::key_scope::Pkcs11KeyScope::for_key(credential)?;
+        let bound = scope.bind(credential)?;
+        let public = scope.p256_public(&bound)?;
+        let public = public.strip_prefix(&[0x04]).ok_or(CKR_DEVICE_ERROR)?;
         let authkey_ids = token_objects
             .iter()
             .filter_map(|object| {
@@ -1835,7 +1573,7 @@ impl YubiHsmSlot {
         &self,
         login: YubiHsmLoginUsername<'_>,
         password: &[u8],
-    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         match login {
             YubiHsmLoginUsername::HsmAuth(login) => {
                 if password.len() > 16 {
@@ -1874,7 +1612,7 @@ impl YubiHsmSlot {
     fn authenticate_public_discovery(
         &self,
         config: &YubiHsmPublicDiscoveryConfig,
-    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         let title = format!("Public discovery on {}", self.label());
         let description = match config.login() {
             YubiHsmLoginUsername::Direct(authkey_id) => {
@@ -1927,11 +1665,11 @@ impl YubiHsmSlot {
     ) -> Result<(), Error> {
         enum WildcardCandidate {
             HsmAuth {
-                provider: HsmAuthProvider,
+                provider: crate::auth_slots::HsmAuthCredentialBinding,
                 authkey_id: u16,
             },
             Platform {
-                credential: Arc<dyn crate::platform_crypto::PrefixedX963Credential>,
+                credential: crate::key_scope::BoundKey,
                 authkey_id: u16,
             },
         }

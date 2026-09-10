@@ -17,6 +17,15 @@ pub(crate) enum Derivation<'a> {
 /// the same implementation; object policy and capability checks remain in the
 /// handlers shared with the public C API. Handles belong to this slot instance.
 pub(crate) trait Pkcs11Auth {
+    fn hsmauth_authenticate(
+        &self,
+        credential: CK_OBJECT_HANDLE,
+        target: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<YubiHsmSecureSession, Error>;
+    fn find(&self, attributes: &[(u32, &[u8])]) -> Result<Vec<CK_OBJECT_HANDLE>, Error>;
     fn create(
         &self,
         template: TokenObjectTemplate,
@@ -266,6 +275,61 @@ impl ProviderSession {
 }
 
 impl Pkcs11Auth for ProviderSession {
+    fn hsmauth_authenticate(
+        &self,
+        credential: CK_OBJECT_HANDLE,
+        target: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<YubiHsmSecureSession, Error> {
+        self.call(|| {
+            api::rust::hsmauth_authenticate(
+                self.handle,
+                credential,
+                target,
+                authkey_id,
+                password,
+                trust_prefix,
+            )
+        })
+    }
+
+    fn find(&self, attributes: &[(u32, &[u8])]) -> Result<Vec<CK_OBJECT_HANDLE>, Error> {
+        let mut inputs = Attributes {
+            values: Vec::new(),
+            policies: Vec::new(),
+        };
+        for (kind, value) in attributes {
+            inputs.bytes(*kind, value);
+        }
+        let mut raw = inputs.raw();
+        self.call(|| {
+            api::rust::find_objects_init(self.handle, raw.as_mut_ptr(), raw.len() as _)?;
+            let result: Result<Vec<CK_OBJECT_HANDLE>, Error> = (|| {
+                let mut result = Vec::new();
+                loop {
+                    let mut handles = [0; 32];
+                    let mut count = 0;
+                    api::rust::find_objects(
+                        self.handle,
+                        handles.as_mut_ptr(),
+                        handles.len() as _,
+                        &mut count,
+                    )?;
+                    result.extend_from_slice(&handles[..count as usize]);
+                    if count < handles.len() as _ {
+                        return Ok(result);
+                    }
+                }
+            })();
+            let finished = api::rust::find_objects_final(self.handle);
+            let result = result?;
+            finished?;
+            Ok(result)
+        })
+    }
+
     fn create(
         &self,
         template: TokenObjectTemplate,

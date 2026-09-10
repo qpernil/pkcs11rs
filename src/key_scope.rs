@@ -26,6 +26,22 @@ pub(crate) struct Pkcs11KeyScope {
 #[derive(Clone)]
 pub(crate) struct BoundKey(Rc<ObjectHandle>);
 impl BoundKey {
+    pub(crate) fn hsmauth_authenticate(
+        &self,
+        target: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
+    ) -> Result<YubiHsmSecureSession, Error> {
+        self.0.session.hsmauth_authenticate(
+            self.0.handle,
+            target,
+            authkey_id,
+            password,
+            trust_prefix,
+        )
+    }
+
     /// Borrow a credential through its authorized session. Token objects stay
     /// token-owned; dropping this reference never deletes the source key.
     pub(crate) fn from_session(
@@ -302,27 +318,6 @@ impl Pkcs11KeyScope {
     ) -> Result<(), Error> {
         self.session
             .verify_cmac(self.object(key)?.handle, input, signature)
-    }
-    /// Existing platform credentials accept a byte prefix and return KDF bytes.
-    /// Only this provider-specific bridge reads its explicitly readable ECDH
-    /// output; generic direct-authentication intermediates remain protected.
-    pub(crate) fn platform_prefixed_x963(
-        &mut self,
-        credential: &dyn crate::platform_crypto::PrefixedX963Credential,
-        peer: &SoftwarePublicKey,
-        prefix: &KeyHandle,
-        shared_info: &[u8],
-        template: TokenObjectTemplate,
-        length: usize,
-    ) -> Result<KeyHandle, Error> {
-        let prefix = self.read(prefix, CKA_VALUE)?;
-        let value = credential
-            .derive_prefixed_x963(peer, MessageDigest::Sha256, &prefix, shared_info, length)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        if value.len() != length {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        self.import_secret(&value, template)
     }
 }
 

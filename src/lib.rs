@@ -82,6 +82,7 @@ use configuration::{
     SecureChannelConfiguration,
 };
 
+mod auth_slots;
 mod key_scope;
 mod pkcs11_auth;
 mod pkcs11_provider;
@@ -151,9 +152,9 @@ mod yubihsm;
 use yubihsm::{
     Command as YubiHsmCommand, CommandCode as YubiHsmCommandCode,
     DelegatedObjectParameters as YubiHsmDelegatedObjectParameters,
-    DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm,
-    DirectAuthenticationMaterial as YubiHsmDirectAuthenticationMaterial,
-    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
+    DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm, ObjectInfo as YubiHsmObjectInfo,
+    ObjectParameters as YubiHsmObjectParameters,
+    Pkcs11AuthenticationMaterial as YubiHsmPkcs11AuthenticationMaterial,
     PublicKey as YubiHsmPublicKey, RsaWrapParameters as YubiHsmRsaWrapParameters,
     SecureSession as YubiHsmSecureSession,
     device_public_key_bytes as get_yubihsm_device_public_key,
