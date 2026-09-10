@@ -53,6 +53,11 @@ Set `PKCS11RS_HARDWARE_DISCOVERY=0` to disable native FIDO HID discovery and
 the FIDO probe over native CCID, along with all other
 automatic local hardware discovery.
 
+On macOS, HIDAPI attaches its enumeration manager to the caller's run loop
+only for the duration of discovery. This permits discovery from short-lived
+threads without retaining a stale CFRunLoop. The scoped lifetime fix is kept
+in the [patched HIDAPI dependency](../vendor/README.md).
+
 A FIDO2 slot is created when the FIDO AID can be selected. As with the other
 CCID applets, the slot remains registered if subsequent initialization or
 `authenticatorGetInfo` discovery fails. In that state `C_GetSlotInfo` still

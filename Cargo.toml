@@ -27,7 +27,7 @@ default-members = [
     "crates/yubihsm-auth-client",
     "tools/pkcs11rs-tool",
 ]
-exclude = ["xtask"]
+exclude = ["xtask", "vendor/hidapi"]
 resolver = "3"
 
 [lib]
@@ -87,3 +87,6 @@ block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-crypto-token-kit = { version = "0.3.2", default-features = false, features = ["TKError", "TKSmartCard", "TKSmartCardATR", "TKSmartCardSlotNFCSession", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSError", "NSString"] }
+
+[patch.crates-io]
+hidapi = { path = "vendor/hidapi" }

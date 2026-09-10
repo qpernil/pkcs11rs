@@ -588,6 +588,21 @@ fn read_packet_until(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "macos", feature = "native-hardware"))]
+    #[test]
+    fn hid_inventory_survives_short_lived_callers() {
+        // HIDAPI keeps a process-global manager. Each caller's CFRunLoop must
+        // be detached before that thread exits, even when no FIDO device exists.
+        for _ in 0..8 {
+            let callers = (0..8)
+                .map(|_| std::thread::spawn(super::enumerate_fido_devices))
+                .collect::<Vec<_>>();
+            for caller in callers {
+                caller.join().unwrap().unwrap();
+            }
+        }
+    }
+
     use super::*;
     use std::collections::VecDeque;
 
