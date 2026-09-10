@@ -56,20 +56,107 @@ impl BoundKey {
         }
         Ok(Self(Rc::new(ObjectHandle { session, handle })))
     }
-    pub(crate) fn symmetric_password(password: &[u8]) -> Result<Self, Error> {
+}
+
+/// Two independently protected AES-128 keys on one provider. The ENC key
+/// derives S-ENC; the MAC key derives S-MAC and S-RMAC. Binding never reads or
+/// copies either source value, so native token keys remain usable in place.
+pub(crate) struct SymmetricCredential {
+    pub(crate) enc: BoundKey,
+    pub(crate) mac: BoundKey,
+}
+impl SymmetricCredential {
+    pub(crate) fn find(
+        session: Rc<ProviderSession>,
+        label: &str,
+        token: bool,
+    ) -> Result<Self, Error> {
+        let find = |suffix: &str| {
+            let label = format!("{label}.{suffix}");
+            let class = (CKO_SECRET_KEY as CK_ULONG).to_ne_bytes();
+            let key_type = (CKK_AES as CK_ULONG).to_ne_bytes();
+            let keys = session.find(&[
+                (CKA_TOKEN, &[u8::from(token)]),
+                (CKA_CLASS, &class),
+                (CKA_KEY_TYPE, &key_type),
+                (CKA_LABEL, label.as_bytes()),
+            ])?;
+            match keys.as_slice() {
+                [handle] => BoundKey::from_session(session.clone(), *handle),
+                [] => Err(CKR_KEY_HANDLE_INVALID.into()),
+                _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
+            }
+        };
+        Self::new(find("enc")?, find("mac")?)
+    }
+
+    pub(crate) fn new(enc: BoundKey, mac: BoundKey) -> Result<Self, Error> {
+        let mut scope = Pkcs11KeyScope::for_key(&enc)?;
+        for key in [&enc, &mac] {
+            let key = scope.bind(key)?;
+            scope.require_aes128(&key)?;
+        }
+        Ok(Self { enc, mac })
+    }
+}
+
+pub(crate) fn authentication_aes_template() -> TokenObjectTemplate {
+    TokenObjectTemplate {
+        key_type: Some(CKK_AES as _),
+        ..generic_template(&[CKM_SP800_108_COUNTER_KDF as _])
+    }
+}
+
+/// Both direct-authentication credential types share one temporary slot and
+/// owning session. No password survives preparation. Only the selected
+/// reauthentication material is transferred to a separate owning session.
+pub(crate) struct PasswordCredentials {
+    scope: Pkcs11KeyScope,
+    enc: KeyHandle,
+    mac: KeyHandle,
+    asymmetric: KeyHandle,
+}
+impl PasswordCredentials {
+    pub(crate) fn new(password: &[u8]) -> Result<Self, Error> {
         let mut scope = Pkcs11KeyScope::new()?;
         let value = crate::yubico_password_kdf(password)?;
-        let handle = scope.import_secret(
-            &value[..],
-            generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _]),
+        let enc = scope.import_secret(
+            &value[..16],
+            TokenObjectTemplate {
+                label: "direct.enc".to_owned(),
+                ..authentication_aes_template()
+            },
         )?;
-        scope.take_key(&handle)
-    }
-    pub(crate) fn p256_password(password: &[u8]) -> Result<Self, Error> {
-        let mut scope = Pkcs11KeyScope::new()?;
+        let mac = scope.import_secret(
+            &value[16..],
+            TokenObjectTemplate {
+                label: "direct.mac".to_owned(),
+                ..authentication_aes_template()
+            },
+        )?;
         let key = crate::yubico_kdf::yubico_password_p256_key(password)?;
-        let handle = scope.import_p256(key)?;
-        scope.take_key(&handle)
+        let asymmetric = scope.import_p256(key)?;
+        Ok(Self {
+            scope,
+            enc,
+            mac,
+            asymmetric,
+        })
+    }
+    pub(crate) fn symmetric(&self) -> Result<SymmetricCredential, Error> {
+        SymmetricCredential::find(self.scope.session.clone(), "direct", false)
+    }
+    pub(crate) fn asymmetric(&self) -> Result<BoundKey, Error> {
+        BoundKey::from_session(
+            self.scope.session.clone(),
+            self.scope.object(&self.asymmetric)?.handle,
+        )
+    }
+    pub(crate) fn retain_symmetric(&mut self) -> Result<SymmetricCredential, Error> {
+        let mut keys = self.scope.take_keys(&[&self.enc, &self.mac])?.into_iter();
+        let enc = keys.next().ok_or(CKR_FUNCTION_FAILED)?;
+        let mac = keys.next().ok_or(CKR_FUNCTION_FAILED)?;
+        SymmetricCredential::new(enc, mac)
     }
 }
 
@@ -133,20 +220,34 @@ impl Pkcs11KeyScope {
         Ok(self.insert(key.0.clone()))
     }
     pub(crate) fn take_key(&mut self, key: &KeyHandle) -> Result<BoundKey, Error> {
-        let object = self.object(key)?;
-        if !Rc::ptr_eq(&object.session, &self.session)
-            || self.read(key, CKA_TOKEN)?.as_slice() != [CK_FALSE as u8]
-        {
-            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        self.take_keys(&[key])?
+            .pop()
+            .ok_or_else(|| CKR_FUNCTION_FAILED.into())
+    }
+    fn take_keys(&mut self, keys: &[&KeyHandle]) -> Result<Vec<BoundKey>, Error> {
+        let mut sources = Vec::with_capacity(keys.len());
+        for key in keys {
+            let object = self.object(key)?;
+            if !Rc::ptr_eq(&object.session, &self.session)
+                || self.read(key, CKA_TOKEN)?.as_slice() != [CK_FALSE as u8]
+            {
+                return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+            }
+            sources.push(object.handle);
         }
-        let source = object.handle;
-        // A retained credential has a dedicated owning session. Copying stays
-        // inside PKCS #11 and preserves key protection; closing the handshake
-        // session can then destroy all its other objects in one operation.
+        // Transfer temporary credentials together to a dedicated owning
+        // session. Token bindings are never copied. Partial copies disappear
+        // with the new session if preparation fails.
         let session = ProviderSession::open(self.session.provider.clone())?;
-        let handle = session.copy(source)?;
-        self.destroy(key)?;
-        BoundKey::from_session(session, handle)
+        let mut retained = Vec::with_capacity(keys.len());
+        for source in sources {
+            let handle = session.copy(source)?;
+            retained.push(BoundKey::from_session(session.clone(), handle)?);
+        }
+        for key in keys {
+            self.destroy(key)?;
+        }
+        Ok(retained)
     }
     pub(crate) fn destroy(&mut self, key: &KeyHandle) -> Result<(), Error> {
         let object = self.object(key)?;
@@ -294,6 +395,17 @@ impl Pkcs11KeyScope {
         }
         output.copy_from_slice(&value);
         Ok(output)
+    }
+    pub(crate) fn require_aes128(&self, key: &KeyHandle) -> Result<(), Error> {
+        if self.ulong(key, CKA_CLASS)? != CKO_SECRET_KEY as CK_ULONG
+            || self.ulong(key, CKA_KEY_TYPE)? != CKK_AES as CK_ULONG
+        {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        if self.ulong(key, CKA_VALUE_LEN)? != 16 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        Ok(())
     }
     pub(crate) fn require_generic_length(
         &self,

@@ -22,7 +22,11 @@ lifetime is distinct from retaining the login secret to authenticate again.
   in zeroizing storage for message encryption and MAC. Successful close or
   channel invalidation drops that storage. Readable derivation outputs are
   transient; long-term credentials remain protected. This does not retain the
-  login password. Transparent session recreation is an explicit exception
+  login password. Direct authentication prepares both the symmetric AES pair
+  and asymmetric P-256 credential as protected session objects in one temporary
+  software slot. The preparation session is closed after the authentication
+  attempt, deleting all three original key objects, including the unused type.
+  Transparent session recreation is an explicit exception
   described below.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
@@ -34,8 +38,8 @@ lifetime is distinct from retaining the login secret to authenticate again.
 
 `yubihsm.recreate_sessions = true`, or
 `PKCS11RS_YUBIHSM_RECREATE_SESSIONS=1`, opts into retaining slot-local
-reauthentication material. Direct symmetric authentication retains a protected
-32-byte generic-secret credential containing the static AES pair; direct
+reauthentication material. Direct symmetric authentication retains a
+pair of protected AES-128 credential objects, Key-ENC and Key-MAC; direct
 asymmetric authentication retains a protected static ECDH shared-secret object.
 These are provider-session handles. Each retained direct credential or agreement
 has a dedicated owning session; handshake sessions own the transient derivation

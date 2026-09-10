@@ -1,5 +1,97 @@
 use super::*;
 use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat};
+
+#[test]
+fn password_credentials_share_a_slot_and_release_the_unused_key() {
+    let mut credentials = PasswordCredentials::new(b"password").unwrap();
+    let provider = Rc::downgrade(&credentials.scope.session.provider);
+    let symmetric = credentials.symmetric().unwrap();
+    let asymmetric = credentials.asymmetric().unwrap();
+    assert!(Rc::ptr_eq(&symmetric.enc.0.session, &asymmetric.0.session));
+    assert_eq!(credentials.scope.count_provider_objects(), 3);
+    for key in [&credentials.enc, &credentials.mac, &credentials.asymmetric] {
+        let object = credentials.scope.snapshot(key);
+        assert!(!object.token && object.private && object.sensitive && !object.extractable);
+        assert!(credentials.scope.read(key, CKA_VALUE).is_err());
+    }
+    credentials.scope.require_aes128(&credentials.enc).unwrap();
+    let expected = crate::yubico_kdf::yubico_password_p256_key(b"password").unwrap();
+    let SoftwarePublicKey::Ec { uncompressed, .. } = expected.public_key() else {
+        panic!("expected EC key")
+    };
+    assert_eq!(
+        credentials
+            .scope
+            .p256_public(&credentials.asymmetric)
+            .unwrap(),
+        uncompressed
+    );
+
+    // Keep an operation session alive to observe cleanup independently of slot
+    // destruction. Retaining the AES pair must not also retain the EC key.
+    let observer = Pkcs11KeyScope::for_key(&symmetric.enc).unwrap();
+    drop(symmetric);
+    drop(asymmetric);
+    let retained = credentials.retain_symmetric().unwrap();
+    drop(credentials);
+    assert_eq!(observer.count_provider_objects(), 2);
+    drop(retained);
+    assert_eq!(observer.count_provider_objects(), 0);
+    drop(observer);
+    assert!(provider.upgrade().is_none());
+}
+
+#[test]
+fn password_credentials_without_retention_release_both_keys() {
+    let credentials = PasswordCredentials::new(b"password").unwrap();
+    let observer = Pkcs11KeyScope::for_key(&credentials.symmetric().unwrap().enc).unwrap();
+    assert_eq!(observer.count_provider_objects(), 3);
+    drop(credentials);
+    assert_eq!(observer.count_provider_objects(), 0);
+}
+
+#[test]
+fn symmetric_pair_lookup_requires_exact_unique_aes_roles() {
+    let scope = Pkcs11KeyScope::new().unwrap();
+    let create = |label: &str, key_type, size: usize| {
+        let template = TokenObjectTemplate {
+            label: label.to_owned(),
+            key_type: Some(key_type),
+            ..authentication_aes_template()
+        };
+        scope
+            .session
+            .create(template, &[(CKA_VALUE, &vec![0x42; size])])
+            .unwrap()
+    };
+    let find = || SymmetricCredential::find(scope.session.clone(), "auth", false);
+    create("auth.enc", CKK_AES as _, 16);
+    // Neither a prefix match nor an object with the wrong key type completes
+    // the credential. A name without both exact roles cannot authenticate.
+    create("auth.mac.extra", CKK_AES as _, 16);
+    create("auth.mac", CKK_GENERIC_SECRET as _, 16);
+    assert!(matches!(find(), Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV));
+    let mac = create("auth.mac", CKK_AES as _, 24);
+    assert!(matches!(find(), Err(Error::Generic(rv)) if rv == CKR_KEY_SIZE_RANGE as CK_RV));
+    scope.session.destroy(mac).unwrap();
+    create("auth.mac", CKK_AES as _, 16);
+    assert!(find().is_ok());
+    assert!(SymmetricCredential::find(scope.session.clone(), "auth", true).is_err());
+    create("auth.enc", CKK_AES as _, 16);
+    assert!(matches!(find(), Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV));
+}
+
+#[test]
+fn symmetric_pair_rejects_keys_from_different_providers() {
+    let first = PasswordCredentials::new(b"first password").unwrap();
+    let second = PasswordCredentials::new(b"second password").unwrap();
+    let enc = first.symmetric().unwrap().enc;
+    let mac = second.symmetric().unwrap().mac;
+    assert!(
+        matches!(SymmetricCredential::new(enc, mac), Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV)
+    );
+}
+
 fn aes(derive: bool) -> TokenObjectTemplate {
     TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as _),

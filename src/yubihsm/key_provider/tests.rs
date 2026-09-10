@@ -42,9 +42,25 @@ fn check_keys(keys: &SessionKeys, enc: &[u8], mac: &[u8], rmac: &[u8]) {
 }
 
 #[test]
-fn symmetric_bound_credential_is_one_object_and_survives_session_cleanup() {
+fn symmetric_bound_aes_pair_survives_session_cleanup() {
     let value: Vec<u8> = (0x40..0x60).collect();
-    let credential = credential(&value, CKM_EXTRACT_KEY_FROM_KEY as _);
+    let mut scope = Pkcs11KeyScope::new().unwrap();
+    let enc = scope
+        .import_secret(
+            &value[..16],
+            crate::key_scope::authentication_aes_template(),
+        )
+        .unwrap();
+    let mac = scope
+        .import_secret(
+            &value[16..],
+            crate::key_scope::authentication_aes_template(),
+        )
+        .unwrap();
+    let credential =
+        SymmetricCredential::new(scope.take_key(&enc).unwrap(), scope.take_key(&mac).unwrap())
+            .unwrap();
+    drop(scope);
     let mut keys = SessionKeys::derive(&credential, &[1; 16]).unwrap();
     check_keys(
         &keys,
@@ -55,20 +71,103 @@ fn symmetric_bound_credential_is_one_object_and_survives_session_cleanup() {
     keys.clear();
     assert!(keys.is_empty());
     assert_eq!(
-        Pkcs11KeyScope::for_key(&credential)
+        Pkcs11KeyScope::for_key(&credential.enc)
             .unwrap()
             .count_provider_objects(),
-        1
+        2
     );
     let second = SessionKeys::derive(&credential, &[2; 16]).unwrap();
     assert!(!second.is_empty());
     drop(second);
     assert_eq!(
-        Pkcs11KeyScope::for_key(&credential)
+        Pkcs11KeyScope::for_key(&credential.enc)
             .unwrap()
             .count_provider_objects(),
-        1
+        2
     );
+}
+
+#[test]
+fn symmetric_pair_derives_through_native_yubihsm_handles_without_export() {
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    use crate::yubihsm::tests::{NIST_AES_KEY_ID, RFC3610_AES_KEY_ID, make_yubihsm_test_slot};
+    let (slot, commands, _, _trust) = make_yubihsm_test_slot();
+    let owner = ProviderSession::open(Pkcs11Provider::new(slot).unwrap()).unwrap();
+    owner.login(b"0001password").unwrap();
+    // These are native handles for the peer fixture's AES keys. The source
+    // PKCS #11 objects deliberately have no software key material.
+    let insert = |id: u16, role: &str| {
+        owner
+            .call(|| {
+                with_session_context_mut(owner.handle, |ctx| {
+                    let mut object =
+                        profile_token_objects(ctx.slot_id, false, false, false).remove(0);
+                    object.unique_id = format!("native-auth-{id}");
+                    object.class = CKO_SECRET_KEY as _;
+                    object.key_type = CKK_AES as _;
+                    object.label = format!("native.{role}");
+                    object.id = id.to_be_bytes().to_vec();
+                    object.private = true;
+                    object.sensitive = true;
+                    object.extractable = false;
+                    object.derive = true;
+                    object.allowed_mechanisms = Some(vec![CKM_SP800_108_COUNTER_KDF as _]);
+                    object.material = KeyMaterial::YubiHsm {
+                        id,
+                        object_type: YUBIHSM_SYMMETRIC_KEY,
+                        algorithm: YUBIHSM_ALGO_AES128,
+                        length: 16,
+                        domains: 0xffff,
+                        capabilities: crate::yubihsm_capabilities(&[0x33]),
+                        delegated_capabilities: [0; 8],
+                        public_key: Vec::new(),
+                        value: Rc::new(std::cell::RefCell::new(None)),
+                    };
+                    ctx.insert_object(object)
+                })
+            })
+            .unwrap()
+    };
+    let enc = insert(NIST_AES_KEY_ID, "enc");
+    let mac = insert(RFC3610_AES_KEY_ID, "mac");
+    let pair = SymmetricCredential::find(owner.clone(), "native", true).unwrap();
+    let start = commands.borrow().len();
+    let context = [0x42; 16];
+    let keys = SessionKeys::derive(&pair, &context).unwrap();
+    let expected_enc = crate::parse_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+    let expected_mac = crate::parse_hex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf").unwrap();
+    check_keys(
+        &keys,
+        &scp03_kdf(&expected_enc, 4, &context, 128).unwrap(),
+        &scp03_kdf(&expected_mac, 6, &context, 128).unwrap(),
+        &scp03_kdf(&expected_mac, 7, &context, 128).unwrap(),
+    );
+    let trace = commands.borrow();
+    assert!(trace.len() > start);
+    assert!(trace[start..].iter().all(|(command, data)| {
+        *command == super::super::CommandCode::EncryptEcb as u8
+            && [NIST_AES_KEY_ID, RFC3610_AES_KEY_ID]
+                .contains(&u16::from_be_bytes(data[..2].try_into().unwrap()))
+    }));
+    for handle in [enc, mac] {
+        assert!(
+            matches!(owner.attribute(handle, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+        );
+        owner
+            .call(|| {
+                with_session_context(owner.handle, |ctx| {
+                    let object = ctx.resolve_object(handle)?.unwrap();
+                    assert!(!object.sign && !object.encrypt);
+                    let KeyMaterial::YubiHsm { value, .. } = object.material else {
+                        panic!("native key expected")
+                    };
+                    assert!(value.borrow().is_none());
+                    Ok(())
+                })
+            })
+            .unwrap();
+    }
 }
 
 type AsymmetricFixture = (

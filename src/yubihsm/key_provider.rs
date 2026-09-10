@@ -1,6 +1,6 @@
 //! YubiHSM derivation through scoped objects, followed by local message crypto.
 use crate::{
-    key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, generic_template},
+    key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, SymmetricCredential, generic_template},
     *,
 };
 use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat, LengthMethod};
@@ -152,22 +152,12 @@ impl SessionKeys {
         self.material.is_none()
     }
 
-    pub(super) fn derive(credential: &BoundKey, context: &[u8]) -> Result<Self, Error> {
-        let mut scope = Pkcs11KeyScope::for_key(credential)?;
-        let static_template = || TokenObjectTemplate {
-            derive: true,
-            ..template(
-                false,
-                false,
-                false,
-                false,
-                &[CKM_SP800_108_COUNTER_KDF as _],
-            )
-        };
-        let base = scope.bind(credential)?;
-        scope.require_generic_length(&base, 32)?;
-        let static_enc = scope.extract(&base, 0, static_template(), 16)?;
-        let static_mac = scope.extract(&base, 128, static_template(), 16)?;
+    pub(super) fn derive(credential: &SymmetricCredential, context: &[u8]) -> Result<Self, Error> {
+        let mut scope = Pkcs11KeyScope::for_key(&credential.enc)?;
+        let static_enc = scope.bind(&credential.enc)?;
+        let static_mac = scope.bind(&credential.mac)?;
+        scope.require_aes128(&static_enc)?;
+        scope.require_aes128(&static_mac)?;
         let mut derive = |base: &KeyHandle, constant: u8, output| {
             let mut prefix = [0; 13];
             prefix[11] = constant;

@@ -9,18 +9,20 @@ then reads the final working AES keys for local message crypto; its configured i
 YubiHSM Auth, or platform credentials. A resolver must connect stored token
 objects to the existing slot/session adapter without extracting long-term values.
 
-## One name identifies one credential object
+## One name identifies one credential
 
 Resolve `(provider identity, credential name, protocol profile)` before opening
 the target secure channel. Provider identity selects one token independently
-of the target device. The name is an exact `CKA_LABEL` match within that token,
-with `CKA_TOKEN=true` and the expected class/type. Names are not globally unique.
+of the target device. For an asymmetric credential, the name is an exact
+`CKA_LABEL` match within that token. A symmetric credential name expands to `<name>.enc` and
+`<name>.mac`. Each lookup requires `CKA_TOKEN=true` and the expected class/type.
+Names are not globally unique.
 Use standard `C_FindObjects` semantics where the provider is a PKCS #11 token;
 a native adapter can use its device's object enumeration and label fields.
 
 | Profile | Persistent credential | Required operation |
 | --- | --- | --- |
-| YubiHSM symmetric | One `CKO_SECRET_KEY`, `CKK_GENERIC_SECRET`, 32 bytes: K-ENC followed by K-MAC | Protected extraction of two 16-byte AES session objects, followed by counter KDF |
+| YubiHSM symmetric | Two `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each, labelled `<name>.enc` and `<name>.mac` | Counter KDF directly on the protected AES handles |
 | YubiHSM asymmetric | One `CKO_PRIVATE_KEY`, `CKK_EC`, P-256 | ECDH into a protected generic-secret session object |
 
 Validate protection, key type/size or curve, derive permission, allowed
@@ -80,10 +82,14 @@ The software token can persist these standard object types using its existing
 encrypted store. The virtual YubiHSM needs protected generic-secret storage and
 volatile derivation outputs in addition to its EC private-key support. Its
 native adapter must preserve the same lookup and authorization semantics.
-This generic32 profile requires protected splitting. A physical YubiHSM cannot
-split an opaque generic32 credential while keeping its value protected; a native
-symmetric profile needs separate AES ENC/MAC token keys and direct counter KDF.
-That lookup profile remains to be defined. Native counter KDF itself is supported.
+The symmetric profile uses separate AES token keys on software and native
+providers. It requires no generic-secret splitting and can use physical
+YubiHSM keys without exporting them. The prepared-session pair resolver uses
+the short `.enc` and `.mac` suffixes to identify roles; `CKA_ID` remains the
+provider's native identity. Each suffix must resolve to exactly one AES-128
+key. Missing matches return `CKR_KEY_HANDLE_INVALID`; duplicate matches return
+`CKR_TEMPLATE_INCONSISTENT`. The resolver also accepts session objects for
+private direct-password preparation. Configured source selection remains planned.
 
 Message encryption and CMAC execute locally using final working keys read once
 at establishment. There is no alternate execution mode. A source policy that
