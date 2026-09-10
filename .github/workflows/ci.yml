@@ -194,6 +194,27 @@ jobs:
       - name: Build dylib
         run: cargo build --locked
 
+      - name: Run Rust tests
+        id: rust-tests
+        run: cargo test --locked
+
+      - name: Diagnose macOS Rust test crash
+        if: failure() && steps.rust-tests.outcome == 'failure'
+        run: |
+          test_binary=$(cargo test --locked -p pkcs11rs --lib --no-run --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .profile.test) | .executable // empty')
+          lldb --batch \
+            -o 'settings set target.disable-aslr false' \
+            -o 'settings set frame-format "frame #${frame.index}: ${function.name}\n"' \
+            -o run -k 'thread backtrace all' -- "$test_binary"
+
+      - name: Upload macOS crash reports
+        if: failure() && steps.rust-tests.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-rust-crash-reports
+          path: ~/Library/Logs/DiagnosticReports/pkcs11rs*.ips
+          if-no-files-found: warn
+
       - name: Build iOS XCFramework
         run: cargo xtask ios --release
 
@@ -217,9 +238,6 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             build
-
-      - name: Run Rust tests
-        run: cargo test --locked
 
       - name: Run mock YubiKey PKCS #11 tests
         run: cargo test --locked --features mock-yubikey preview_sign_mock
