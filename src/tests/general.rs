@@ -3515,9 +3515,10 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
             initialize_with_configuration(configuration),
             CKR_OK as CK_RV
         );
-        // This test supplies its own inventory, including absent slots and
-        // physical identities. Remove the optional ABI fixtures first.
+        // Finish lazy discovery before replacing its optional ABI/mock fixtures
+        // with this test's inventory, including absent slots and physical identities.
         crate::with_context(|ctx| {
+            ctx.init()?;
             ctx.slot_contexts.write().unwrap().clear();
             Ok(())
         })
