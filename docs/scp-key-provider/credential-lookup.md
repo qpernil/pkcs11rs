@@ -31,6 +31,12 @@ non-operational metadata and are excluded from native source discovery.
 Every existing-source lookup requires `CKA_TOKEN=true` and the expected object
 class/type. Symmetric keys require explicit selection: each role must resolve
 to exactly one AES-128 key. Different native IDs are valid for the two roles.
+Each AES key must permit either counter-KDF derivation or AES-ECB encryption.
+CBC encryption permission is optional: when both the slot and key allow it,
+the ECB-based construction batches CMAC chaining into one zero-IV CBC call.
+The former is preferred; the latter constructs CMAC/counter KDF through source
+session encryption without exporting the long-term key. Explicit permission to
+encrypt is sufficient for this alternative; it does not enable `C_DeriveKey`.
 Missing keys return `CKR_KEY_HANDLE_INVALID`; duplicate matches return
 `CKR_TEMPLATE_INCONSISTENT`. A name matching both an ordinary asymmetric key and
 symmetric roles is ambiguous. No failure causes password-based protocol fallback.

@@ -158,11 +158,14 @@ impl SessionKeys {
         let static_mac = scope.bind(&credential.mac)?;
         scope.require_aes128(&static_enc)?;
         scope.require_aes128(&static_mac)?;
-        let mut derive = |base: &KeyHandle, constant: u8, output| {
+        let enc_path = scope.counter_kdf_path(&static_enc)?;
+        let mac_path = scope.counter_kdf_path(&static_mac)?;
+        let mut derive = |base: &KeyHandle, path, constant: u8, output| {
             let mut prefix = [0; 13];
             prefix[11] = constant;
-            scope.derive_counter(
+            scope.counter_kdf_aes128(
                 base,
+                path,
                 &[
                     CounterKdfField::Bytes(&prefix),
                     CounterKdfField::Length(
@@ -179,13 +182,14 @@ impl SessionKeys {
                     CounterKdfField::Bytes(context),
                 ],
                 output,
-                16,
             )
         };
-        let enc = derive(&static_enc, 0x04, readable(enc_template()))?;
-        let mac = derive(&static_mac, 0x06, readable(mac_template()))?;
-        let rmac = derive(&static_mac, 0x07, readable(rmac_template()))?;
-        Self::read_working_keys(scope, enc, mac, rmac)
+        let enc = derive(&static_enc, enc_path, 0x04, readable(enc_template()))?;
+        let mac = derive(&static_mac, mac_path, 0x06, readable(mac_template()))?;
+        let rmac = derive(&static_mac, mac_path, 0x07, readable(rmac_template()))?;
+        Ok(Self {
+            material: Some(LocalKeys { enc, mac, rmac }),
+        })
     }
 
     pub(super) fn cryptogram(&self, constant: u8, context: &[u8]) -> Result<[u8; 8], Error> {

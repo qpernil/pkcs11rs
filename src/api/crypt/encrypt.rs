@@ -200,7 +200,7 @@ pub(crate) fn parse_key_wrap_iv(
     Ok(unsafe { from_raw_parts(mechanism.pParameter.cast::<u8>(), default.len()) }?.to_vec())
 }
 
-fn crypt_init(
+pub(crate) fn crypt_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
@@ -814,7 +814,7 @@ pub(crate) fn yubihsm_aes_cbc_pad(
     }
 }
 
-fn crypt(
+pub(crate) fn crypt(
     session_handle: CK_SESSION_HANDLE,
     input: *const u8,
     input_len: CK_ULONG,

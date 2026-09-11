@@ -62,7 +62,7 @@ pub(crate) use yubihsm::{YubiHsmEnrollment, yubihsm_enroll_device};
 /// input buffers and select a module instance before invoking these operations.
 /// Session routing, object policy, and mechanism execution remain in the handlers.
 pub(crate) mod rust {
-    pub(crate) use super::crypt::{verify, verify_init};
+    pub(crate) use super::crypt::{crypt, crypt_init, verify, verify_init};
     pub(crate) use super::general::{get_slot_list, get_token_info};
     pub(crate) use super::hsmauth::hsmauth_authenticate;
     pub(crate) use super::key::{derive_key, generate_key_pair};

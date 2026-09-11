@@ -72,6 +72,55 @@ pub(crate) fn software_aes_cmac(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Erro
         .map_err(|_| CKR_KEY_SIZE_RANGE.into())
 }
 
+pub(crate) fn cmac_with_encryptor(
+    data: &[u8],
+    encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
+    software_key_core::software_symmetric::cmac_with(AES_BLOCK_LENGTH, data, encrypt)
+        .map_err(cmac_error)
+}
+
+pub(crate) fn cmac_with_cbc_encryptor(
+    data: &[u8],
+    encrypt_block: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+    encrypt_cbc: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
+    software_key_core::software_symmetric::cmac_with_cbc(
+        AES_BLOCK_LENGTH,
+        data,
+        encrypt_block,
+        encrypt_cbc,
+    )
+    .map_err(cmac_error)
+}
+
+fn cmac_error(error: software_key_core::software_symmetric::BlockCipherModeError<Error>) -> Error {
+    use software_key_core::software_symmetric::BlockCipherModeError;
+    match error {
+        BlockCipherModeError::BlockOperation(error) => error,
+        _ => CKR_DEVICE_ERROR.into(),
+    }
+}
+
+pub(crate) fn counter_kdf_with(
+    fields: &[software_key_core::counter_kdf::CounterKdfField<'_>],
+    length: usize,
+    cmac: impl FnMut(&[u8]) -> Result<[u8; 16], Error>,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    use software_key_core::counter_kdf::{
+        CounterKdfError, CounterKdfOperationError, cmac_counter_kdf_with,
+    };
+    cmac_counter_kdf_with(fields, length, cmac).map_err(|error| match error {
+        CounterKdfOperationError::Kdf(error) => Error::from(match error {
+            CounterKdfError::InvalidParameters => CKR_MECHANISM_PARAM_INVALID,
+            CounterKdfError::InvalidKeyLength | CounterKdfError::OutputTooLong => {
+                CKR_KEY_SIZE_RANGE
+            }
+        }),
+        CounterKdfOperationError::Cmac(error) => error,
+    })
+}
+
 /// Derive into an already validated and policy-merged output object. Publication
 /// belongs to the caller's public session or private scope, after success only.
 pub(crate) fn derive_counter_key_with(
@@ -81,18 +130,7 @@ pub(crate) fn derive_counter_key_with(
     length: usize,
     cmac: impl FnMut(&[u8]) -> Result<[u8; 16], Error>,
 ) -> Result<TokenObject, Error> {
-    use software_key_core::counter_kdf::{
-        CounterKdfError, CounterKdfOperationError, cmac_counter_kdf_with,
-    };
-    let mut derived = cmac_counter_kdf_with(fields, length, cmac).map_err(|error| match error {
-        CounterKdfOperationError::Kdf(error) => Error::from(match error {
-            CounterKdfError::InvalidParameters => CKR_MECHANISM_PARAM_INVALID,
-            CounterKdfError::InvalidKeyLength | CounterKdfError::OutputTooLong => {
-                CKR_KEY_SIZE_RANGE
-            }
-        }),
-        CounterKdfOperationError::Cmac(error) => error,
-    })?;
+    let mut derived = counter_kdf_with(fields, length, cmac)?;
     if object.key_type == CKK_DES3 as CK_KEY_TYPE {
         for byte in derived.iter_mut() {
             *byte = (*byte & 0xfe) | u8::from((*byte & 0xfe).count_ones().is_multiple_of(2));
