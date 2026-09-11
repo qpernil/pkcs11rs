@@ -228,3 +228,44 @@ objects or usable stale handles; no provider/device message-crypto calls; and
 passing PKCS #11/client regressions. Reconcile commands, object policy, and
 lifetime documentation in both repositories. Use disposable virtual fixtures
 for destructive/exhaustion tests and keep physical devices intact.
+
+## Future direction: external PKCS #11 sources
+
+Explore adapting a separately loaded PKCS #11 module as an authentication
+source through the `Pkcs11Auth` session contract. This is a tentative direction,
+not an implemented loader or a prerequisite for the work above. Module
+configuration and identity/selector syntax remain design decisions for a
+concrete integration. General module aggregation and re-exposure as ordinary
+pkcs11rs slots are outside this plan:
+[p11-kit’s proxy module](https://p11-glue.github.io/p11-glue/p11-kit/manual/sharing.html)
+already exposes the slots of multiple configured modules through one PKCS #11
+interface. The proposed adapter supplies credentials for YubiHSM authentication,
+without recreating that aggregation facility.
+
+Choose derivation paths from the source's mechanisms and key permissions,
+without relying on backend kind. Prefer prefixed ECDH+KDF when available;
+otherwise require ordinary ECDH and the remaining composition/KDF operations.
+For explicitly named AES-128 pairs (`<name>.enc` and `<name>.mac`), prefer
+`CKM_SP800_108_COUNTER_KDF`. Consider an authentication-provider fallback that
+constructs CMAC and the counter KDF using `CKM_AES_ECB` when counter KDF is
+unavailable and the source keys permit encryption. Reuse the existing
+construction used for native YubiHSM AES keys rather than duplicating crypto
+in the authentication client. This provider-level fallback is future work;
+the current symmetric client requires the counter-KDF mechanism.
+
+Select a permitted path before execution; an operational failure must not
+trigger a different path or weaken object policy. Long-term keys remain in the
+source token. Qualify the required output policies and intermediate-object
+operations explicitly rather than assuming an external module offers the
+common software layer supplied by pkcs11rs.
+
+Retain the selected source session for channel recreation without retaining
+its login PIN. Target logout releases that session through normal session
+closure, preserving other source sessions and their shared login. Explicit
+source logout prevents recreation until fresh authorization; established
+channels retain their own working keys. An external adapter must also define
+module initialization/finalization ownership, threading, handle invalidation,
+and protection against recursive module loading or source dependencies.
+
+Qualify authentication against an independent module, including restricted mechanisms, shared login,
+source logout, device loss, and session cleanup.

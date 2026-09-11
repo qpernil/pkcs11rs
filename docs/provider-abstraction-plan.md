@@ -169,6 +169,15 @@ New protocol clients and transports should follow the YubiHSM Auth and CTAP
 pattern: share the protocol state machine or exchange vocabulary while leaving
 discovery and application policy with the caller.
 
+### Explore external PKCS #11 integration
+
+An optional future integration is an external PKCS #11 module used as
+an authentication source. General module aggregation remains outside this
+scope; p11-kit already provides a proxy for that purpose.
+The [SCP provider plan](scp-key-provider/README.md#future-direction-external-pkcs-11-sources)
+records its capability fallbacks and lifetime constraints. This does not require
+publishing the internal Rust traits or introducing a universal provider API.
+
 ### Prepare releasable artifacts
 
 Add reproducible binary packaging, system installation guidance, and
