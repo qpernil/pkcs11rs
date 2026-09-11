@@ -810,7 +810,10 @@ class OasisProfileTests(unittest.TestCase):
         )
         pin = os.environ.get("PKCS11RS_OASIS_PIN")
         if pin is None and module is None:
-            pin = "1234"
+            pin = {
+                p11.ABI_TEST_PIV_SLOT_ID: "123456",
+                p11.ABI_TEST_YUBIHSM_SLOT_ID: "0001password",
+            }.get(cls.slot_id, "1234")
         cls.pin = None if pin is None else pin.encode("utf-8")
 
     def setUp(self) -> None:
