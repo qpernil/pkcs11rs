@@ -258,6 +258,12 @@ DEK use and cleanup, plus virtual-YubiKey provisioning and transaction-lifetime
 regressions. Caller-supplied new-key material and KCV calculation remain an
 explicit administration input workflow. SCP03 S16 is outside this plan.
 
+Physical qualification covers SCP03 and custom-CA SCP11a/b on a YubiKey,
+including an SCP11a OCE private key generated on a physical YubiHSM and borrowed
+through `Pkcs11Auth`. Three fresh SCP11a handshakes and protected reads pass
+without exporting the native host private scalar. See the
+[hardware tests and device-capacity constraints](../scp11.md#issuer-sd-key-provisioning).
+
 ## 3. Implement native virtual-YubiHSM derivation
 
 Add generic protected-object commands using software-key-core: agreement,
