@@ -90,3 +90,4 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 
 [patch.crates-io]
 hidapi = { path = "vendor/hidapi" }
+module-lattice = { git = "https://github.com/qpernil/KEMs.git", rev = "2251f07e269ef6f42e3496666fbf5f70d95628eb" }
