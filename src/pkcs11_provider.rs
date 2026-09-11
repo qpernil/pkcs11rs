@@ -5,12 +5,12 @@ use crate::*;
 use std::cell::RefCell;
 
 thread_local! {
-    static SELECTED: RefCell<Option<Rc<Option<ModuleContext>>>> = const { RefCell::new(None) };
+    static SELECTED: RefCell<Option<Arc<Option<ModuleContext>>>> = const { RefCell::new(None) };
 }
 
 pub(crate) enum ContextRead {
     Global(std::sync::RwLockReadGuard<'static, Option<ModuleContext>>),
-    Private(Rc<Option<ModuleContext>>),
+    Private(Arc<Option<ModuleContext>>),
 }
 impl std::ops::Deref for ContextRead {
     type Target = Option<ModuleContext>;
@@ -21,21 +21,21 @@ impl std::ops::Deref for ContextRead {
         }
     }
 }
-pub(crate) fn selected_context() -> Option<Rc<Option<ModuleContext>>> {
+pub(crate) fn selected_context() -> Option<Arc<Option<ModuleContext>>> {
     SELECTED.with(|selected| selected.borrow().clone())
 }
 
 pub(crate) struct Pkcs11Provider {
-    context: Rc<Option<ModuleContext>>,
+    context: Arc<Option<ModuleContext>>,
     quiet: tracing::Dispatch,
     automatic_software_login: bool,
 }
 impl Pkcs11Provider {
-    pub(crate) fn private_software() -> Result<Rc<Self>, Error> {
+    pub(crate) fn private_software() -> Result<Arc<Self>, Error> {
         let slot =
             SoftwareSlot::new_with_storage("private authentication".to_owned(), 0, None, None)?;
         let mut provider = Self::new(Box::new(slot))?;
-        Rc::get_mut(&mut provider)
+        Arc::get_mut(&mut provider)
             .ok_or(CKR_FUNCTION_FAILED)?
             .automatic_software_login = true;
         Ok(provider)
@@ -43,12 +43,12 @@ impl Pkcs11Provider {
 
     /// An isolated instance containing the supplied slot. Its native backend
     /// and credentials need not be software; ordinary slot login applies.
-    pub(crate) fn new(slot: Box<dyn Slot>) -> Result<Rc<Self>, Error> {
+    pub(crate) fn new(slot: Box<dyn Slot>) -> Result<Arc<Self>, Error> {
         let quiet = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let context =
             tracing::dispatcher::with_default(&quiet, || ModuleContext::private_slot(slot))?;
-        Ok(Rc::new(Self {
-            context: Rc::new(Some(context)),
+        Ok(Arc::new(Self {
+            context: Arc::new(Some(context)),
             quiet,
             automatic_software_login: false,
         }))
@@ -57,19 +57,19 @@ impl Pkcs11Provider {
     /// Prepare an existing slot without cloning its backend or credentials.
     /// The caller selects the slot and supplies login separately if necessary.
     #[allow(dead_code)] // Exercised by integration tests; configured selection is separate.
-    pub(crate) fn from_slot(slot: Arc<Mutex<SlotContext>>) -> Result<Rc<Self>, Error> {
+    pub(crate) fn from_slot(slot: Arc<Mutex<SlotContext>>) -> Result<Arc<Self>, Error> {
         let quiet = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let context =
             tracing::dispatcher::with_default(&quiet, || ModuleContext::for_auth_slot(slot))?;
-        Ok(Rc::new(Self {
-            context: Rc::new(Some(context)),
+        Ok(Arc::new(Self {
+            context: Arc::new(Some(context)),
             quiet,
             automatic_software_login: false,
         }))
     }
 
     pub(crate) fn call<T>(&self, operation: impl FnOnce() -> T) -> T {
-        struct Restore(Option<Rc<Option<ModuleContext>>>);
+        struct Restore(Option<Arc<Option<ModuleContext>>>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 SELECTED.with(|selected| {
@@ -93,18 +93,18 @@ pub(crate) fn check(rv: CK_RV) -> Result<(), Error> {
 }
 
 pub(crate) struct ProviderSession {
-    pub(crate) provider: Rc<Pkcs11Provider>,
+    pub(crate) provider: Arc<Pkcs11Provider>,
     pub(crate) handle: CK_SESSION_HANDLE,
 }
 impl ProviderSession {
-    pub(crate) fn open(provider: Rc<Pkcs11Provider>) -> Result<Rc<Self>, Error> {
+    pub(crate) fn open(provider: Arc<Pkcs11Provider>) -> Result<Arc<Self>, Error> {
         let slots = provider.call(|| api::rust::get_slot_list(true))?;
         let [slot] = slots.as_slice() else {
             return Err(CKR_DEVICE_ERROR.into());
         };
         let handle = provider
             .call(|| api::rust::open_session(*slot, (CKF_RW_SESSION | CKF_SERIAL_SESSION) as _))?;
-        let session = Rc::new(Self { provider, handle });
+        let session = Arc::new(Self { provider, handle });
         if session.provider.automatic_software_login {
             // This ephemeral, nonpersistent token has no configured credential.
             // Supply a fresh random PIN solely to establish its PKCS #11 login state.
@@ -194,7 +194,7 @@ mod tests {
                 .map(|module| module.slot_contexts.read().unwrap().len()),
             before
         );
-        let context = Rc::downgrade(&scope.session.provider.context);
+        let context = Arc::downgrade(&scope.session.provider.context);
         drop(scope);
         assert!(context.upgrade().is_none());
     }
@@ -205,18 +205,18 @@ mod tests {
         let second = Pkcs11Provider::private_software().unwrap();
         assert!(selected_context().is_none());
         first.call(|| {
-            assert!(Rc::ptr_eq(&selected_context().unwrap(), &first.context));
+            assert!(Arc::ptr_eq(&selected_context().unwrap(), &first.context));
             std::thread::spawn(|| assert!(selected_context().is_none()))
                 .join()
                 .unwrap();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 second.call(|| {
-                    assert!(Rc::ptr_eq(&selected_context().unwrap(), &second.context));
+                    assert!(Arc::ptr_eq(&selected_context().unwrap(), &second.context));
                     panic!("exercise selection cleanup");
                 });
             }));
             assert!(result.is_err());
-            assert!(Rc::ptr_eq(&selected_context().unwrap(), &first.context));
+            assert!(Arc::ptr_eq(&selected_context().unwrap(), &first.context));
         });
         assert!(selected_context().is_none());
     }

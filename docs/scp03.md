@@ -48,6 +48,16 @@ accepted. Key values are never included in debug output, and derived
 transport and session keys are zeroized when their smart-card transaction
 ends.
 
+Derivation uses the shared Rust `Pkcs11Auth` handlers behind the public C ABI.
+Configured input keys are imported as protected session objects in a temporary
+software provider. Batch diversification produces protected ENC, MAC, and DEK
+objects without reading their values. Counter-KDF outputs explicitly permit
+reading the channel working keys; cryptograms and message AES/CMAC run locally.
+The static DEK remains a protected provider binding and wraps administration
+payloads through AES-CBC. Its owning session ends with the card transaction.
+Provider code also accepts an already authorized source session; card
+configuration still uses the input forms above and has no slot-selector syntax.
+
 This implementation currently supports SCP03 S8 mode. It validates the
 card's `i` parameter, verifies pseudo-random card challenges using the
 three-byte sequence counter and selected Security Domain AID, and rejects
@@ -100,7 +110,8 @@ The function follows the Yubico `PUT KEY` format. All three AES-128 components
 are wrapped with the current static DEK using AES-CBC with a zero IV. The
 three-byte key check values are calculated and verified against the card's
 response. Provisioning returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
-authenticated channel has no static DEK, including an SCP11 channel.
+authenticated channel has no DEK. SCP11 supplies a derived DEK for its
+OCE-authenticated administration.
 
 `replace_kvn` is zero when adding a key set and identifies the old KVN for an
 in-place replacement otherwise. New key sets must use a KVN from 1 through

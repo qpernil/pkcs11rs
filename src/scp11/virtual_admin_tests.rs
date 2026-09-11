@@ -5,6 +5,7 @@ use spki::EncodePublicKey;
 use virtual_yubikey_core::{
     DeviceProfile, ISSUER_SECURITY_DOMAIN_AID as SD, PIV_AID, VirtualYubiKey,
 };
+use zeroize::Zeroizing;
 
 fn factory_session(connector: &MockYubiKeyConnector) -> Scp03Session {
     select_application(connector, &SD).unwrap();
@@ -123,7 +124,7 @@ fn commands_provision_scp11a_and_c_with_discovery_and_persistent_policy() {
             host: Some(Scp11aHostCredentials {
                 key_id: 0x10,
                 key_version: 1,
-                private_key: private_key(5),
+                private_key: protect_p256(private_key(5)).unwrap(),
                 certificates: certificate_chain(&ca).into_iter().rev().collect(),
             }),
         };

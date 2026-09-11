@@ -46,7 +46,7 @@ enum Credential {
 }
 struct Fixture {
     credential: Credential,
-    owner: Rc<ProviderSession>,
+    owner: Arc<ProviderSession>,
     keys: Vec<CK_OBJECT_HANDLE>,
     baseline: (Vec<CK_SESSION_HANDLE>, Vec<CK_OBJECT_HANDLE>),
     existing: Option<(
@@ -205,7 +205,7 @@ impl Fixture {
             existing,
             ..
         } = self;
-        let provider = Rc::downgrade(&owner.provider);
+        let provider = Arc::downgrade(&owner.provider);
         drop(credential);
         drop(owner);
         assert!(provider.upgrade().is_none());

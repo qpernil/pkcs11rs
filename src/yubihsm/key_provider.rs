@@ -1,6 +1,8 @@
 //! YubiHSM derivation through scoped objects, followed by local message crypto.
+#[cfg(test)]
+use crate::key_scope::generic_template;
 use crate::{
-    key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, SymmetricCredential, generic_template},
+    key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, SymmetricCredential},
     *,
 };
 use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat, LengthMethod};
@@ -213,6 +215,7 @@ pub(super) struct AsymmetricKeys {
     ephemeral: KeyHandle,
 }
 
+#[cfg(test)]
 fn agreement_template() -> TokenObjectTemplate {
     generic_template(&[CKM_CONCATENATE_BASE_AND_KEY as _])
 }
@@ -228,6 +231,7 @@ impl AsymmetricKeys {
         self.scope.p256_public(&self.ephemeral)
     }
 
+    #[cfg(test)]
     pub(super) fn static_agreement(
         &mut self,
         credential: &BoundKey,
@@ -246,38 +250,22 @@ impl AsymmetricKeys {
         context: &[u8; 130],
         receipt: &[u8; 16],
     ) -> Result<SessionKeys, Error> {
-        let base = self.scope.bind(credential)?;
-        if !self
-            .scope
-            .can_derive(&base, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)?
-        {
-            self.scope.destroy(&base)?;
-            let shared = self.static_agreement(credential, peer)?;
-            return self.finish(&shared, context, receipt);
-        }
         if self.public_key()?.as_slice() != &context[..65] {
             return Err(CKR_DATA_INVALID.into());
         }
-        let ephemeral_shared = self.scope.ecdh(
+        let base = self.scope.bind(credential)?;
+        let material = self.scope.dual_ecdh_x963(
             &self.ephemeral,
             &context[65..],
-            readable(generic_template(&[])),
-        )?;
-        let prefix = self.scope.read_ephemeral_agreement(&ephemeral_shared)?;
-        self.scope.destroy(&ephemeral_shared)?;
-        // This is a capability decision, not an error-based retry. A failed
-        // combined operation must never fall back to exporting a static secret.
-        let material = self.scope.prefixed_ecdh(
             &base,
             peer,
-            &prefix,
             &super::SCP11_SHARED_INFO,
-            readable(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
             64,
         )?;
         finish_asymmetric(self.scope, material, context, receipt)
     }
 
+    #[cfg(test)]
     pub(super) fn finish(
         mut self,
         static_shared: &BoundKey,
@@ -298,28 +286,9 @@ impl AsymmetricKeys {
             generic_template(&[CKM_CONCATENATE_BASE_AND_DATA as _]),
             64,
         )?;
-        let mut blocks = Vec::new();
-        for i in 1u32..=2 {
-            let mut suffix = i.to_be_bytes().to_vec();
-            suffix.extend_from_slice(&super::SCP11_SHARED_INFO);
-            let input = self.scope.append_data(
-                &z,
-                &suffix,
-                generic_template(&[CKM_SHA256_KEY_DERIVATION as _]),
-                71,
-            )?;
-            blocks.push(self.scope.sha256(
-                &input,
-                readable(generic_template(&[CKM_CONCATENATE_BASE_AND_KEY as _])),
-            )?);
-            self.scope.destroy(&input)?;
-        }
-        let material = self.scope.append_key(
-            &blocks[0],
-            &blocks[1],
-            readable(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
-            64,
-        )?;
+        let material = self
+            .scope
+            .x963_sha256(&z, 64, &super::SCP11_SHARED_INFO, 64)?;
         finish_asymmetric(self.scope, material, context, receipt)
     }
 }

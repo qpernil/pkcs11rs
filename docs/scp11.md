@@ -79,6 +79,24 @@ authentication. The card receipt is verified before the channel becomes
 active. Subsequent APDUs use the same short, extended, command-chaining,
 response-chaining, counter, padding, and MAC handling as the SCP03 transport.
 
+The shared Rust `Pkcs11Auth` handlers perform ephemeral generation, ECDH,
+X9.63 SHA-256, extraction, and receipt verification. Configured OCE private keys
+are imported into protected provider session objects after file decryption and
+certificate matching. No file-unlock password is retained. The provider session
+owns the imported OCE credential; separate handshake sessions own ephemeral
+keys and intermediate objects.
+
+The preferred prefixed-ECDH mechanism combines the static agreement and KDF,
+using an explicitly readable ephemeral agreement as prefix. When key policy
+or advertised mechanisms exclude it, ordinary ECDH and protected composition
+perform the same KDF. A failure executing the selected path is returned without
+retrying another path. The protected receipt key verifies the complete encoded
+request and card ephemeral TLV before the four final AES values are read.
+S-ENC, S-MAC, S-RMAC, and the derived DEK use zeroizing local storage; temporary
+provider objects are released on both success and failure. Existing provider
+sessions use the same operations, but card configuration does not yet select
+credentials by slot and label.
+
 The live SCP11 session and selected applet belong to one native smart-card
 transaction and are destroyed together when the device-backed PKCS #11 call
 ends. Later calls reuse only the connection-scoped validated card public key;
@@ -99,7 +117,7 @@ declared in `pkcs11rs.h` match Yubico's Security Domain curve IDs.
 
 `PKCS11RS_SecurityDomainPutScp11PrivateKey` accepts one transient canonical
 PKCS #8 DER EC private key. The authenticated secure channel protects it in
-transit, and the private scalar is wrapped using the current static DEK before
+transit, and the private scalar is wrapped using the channel DEK before
 device storage. The function returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
 channel has no DEK. `PKCS11RS_SecurityDomainPutScp11PublicKey` accepts a
 canonical DER SubjectPublicKeyInfo EC public key and does not require a DEK.

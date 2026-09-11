@@ -53,8 +53,7 @@ The trace follows the [YubiHSM client](../../src/yubihsm.rs),
 [channel ownership](../../src/connector.rs), and
 [PKCS #11 derivation](../../src/api/key.rs). The shared crypto core already
 implements CMAC, AES ECB/CBC, SCP03 KDF, ECDH, and X9.63 SHA-256. The PKCS #11
-layer already supports AES, CMAC, P-256 generation, ECDH, and HKDF. These are
-available primitives, not yet a complete protected-key operation graph.
+layer already supports AES, CMAC, P-256 generation, ECDH, and HKDF. These primitives form the shared protected-key operation graphs.
 
 YubiHSM `SecureSession` retains three local AES values in zeroizing storage.
 Direct derivation uses the safe `Pkcs11Auth` interface to the shared Rust
@@ -69,7 +68,8 @@ mechanism's ephemeral prefix is explicitly readable from creation.
 
 YubiHSM Auth supplies working bytes directly. Platform keys use native ECDH
 through the host slot and the same combined-mechanism selection.
-Card structures retain local working keys and still use direct derivation.
+Card structures retain local working keys after derivation through the same
+provider operations. Their static SCP03 DEK remains a protected provider binding.
 Hardware ECDH outputs in public PKCS #11 operations use software session objects;
 the native prefixed extension returns KDF bytes. None establishes native retention
 of the entire derivation graph. Mechanism names below specify the intended
@@ -275,7 +275,7 @@ SCP11b still derives DEK, but does not gain OCE-authenticated administration.
 
 ## GlobalPlatform card client: protected traffic and administration
 
-The following local operations apply to established card SCP03 and SCP11
+The following operations apply to established card SCP03 and SCP11
 channels, subject to the selected security level. SCP11 uses level `33`.
 
 | Client step | Key and input | Operation and boundary |
@@ -305,8 +305,9 @@ a separate gap from preserving the existing caller-supplied workflow; do not
 pretend generic encryption exports a non-extractable key legally.
 
 Public certificate processing, on-card key-generation commands, and admin
-APDU construction stay in the client. DEK access becomes a handle operation;
-the current raw `static_dek()` accessor must disappear from the consumer.
+APDU construction stay in the client. Static SCP03 DEK access is a provider
+handle operation; the derived SCP11 DEK is a local working key.
+Administration receives an operation interface rather than the static DEK value.
 
 ## Required generic mechanism set
 
@@ -480,7 +481,7 @@ lost working keys. Preserve transaction-scoped CCID lifetimes for card channels.
 
 ## Implementation order and acceptance checks
 
-See the [staged plan](README.md) for remaining work: migrate card derivation, implement
+See the [staged plan](README.md) for remaining work: implement
 native virtual-HSM derivation, then qualify full channels with local message
 crypto. Instrumented tests must show final working-key reads at establishment and no
 provider calls for subsequent message encryption/MAC.

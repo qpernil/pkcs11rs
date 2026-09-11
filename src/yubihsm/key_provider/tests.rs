@@ -254,7 +254,7 @@ fn symmetric_pair_derives_through_native_yubihsm_handles_without_export() {
 type AsymmetricFixture = (
     AsymmetricKeys,
     BoundKey,
-    std::rc::Weak<crate::pkcs11_provider::Pkcs11Provider>,
+    std::sync::Weak<crate::pkcs11_provider::Pkcs11Provider>,
     [u8; 130],
     Zeroizing<Vec<u8>>,
     [u8; 16],
@@ -264,7 +264,7 @@ fn asymmetric_fixture() -> AsymmetricFixture {
     let mut scope = Pkcs11KeyScope::new().unwrap();
     let key = scope.import_p256(ec(1)).unwrap();
     let credential = scope.take_key(&key).unwrap();
-    let source = Rc::downgrade(&scope.session.provider);
+    let source = Arc::downgrade(&scope.session.provider);
     let ephemeral = scope.import_p256(ec(2)).unwrap();
     let mut exchange = AsymmetricKeys { scope, ephemeral };
     let static_shared = exchange
@@ -721,7 +721,7 @@ fn symmetric_permission_fixture(
     templates: [TokenObjectTemplate; 2],
 ) -> (
     SymmetricCredential,
-    Rc<crate::pkcs11_provider::ProviderSession>,
+    Arc<crate::pkcs11_provider::ProviderSession>,
 ) {
     use crate::pkcs11_auth::Pkcs11Auth;
     use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};

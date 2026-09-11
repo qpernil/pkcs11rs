@@ -1108,7 +1108,7 @@ impl BackendSession for IssuerSecurityDomainSession {
     ) -> Result<(), Error> {
         let mut session = self.session.try_borrow_mut()?;
         let channel = session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
-        if channel.static_dek()?.len() != 16 {
+        if channel.static_dek()?.len()? != 16 {
             return Err(CKR_KEY_SIZE_RANGE.into());
         }
         let result = SecurityDomainClient.put_scp03_key_set(

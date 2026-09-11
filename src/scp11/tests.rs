@@ -220,40 +220,126 @@ fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
              d9e9b933fa4449000",
     )
     .unwrap();
-    let connector = ScriptedConnector {
-        response,
-        commands: RefCell::new(Vec::new()),
+    use crate::{
+        pkcs11_auth::{P256_PARAMS, Pkcs11Auth, ec_template},
+        pkcs11_provider::{Pkcs11Provider, ProviderSession},
+        *,
     };
-    let keys = Scp11KeySet {
-        variant: Scp11Variant::A,
-        key_version: 1,
-        card_public_key: Some(parse_public_point(&static_public).unwrap()),
-        certificate_trust: None,
-        host: Some(Scp11aHostCredentials {
-            key_version: 0,
-            key_id: 0,
-            private_key: private_key(4),
-            certificates: vec![vec![0x30, 0x01, 0x00]],
-        }),
-    };
-    let session = keys
-        .establish_with_ephemeral(&connector, private_key(1))
+    for mode in 0..4 {
+        let credential = if mode == 0 {
+            protect_p256(private_key(4)).unwrap()
+        } else {
+            let owner = ProviderSession::open(
+                Pkcs11Provider::new(Box::new(SoftwareSlot::new("card OCE source".into(), 0)))
+                    .unwrap(),
+            )
+            .unwrap();
+            owner.login(b"source PIN").unwrap();
+            let mut template = ec_template();
+            if mode == 1 || mode == 3 {
+                template.allowed_mechanisms = Some(vec![CKM_ECDH1_DERIVE as _]);
+            }
+            if mode >= 2 {
+                let mut policy = crate::key_metadata::KeyAttributes::new();
+                policy
+                    .insert(
+                        CKA_SENSITIVE as _,
+                        crate::key_metadata::KeyAttributeValue::Boolean(true),
+                    )
+                    .unwrap();
+                template.policy_templates.derive = Some(policy);
+            }
+            let handle = owner
+                .create(
+                    template,
+                    &[
+                        (CKA_EC_PARAMS, P256_PARAMS),
+                        (CKA_VALUE, &private_key(4).serialized().unwrap()),
+                    ],
+                )
+                .unwrap();
+            assert!(owner.attribute(handle, CKA_VALUE).is_err());
+            BoundKey::from_session(owner, handle).unwrap()
+        };
+        let observer = Pkcs11KeyScope::for_key(&credential).unwrap();
+        let connector = ScriptedConnector {
+            response: response.clone(),
+            commands: RefCell::new(Vec::new()),
+        };
+        let keys = Scp11KeySet {
+            variant: Scp11Variant::A,
+            key_version: 1,
+            card_public_key: Some(parse_public_point(&static_public).unwrap()),
+            certificate_trust: None,
+            host: Some(Scp11aHostCredentials {
+                key_version: 0,
+                key_id: 0,
+                private_key: credential,
+                certificates: vec![vec![0x30, 0x01, 0x00]],
+            }),
+        };
+        let result = keys.establish_with_ephemeral(&connector, private_key(1));
+        assert_eq!(observer.count_provider_objects(), 1);
+        if mode == 2 {
+            // The combined output violates source policy. Standard ECDH could
+            // succeed (mode 3 proves it), but an operational failure is not retried.
+            assert!(
+                matches!(result, Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV)
+            );
+            continue;
+        }
+        let session = result.unwrap();
+        // Check the fifth key through its permitted wrapping operation.
+        let first = software_key_core::software_key_agreement::derive_with_signing_key(
+            &private_key(1),
+            &encode_private_public_point(&private_key(3)).unwrap(),
+        )
         .unwrap();
-    session.require_oce_authentication().unwrap();
-    assert_eq!(
-        connector.commands.borrow().as_slice(),
-        &[
-            parse_hex("802a000003300100").unwrap(),
-            parse_hex(
-                "8082011153a60d9002110195013c8001888101105f \
+        let second = software_key_core::software_key_agreement::derive_with_signing_key(
+            &private_key(4),
+            &static_public,
+        )
+        .unwrap();
+        let material =
+            derive_key_material(&[first.as_slice(), second.as_slice()].concat()).unwrap();
+        assert_eq!(
+            session.static_dek().unwrap().encrypt(&[0; 16]).unwrap(),
+            crate::secure_channel_crypto::aes_cbc(
+                &material[64..80],
+                &[0; 16],
+                &[0; 16],
+                crate::secure_channel_crypto::Direction::Encrypt
+            )
+            .unwrap()
+        );
+        session.require_oce_authentication().unwrap();
+        assert_eq!(
+            connector.commands.borrow().as_slice(),
+            &[
+                parse_hex("802a000003300100").unwrap(),
+                parse_hex(
+                    "8082011153a60d9002110195013c8001888101105f \
                      4941046b17d1f2e12c4247f8bce6e563a440f277 \
                      037d812deb33a0f4a13945d898c2964fe342e2fe1 \
                      a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb \
                      6406837bf51f500"
-            )
-            .unwrap(),
-        ]
-    );
+                )
+                .unwrap(),
+            ]
+        );
+        let mut bad_response = response.clone();
+        let receipt_offset = bad_response.len() - 3;
+        bad_response[receipt_offset] ^= 1;
+        let bad = ScriptedConnector {
+            response: bad_response,
+            commands: RefCell::new(Vec::new()),
+        };
+        assert!(
+            matches!(keys.establish_with_ephemeral(&bad, private_key(1)),
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
+        );
+        assert_eq!(observer.count_provider_objects(), 1);
+    }
 }
 
 #[test]
@@ -321,7 +407,7 @@ mod virtual_card {
             host: Some(Scp11aHostCredentials {
                 key_version: 1,
                 key_id: 0x10,
-                private_key: private_key(5),
+                private_key: protect_p256(private_key(5)).unwrap(),
                 certificates: chain.into_iter().rev().collect(),
             }),
         };
@@ -397,7 +483,7 @@ mod virtual_card {
                 select_application(&connector, &PIV_AID).unwrap();
                 let host = keys.host.as_mut().unwrap();
                 match failure {
-                    0 => host.private_key = private_key(6),
+                    0 => host.private_key = protect_p256(private_key(6)).unwrap(),
                     1 => {
                         host.certificates = certificate_chain(&signing_key(6))
                             .into_iter()

@@ -4,7 +4,7 @@ use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat};
 #[test]
 fn password_credentials_share_a_slot_and_release_the_unused_key() {
     let mut credentials = PasswordCredentials::new(b"password").unwrap();
-    let provider = Rc::downgrade(&credentials.scope.session.provider);
+    let provider = Arc::downgrade(&credentials.scope.session.provider);
     // The private preparation knows its creation handles. Labels can change
     // or collide without changing which keys direct authentication uses.
     let mut label = b"same label".to_vec();
@@ -30,7 +30,7 @@ fn password_credentials_share_a_slot_and_release_the_unused_key() {
     }
     let symmetric = credentials.symmetric().unwrap();
     let asymmetric = credentials.asymmetric().unwrap();
-    assert!(Rc::ptr_eq(&symmetric.enc.0.session, &asymmetric.0.session));
+    assert!(Arc::ptr_eq(&symmetric.enc.0.session, &asymmetric.0.session));
     assert_eq!(credentials.scope.count_provider_objects(), 3);
     for key in [&credentials.enc, &credentials.mac, &credentials.asymmetric] {
         let object = credentials.scope.snapshot(key);
@@ -236,7 +236,7 @@ fn api_bound_keys_hold_only_their_object_and_owning_session() {
     let intermediate = scope
         .derive_counter(&base, &fields(), aes(false), 16)
         .unwrap();
-    let provider = Rc::downgrade(&scope.session.provider);
+    let provider = Arc::downgrade(&scope.session.provider);
     let binding = scope.take_key(&base).unwrap();
     assert!(scope.read_aes128(&base).is_err());
     drop(scope);

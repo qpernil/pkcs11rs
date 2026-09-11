@@ -2,6 +2,7 @@ use crate::{
     CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
     CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, Connector,
     error::Error,
+    scp_key_provider::{CardDek, Scp03Keys},
     secure_channel_crypto::{
         AES_BLOCK_SIZE, Direction, aes_cbc, aes_cmac, aes_encrypt_block as aes_block,
         pad_iso7816 as pad, scp03_kdf as derive, unpad_iso7816 as unpad,
@@ -45,9 +46,13 @@ const IMPLEMENTATION_S16: u8 = 0x01;
 const IMPLEMENTATION_PSEUDO_RANDOM_CHALLENGE: u8 = 0x10;
 const IMPLEMENTATION_R_MAC: u8 = 0x20;
 const IMPLEMENTATION_R_ENCRYPTION: u8 = 0x40;
+#[cfg(test)]
 const YUBICO_DIVERSIFICATION_ENC_LABEL: [u8; 4] = [0, 0, 0, 1];
+#[cfg(test)]
 const YUBICO_DIVERSIFICATION_MAC_LABEL: [u8; 4] = [0, 0, 0, 2];
+#[cfg(test)]
 const YUBICO_DIVERSIFICATION_DEK_LABEL: [u8; 4] = [0, 0, 0, 3];
+#[cfg(test)]
 const YUBICO_DIVERSIFIED_KEY_BITS: u16 = 128;
 const YUBICO_BMK_LENGTH: usize = 32;
 const RESPONSE_OK: u16 = 0x9000;
@@ -395,38 +400,13 @@ impl Scp03KeySet {
         Ok(())
     }
 
-    fn resolve(&self, issuer_context: &[u8; 10]) -> Result<ResolvedKeySet, Error> {
+    fn resolve(&self, issuer_context: &[u8; 10]) -> Result<Scp03Keys, Error> {
         if let Some(bmk) = self.diversification_bmk.as_deref() {
-            return Ok(ResolvedKeySet {
-                enc: Zeroizing::new(yubico_diversify_key(
-                    bmk,
-                    YUBICO_DIVERSIFICATION_ENC_LABEL,
-                    issuer_context,
-                )?),
-                mac: Zeroizing::new(yubico_diversify_key(
-                    bmk,
-                    YUBICO_DIVERSIFICATION_MAC_LABEL,
-                    issuer_context,
-                )?),
-                dek: Some(Zeroizing::new(yubico_diversify_key(
-                    bmk,
-                    YUBICO_DIVERSIFICATION_DEK_LABEL,
-                    issuer_context,
-                )?)),
-            });
+            Scp03Keys::diversify(bmk, issuer_context)
+        } else {
+            Scp03Keys::import(&self.enc, &self.mac, self.dek.as_deref().map(Vec::as_slice))
         }
-        Ok(ResolvedKeySet {
-            enc: Zeroizing::new(self.enc.to_vec()),
-            mac: Zeroizing::new(self.mac.to_vec()),
-            dek: self.dek.as_deref().map(|key| Zeroizing::new(key.to_vec())),
-        })
     }
-}
-
-struct ResolvedKeySet {
-    enc: Zeroizing<Vec<u8>>,
-    mac: Zeroizing<Vec<u8>>,
-    dek: Option<Zeroizing<Vec<u8>>>,
 }
 
 fn valid_aes_key(key: &[u8]) -> bool {
@@ -520,7 +500,7 @@ pub(crate) struct Scp03Session {
     s_enc: Zeroizing<Vec<u8>>,
     s_mac: Zeroizing<Vec<u8>>,
     s_rmac: Zeroizing<Vec<u8>>,
-    static_dek: Option<Zeroizing<Vec<u8>>>,
+    static_dek: Option<CardDek>,
     oce_authenticated: bool,
     mac_chaining_value: [u8; AES_BLOCK_SIZE],
     encryption_counter: u128,
@@ -561,7 +541,7 @@ impl Scp03Session {
             s_enc: Zeroizing::new(s_enc),
             s_mac: Zeroizing::new(s_mac),
             s_rmac: Zeroizing::new(s_rmac),
-            static_dek: static_dek.map(Zeroizing::new),
+            static_dek: static_dek.map(|value| CardDek::Session(Zeroizing::new(value))),
             oce_authenticated,
             mac_chaining_value,
             encryption_counter: 0,
@@ -612,43 +592,35 @@ impl Scp03Session {
             return Err(CKR_DEVICE_ERROR.into());
         }
         validate_card_capabilities(update.implementation, security_level)?;
-        let static_keys = keys.resolve(&update.issuer_context)?;
+        let mut static_keys = keys.resolve(&update.issuer_context)?;
         if let Some(sequence_counter) = update.sequence_counter {
             let mut challenge_context = Vec::with_capacity(3 + selected_aid.len());
             challenge_context.extend_from_slice(&sequence_counter);
             challenge_context.extend_from_slice(selected_aid);
-            let expected_challenge = derive(
-                &static_keys.enc,
-                DERIVATION_CARD_CHALLENGE,
-                &challenge_context,
-                64,
-            )?;
+            let expected_challenge =
+                static_keys.derive(true, DERIVATION_CARD_CHALLENGE, &challenge_context, 8)?;
             if !bool::from(expected_challenge.ct_eq(&update.card_challenge)) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
         }
 
         let (mut session, host_cryptogram) = Self::from_initialize_update(
-            &static_keys,
+            &mut static_keys,
             security_level,
             host_challenge,
             &update,
             &initialize_response.data[21..29],
         )?;
-        session.static_dek = static_keys
-            .dek
-            .as_deref()
-            .map(|key| Zeroizing::new(key.to_vec()));
+        session.static_dek = static_keys.take_dek()?;
         session.oce_authenticated = true;
         let authenticate = session.external_authenticate(&host_cryptogram)?;
         transmit(connector, &authenticate)?.require_success(&authenticate)?;
         Ok(session)
     }
 
-    pub(crate) fn static_dek(&self) -> Result<&[u8], Error> {
+    pub(crate) fn static_dek(&self) -> Result<&CardDek, Error> {
         self.static_dek
             .as_ref()
-            .map(|key| key.as_slice())
             .ok_or(CKR_KEY_FUNCTION_NOT_PERMITTED.into())
     }
 
@@ -661,7 +633,7 @@ impl Scp03Session {
     }
 
     fn from_initialize_update(
-        static_keys: &ResolvedKeySet,
+        static_keys: &mut Scp03Keys,
         security_level: u8,
         host_challenge: [u8; 8],
         update: &InitializeUpdate,
@@ -671,26 +643,11 @@ impl Scp03Session {
         let mut context = [0u8; 16];
         context[..8].copy_from_slice(&host_challenge);
         context[8..].copy_from_slice(&update.card_challenge);
-        let enc_bits = (static_keys.enc.len() * 8) as u16;
-        let mac_bits = (static_keys.mac.len() * 8) as u16;
-        let s_enc = Zeroizing::new(derive(
-            &static_keys.enc,
-            DERIVATION_S_ENC,
-            &context,
-            enc_bits,
-        )?);
-        let s_mac = Zeroizing::new(derive(
-            &static_keys.mac,
-            DERIVATION_S_MAC,
-            &context,
-            mac_bits,
-        )?);
-        let s_rmac = Zeroizing::new(derive(
-            &static_keys.mac,
-            DERIVATION_S_RMAC,
-            &context,
-            mac_bits,
-        )?);
+        let enc_length = static_keys.scope.aes_length(&static_keys.enc)?;
+        let mac_length = static_keys.scope.aes_length(&static_keys.mac)?;
+        let s_enc = static_keys.derive(true, DERIVATION_S_ENC, &context, enc_length)?;
+        let s_mac = static_keys.derive(false, DERIVATION_S_MAC, &context, mac_length)?;
+        let s_rmac = static_keys.derive(false, DERIVATION_S_RMAC, &context, mac_length)?;
         let expected_card_cryptogram = derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64)?;
         if !bool::from(expected_card_cryptogram.ct_eq(card_cryptogram)) {
             return Err(CKR_PIN_INCORRECT.into());
@@ -971,6 +928,7 @@ fn validate_card_capabilities(implementation: u8, security_level: u8) -> Result<
     Ok(())
 }
 
+#[cfg(test)]
 fn yubico_diversify_key(
     bmk: &[u8],
     label: [u8; 4],
