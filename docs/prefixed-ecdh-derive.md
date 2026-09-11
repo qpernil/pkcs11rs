@@ -101,10 +101,9 @@ and the key's computed `CKA_ALLOWED_MECHANISMS` permit it. The client derives
 and reads only the ephemeral agreement `P`, then supplies it as prefix bytes
 for static ECDH plus KDF. A missing or excluded mechanism selects the standard
 protected-object ECDH/concatenation/SHA-256 sequence. Operational failures are
-returned without retrying through the fallback. Direct password authentication
-and recreation from an already retained static agreement use the standard
-sequence, preserving the documented retention of the static agreement rather
-than the password-derived private key.
+returned without retrying through the fallback. Direct password authentication and recreation use the same capability selection.
+Recreation retains a protected private-key credential and recomputes ECDH;
+static agreements are scoped to the handshake.
 
 The 64-byte result is divided as follows:
 

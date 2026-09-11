@@ -164,6 +164,9 @@ impl PasswordCredentials {
             self.scope.object(&self.asymmetric)?.handle,
         )
     }
+    pub(crate) fn retain_asymmetric(&mut self) -> Result<BoundKey, Error> {
+        self.scope.take_key(&self.asymmetric)
+    }
     pub(crate) fn retain_symmetric(&mut self) -> Result<SymmetricCredential, Error> {
         let mut keys = self.scope.take_keys(&[&self.enc, &self.mac])?.into_iter();
         let enc = keys.next().ok_or(CKR_FUNCTION_FAILED)?;
