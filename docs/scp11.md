@@ -104,6 +104,63 @@ they perform a fresh SCP11 handshake for their transaction.
 
 ## Issuer SD key provisioning
 
+On physical YubiKeys, installing custom SCP11 authentication credentials can
+remove the factory SCP03 key set. Before provisioning, establish and verify a
+separate, recoverable custom administrative credential. An in-memory test
+credential is insufficient as the only recovery path if the process exits.
+SCP03 and SCP11 credentials can coexist, but the factory SCP03 bootstrap key
+set must not be treated as a persistent recovery credential.
+
+Physical qualification on firmware 5.7.4 is consistent with a shared budget of
+three credential entries: one SCP03 set, one SCP11a card key, and one SCP11b
+card key fit together. Adding the OCE CA public key as a fourth entry returned
+`6A84`. With the factory SCP11b key also installed, adding both custom card keys
+likewise failed at the second generation command, regardless of insertion order.
+These observations do not imply a separate quota for each SCP11 variant.
+
+The ignored `physical_scp11_coexistence` test requires a saved custom SCP03
+recovery configuration and space for both temporary card keys. It verifies
+SCP11b while SCP11a is present, removes the test-owned SCP11b key to make room
+for the OCE CA, and then verifies SCP11a. Each protocol completes three fresh
+handshakes and protected Issuer SD reads. It removes its temporary keys and
+compares the complete Security Domain inventory with its initial snapshot.
+It does not qualify simultaneous operation of both protocols with the CA and
+SCP03 recovery set present, nor the factory Yubico certificate-trust path.
+
+```sh
+PKCS11RS_TEST_ISSUER_SD_SOURCE=SERIAL \
+PKCS11RS_TEST_SCP_RECOVERY_CONFIG=/path/to/saved-custom-scp03.json \
+cargo test --lib physical_scp11_coexistence -- --ignored --nocapture
+```
+
+The custom recovery set must already be installed and its configuration saved
+before this test runs. The test refuses factory KVN `255` and never removes its
+recovery set. Its host certificate uses key-agreement usage, subject and authority
+key identifiers, and critical GlobalPlatform OCE policy
+`1.2.840.114283.100.0.10.2.1.0`, following
+[Yubico's hardware-test certificate profile](https://github.com/Yubico/yubikey-manager/blob/main/tests/files/scp/generate_files.sh).
+The matching CA identifier is stored on the card. Host private keys remain
+temporary provider objects; the saved recovery set permits cleanup after a
+process failure without retaining the temporary host credential.
+
+The ignored `physical_scp11a_with_yubihsm_host` variant generates a temporary
+nonextractable P-256 token key on a physical YubiHSM and issues the OCE
+certificate from its public point. It borrows that key through an authorized
+`Pkcs11Auth` provider session. The test verifies that the private scalar cannot
+be read, the key exists in the native HSM inventory, and the prefixed-ECDH
+mechanism is permitted. Three fresh SCP11a handshakes and protected reads have
+been qualified against a physical YubiKey with this source. The private scalar
+stays in the HSM; the physical YubiHSM backend completes the prefixed KDF in
+the module, and channel message cryptography uses the final local working keys.
+
+This variant also requires `PKCS11RS_TEST_SCP_HOST_HSM` and
+`PKCS11RS_TEST_SCP_HOST_HSM_PIN`, in addition to the card serial and saved SCP03
+configuration above. Supply the source PIN through a secret-input wrapper, not
+as a literal shell argument. The existing HSM Auth helper must be available; the
+test enables its applet on the selected YubiKey. Both native device inventories
+are checked after temporary-key cleanup. No source PIN is retained for session
+recreation, and the saved SCP03 recovery set remains installed.
+
 `pkcs11rs.h` declares typed administration functions for SCP11 keys and trust
 data. They require a read/write session on the Issuer SD slot and an existing
 `CKU_USER` login over an OCE-authenticated channel. SCP03, SCP11a, and SCP11c
