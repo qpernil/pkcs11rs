@@ -13,18 +13,18 @@ pub(crate) struct KeyHandle {
 }
 
 struct ObjectHandle {
-    session: Rc<ProviderSession>,
+    session: Arc<ProviderSession>,
     handle: CK_OBJECT_HANDLE,
 }
 pub(crate) struct Pkcs11KeyScope {
     identity: Arc<()>,
-    pub(crate) session: Rc<ProviderSession>,
-    objects: Vec<Option<Rc<ObjectHandle>>>,
+    pub(crate) session: Arc<ProviderSession>,
+    objects: Vec<Option<Arc<ObjectHandle>>>,
 }
 
 /// Keeps the owning session alive without exporting its key.
 #[derive(Clone)]
-pub(crate) struct BoundKey(Rc<ObjectHandle>);
+pub(crate) struct BoundKey(Arc<ObjectHandle>);
 
 #[derive(Clone, Copy)]
 pub(crate) enum CounterKdfPath {
@@ -55,7 +55,7 @@ impl BoundKey {
     /// Borrow a credential through its authorized session. Token objects stay
     /// token-owned; dropping this reference never deletes the source key.
     pub(crate) fn from_session(
-        session: Rc<ProviderSession>,
+        session: Arc<ProviderSession>,
         handle: CK_OBJECT_HANDLE,
     ) -> Result<Self, Error> {
         let class = session.attribute(handle, CKA_CLASS)?;
@@ -64,7 +64,7 @@ impl BoundKey {
         if class != CKO_SECRET_KEY as CK_ULONG && class != CKO_PRIVATE_KEY as CK_ULONG {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
-        Ok(Self(Rc::new(ObjectHandle { session, handle })))
+        Ok(Self(Arc::new(ObjectHandle { session, handle })))
     }
 }
 
@@ -77,7 +77,7 @@ pub(crate) struct SymmetricCredential {
 }
 impl SymmetricCredential {
     pub(crate) fn find(
-        session: Rc<ProviderSession>,
+        session: Arc<ProviderSession>,
         label: &str,
         token: bool,
     ) -> Result<Self, Error> {
@@ -182,6 +182,12 @@ impl PasswordCredentials {
     }
 }
 
+pub(crate) fn readable_template(mut template: TokenObjectTemplate) -> TokenObjectTemplate {
+    template.sensitive = Some(false);
+    template.extractable = Some(true);
+    template
+}
+
 pub(crate) fn generic_template(mechanisms: &[CK_MECHANISM_TYPE]) -> TokenObjectTemplate {
     TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as _),
@@ -199,10 +205,10 @@ impl Pkcs11KeyScope {
     pub(crate) fn new() -> Result<Self, Error> {
         Self::open(Pkcs11Provider::private_software()?)
     }
-    fn open(provider: Rc<Pkcs11Provider>) -> Result<Self, Error> {
+    fn open(provider: Arc<Pkcs11Provider>) -> Result<Self, Error> {
         Ok(Self::from_session(ProviderSession::open(provider)?))
     }
-    pub(crate) fn from_session(session: Rc<ProviderSession>) -> Self {
+    pub(crate) fn from_session(session: Arc<ProviderSession>) -> Self {
         Self {
             identity: Arc::new(()),
             session,
@@ -212,7 +218,7 @@ impl Pkcs11KeyScope {
     pub(crate) fn for_key(key: &BoundKey) -> Result<Self, Error> {
         Self::open(key.0.session.provider.clone())
     }
-    fn insert(&mut self, object: Rc<ObjectHandle>) -> KeyHandle {
+    fn insert(&mut self, object: Arc<ObjectHandle>) -> KeyHandle {
         let index = self.objects.len();
         self.objects.push(Some(object));
         KeyHandle {
@@ -221,7 +227,7 @@ impl Pkcs11KeyScope {
         }
     }
     fn created(&mut self, handle: CK_OBJECT_HANDLE) -> KeyHandle {
-        self.insert(Rc::new(ObjectHandle {
+        self.insert(Arc::new(ObjectHandle {
             session: self.session.clone(),
             handle,
         }))
@@ -236,10 +242,25 @@ impl Pkcs11KeyScope {
             .ok_or_else(|| CKR_KEY_HANDLE_INVALID.into())
     }
     pub(crate) fn bind(&mut self, key: &BoundKey) -> Result<KeyHandle, Error> {
-        if !Rc::ptr_eq(&self.session.provider, &key.0.session.provider) {
+        if !Arc::ptr_eq(&self.session.provider, &key.0.session.provider) {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
         Ok(self.insert(key.0.clone()))
+    }
+    /// Retain a borrowed source binding unchanged; transfer a newly created
+    /// session key into a dedicated owning session so other intermediates die.
+    pub(crate) fn retain_key(&mut self, key: &KeyHandle) -> Result<BoundKey, Error> {
+        let object = self.object(key)?;
+        if Arc::ptr_eq(&object.session, &self.session) {
+            self.take_key(key)
+        } else {
+            Ok(BoundKey(
+                self.objects[key.index]
+                    .as_ref()
+                    .ok_or(CKR_KEY_HANDLE_INVALID)?
+                    .clone(),
+            ))
+        }
     }
     pub(crate) fn take_key(&mut self, key: &KeyHandle) -> Result<BoundKey, Error> {
         self.take_keys(&[key])?
@@ -250,7 +271,7 @@ impl Pkcs11KeyScope {
         let mut sources = Vec::with_capacity(keys.len());
         for key in keys {
             let object = self.object(key)?;
-            if !Rc::ptr_eq(&object.session, &self.session)
+            if !Arc::ptr_eq(&object.session, &self.session)
                 || self.read(key, CKA_TOKEN)?.as_slice() != [CK_FALSE as u8]
             {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
@@ -273,7 +294,7 @@ impl Pkcs11KeyScope {
     }
     pub(crate) fn destroy(&mut self, key: &KeyHandle) -> Result<(), Error> {
         let object = self.object(key)?;
-        if Rc::ptr_eq(&object.session, &self.session) {
+        if Arc::ptr_eq(&object.session, &self.session) {
             self.session.destroy(object.handle)?;
         }
         self.objects[key.index] = None;
@@ -384,6 +405,97 @@ impl Pkcs11KeyScope {
             length,
         )
     }
+    /// Two P-256 agreements, with only the ephemeral prefix readable on the
+    /// combined path. Mechanism selection precedes execution and is not retried.
+    pub(crate) fn dual_ecdh_x963(
+        &mut self,
+        ephemeral: &KeyHandle,
+        ephemeral_peer: &[u8],
+        credential: &KeyHandle,
+        credential_peer: &[u8],
+        shared_info: &[u8],
+        length: usize,
+    ) -> Result<KeyHandle, Error> {
+        let agreement = || generic_template(&[CKM_CONCATENATE_BASE_AND_KEY as _]);
+        if self.can_derive(credential, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)? {
+            let shared = self.ecdh(
+                ephemeral,
+                ephemeral_peer,
+                readable_template(generic_template(&[])),
+            )?;
+            let prefix = self.read_ephemeral_agreement(&shared)?;
+            self.destroy(&shared)?;
+            self.prefixed_ecdh(
+                credential,
+                credential_peer,
+                &prefix,
+                shared_info,
+                readable_template(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
+                length,
+            )
+        } else {
+            let first = self.ecdh(ephemeral, ephemeral_peer, agreement())?;
+            let second = self.ecdh(credential, credential_peer, agreement())?;
+            let z = self.append_key(
+                &first,
+                &second,
+                generic_template(&[CKM_CONCATENATE_BASE_AND_DATA as _]),
+                64,
+            )?;
+            self.x963_sha256(&z, 64, shared_info, length)
+        }
+    }
+
+    /// X9.63 over a protected agreement object. Only final hash outputs are
+    /// readable; agreement and hash input values never cross the provider API.
+    pub(crate) fn x963_sha256(
+        &mut self,
+        z: &KeyHandle,
+        z_length: usize,
+        shared_info: &[u8],
+        length: usize,
+    ) -> Result<KeyHandle, Error> {
+        if length == 0 || length > 1024 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        self.require_generic_length(z, z_length)?;
+        let output = || {
+            readable_template(generic_template(&[
+                CKM_CONCATENATE_BASE_AND_KEY as _,
+                CKM_EXTRACT_KEY_FROM_KEY as _,
+            ]))
+        };
+        let mut material = None;
+        for i in 1..=length.div_ceil(32) {
+            let mut suffix = (i as u32).to_be_bytes().to_vec();
+            suffix.extend_from_slice(shared_info);
+            let input = self.append_data(
+                z,
+                &suffix,
+                generic_template(&[CKM_SHA256_KEY_DERIVATION as _]),
+                z_length + suffix.len(),
+            )?;
+            let block = self.sha256(&input, output())?;
+            self.destroy(&input)?;
+            material = Some(match material {
+                None => block,
+                Some(previous) => {
+                    let joined = self.append_key(&previous, &block, output(), i * 32)?;
+                    self.destroy(&previous)?;
+                    self.destroy(&block)?;
+                    joined
+                }
+            });
+        }
+        let material = material.ok_or(CKR_FUNCTION_FAILED)?;
+        if length.is_multiple_of(32) {
+            return Ok(material);
+        }
+        let truncated = self.extract(&material, 0, output(), length)?;
+        self.destroy(&material)?;
+        Ok(truncated)
+    }
+
     /// Export only an explicitly readable ephemeral agreement, never a static key.
     pub(crate) fn read_ephemeral_agreement(
         &self,
@@ -467,23 +579,24 @@ impl Pkcs11KeyScope {
         }
         Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into())
     }
-    pub(crate) fn counter_kdf_aes128(
+    pub(crate) fn counter_kdf_bytes(
         &mut self,
         base: &KeyHandle,
         path: CounterKdfPath,
         fields: &[software_key_core::counter_kdf::CounterKdfField<'_>],
         template: TokenObjectTemplate,
-    ) -> Result<Zeroizing<[u8; 16]>, Error> {
+        length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
         match path {
             CounterKdfPath::Derive => {
-                let output = self.derive_counter(base, fields, template, 16)?;
-                let value = self.read_aes128(&output)?;
+                let output = self.derive_counter(base, fields, template, length)?;
+                let value = self.read_secret(&output, length)?;
                 self.destroy(&output)?;
                 Ok(value)
             }
             CounterKdfPath::AesEcb | CounterKdfPath::AesCbc => {
                 let handle = self.object(base)?.handle;
-                let value = crate::software_key_ops::counter_kdf_with(fields, 16, |input| {
+                let value = crate::software_key_ops::counter_kdf_with(fields, length, |input| {
                     let encrypt_block = |block: &[u8]| {
                         let block = block
                             .try_into()
@@ -509,11 +622,52 @@ impl Pkcs11KeyScope {
                         .try_into()
                         .map_err(|_| CKR_DEVICE_ERROR.into())
                 })?;
-                let mut output = Zeroizing::new([0; 16]);
-                output.copy_from_slice(&value);
-                Ok(output)
+                Ok(value)
             }
         }
+    }
+    pub(crate) fn counter_kdf_aes128(
+        &mut self,
+        base: &KeyHandle,
+        path: CounterKdfPath,
+        fields: &[software_key_core::counter_kdf::CounterKdfField<'_>],
+        template: TokenObjectTemplate,
+    ) -> Result<Zeroizing<[u8; 16]>, Error> {
+        let value = self.counter_kdf_bytes(base, path, fields, template, 16)?;
+        let mut output = Zeroizing::new([0; 16]);
+        output.copy_from_slice(&value);
+        Ok(output)
+    }
+    pub(crate) fn read_secret(
+        &self,
+        key: &KeyHandle,
+        length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let value = self.read(key, CKA_VALUE)?;
+        if value.len() != length {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        Ok(value)
+    }
+    pub(crate) fn aes_length(&self, key: &KeyHandle) -> Result<usize, Error> {
+        if self.ulong(key, CKA_CLASS)? != CKO_SECRET_KEY as CK_ULONG
+            || self.ulong(key, CKA_KEY_TYPE)? != CKK_AES as CK_ULONG
+        {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        let length = self.ulong(key, CKA_VALUE_LEN)? as usize;
+        if !matches!(length, 16 | 24 | 32) {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        Ok(length)
+    }
+    pub(crate) fn encrypt_cbc(
+        &self,
+        key: &KeyHandle,
+        input: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.session
+            .encrypt_aes_cbc(self.object(key)?.handle, input)
     }
     pub(crate) fn read_aes128(&self, key: &KeyHandle) -> Result<Zeroizing<[u8; 16]>, Error> {
         if self.ulong(key, CKA_CLASS)? != CKO_SECRET_KEY as CK_ULONG

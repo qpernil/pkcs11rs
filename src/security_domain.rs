@@ -1,7 +1,7 @@
 use crate::{
     CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
     CommandApdu, Connector, Error, ResponseApdu, Scp03Session,
-    secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc, aes_encrypt_block},
+    secure_channel_crypto::{AES_BLOCK_SIZE, aes_encrypt_block},
 };
 use const_oid::ObjectIdentifier;
 use der::{Decode, Encode};
@@ -207,15 +207,10 @@ impl Client {
                 validate_scp11_key_ref(*key_ref)?;
                 let (curve, scalar) = parse_private_key(encoded)?;
                 let wrapping_dek = session.static_dek()?;
-                if wrapping_dek.len() != AES_BLOCK_SIZE || scalar.len() % AES_BLOCK_SIZE != 0 {
+                if wrapping_dek.len()? != AES_BLOCK_SIZE || scalar.len() % AES_BLOCK_SIZE != 0 {
                     return Err(CKR_KEY_SIZE_RANGE.into());
                 }
-                let wrapped = aes_cbc(
-                    wrapping_dek,
-                    &[0; AES_BLOCK_SIZE],
-                    scalar.as_slice(),
-                    Direction::Encrypt,
-                )?;
+                let wrapped = wrapping_dek.encrypt(scalar.as_slice())?;
                 let data = put_ec_key_data(key_ref.kvn, KEY_TYPE_ECC_PRIVATE, &wrapped, curve)?;
                 (
                     administration_apdu(INS_PUT_KEY, *replace_kvn, key_ref.kid, data),
@@ -687,7 +682,7 @@ fn canonical_positive_integer(encoded: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn scp03_put_key_command(
-    wrapping_dek: &[u8],
+    wrapping_dek: &crate::scp_key_provider::CardDek,
     new_kvn: u8,
     replace_kvn: u8,
     keys: &Scp03ProvisioningKeys<'_>,
@@ -695,7 +690,7 @@ fn scp03_put_key_command(
     if !(1..=254).contains(&new_kvn) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    if wrapping_dek.len() != AES_BLOCK_SIZE
+    if wrapping_dek.len()? != AES_BLOCK_SIZE
         || [keys.enc, keys.mac, keys.dek]
             .iter()
             .any(|key| key.len() != AES_BLOCK_SIZE)
@@ -706,7 +701,7 @@ fn scp03_put_key_command(
     let mut data = vec![new_kvn];
     let mut expected = vec![new_kvn];
     for key in [keys.enc, keys.mac, keys.dek] {
-        let wrapped = aes_cbc(wrapping_dek, &[0; AES_BLOCK_SIZE], key, Direction::Encrypt)?;
+        let wrapped = wrapping_dek.encrypt(key)?;
         data.extend_from_slice(&encode_tlv(KEY_TYPE_AES, &wrapped)?);
         let encrypted_ones = aes_encrypt_block(key, &[1; AES_BLOCK_SIZE])?;
         let kcv = &encrypted_ones[..3];
@@ -1079,7 +1074,7 @@ mod tests {
         let mac = hex("101112131415161718191a1b1c1d1e1f");
         let dek = hex("202122232425262728292a2b2c2d2e2f");
         let (command, expected) = scp03_put_key_command(
-            &wrapping_dek,
+            &crate::scp_key_provider::CardDek::Session(Zeroizing::new(wrapping_dek.clone())),
             2,
             0xff,
             &Scp03ProvisioningKeys {
@@ -1112,7 +1107,7 @@ mod tests {
         let short = [0; AES_BLOCK_SIZE - 1];
         assert!(
             scp03_put_key_command(
-                &short,
+                &crate::scp_key_provider::CardDek::Session(Zeroizing::new(short.to_vec())),
                 1,
                 0,
                 &Scp03ProvisioningKeys {
@@ -1125,7 +1120,7 @@ mod tests {
         );
         assert!(
             scp03_put_key_command(
-                &key,
+                &crate::scp_key_provider::CardDek::Session(Zeroizing::new(key.to_vec())),
                 1,
                 0,
                 &Scp03ProvisioningKeys {
@@ -1139,7 +1134,7 @@ mod tests {
         for reserved_kvn in [0, 255] {
             assert!(
                 scp03_put_key_command(
-                    &key,
+                    &crate::scp_key_provider::CardDek::Session(Zeroizing::new(key.to_vec())),
                     reserved_kvn,
                     0,
                     &Scp03ProvisioningKeys {

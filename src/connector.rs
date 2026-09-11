@@ -1001,7 +1001,7 @@ impl Connector for PcscAppletConnector {
                 .session
                 .as_mut()
                 .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-            if session.static_dek()?.len() != 16 {
+            if session.static_dek()?.len()? != 16 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
             let result = SecurityDomainClient.put_scp03_key_set(

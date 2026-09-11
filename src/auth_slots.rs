@@ -326,7 +326,7 @@ impl HsmAuthCredentialBinding {
 pub(crate) struct OrdinaryCredential {
     pub(crate) pin_required: bool,
     explicit: bool,
-    pub(crate) session: Rc<ProviderSession>,
+    pub(crate) session: Arc<ProviderSession>,
     pub(crate) source: String,
     pub(crate) title: String,
     pub(crate) label: String,

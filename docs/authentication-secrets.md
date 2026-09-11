@@ -28,6 +28,13 @@ lifetime is distinct from retaining the login secret to authenticate again.
   attempt, deleting all three original key objects, including the unused type.
   Transparent session recreation is an explicit exception
   described below.
+- Card SCP03/SCP11 uses protected provider objects for establishment. Configured
+  SCP03 inputs are imported per handshake; the static administration DEK remains
+  a protected binding until the card transaction ends. A configured SCP11 OCE key
+  is decrypted once into a protected provider credential; its file-unlock password
+  is not retained. Separate handshake sessions release all ephemeral agreements,
+  receipt keys, and KDF intermediates. Final message keys and SCP11's derived DEK
+  remain in zeroizing local storage for the card transaction lifetime.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
   they are not a cache populated from ordinary user login.

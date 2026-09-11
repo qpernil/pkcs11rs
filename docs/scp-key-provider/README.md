@@ -132,7 +132,7 @@ All YubiHSM channels use local AES ECB/CBC and CMAC. Response authentication
 precedes decryption. Successful close and failed exchanges erase working keys;
 authenticated device-command errors advance the channel and preserve its keys.
 Local command-validation errors leave it intact. Card SCP03/SCP11 message crypto
-also runs locally; their derivation graphs still need migration.
+also runs locally; their derivation graphs use the same provider operations.
 
 ## 1. Configured provider selection and named lookup
 
@@ -159,8 +159,7 @@ Platform and native-source tests cover public ambiguity before authorization;
 native tests count password-bearing requests to verify no candidate fallback.
 
 Remaining qualification includes additional real hardware source-to-target combinations
-and provider dependency-cycle handling across retained bindings. Card protocol
-migration and virtual-token-native operations follow below.
+and provider dependency-cycle handling across retained bindings. Card protocol details and remaining virtual-token-native operations follow below.
 
 ### Physical YubiHSM-to-YubiHSM regression
 
@@ -224,22 +223,40 @@ authentication and recovery after 35 seconds idle in this topology. Symmetric
 selection was driven by the persisted usage flags and allowed-mechanism list.
 Both inventories returned to their original 12 objects after each case.
 
-## 2. Migrate card derivation
+## 2. Card derivation
 
-Route the existing card SCP03 S8 and SCP11a/b/c derivation graphs through the
-same API adapter while preserving their distinct transcripts, IV direction bit,
-security levels, and native smart-card transaction lifetime. Local encryption
-and MAC continue to use the derived channel keys.
+Card SCP03 S8 and SCP11a/b/c use `Pkcs11Auth` through scoped provider objects.
+Their transcripts, security levels, response IV direction bit, and native
+smart-card transaction lifetime remain protocol-specific. Message AES/CMAC
+runs locally with the derived working keys.
 
-Card SCP11 derives a fifth key, DEK. Card SCP03 has a static administration DEK;
-its access policy must be handled separately rather than exporting a long-term
-key as if it were a disposable channel key. Existing caller-supplied provisioning
-material and KCV calculation remain an explicit input workflow. SCP03 S16 and
-unrelated protocol families are outside this plan.
+SCP03 accepts AES-128/192/256 configured inputs. A temporary software provider
+imports direct ENC/MAC/DEK keys or performs protected batch-master-key
+diversification. Counter KDF, with the permitted ECB/CBC alternative, derives
+working bytes and the optional 64-bit card challenge. The static administration
+DEK stays behind a protected handle and performs zero-IV CBC wrapping through
+the provider; it is never exported as a disposable working key.
 
-Acceptance: card protocol vectors, receipt validation, provisioning, and
-transaction-lifetime regressions pass. No long-term credential is exported to
-implement derivation or administration.
+SCP11 imports the configured OCE P-256 key as a protected credential and uses
+separate handshake sessions for ephemeral generation and intermediate objects.
+Its combined and standard ECDH paths share the generalized X9.63 operation graph
+with YubiHSM authentication. The card recipe requests five AES keys and verifies
+the encoded receipt transcript before reading S-ENC, S-MAC, S-RMAC, and DEK.
+SCP11b uses the ephemeral private key for both agreements and does not establish
+OCE authentication. Every temporary object is released on success or failure.
+
+Provider and session ownership uses `Arc`; the module's existing slot locks
+serialize backend access and provider selection remains thread-local. A retained
+DEK can move with a card transaction between caller threads. Direct input
+configuration remains supported; selecting card credentials by a configured
+slot/label is future work. Existing authorized sources are covered at the
+provider layer without copying or reading their credential values.
+
+Validation includes fixed card vectors, AES-192/256, batch diversification,
+both ECDH paths, failed receipts and source policies, source logout, cross-thread
+DEK use and cleanup, plus virtual-YubiKey provisioning and transaction-lifetime
+regressions. Caller-supplied new-key material and KCV calculation remain an
+explicit administration input workflow. SCP03 S16 is outside this plan.
 
 ## 3. Implement native virtual-YubiHSM derivation
 

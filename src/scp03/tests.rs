@@ -418,20 +418,53 @@ fn resolves_all_three_keys_from_the_initialize_update_context() {
         ))),
     };
     keys.validate().unwrap();
-    let resolved = keys
+    let mut resolved = keys
         .resolve(&hex("00010203040506070809").try_into().unwrap())
         .unwrap();
+    for key in [&resolved.enc, &resolved.mac, resolved.dek.as_ref().unwrap()] {
+        assert!(resolved.scope.read_secret(key, 16).is_err());
+    }
+    let context = [0x5a; 16];
     assert_eq!(
-        resolved.enc.as_slice(),
-        hex("6D8EF504CDFCA3D667DE72F24C4C82AF")
+        resolved
+            .derive(true, DERIVATION_S_ENC, &context, 16)
+            .unwrap()
+            .as_slice(),
+        derive(
+            &hex("6D8EF504CDFCA3D667DE72F24C4C82AF"),
+            DERIVATION_S_ENC,
+            &context,
+            128
+        )
+        .unwrap()
     );
     assert_eq!(
-        resolved.mac.as_slice(),
-        hex("90753AB6FD71D3BB9618DBEA179E0A56")
+        resolved
+            .derive(false, DERIVATION_S_MAC, &context, 16)
+            .unwrap()
+            .as_slice(),
+        derive(
+            &hex("90753AB6FD71D3BB9618DBEA179E0A56"),
+            DERIVATION_S_MAC,
+            &context,
+            128
+        )
+        .unwrap()
     );
     assert_eq!(
-        resolved.dek.as_ref().map(|key| key.as_slice()),
-        Some(hex("53A68B700A229B4314315BFCB162A650").as_slice())
+        resolved
+            .take_dek()
+            .unwrap()
+            .unwrap()
+            .encrypt(&[0; 16])
+            .unwrap(),
+        aes_cbc(
+            &hex("53A68B700A229B4314315BFCB162A650"),
+            &[0; 16],
+            &[0; 16],
+            Direction::Encrypt
+        )
+        .unwrap()
     );
 }
 
@@ -982,12 +1015,17 @@ fn authenticates_with_yubico_diversified_transport_keys() {
     };
     keys.validate().unwrap();
     let issuer_context: [u8; 10] = hex("00010203040506070809").try_into().unwrap();
-    let resolved = keys.resolve(&issuer_context).unwrap();
     let host: [u8; 8] = hex("0102030405060708").try_into().unwrap();
     let card = hex("1112131415161718");
     let mut session_context = host.to_vec();
     session_context.extend_from_slice(&card);
-    let s_mac = derive(&resolved.mac, DERIVATION_S_MAC, &session_context, 128).unwrap();
+    let s_mac = derive(
+        &hex("90753AB6FD71D3BB9618DBEA179E0A56"),
+        DERIVATION_S_MAC,
+        &session_context,
+        128,
+    )
+    .unwrap();
     let card_cryptogram = derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &session_context, 64).unwrap();
     let mut initialize_response = issuer_context.to_vec();
     initialize_response.extend([7, 3, 0x60]);
@@ -1215,9 +1253,9 @@ fn matches_samsung_openscp_s8_exchange_vectors() {
             Scp03KeySet::new(0x30, 0, hex(vector.enc), hex(vector.mac), hex(vector.dek)).unwrap();
         let initialize_response = ResponseApdu::parse(&hex(vector.initialize_response)).unwrap();
         let update = InitializeUpdate::parse(&initialize_response.data).unwrap();
-        let static_keys = keys.resolve(&update.issuer_context).unwrap();
+        let mut static_keys = keys.resolve(&update.issuer_context).unwrap();
         let (mut session, host_cryptogram) = Scp03Session::from_initialize_update(
-            &static_keys,
+            &mut static_keys,
             0x33,
             host,
             &update,

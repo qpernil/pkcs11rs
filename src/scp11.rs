@@ -1,17 +1,15 @@
 use crate::{
-    CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_USER_PIN_NOT_INITIALIZED,
-    Connector,
+    CKK_AES, CKM_AES_CMAC, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
+    CKR_SIGNATURE_INVALID, CKR_USER_PIN_NOT_INITIALIZED, Connector, TokenObjectTemplate,
     error::Error,
+    key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, generic_template, readable_template},
+    scp_key_provider::protect_p256,
     scp03::{CommandApdu, Scp03Session},
-    secure_channel_crypto::aes_cmac,
 };
-use software_key_core::{
-    software_key_agreement::derive_with_signing_key,
-    software_signing::{EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
+use software_key_core::software_signing::{
+    EcCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey,
 };
 use std::fs;
-use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
 
 #[cfg(test)]
 use crate::scp03::parse_hex;
@@ -68,7 +66,7 @@ impl Scp11Variant {
 struct Scp11aHostCredentials {
     key_version: u8,
     key_id: u8,
-    private_key: SoftwareSigningKey,
+    private_key: BoundKey,
     certificates: Vec<Vec<u8>>,
 }
 
@@ -161,8 +159,7 @@ impl Scp11KeySet {
         connector: &dyn Connector,
     ) -> Result<Scp03Session, Error> {
         let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
-        let ephemeral = p256_key()?;
-        self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
+        self.establish_with_card_key(connector, card_public_key)
     }
 
     pub(crate) fn authenticate_application(
@@ -179,9 +176,8 @@ impl Scp11KeySet {
         }
         if let Some(point) = cached_public_point {
             let card_public_key = parse_public_point(point)?;
-            let ephemeral = p256_key()?;
             return self
-                .establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
+                .establish_with_card_key(connector, &card_public_key)
                 .map(|session| (session, None));
         }
 
@@ -200,9 +196,8 @@ impl Scp11KeySet {
             &certificates?,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )?;
-        let ephemeral = p256_key()?;
         let point = card_public_key.clone();
-        self.establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
+        self.establish_with_card_key(connector, &card_public_key)
             .map(|session| (session, Some(point)))
     }
 
@@ -224,17 +219,37 @@ impl Scp11KeySet {
         ephemeral: SoftwareSigningKey,
     ) -> Result<Scp03Session, Error> {
         let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
-        self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
+        let mut scope = self.key_scope()?;
+        let ephemeral = scope.import_p256(ephemeral)?;
+        self.establish_with_ephemeral_and_card_key(connector, scope, ephemeral, card_public_key)
+    }
+
+    fn key_scope(&self) -> Result<Pkcs11KeyScope, Error> {
+        match &self.host {
+            Some(host) => Pkcs11KeyScope::for_key(&host.private_key),
+            None => Pkcs11KeyScope::new(),
+        }
+    }
+
+    fn establish_with_card_key(
+        &self,
+        connector: &dyn Connector,
+        card_public_key: &[u8],
+    ) -> Result<Scp03Session, Error> {
+        let mut scope = self.key_scope()?;
+        let ephemeral = scope.generate_p256()?;
+        self.establish_with_ephemeral_and_card_key(connector, scope, ephemeral, card_public_key)
     }
 
     fn establish_with_ephemeral_and_card_key(
         &self,
         connector: &dyn Connector,
-        ephemeral: SoftwareSigningKey,
+        mut scope: Pkcs11KeyScope,
+        ephemeral: KeyHandle,
         card_public_key: &[u8],
     ) -> Result<Scp03Session, Error> {
         self.upload_host_certificates(connector)?;
-        let host_ephemeral_point = encode_private_public_point(&ephemeral)?;
+        let host_ephemeral_point = scope.p256_public(&ephemeral)?;
         let request_data = authentication_data(&host_ephemeral_point, self.variant.parameter())?;
         let authenticate = CommandApdu {
             cla: 0x80,
@@ -251,37 +266,66 @@ impl Scp11KeySet {
         let authentication = parse_authentication_response(&response.data)?;
         let card_ephemeral_key = parse_public_point(authentication.card_ephemeral_point)?;
 
-        let ka1 = Zeroizing::new(ecdh(&ephemeral, &card_ephemeral_key)?);
-        let static_or_ephemeral = self
-            .host
-            .as_ref()
-            .map(|host| &host.private_key)
-            .unwrap_or(&ephemeral);
-        let ka2 = Zeroizing::new(ecdh(static_or_ephemeral, card_public_key)?);
-        if ka1.len() != 32 || ka2.len() != 32 {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let mut key_agreement = Zeroizing::new(Vec::with_capacity(ka1.len() + ka2.len()));
-        key_agreement.extend_from_slice(&ka1);
-        key_agreement.extend_from_slice(&ka2);
-        let key_material = derive_key_material(&key_agreement)?;
-
-        let mut receipt_input =
-            Vec::with_capacity(request_data.len() + authentication.card_ephemeral_tlv.len());
-        receipt_input.extend_from_slice(&request_data);
+        let credential = match &self.host {
+            Some(host) => scope.bind(&host.private_key)?,
+            None => ephemeral.clone(),
+        };
+        let material = scope.dual_ecdh_x963(
+            &ephemeral,
+            &card_ephemeral_key,
+            &credential,
+            card_public_key,
+            &[KEY_USAGE, KEY_TYPE_AES, KEY_LENGTH_AES_128],
+            SESSION_KEY_LENGTH * DERIVED_KEY_COUNT,
+        )?;
+        let receipt_key = scope.extract(
+            &material,
+            0,
+            TokenObjectTemplate {
+                key_type: Some(CKK_AES as _),
+                derive: false,
+                verify: true,
+                ..generic_template(&[CKM_AES_CMAC as _])
+            },
+            16,
+        )?;
+        let mut receipt_input = request_data;
         receipt_input.extend_from_slice(authentication.card_ephemeral_tlv);
-        let expected_receipt = aes_cmac(&key_material[..SESSION_KEY_LENGTH], &receipt_input)?;
-        if !bool::from(expected_receipt.ct_eq(authentication.receipt)) {
-            return Err(CKR_PIN_INCORRECT.into());
+        scope
+            .verify_cmac(&receipt_key, &receipt_input, authentication.receipt)
+            .map_err(|error| match error {
+                Error::Generic(rv) if rv == CKR_SIGNATURE_INVALID as crate::CK_RV => {
+                    CKR_PIN_INCORRECT.into()
+                }
+                error => error,
+            })?;
+        scope.destroy(&receipt_key)?;
+        let mut working = Vec::new();
+        for index in 1..DERIVED_KEY_COUNT {
+            let key = scope.extract(
+                &material,
+                index * 128,
+                readable_template(TokenObjectTemplate {
+                    key_type: Some(CKK_AES as _),
+                    derive: false,
+                    ..generic_template(&[])
+                }),
+                16,
+            )?;
+            working.push(scope.read_aes128(&key)?);
+            scope.destroy(&key)?;
         }
-
+        let receipt = authentication
+            .receipt
+            .try_into()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         Scp03Session::from_session_keys(
-            key_material[16..32].to_vec(),
-            key_material[32..48].to_vec(),
-            key_material[48..64].to_vec(),
-            Some(key_material[64..80].to_vec()),
+            working[0].to_vec(),
+            working[1].to_vec(),
+            working[2].to_vec(),
+            Some(working[3].to_vec()),
             self.host.is_some(),
-            expected_receipt,
+            receipt,
             SCP11_SECURITY_LEVEL,
         )
     }
@@ -336,7 +380,7 @@ impl Scp11aHostCredentials {
         Ok(Self {
             key_version: configuration.key_version,
             key_id: configuration.key_id,
-            private_key,
+            private_key: protect_p256(private_key)?,
             certificates,
         })
     }
@@ -362,13 +406,6 @@ fn card_public_key_from_certificates(
     parse_public_point(&trust.validate_p256_public_point(certificates)?)
 }
 
-fn p256_key() -> Result<SoftwareSigningKey, Error> {
-    SoftwareSigningKey::generate_for_kind(KeyKind::Ec(
-        software_key_core::software_signing::EcCurve::P256,
-    ))
-    .map_err(|_| CKR_DEVICE_ERROR.into())
-}
-
 fn encode_private_public_point(key: &SoftwareSigningKey) -> Result<Vec<u8>, Error> {
     let SoftwarePublicKey::Ec {
         curve: EcCurve::P256,
@@ -378,12 +415,6 @@ fn encode_private_public_point(key: &SoftwareSigningKey) -> Result<Vec<u8>, Erro
         return Err(CKR_ARGUMENTS_BAD.into());
     };
     Ok(uncompressed)
-}
-
-fn ecdh(private: &SoftwareSigningKey, peer: &[u8]) -> Result<Vec<u8>, Error> {
-    derive_with_signing_key(private, peer)
-        .map(|secret| secret.to_vec())
-        .map_err(|_| CKR_ARGUMENTS_BAD.into())
 }
 
 fn authentication_data(host_ephemeral_point: &[u8], parameter: u8) -> Result<Vec<u8>, Error> {
@@ -404,7 +435,8 @@ fn authentication_data(host_ephemeral_point: &[u8], parameter: u8) -> Result<Vec
     Ok([parameters, public_key].concat())
 }
 
-fn derive_key_material(key_agreement: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
+#[cfg(test)]
+fn derive_key_material(key_agreement: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, Error> {
     if key_agreement.len() != 64 {
         return Err(CKR_DEVICE_ERROR.into());
     }
