@@ -957,8 +957,8 @@ discovery/applet filters to limit candidates if necessary. No password is used
 to distinguish candidates. A prompt identifies the selected source first.
 
 An ordinary source session reuses existing USER authorization, or calls the
-shared Rust `C_Login` handler when `CKF_LOGIN_REQUIRED` is set. Platform uses its
-empty-PIN login. Only after authorization are private keys resolved and checked
+shared Rust `C_Login` handler when `CKF_LOGIN_REQUIRED` is set. Host login ignores
+the supplied or omitted PIN. Only after authorization are private keys resolved and checked
 for type, identity, and derivation permission. Native HSM Auth instead consumes
 its credential password in the native operation. A failed authorization ends the
 request; there is no candidate fallback or automatic password retry.
@@ -967,7 +967,7 @@ request; there is no candidate fallback or automatic password retry.
 | --- | --- |
 | Temporary direct software slot | Password-derived protected session keys; private preparation establishes authorization |
 | Configured software slot | Persistent P-256 key or named AES pair; normal token USER PIN; public discovery needed for automatic matching |
-| Platform | Public P-256 projection; empty-PIN USER login and OS key-use policy |
+| Host | Public P-256 projection; PIN-independent USER login and OS key-use policy |
 | PIV / OpenPGP | P-256 key capable of ECDH; normal PIN and per-key policy, including any fresh-authentication requirement |
 | YubiHSM | P-256 key or AES pair; source HSM login and native key capabilities; public discovery for automatic matching |
 | HSM Auth profile | Dedicated symmetric/asymmetric credential types; native per-credential password |
@@ -1004,9 +1004,9 @@ YubiHSM login selector
 #### Login selection
 
 `:1003reserve@host` selects the target Authentication Key ID `1003` and exactly
-`CKA_LABEL=reserve` on the host slot. `C_LoginUser` supplies this username
-with a null PIN pointer and zero PIN length; the packed `C_Login` form is also
-supported. The selected host slot requires an empty PIN.
+`CKA_LABEL=reserve` on the host slot. `C_LoginUser` supplies this username; the
+packed `C_Login` form is also supported. The selected host slot accepts an
+omitted or supplied PIN and ignores its value.
 
 `:*reserve@host` matches that key's public point against the target HSM's discovered
 public authentication-key projections. Universal `:*` enumerates the enabled
@@ -1035,8 +1035,8 @@ uses it for the combined KDF in zeroizing memory, or stores it as a protected
 session object for ordinary ECDH; the private scalar remains
 in the Secure Enclave. The native key checks its managed identity before use,
 so deletion or replacement does not silently keep an obsolete binding usable.
-OS authorization governs the operation; the PKCS #11 platform source slot
-requires empty-PIN login to access private objects.
+OS authorization governs the operation; PKCS #11 USER login gates access to
+the host slot's private objects without validating a PIN.
 
 #### Asymmetric handshake
 

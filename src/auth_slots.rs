@@ -111,7 +111,7 @@ impl AuthSlots {
             if entry.profiles.contains(&CKP_YUBICO_HSMAUTH) {
                 continue;
             }
-            let (serial, title, pin_required) = {
+            {
                 let ctx = slot
                     .try_lock()
                     .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
@@ -122,8 +122,7 @@ impl AuthSlots {
                 if source.is_some_and(|source| source != serial) {
                     continue;
                 }
-                (serial, ctx.slot.label(), ctx.slot.user_login_requires_pin())
-            };
+            }
             let session = ProviderSession::open(Pkcs11Provider::from_slot(slot)?)?;
             let mut template = vec![(CKA_TOKEN, &[CK_TRUE as u8][..])];
             let class = (CKO_PUBLIC_KEY as CK_ULONG).to_ne_bytes();
@@ -143,11 +142,8 @@ impl AuthSlots {
                     return Err(CKR_PUBLIC_KEY_INVALID.into());
                 }
                 result.push(OrdinaryCredential {
-                    pin_required,
                     explicit,
                     session: session.clone(),
-                    source: serial.clone(),
-                    title: title.clone(),
                     label: String::from_utf8(session.attribute(handle, CKA_LABEL)?.to_vec())
                         .map_err(|_| CKR_DEVICE_ERROR)?,
                     id: Some(session.attribute(handle, CKA_ID)?.to_vec()),
@@ -163,11 +159,8 @@ impl AuthSlots {
                 && let Some(label) = label
             {
                 result.push(OrdinaryCredential {
-                    pin_required,
                     explicit,
                     session,
-                    source: serial,
-                    title,
                     label: label.to_owned(),
                     id: None,
                     public_key: None,
@@ -324,11 +317,8 @@ impl HsmAuthCredentialBinding {
 /// A public selection owns only a session and identifying metadata. It does not
 /// bind a private key or authorize the source until it has been selected uniquely.
 pub(crate) struct OrdinaryCredential {
-    pub(crate) pin_required: bool,
     explicit: bool,
     pub(crate) session: Arc<ProviderSession>,
-    pub(crate) source: String,
-    pub(crate) title: String,
     pub(crate) label: String,
     id: Option<Vec<u8>>,
     pub(crate) public_key: Option<Vec<u8>>,
@@ -336,10 +326,10 @@ pub(crate) struct OrdinaryCredential {
 impl OrdinaryCredential {
     pub(crate) fn authorize(
         self,
-        password: &[u8],
+        password: Option<&[u8]>,
         trust_prefix: Option<std::ffi::OsString>,
     ) -> Result<YubiHsmPkcs11AuthenticationMaterial, Error> {
-        self.session.authorize(password)?;
+        self.session.authorize_optional(password)?;
         let class = (CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes();
         let key_type = (CKK_EC as CK_ULONG).to_ne_bytes();
         let mut template = vec![

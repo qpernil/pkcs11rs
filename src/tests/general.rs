@@ -544,9 +544,13 @@ pub fn yubikey_login_preserves_connector_errors() {
         application_aid,
     );
 
-    let nonempty: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
-    assert_eq!(nonempty, CKR_PIN_INCORRECT as CK_RV);
-    let rv: CK_RV = crate::Slot::login(&mut slot, b"").unwrap_err().into();
+    let rv: CK_RV = crate::Slot::login(
+        &mut slot,
+        Some(b"arbitrary"),
+        &crate::pinentry::Pinentry::unconfigured(),
+    )
+    .unwrap_err()
+    .into();
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
 }
 
@@ -818,7 +822,6 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
     ];
     for (mut slot, certificates) in slots {
         assert!(slot.supports_login_user(), "{:?}", slot.kind());
-        assert!(!slot.login_user_has_named_users(), "{:?}", slot.kind());
         let ids: Vec<_> = slot
             .profile_objects(1)
             .into_iter()
@@ -1587,13 +1590,11 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
                 .any(|mechanism| mechanism.type_ == private_only as CK_MECHANISM_TYPE)
         );
     }
-    assert!(crate::Slot::login(&mut slot, &[]).is_ok());
+    let pinentry = crate::pinentry::Pinentry::unconfigured();
+    assert!(crate::Slot::login(&mut slot, Some(&[]), &pinentry).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::logout(&mut slot).unwrap();
-    assert!(matches!(
-        crate::Slot::login(&mut slot, b"ignored"),
-        Err(crate::Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
-    ));
+    assert!(crate::Slot::login(&mut slot, Some(b"ignored"), &pinentry).is_ok());
 }
 
 #[test]

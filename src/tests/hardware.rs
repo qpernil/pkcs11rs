@@ -3022,7 +3022,10 @@ mod fido2_hardware {
             let mut child = child
                 .lock()
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
-            child._get_slot_mut(slot_id)?.login(pin.as_bytes())?;
+            let pinentry = child.pinentry.clone();
+            child
+                ._get_slot_mut(slot_id)?
+                .login(Some(pin.as_bytes()), pinentry.as_ref())?;
             let objects = child.get_slot(slot_id)?.backend_token_objects(slot_id)?;
             let credential_count = objects
                 .iter()

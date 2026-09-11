@@ -352,14 +352,8 @@ pub(crate) fn login(
         };
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, slot_id, role, |slot| match role {
-                LoginRole::User => match pin {
-                    Some(pin) => slot.login_with_pinentry(pin, pinentry.as_ref()),
-                    None => slot.login_without_pin(pinentry.as_ref()),
-                },
-                LoginRole::So => match pin {
-                    Some(pin) => slot.login_so(pin),
-                    None => slot.login_so_without_pin(pinentry.as_ref()),
-                },
+                LoginRole::User => slot.login(pin, pinentry.as_ref()),
+                LoginRole::So => slot.login_so(pin, pinentry.as_ref()),
             })
         })
     })
@@ -415,23 +409,6 @@ fn login_user(
     username: *const CK_UTF8CHAR,
     username_len: CK_ULONG,
 ) -> Result<(), Error> {
-    let named_users = with_session_context(session_handle, |ctx| {
-        let slot_id = ctx._get_session(session_handle)?.1.slotID();
-        let slot = ctx.get_slot(slot_id)?;
-        if !slot.supports_login_user() {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
-        Ok(slot.login_user_has_named_users())
-    })?;
-    if !named_users {
-        let username = unsafe { from_raw_parts(username, username_len as usize) }?;
-        if !username.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        // Reuse user/SO/context-specific authorization, protected PIN entry,
-        // and session-state transitions without retaining another PIN copy.
-        return login(session_handle, user_type, pin, pin_len);
-    }
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         let pinentry = ctx.pinentry.clone();
@@ -457,12 +434,10 @@ fn login_user(
         };
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, slot_id, LoginRole::User, |slot| {
-                if let Some(pin) = pin {
-                    return slot.login_user(slot_id, username.as_bytes(), pin, &token_objects);
-                }
-                slot.login_user_without_pin(
+                slot.login_user(
                     slot_id,
                     username.as_bytes(),
+                    pin,
                     pinentry.as_ref(),
                     &token_objects,
                 )

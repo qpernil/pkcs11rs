@@ -11,10 +11,10 @@ the same C structures, buffers, sessions, and lifecycle.
 The inventory also exercises automatic YubiHSM authentication. It calls
 `C_LoginUser` with the provider-independent wildcard selector `:*` and the
 prototype YubiHSM Auth credential password `password` for each YubiHSM.
-pkcs11rs prefers a matching credential from an attached YubiKey and falls back
-to a matching platform credential, for which the supplied password is ignored.
-A successful login produces a second authenticated object inventory before the
-app logs out.
+pkcs11rs uses public-key matching to select the unique credential source.
+Native YubiHSM Auth consumes the supplied password; a matching host credential
+ignores it. A successful login produces a second authenticated object inventory
+before the app logs out.
 
 The platform-credential button exercises the same idempotent high-level
 PKCS11RS lifecycle API as the Swift app. **Provision platform credential** uses

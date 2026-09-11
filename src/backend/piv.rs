@@ -508,7 +508,8 @@ impl Slot for PivSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         self.authenticated.set(false);
         self.management_authenticated.set(false);
         self.connector
@@ -534,7 +535,12 @@ impl Slot for PivSlot {
         }
         result
     }
-    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login_so(
+        &mut self,
+        pin: Option<&[u8]>,
+        _pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         self.authenticated.set(false);
         self.management_authenticated.set(false);
         let key_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
