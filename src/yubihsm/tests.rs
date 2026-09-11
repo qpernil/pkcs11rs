@@ -2877,6 +2877,7 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
         &private.unique_id,
         Some(b"repaired-id"),
         Some("repaired label"),
+        None,
     )
     .unwrap();
     let commands = peer.inner_commands.borrow();
@@ -2969,6 +2970,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
             &unique_id,
             Some(b"failed-create-id"),
             Some("failed create"),
+            None,
         )
         .is_err()
     );
@@ -2993,6 +2995,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
         &unique_id,
         Some(b"first-canonical-id"),
         Some("first canonical"),
+        None,
     )
     .unwrap();
     let _ = Slot::token_objects(&slot, 7).unwrap();
@@ -3013,6 +3016,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
             &unique_id,
             Some(b"failed-delete-id"),
             Some("failed delete"),
+            None,
         )
         .is_err()
     );
@@ -3054,6 +3058,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
         &unique_id,
         Some(b"recovered-id"),
         Some("recovered label"),
+        None,
     )
     .unwrap();
     let recovered = Slot::token_objects(&slot, 7).unwrap();
@@ -3109,6 +3114,7 @@ fn assert_invalid_legacy_metadata_is_shadowed(public_discovery: bool) {
         &private.unique_id,
         None,
         Some("valid replacement"),
+        None,
     )
     .unwrap();
     assert!(peer.metadata_objects.borrow().contains_key(&101));
@@ -3156,6 +3162,7 @@ fn assert_invalid_canonical_metadata_suppresses_legacy_fallback(public_discovery
         &private.unique_id,
         Some(b"canonical-id"),
         Some("canonical label"),
+        None,
     )
     .unwrap();
     let _ = Slot::token_objects(&slot, 7).unwrap();

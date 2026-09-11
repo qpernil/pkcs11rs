@@ -393,7 +393,17 @@ credential.
 
 YubiHSM PKCS #11 metadata objects are internal opaque-data companions and are
 never exposed as PKCS #11 objects. Metadata may contain any subset of the
-private object's `CKA_ID` and `CKA_LABEL`. Canonical metadata may additionally
+primary object's `CKA_ID` and `CKA_LABEL`, usage-flag restrictions, and
+`CKA_ALLOWED_MECHANISMS`. Import, generation, and template-based unwrap preserve
+these PKCS #11 restrictions when native capabilities cannot express them exactly.
+For example, native AES-ECB capability supports encryption, CMAC, and counter
+derivation; separate PKCS #11 flags can prohibit individual uses. Rediscovery
+intersects stored usage flags with native capabilities, and mechanism selection
+also checks the stored allowed list. An explicitly empty list permits no
+mechanisms; an absent list imposes no additional restriction. Keys without this
+metadata retain the native capability mapping; existing objects and identity
+metadata require no migration. Restrictions lost during an earlier import cannot
+be reconstructed. Canonical metadata may additionally
 contain an explicit public aspect with sparse public-object attribute deltas.
 The linked native key supplies the public material, so its SPKI is not
 duplicated in metadata. Public-aspect presence represents a real public token

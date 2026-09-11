@@ -550,6 +550,7 @@ pub(crate) trait Slot {
         _unique_id: &str,
         _id: Option<&[u8]>,
         _label: Option<&str>,
+        _policy: Option<&TokenObject>,
     ) -> Result<(), Error> {
         Err(CKR_ATTRIBUTE_READ_ONLY.into())
     }

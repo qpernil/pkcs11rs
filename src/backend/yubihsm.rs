@@ -564,6 +564,7 @@ pub(crate) struct YubiHsmPkcs11Metadata {
     pub(crate) public_id: Option<Vec<u8>>,
     pub(crate) public_label: Option<String>,
     pub(crate) public_attributes: KeyAttributes,
+    pub(crate) primary_attributes: KeyAttributes,
 }
 
 impl YubiHsmPkcs11Metadata {
@@ -574,6 +575,7 @@ impl YubiHsmPkcs11Metadata {
             && self.public_id.is_none()
             && self.public_label.is_none()
             && self.public_attributes.is_empty()
+            && self.primary_attributes.is_empty()
     }
 
     fn has_public_aspect(&self) -> bool {
@@ -623,7 +625,7 @@ impl YubiHsmPkcs11Metadata {
         )
         .map_err(key_metadata_error)?;
         let mut record = BackedKeyMetadata::new(backing);
-        let mut primary = KeyAttributes::new();
+        let mut primary = self.primary_attributes.clone();
         insert_sparse_identity(&mut primary, self.id.as_deref(), self.label.as_deref())?;
         record
             .insert_aspect(primary_class, primary)
@@ -679,7 +681,10 @@ impl YubiHsmPkcs11Metadata {
         let primary = record
             .aspect(backing.primary_class)
             .ok_or(CKR_DATA_INVALID)?;
-        let (id, label) = sparse_identity(primary)?;
+        let (id, label) = primary_metadata_identity(primary)?;
+        let mut primary_attributes = primary.clone();
+        primary_attributes.remove(u64::from(CKA_ID));
+        primary_attributes.remove(u64::from(CKA_LABEL));
         let projected_public = backing.primary_class != u64::from(CKO_PUBLIC_KEY)
             && record.aspect(u64::from(CKO_PUBLIC_KEY)).is_some();
         let (public_id, public_label, public_attributes) =
@@ -708,6 +713,7 @@ impl YubiHsmPkcs11Metadata {
             public_id,
             public_label,
             public_attributes,
+            primary_attributes,
         })
     }
 }
@@ -757,7 +763,9 @@ fn insert_sparse_identity(
     Ok(())
 }
 
-fn sparse_identity(attributes: &KeyAttributes) -> Result<(Option<Vec<u8>>, Option<String>), Error> {
+fn primary_metadata_identity(
+    attributes: &KeyAttributes,
+) -> Result<(Option<Vec<u8>>, Option<String>), Error> {
     let mut id = None;
     let mut label = None;
     for (attribute, value) in attributes.iter() {
@@ -768,6 +776,20 @@ fn sparse_identity(attributes: &KeyAttributes) -> Result<(Option<Vec<u8>>, Optio
             (attribute, KeyAttributeValue::Text(value)) if attribute == u64::from(CKA_LABEL) => {
                 label = Some(value.clone());
             }
+            (attribute, KeyAttributeValue::Boolean(_))
+                if [
+                    CKA_ENCRYPT,
+                    CKA_DECRYPT,
+                    CKA_SIGN,
+                    CKA_VERIFY,
+                    CKA_DERIVE,
+                    CKA_WRAP,
+                    CKA_UNWRAP,
+                ]
+                .iter()
+                .any(|kind| attribute == u64::from(*kind)) => {}
+            (attribute, KeyAttributeValue::Mechanisms(_))
+                if attribute == u64::from(CKA_ALLOWED_MECHANISMS) => {}
             _ => return Err(CKR_ATTRIBUTE_TYPE_INVALID.into()),
         }
     }
@@ -2628,12 +2650,19 @@ impl YubiHsmSlot {
         unique_id: &str,
         id: Option<&[u8]>,
         label: Option<&str>,
+        policy: Option<&TokenObject>,
     ) -> Result<(), Error> {
         let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
         let mut metadata = current
             .clone()
             .unwrap_or_else(|| Self::empty_pkcs11_metadata(&info));
         metadata.prepare_for_canonical_write(&info);
+        if let Some(policy) = policy {
+            if public || policy.class != yubihsm_object_class(&info) {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            metadata.primary_attributes = yubihsm_primary_policy(policy, &info)?;
+        }
 
         if let Some(id) = id {
             let value = (id != info.id.to_be_bytes()).then(|| id.to_vec());
@@ -2669,6 +2698,7 @@ impl YubiHsmSlot {
             public_id: None,
             public_label: None,
             public_attributes: KeyAttributes::new(),
+            primary_attributes: KeyAttributes::new(),
         }
     }
 
@@ -3604,6 +3634,7 @@ pub(crate) fn parse_yubihsm_pkcs11_metadata(
         public_id: None,
         public_label: None,
         public_attributes: KeyAttributes::new(),
+        primary_attributes: KeyAttributes::new(),
     };
     let mut offset = 8;
     while offset < value.len() {
@@ -3736,6 +3767,10 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         material,
     }];
 
+    if let Some(metadata) = metadata {
+        apply_yubihsm_primary_policy(&mut objects[0], &metadata.primary_attributes)?;
+    }
+
     if (info.object_type == YUBIHSM_ASYMMETRIC_KEY || rsa_wrap_key)
         && metadata.is_some_and(YubiHsmPkcs11Metadata::has_public_aspect)
     {
@@ -3811,6 +3846,81 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         }
     }
     Ok(objects)
+}
+
+/// Preserve policy distinctions that native capabilities cannot express.
+fn yubihsm_primary_policy(
+    object: &TokenObject,
+    info: &YubiHsmObjectInfo,
+) -> Result<KeyAttributes, Error> {
+    let native =
+        yubihsm_capabilities_to_attributes(info.object_type, info.algorithm, &info.capabilities);
+    let mut attributes = KeyAttributes::new();
+    for (kind, value, native_value) in [
+        (CKA_ENCRYPT, object.encrypt, native.encrypt),
+        (CKA_DECRYPT, object.decrypt, native.decrypt),
+        (CKA_SIGN, object.sign, native.sign),
+        (CKA_VERIFY, object.verify, native.verify),
+        (CKA_DERIVE, object.derive, native.derive),
+        (CKA_WRAP, object.wrap, native.wrap),
+        (CKA_UNWRAP, object.unwrap, native.unwrap),
+    ] {
+        if value == native_value {
+            continue;
+        }
+        attributes
+            .insert(u64::from(kind), KeyAttributeValue::Boolean(value))
+            .map_err(key_metadata_error)?;
+    }
+    if let Some(allowed) = &object.allowed_mechanisms {
+        attributes
+            .insert(
+                u64::from(CKA_ALLOWED_MECHANISMS),
+                KeyAttributeValue::Mechanisms(
+                    allowed.iter().copied().map(cryptoki_ulong_to_u64).collect(),
+                ),
+            )
+            .map_err(key_metadata_error)?;
+    }
+    Ok(attributes)
+}
+
+fn apply_yubihsm_primary_policy(
+    object: &mut TokenObject,
+    attributes: &KeyAttributes,
+) -> Result<(), Error> {
+    for (kind, value) in attributes.iter() {
+        if let KeyAttributeValue::Mechanisms(mechanisms) = value
+            && *kind == u64::from(CKA_ALLOWED_MECHANISMS)
+        {
+            object.allowed_mechanisms = Some(
+                mechanisms
+                    .iter()
+                    .map(|mechanism| {
+                        CK_MECHANISM_TYPE::try_from(*mechanism)
+                            .map_err(|_| Error::from(CKR_DATA_INVALID))
+                    })
+                    .collect::<Result<_, _>>()?,
+            );
+            continue;
+        }
+        let KeyAttributeValue::Boolean(value) = value else {
+            return Err(CKR_DATA_INVALID.into());
+        };
+        let permission = match *kind {
+            x if x == u64::from(CKA_ENCRYPT) => &mut object.encrypt,
+            x if x == u64::from(CKA_DECRYPT) => &mut object.decrypt,
+            x if x == u64::from(CKA_SIGN) => &mut object.sign,
+            x if x == u64::from(CKA_VERIFY) => &mut object.verify,
+            x if x == u64::from(CKA_DERIVE) => &mut object.derive,
+            x if x == u64::from(CKA_WRAP) => &mut object.wrap,
+            x if x == u64::from(CKA_UNWRAP) => &mut object.unwrap,
+            _ => return Err(CKR_DATA_INVALID.into()),
+        };
+        // Companion metadata may narrow a device capability, never grant one.
+        *permission &= *value;
+    }
+    Ok(())
 }
 
 fn apply_yubihsm_public_projection_metadata(
@@ -3988,6 +4098,7 @@ pub(crate) fn yubihsm_abi_public_projection_metadata(
         public_label: (projection.label != yubihsm_object_label(target))
             .then(|| projection.label.clone()),
         public_attributes: yubihsm_public_projection_attributes(target, projection)?,
+        primary_attributes: KeyAttributes::new(),
     };
     Ok((
         yubihsm_metadata_label_for_target(target, YubiHsmMetadataPhysicalFormat::CanonicalCbor),
@@ -4537,8 +4648,9 @@ impl Slot for YubiHsmSlot {
         unique_id: &str,
         id: Option<&[u8]>,
         label: Option<&str>,
+        policy: Option<&TokenObject>,
     ) -> Result<(), Error> {
-        self.replace_pkcs11_metadata(slot_id, unique_id, id, label)
+        self.replace_pkcs11_metadata(slot_id, unique_id, id, label, policy)
     }
     fn yubihsm_persist_public_projection(
         &self,
@@ -4816,4 +4928,83 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
         _ => 0,
     };
     common & native as CK_FLAGS
+}
+
+#[cfg(test)]
+mod primary_policy_tests {
+    use super::*;
+
+    fn aes_info() -> YubiHsmObjectInfo {
+        YubiHsmObjectInfo {
+            capabilities: yubihsm_capabilities(&[0x33, 0x35]),
+            id: 1,
+            length: 16,
+            domains: 1,
+            object_type: YUBIHSM_SYMMETRIC_KEY,
+            algorithm: YUBIHSM_ALGO_AES128,
+            sequence: 1,
+            origin: 0,
+            label: "AES credential".to_owned(),
+            delegated_capabilities: [0; 8],
+        }
+    }
+
+    fn roundtrip(info: &YubiHsmObjectInfo, object: &TokenObject) -> TokenObject {
+        let mut metadata = YubiHsmSlot::empty_pkcs11_metadata(info);
+        metadata.primary_attributes = yubihsm_primary_policy(object, info).unwrap();
+        let encoded = metadata.encode(info).unwrap();
+        let record = BackedKeyMetadata::from_cbor(&encoded).unwrap();
+        let mut companion = info.clone();
+        companion.object_type = YUBIHSM_OPAQUE;
+        companion.algorithm = YUBIHSM_ALGO_OPAQUE_DATA;
+        companion.label =
+            yubihsm_metadata_label_for_target(info, YubiHsmMetadataPhysicalFormat::CanonicalCbor);
+        let decoded = YubiHsmPkcs11Metadata::from_backed_key(&companion, &record).unwrap();
+        yubihsm_token_objects_with_generation(7, info.clone(), None, 1, Some(&decoded))
+            .unwrap()
+            .remove(0)
+    }
+
+    #[test]
+    fn yubihsm_primary_policy_survives_cbor_rediscovery() {
+        let info = aes_info();
+        let mut object = yubihsm_token_objects(7, info.clone(), None)
+            .unwrap()
+            .remove(0);
+        assert!(object.encrypt && object.derive && object.sign && object.verify);
+        object.derive = false;
+        object.sign = false;
+        object.verify = false;
+        object.allowed_mechanisms = Some(vec![CKM_AES_ECB as _]);
+        let restored = roundtrip(&info, &object);
+        assert!(restored.encrypt);
+        assert!(!restored.derive && !restored.sign && !restored.verify);
+        assert_eq!(restored.allowed_mechanisms, object.allowed_mechanisms);
+    }
+
+    #[test]
+    fn yubihsm_primary_policy_preserves_empty_vs_unspecified_mechanisms() {
+        let info = aes_info();
+        let mut object = yubihsm_token_objects(7, info.clone(), None)
+            .unwrap()
+            .remove(0);
+        assert!(yubihsm_primary_policy(&object, &info).unwrap().is_empty());
+        assert_eq!(roundtrip(&info, &object).allowed_mechanisms, None);
+        object.allowed_mechanisms = Some(vec![]);
+        assert_eq!(roundtrip(&info, &object).allowed_mechanisms, Some(vec![]));
+    }
+
+    #[test]
+    fn yubihsm_primary_policy_cannot_grant_missing_native_capability() {
+        let info = aes_info();
+        let mut object = yubihsm_token_objects(7, info.clone(), None)
+            .unwrap()
+            .remove(0);
+        assert!(!object.decrypt && !object.wrap && !object.unwrap);
+        object.decrypt = true;
+        object.wrap = true;
+        object.unwrap = true;
+        let restored = roundtrip(&info, &object);
+        assert!(!restored.decrypt && !restored.wrap && !restored.unwrap);
+    }
 }

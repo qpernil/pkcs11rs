@@ -2218,6 +2218,7 @@ pub(crate) fn generate_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
         &imported.unique_id,
         (!object.id.is_empty()).then_some(object.id.as_slice()),
         (!object.label.is_empty()).then_some(object.label.as_str()),
+        Some(&object),
     );
     let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
     if let Err(error) = metadata_result {
@@ -2371,6 +2372,7 @@ pub(crate) fn generate_yubihsm_token_pair_in_slot<S: Slot + ?Sized>(
         &imported_private.unique_id,
         (!private_object.id.is_empty()).then_some(private_object.id.as_slice()),
         (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
+        Some(&private_object),
     );
     let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
     if let Err(error) = private_result {
