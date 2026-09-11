@@ -18,6 +18,7 @@ mod hardware_provisioning {
     use super::*;
     use std::rc::Rc;
 
+    mod hsm_to_hsm;
     mod shared_symmetric;
 
     const ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH";
