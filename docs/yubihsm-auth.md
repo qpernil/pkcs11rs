@@ -22,8 +22,22 @@ maintains chaining; the response's eight-byte MAC is verified before decryption.
 Closing or invalidating the channel immediately clears all three working keys.
 
 Symmetric authentication binds two protected AES-128 objects, Key-ENC and
-Key-MAC, and uses counter KDF directly on those keys to create explicitly
-readable working keys. The source AES values are neither read nor split. Direct
+Key-MAC. For each key it prefers `CKM_SP800_108_COUNTER_KDF`, requiring
+`CKA_DERIVE=true` and permission for that mechanism. If unavailable for that key,
+it uses `CKM_AES_ECB` with `CKA_ENCRYPT=true` to construct CMAC and counter KDF.
+When the same key also permits `CKM_AES_CBC` encryption, CMAC uses one ECB
+operation to generate its subkeys and one unpadded CBC operation with a zero IV
+for the complete prepared message. Without CBC permission, chaining uses ECB
+block operations. CBC selection checks both slot support and key permissions;
+a CBC failure is returned without retrying through ECB.
+Explicit mechanism restrictions apply to either path. ENC and MAC may choose
+different paths; both are checked before the first derivation. Failures during
+execution, including incompatible output policies, never trigger a retry through
+the alternative mechanism.
+
+The counter-KDF path creates explicitly readable working objects; the ECB path
+produces the working bytes directly without creating output objects in the
+source token. The source AES values are neither read nor split. Direct
 asymmetric authentication uses the same capability-based prefixed ECDH/KDF or
 protected standard composition path as an existing source credential.
 The receipt key remains protected and verifies the receipt before the working

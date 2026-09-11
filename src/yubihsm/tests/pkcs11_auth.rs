@@ -15,6 +15,8 @@ enum Preparation {
 #[derive(Clone, Copy, Debug)]
 enum Protocol {
     Symmetric,
+    SymmetricEcb,
+    SymmetricCbc,
     Asymmetric,
 }
 
@@ -112,13 +114,23 @@ impl Fixture {
         let owner = ProviderSession::open(provider).unwrap();
         let token = matches!(preparation, Preparation::Existing);
         let (credential, keys) = match protocol {
-            Protocol::Symmetric => {
+            Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc => {
                 let value = crate::yubico_password_kdf(PASSWORD).unwrap();
                 let mut keys = Vec::new();
                 // Reverse creation order proves that roles come from labels,
                 // not enumeration order or native object IDs.
                 for (role, value) in [("mac", &value[16..]), ("enc", &value[..16])] {
                     let mut template = authentication_aes_template();
+                    if matches!(protocol, Protocol::SymmetricEcb | Protocol::SymmetricCbc) {
+                        template.derive = false;
+                        template.encrypt = true;
+                        template.allowed_mechanisms =
+                            Some(if matches!(protocol, Protocol::SymmetricCbc) {
+                                vec![CKM_AES_ECB as _, CKM_AES_CBC as _]
+                            } else {
+                                vec![CKM_AES_ECB as _]
+                            });
+                    }
                     template.token = token;
                     template.label = format!("SCP credential.{role}");
                     // AES roles are selected by exact labels, independently of IDs.
@@ -224,7 +236,10 @@ fn authenticate(
     bad_receipt: bool,
 ) -> Result<SecureSession, Error> {
     match (&fixture.credential, protocol) {
-        (Credential::Symmetric(credential), Protocol::Symmetric) => {
+        (
+            Credential::Symmetric(credential),
+            Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc,
+        ) => {
             let handshake = SecureSession::begin_symmetric(peer, 1, HOST_CHALLENGE)?;
             SecureSession::complete_symmetric_with_static_keys(peer, handshake, credential)
         }
@@ -301,11 +316,17 @@ fn exercise(preparation: Preparation, protocol: Protocol) {
     fixture.assert_clean();
 
     let peer = target(protocol);
-    if matches!(protocol, Protocol::Symmetric) {
+    if matches!(
+        protocol,
+        Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc
+    ) {
         peer.corrupt_card_cryptogram.set(true);
     }
     let result = authenticate(&fixture, protocol, &peer, true);
-    let expected = if matches!(protocol, Protocol::Symmetric) {
+    let expected = if matches!(
+        protocol,
+        Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc
+    ) {
         CKR_ENCRYPTED_DATA_INVALID
     } else {
         CKR_SIGNATURE_INVALID
@@ -336,6 +357,8 @@ fn symmetric_complete_channel_uses_private_and_existing_pkcs11_auth() {
     let _guard = crate::test::TEST_LOCK.lock().unwrap();
     for preparation in [Preparation::Private, Preparation::Existing] {
         exercise(preparation, Protocol::Symmetric);
+        exercise(preparation, Protocol::SymmetricEcb);
+        exercise(preparation, Protocol::SymmetricCbc);
     }
 }
 #[test]
@@ -349,7 +372,12 @@ fn asymmetric_complete_channel_uses_private_and_existing_pkcs11_auth() {
 #[test]
 fn registered_software_source_login_selects_before_authorization_for_both_protocols() {
     let _serial = crate::test::TEST_LOCK.lock().unwrap();
-    for protocol in [Protocol::Symmetric, Protocol::Asymmetric] {
+    for protocol in [
+        Protocol::Symmetric,
+        Protocol::SymmetricEcb,
+        Protocol::SymmetricCbc,
+        Protocol::Asymmetric,
+    ] {
         let mut fixture = Fixture::new(Preparation::Existing, protocol);
         let child = fixture.existing.as_ref().unwrap().0.clone();
         let serial = child.lock().unwrap().slot.serial().to_owned();
@@ -416,7 +444,10 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
                 (CKA_TOKEN, &[CK_TRUE as u8]),
                 (
                     CKA_CLASS,
-                    &((if matches!(protocol, Protocol::Symmetric) {
+                    &((if matches!(
+                        protocol,
+                        Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc
+                    ) {
                         CKO_SECRET_KEY
                     } else {
                         CKO_PRIVATE_KEY
@@ -427,7 +458,10 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
             .unwrap();
         assert_eq!(
             fixture.keys.len(),
-            if matches!(protocol, Protocol::Symmetric) {
+            if matches!(
+                protocol,
+                Protocol::Symmetric | Protocol::SymmetricEcb | Protocol::SymmetricCbc
+            ) {
                 2
             } else {
                 1

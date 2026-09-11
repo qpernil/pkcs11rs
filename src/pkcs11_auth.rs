@@ -46,6 +46,21 @@ pub(crate) trait Pkcs11Auth {
         key: CK_OBJECT_HANDLE,
         mechanism: CK_MECHANISM_TYPE,
     ) -> Result<bool, Error>;
+    fn can_encrypt(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> Result<bool, Error>;
+    fn encrypt_aes_block(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        input: &[u8; 16],
+    ) -> Result<Zeroizing<[u8; 16]>, Error>;
+    fn encrypt_aes_cbc(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        input: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error>;
     fn generate_p256(&self) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error>;
     fn derive(
         &self,
@@ -190,6 +205,46 @@ pub(crate) fn ec_template() -> TokenObjectTemplate {
 }
 
 impl ProviderSession {
+    fn encrypt_auth_aes(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        input: &[u8],
+        cbc: bool,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let mut iv = [0u8; 16];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: if cbc {
+                CKM_AES_CBC as _
+            } else {
+                CKM_AES_ECB as _
+            },
+            pParameter: if cbc {
+                iv.as_mut_ptr().cast()
+            } else {
+                std::ptr::null_mut()
+            },
+            ulParameterLen: if cbc { 16 } else { 0 },
+        };
+        self.call(|| api::rust::crypt_init(self.handle, &mut mechanism, key, true))?;
+        let mut output = Zeroizing::new(vec![0; input.len()]);
+        let mut length = output.len() as CK_ULONG;
+        self.call(|| {
+            api::rust::crypt(
+                self.handle,
+                input.as_ptr(),
+                input.len() as _,
+                output.as_mut_ptr(),
+                &mut length,
+                true,
+                false,
+            )
+        })?;
+        if length as usize != input.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(output)
+    }
+
     fn derive_raw(
         &self,
         base: CK_OBJECT_HANDLE,
@@ -409,6 +464,48 @@ impl Pkcs11Auth for ProviderSession {
                         .contains(&mechanism))
             })
         })
+    }
+    fn can_encrypt(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> Result<bool, Error> {
+        self.call(|| {
+            with_session_context(self.handle, |ctx| {
+                let (slot, _, logged_in) = ctx.session_details(self.handle)?;
+                let key = ctx
+                    .resolve_object(key)?
+                    .filter(|key| key.is_visible_to(logged_in))
+                    .ok_or(CKR_KEY_HANDLE_INVALID)?;
+                Ok(key.encrypt
+                    && ctx
+                        .get_slot(slot)?
+                        .key_mechanism_operations(&key, mechanism)
+                        & CKF_ENCRYPT as CK_FLAGS
+                        != 0
+                    && ctx
+                        .get_slot(slot)?
+                        .allowed_key_mechanisms(&key)
+                        .contains(&mechanism))
+            })
+        })
+    }
+    fn encrypt_aes_block(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        input: &[u8; 16],
+    ) -> Result<Zeroizing<[u8; 16]>, Error> {
+        let value = self.encrypt_auth_aes(key, input, false)?;
+        let mut output = Zeroizing::new([0; 16]);
+        output.copy_from_slice(&value);
+        Ok(output)
+    }
+    fn encrypt_aes_cbc(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        input: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.encrypt_auth_aes(key, input, true)
     }
     fn generate_p256(&self) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
         let mut public = Attributes::new(TokenObjectTemplate {

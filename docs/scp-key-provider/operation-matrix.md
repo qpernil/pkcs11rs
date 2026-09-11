@@ -58,7 +58,9 @@ available primitives, not yet a complete protected-key operation graph.
 
 YubiHSM `SecureSession` retains three local AES values in zeroizing storage.
 Direct derivation uses the safe `Pkcs11Auth` interface to the shared Rust
-handlers, without crossing the C ABI. SCP03 counter KDF creates readable final AES objects. SCP11 SHA-256
+handlers, without crossing the C ABI. SCP03 counter KDF creates readable final
+AES objects, or constructs working bytes through source AES-ECB encryption when
+the key does not permit the KDF mechanism. SCP11 SHA-256
 creates readable final KDF blocks; their concatenation and extracted working
 AES keys are readable by inheritance. The receipt key is protected and verifies
 the receipt before the three working keys are read. All scope objects are
@@ -374,7 +376,16 @@ preserves their narrower usage policy. Derived objects live in the common module
 session layer, not native YubiHSM volatile object storage.
 
 The PKCS #11 authentication adapter uses two protected AES keys as counter-KDF
-bases directly. Paired-key lookup resolves `<label>.enc` and `<label>.mac`
+bases directly when each key permits `CKM_SP800_108_COUNTER_KDF`. Otherwise a
+key with `CKA_ENCRYPT=true` and permission for `CKM_AES_ECB` uses the same CMAC
+and counter-KDF code with block encryption through the source session. If the
+same key permits `CKM_AES_CBC`, subkey generation uses one ECB call and the
+prepared message uses one unpadded CBC call with an all-zero IV. Otherwise,
+CMAC chains individual ECB calls. Both key paths, including CBC availability,
+are selected in advance and may differ. Operational errors are preserved,
+without retry. ECB results become zeroizing working bytes directly; this path
+does not require creating or reading derived objects in the source slot.
+Paired-key lookup resolves `<label>.enc` and `<label>.mac`
 through the prepared source session. Explicit selectors name the source token,
 credential prefix, and target Authentication Key ID; the two AES IDs need not match.
 
@@ -409,7 +420,9 @@ and SCP11 hash blocks explicitly have `CKA_SENSITIVE=false` and
 `CKA_EXTRACTABLE=true`. Concatenation and extraction preserve that policy for
 working-key reads. Receipt verification can strengthen its extracted key to
 sensitive/non-extractable, without changing the source. All temporary objects
-have session lifetime. Existing object protection is never weakened.
+have session lifetime. The symmetric AES-ECB alternative creates no derived
+objects in the source: its final working bytes use zeroizing client storage.
+Existing object protection is never weakened.
 
 | Object role | Type / length | Use |
 | --- | --- | --- |
@@ -486,7 +499,9 @@ for the external PKCS #11/client suites.
 
 The existing-slot regression prepares a registered YubiHSM protocol fixture,
 uses its independently established login and native AES key for counter KDF,
-and verifies native ECB commands without exporting the base key. It exercises
+and verifies native ECB/CBC commands without exporting the base key. For the
+32-byte SCP03 KDF input, the CBC construction uses two device calls per CMAC
+instead of three; three working keys require six calls instead of nine. It exercises
 this path while the public module lock is held and confirms that closing the
 authentication sessions preserves the original public session and token key.
 

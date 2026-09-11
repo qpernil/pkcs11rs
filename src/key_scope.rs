@@ -25,6 +25,13 @@ pub(crate) struct Pkcs11KeyScope {
 /// Keeps the owning session alive without exporting its key.
 #[derive(Clone)]
 pub(crate) struct BoundKey(Rc<ObjectHandle>);
+
+#[derive(Clone, Copy)]
+pub(crate) enum CounterKdfPath {
+    Derive,
+    AesEcb,
+    AesCbc,
+}
 impl BoundKey {
     pub(crate) fn authorize_source(&self, pin: &[u8]) -> Result<(), Error> {
         self.0.session.authorize(pin)
@@ -436,6 +443,77 @@ impl Pkcs11KeyScope {
         length: usize,
     ) -> Result<KeyHandle, Error> {
         self.derive(base, Derivation::Counter(fields), template, length)
+    }
+    /// Select before executing either key's derivation. Encryption permission
+    /// authorizes the ECB construction; it does not grant C_DeriveKey access.
+    pub(crate) fn counter_kdf_path(&self, base: &KeyHandle) -> Result<CounterKdfPath, Error> {
+        if self.can_derive(base, CKM_SP800_108_COUNTER_KDF as _)? {
+            return Ok(CounterKdfPath::Derive);
+        }
+        if self
+            .session
+            .can_encrypt(self.object(base)?.handle, CKM_AES_ECB as _)?
+        {
+            return Ok(
+                if self
+                    .session
+                    .can_encrypt(self.object(base)?.handle, CKM_AES_CBC as _)?
+                {
+                    CounterKdfPath::AesCbc
+                } else {
+                    CounterKdfPath::AesEcb
+                },
+            );
+        }
+        Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into())
+    }
+    pub(crate) fn counter_kdf_aes128(
+        &mut self,
+        base: &KeyHandle,
+        path: CounterKdfPath,
+        fields: &[software_key_core::counter_kdf::CounterKdfField<'_>],
+        template: TokenObjectTemplate,
+    ) -> Result<Zeroizing<[u8; 16]>, Error> {
+        match path {
+            CounterKdfPath::Derive => {
+                let output = self.derive_counter(base, fields, template, 16)?;
+                let value = self.read_aes128(&output)?;
+                self.destroy(&output)?;
+                Ok(value)
+            }
+            CounterKdfPath::AesEcb | CounterKdfPath::AesCbc => {
+                let handle = self.object(base)?.handle;
+                let value = crate::software_key_ops::counter_kdf_with(fields, 16, |input| {
+                    let encrypt_block = |block: &[u8]| {
+                        let block = block
+                            .try_into()
+                            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+                        self.session
+                            .encrypt_aes_block(handle, block)
+                            .map(|value| value.to_vec())
+                    };
+                    let mac = Zeroizing::new(if matches!(path, CounterKdfPath::AesCbc) {
+                        crate::software_key_ops::cmac_with_cbc_encryptor(
+                            input,
+                            encrypt_block,
+                            |blocks| {
+                                self.session
+                                    .encrypt_aes_cbc(handle, blocks)
+                                    .map(|value| value.to_vec())
+                            },
+                        )?
+                    } else {
+                        crate::software_key_ops::cmac_with_encryptor(input, encrypt_block)?
+                    });
+                    mac.as_slice()
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR.into())
+                })?;
+                let mut output = Zeroizing::new([0; 16]);
+                output.copy_from_slice(&value);
+                Ok(output)
+            }
+        }
     }
     pub(crate) fn read_aes128(&self, key: &KeyHandle) -> Result<Zeroizing<[u8; 16]>, Error> {
         if self.ulong(key, CKA_CLASS)? != CKO_SECRET_KEY as CK_ULONG

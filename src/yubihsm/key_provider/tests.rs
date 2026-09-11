@@ -92,81 +92,162 @@ fn symmetric_pair_derives_through_native_yubihsm_handles_without_export() {
     use crate::pkcs11_auth::Pkcs11Auth;
     use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
     use crate::yubihsm::tests::{NIST_AES_KEY_ID, RFC3610_AES_KEY_ID, make_yubihsm_test_slot};
-    let (slot, commands, _, _trust) = make_yubihsm_test_slot();
-    let owner = ProviderSession::open(Pkcs11Provider::new(slot).unwrap()).unwrap();
-    owner.login(b"0001password").unwrap();
-    // These are native handles for the peer fixture's AES keys. The source
-    // PKCS #11 objects deliberately have no software key material.
-    let insert = |id: u16, role: &str| {
-        owner
-            .call(|| {
-                with_session_context_mut(owner.handle, |ctx| {
-                    let mut object =
-                        profile_token_objects(ctx.slot_id, false, false, false).remove(0);
-                    object.unique_id = format!("native-auth-{id}");
-                    object.class = CKO_SECRET_KEY as _;
-                    object.key_type = CKK_AES as _;
-                    object.label = format!("native.{role}");
-                    object.id = id.to_be_bytes().to_vec();
-                    object.private = true;
-                    object.sensitive = true;
-                    object.extractable = false;
-                    object.derive = true;
-                    object.allowed_mechanisms = Some(vec![CKM_SP800_108_COUNTER_KDF as _]);
-                    object.material = KeyMaterial::YubiHsm {
-                        id,
-                        object_type: YUBIHSM_SYMMETRIC_KEY,
-                        algorithm: YUBIHSM_ALGO_AES128,
-                        length: 16,
-                        domains: 0xffff,
-                        capabilities: crate::yubihsm_capabilities(&[0x33]),
-                        delegated_capabilities: [0; 8],
-                        public_key: Vec::new(),
-                        value: Rc::new(std::cell::RefCell::new(None)),
-                    };
-                    ctx.insert_object(object)
+    for (fallback, cbc) in [(false, false), (true, false), (true, true)] {
+        let (slot, commands, corrupt, _trust) = make_yubihsm_test_slot();
+        let owner = ProviderSession::open(Pkcs11Provider::new(slot).unwrap()).unwrap();
+        owner.login(b"0001password").unwrap();
+        // These are native handles for the peer fixture's AES keys. The source
+        // PKCS #11 objects deliberately have no software key material.
+        let insert = |id: u16, role: &str| {
+            owner
+                .call(|| {
+                    with_session_context_mut(owner.handle, |ctx| {
+                        let mut object =
+                            profile_token_objects(ctx.slot_id, false, false, false).remove(0);
+                        object.unique_id = format!("native-auth-{id}");
+                        object.class = CKO_SECRET_KEY as _;
+                        object.key_type = CKK_AES as _;
+                        object.label = format!("native.{role}");
+                        object.id = id.to_be_bytes().to_vec();
+                        object.private = true;
+                        object.sensitive = true;
+                        object.extractable = false;
+                        object.derive = !fallback;
+                        object.encrypt = fallback;
+                        object.allowed_mechanisms = Some(if cbc {
+                            vec![CKM_AES_ECB as _, CKM_AES_CBC as _]
+                        } else if fallback {
+                            vec![CKM_AES_ECB as _]
+                        } else {
+                            vec![CKM_SP800_108_COUNTER_KDF as _]
+                        });
+                        object.material = KeyMaterial::YubiHsm {
+                            id,
+                            object_type: YUBIHSM_SYMMETRIC_KEY,
+                            algorithm: YUBIHSM_ALGO_AES128,
+                            length: 16,
+                            domains: 0xffff,
+                            capabilities: crate::yubihsm_capabilities(if cbc {
+                                &[0x33, 0x35]
+                            } else {
+                                &[0x33]
+                            }),
+                            delegated_capabilities: [0; 8],
+                            public_key: Vec::new(),
+                            value: Rc::new(std::cell::RefCell::new(None)),
+                        };
+                        ctx.insert_object(object)
+                    })
                 })
-            })
-            .unwrap()
-    };
-    let enc = insert(NIST_AES_KEY_ID, "enc");
-    let mac = insert(RFC3610_AES_KEY_ID, "mac");
-    let pair = SymmetricCredential::find(owner.clone(), "native", true).unwrap();
-    let start = commands.borrow().len();
-    let context = [0x42; 16];
-    let keys = SessionKeys::derive(&pair, &context).unwrap();
-    let expected_enc = crate::parse_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
-    let expected_mac = crate::parse_hex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf").unwrap();
-    check_keys(
-        &keys,
-        &scp03_kdf(&expected_enc, 4, &context, 128).unwrap(),
-        &scp03_kdf(&expected_mac, 6, &context, 128).unwrap(),
-        &scp03_kdf(&expected_mac, 7, &context, 128).unwrap(),
-    );
-    let trace = commands.borrow();
-    assert!(trace.len() > start);
-    assert!(trace[start..].iter().all(|(command, data)| {
-        *command == super::super::CommandCode::EncryptEcb as u8
-            && [NIST_AES_KEY_ID, RFC3610_AES_KEY_ID]
-                .contains(&u16::from_be_bytes(data[..2].try_into().unwrap()))
-    }));
-    for handle in [enc, mac] {
-        assert!(
-            matches!(owner.attribute(handle, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+                .unwrap()
+        };
+        let enc = insert(NIST_AES_KEY_ID, "enc");
+        let mac = insert(RFC3610_AES_KEY_ID, "mac");
+        let pair = SymmetricCredential::find(owner.clone(), "native", true).unwrap();
+        let start = commands.borrow().len();
+        let context = [0x42; 16];
+        let keys = SessionKeys::derive(&pair, &context).unwrap();
+        let expected_enc = crate::parse_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let expected_mac = crate::parse_hex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf").unwrap();
+        check_keys(
+            &keys,
+            &scp03_kdf(&expected_enc, 4, &context, 128).unwrap(),
+            &scp03_kdf(&expected_mac, 6, &context, 128).unwrap(),
+            &scp03_kdf(&expected_mac, 7, &context, 128).unwrap(),
         );
-        owner
-            .call(|| {
-                with_session_context(owner.handle, |ctx| {
-                    let object = ctx.resolve_object(handle)?.unwrap();
-                    assert!(!object.sign && !object.encrypt);
-                    let KeyMaterial::YubiHsm { value, .. } = object.material else {
-                        panic!("native key expected")
-                    };
-                    assert!(value.borrow().is_none());
-                    Ok(())
+        let trace = commands.borrow();
+        use super::super::CommandCode::{EncryptCbc, EncryptEcb};
+        assert_eq!(trace.len() - start, if cbc { 6 } else { 9 });
+        for (index, (command, data)) in trace[start..].iter().enumerate() {
+            assert_eq!(
+                *command,
+                if cbc && index % 2 == 1 {
+                    EncryptCbc as u8
+                } else {
+                    EncryptEcb as u8
+                }
+            );
+            assert!(
+                [NIST_AES_KEY_ID, RFC3610_AES_KEY_ID]
+                    .contains(&u16::from_be_bytes(data[..2].try_into().unwrap()))
+            );
+            if *command == EncryptCbc as u8 {
+                assert_eq!(&data[2..18], &[0; 16]);
+                assert_eq!(data.len() - 18, 32);
+            }
+        }
+        drop(trace);
+        for handle in [enc, mac] {
+            assert!(
+                matches!(owner.attribute(handle, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+            );
+            owner
+                .call(|| {
+                    with_session_context(owner.handle, |ctx| {
+                        let object = ctx.resolve_object(handle)?.unwrap();
+                        assert!(!object.sign);
+                        assert_eq!(object.encrypt, fallback);
+                        assert_eq!(object.derive, !fallback);
+                        let KeyMaterial::YubiHsm { value, .. } = object.material else {
+                            panic!("native key expected")
+                        };
+                        assert!(value.borrow().is_none());
+                        Ok(())
+                    })
                 })
-            })
-            .unwrap();
+                .unwrap();
+        }
+        if fallback {
+            let before = Pkcs11KeyScope::for_key(&pair.enc)
+                .unwrap()
+                .count_provider_objects();
+            let set_capability = |capability| {
+                owner
+                    .call(|| {
+                        with_session_context_mut(owner.handle, |ctx| {
+                            let object = ctx.memory_objects.get_mut(&mac).unwrap();
+                            object.decrypt = true;
+                            let KeyMaterial::YubiHsm { capabilities, .. } = &mut object.material
+                            else {
+                                panic!("native key expected")
+                            };
+                            *capabilities = crate::yubihsm_capabilities(&[capability]);
+                            Ok(())
+                        })
+                    })
+                    .unwrap();
+            };
+            // ECB may appear in the key's mechanism list for decryption only.
+            // An optimistic CKA_ENCRYPT must not override native capabilities.
+            set_capability(0x32);
+            assert!(!owner.can_encrypt(mac, CKM_AES_ECB as _).unwrap());
+            let start = commands.borrow().len();
+            assert!(
+                matches!(SessionKeys::derive(&pair, &context), Err(Error::Generic(rv)) if rv == CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV)
+            );
+            assert_eq!(commands.borrow().len(), start);
+            set_capability(0x33);
+            let start = commands.borrow().len();
+            corrupt.set(true);
+            assert!(
+                matches!(SessionKeys::derive(&pair, &context), Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as CK_RV)
+            );
+            assert_eq!(
+                commands.borrow()[start..]
+                    .iter()
+                    .filter(|(command, _)| {
+                        *command == super::super::CommandCode::EncryptEcb as u8
+                    })
+                    .count(),
+                1
+            );
+            assert_eq!(
+                Pkcs11KeyScope::for_key(&pair.enc)
+                    .unwrap()
+                    .count_provider_objects(),
+                before
+            );
+        }
     }
 }
 
@@ -291,8 +372,8 @@ fn partial_working_key_read_fails_and_releases_the_derivation_scope() {
 
 /// An ordinary source whose advertised mechanism set lacks the extension.
 #[derive(Debug)]
-struct StandardEcdhSlot(SoftwareSlot);
-impl Slot for StandardEcdhSlot {
+struct WithoutMechanismSlot(SoftwareSlot, CK_MECHANISM_TYPE);
+impl Slot for WithoutMechanismSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -339,7 +420,7 @@ impl Slot for StandardEcdhSlot {
         self.0.get_token_info(info)
     }
     fn software_mechanism_enabled(&self, mechanism: CK_MECHANISM_TYPE) -> bool {
-        mechanism != CKM_PKCS11RS_PREFIXED_ECDH_DERIVE
+        mechanism != self.1
     }
 }
 
@@ -358,10 +439,10 @@ fn asymmetric_prefixed_and_standard_paths_match_independent_reference() {
         let provider = if advertised {
             Pkcs11Provider::private_software().unwrap()
         } else {
-            Pkcs11Provider::new(Box::new(StandardEcdhSlot(SoftwareSlot::new(
-                "standard".into(),
-                0,
-            ))))
+            Pkcs11Provider::new(Box::new(WithoutMechanismSlot(
+                SoftwareSlot::new("standard".into(), 0),
+                CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            )))
             .unwrap()
         };
         let owner = ProviderSession::open(provider).unwrap();
@@ -633,4 +714,250 @@ fn piv_and_openpgp_native_keys_select_combined_authentication_and_complete_kdf()
             objects_before
         );
     }
+}
+
+fn symmetric_permission_fixture(
+    counter_advertised: bool,
+    templates: [TokenObjectTemplate; 2],
+) -> (
+    SymmetricCredential,
+    Rc<crate::pkcs11_provider::ProviderSession>,
+) {
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    let provider = if counter_advertised {
+        Pkcs11Provider::private_software().unwrap()
+    } else {
+        Pkcs11Provider::new(Box::new(WithoutMechanismSlot(
+            SoftwareSlot::new("ECB source".into(), 0),
+            CKM_SP800_108_COUNTER_KDF as _,
+        )))
+        .unwrap()
+    };
+    let owner = ProviderSession::open(provider).unwrap();
+    owner.authorize(b"test source PIN").unwrap();
+    let mut keys = Vec::new();
+    for (template, value) in templates.into_iter().zip([0x41u8, 0x42]) {
+        let handle = owner
+            .create(template, &[(CKA_VALUE, &[value; 16])])
+            .unwrap();
+        assert!(
+            matches!(owner.attribute(handle, CKA_VALUE), Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+        );
+        keys.push(BoundKey::from_session(owner.clone(), handle).unwrap());
+    }
+    (
+        SymmetricCredential::new(keys.remove(0), keys.remove(0)).unwrap(),
+        owner,
+    )
+}
+
+fn symmetric_permissions(
+    derive: bool,
+    encrypt: bool,
+    mechanisms: &[CK_MECHANISM_TYPE],
+) -> TokenObjectTemplate {
+    TokenObjectTemplate {
+        derive,
+        encrypt,
+        allowed_mechanisms: Some(mechanisms.to_vec()),
+        ..crate::key_scope::authentication_aes_template()
+    }
+}
+
+#[test]
+fn symmetric_counter_and_ecb_paths_obey_slot_and_key_permissions() {
+    use crate::key_scope::CounterKdfPath;
+    let counter = CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE;
+    let ecb = CKM_AES_ECB as CK_MECHANISM_TYPE;
+    for (advertised, enc, mac, enc_fallback, mac_fallback) in [
+        (
+            true,
+            symmetric_permissions(true, true, &[counter, ecb]),
+            symmetric_permissions(true, true, &[counter, ecb]),
+            false,
+            false,
+        ),
+        (
+            false,
+            symmetric_permissions(true, true, &[counter, ecb]),
+            symmetric_permissions(true, true, &[counter, ecb]),
+            true,
+            true,
+        ),
+        (
+            true,
+            symmetric_permissions(true, true, &[ecb]),
+            symmetric_permissions(true, true, &[ecb]),
+            true,
+            true,
+        ),
+        (
+            true,
+            symmetric_permissions(false, true, &[counter, ecb]),
+            symmetric_permissions(false, true, &[counter, ecb]),
+            true,
+            true,
+        ),
+        (
+            true,
+            symmetric_permissions(true, false, &[counter]),
+            symmetric_permissions(false, true, &[ecb]),
+            false,
+            true,
+        ),
+        (
+            true,
+            symmetric_permissions(false, true, &[ecb]),
+            symmetric_permissions(true, false, &[counter]),
+            true,
+            false,
+        ),
+    ] {
+        let (pair, _owner) = symmetric_permission_fixture(advertised, [enc, mac]);
+        let mut scope = Pkcs11KeyScope::for_key(&pair.enc).unwrap();
+        for (key, fallback) in [(&pair.enc, enc_fallback), (&pair.mac, mac_fallback)] {
+            let base = scope.bind(key).unwrap();
+            assert_eq!(
+                matches!(
+                    scope.counter_kdf_path(&base).unwrap(),
+                    CounterKdfPath::AesEcb
+                ),
+                fallback
+            );
+        }
+        let before = scope.count_provider_objects();
+        let context = [0x23; 16];
+        let keys = SessionKeys::derive(&pair, &context).unwrap();
+        check_keys(
+            &keys,
+            &scp03_kdf(&[0x41; 16], 4, &context, 128).unwrap(),
+            &scp03_kdf(&[0x42; 16], 6, &context, 128).unwrap(),
+            &scp03_kdf(&[0x42; 16], 7, &context, 128).unwrap(),
+        );
+        assert_eq!(scope.count_provider_objects(), before);
+    }
+    for denied in [
+        symmetric_permissions(false, false, &[counter, ecb]),
+        symmetric_permissions(false, true, &[counter]),
+        symmetric_permissions(true, false, &[ecb]),
+        symmetric_permissions(true, true, &[]),
+    ] {
+        let (pair, _owner) = symmetric_permission_fixture(
+            true,
+            [symmetric_permissions(true, false, &[counter]), denied],
+        );
+        assert!(
+            matches!(SessionKeys::derive(&pair, &[0; 16]), Err(Error::Generic(rv)) if rv == CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV)
+        );
+        assert_eq!(
+            Pkcs11KeyScope::for_key(&pair.enc)
+                .unwrap()
+                .count_provider_objects(),
+            2
+        );
+    }
+}
+
+#[test]
+fn symmetric_cbc_selection_respects_slot_and_key_permissions() {
+    use crate::key_scope::CounterKdfPath;
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    let ecb = CKM_AES_ECB as CK_MECHANISM_TYPE;
+    let cbc = CKM_AES_CBC as CK_MECHANISM_TYPE;
+    let counter = CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE;
+    for (hidden, allowed, derive, expected) in [
+        (0, vec![counter, ecb, cbc], true, "derive"),
+        (0, vec![ecb, cbc], false, "cbc"),
+        (cbc, vec![ecb, cbc], false, "ecb"),
+        (0, vec![ecb], false, "ecb"),
+        (0, vec![cbc], false, "denied"),
+    ] {
+        let owner = ProviderSession::open(
+            Pkcs11Provider::new(Box::new(WithoutMechanismSlot(
+                SoftwareSlot::new("CBC source".into(), 0),
+                hidden,
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        owner.authorize(b"test source PIN").unwrap();
+        let mut keys = Vec::new();
+        for value in [0x41u8, 0x42] {
+            let handle = owner
+                .create(
+                    symmetric_permissions(derive, true, &allowed),
+                    &[(CKA_VALUE, &[value; 16])],
+                )
+                .unwrap();
+            keys.push(BoundKey::from_session(owner.clone(), handle).unwrap());
+        }
+        let pair = SymmetricCredential::new(keys.remove(0), keys.remove(0)).unwrap();
+        let mut scope = Pkcs11KeyScope::for_key(&pair.enc).unwrap();
+        let base = scope.bind(&pair.enc).unwrap();
+        let actual = match scope.counter_kdf_path(&base) {
+            Ok(CounterKdfPath::Derive) => "derive",
+            Ok(CounterKdfPath::AesCbc) => "cbc",
+            Ok(CounterKdfPath::AesEcb) => "ecb",
+            Err(Error::Generic(rv)) if rv == CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV => "denied",
+            _ => panic!("unexpected selection result"),
+        };
+        assert_eq!(actual, expected);
+        if expected != "denied" {
+            let context = [0x23; 16];
+            let keys = SessionKeys::derive(&pair, &context).unwrap();
+            check_keys(
+                &keys,
+                &scp03_kdf(&[0x41; 16], 4, &context, 128).unwrap(),
+                &scp03_kdf(&[0x42; 16], 6, &context, 128).unwrap(),
+                &scp03_kdf(&[0x42; 16], 7, &context, 128).unwrap(),
+            );
+            assert_eq!(scope.count_provider_objects(), 2);
+        }
+    }
+}
+
+#[test]
+fn symmetric_counter_policy_failure_does_not_retry_with_ecb() {
+    let counter = CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE;
+    let ecb = CKM_AES_ECB as CK_MECHANISM_TYPE;
+    let mut restricted = symmetric_permissions(true, true, &[counter, ecb]);
+    let mut policy = crate::key_metadata::KeyAttributes::new();
+    policy
+        .insert(
+            CKA_SENSITIVE as _,
+            crate::key_metadata::KeyAttributeValue::Boolean(true),
+        )
+        .unwrap();
+    restricted.policy_templates.derive = Some(policy);
+    // Fail on the second key, after S-ENC was successfully derived and read.
+    let (pair, _owner) = symmetric_permission_fixture(
+        true,
+        [
+            symmetric_permissions(true, true, &[counter, ecb]),
+            restricted,
+        ],
+    );
+    assert!(
+        matches!(SessionKeys::derive(&pair, &[0x23; 16]), Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV)
+    );
+    let mut scope = Pkcs11KeyScope::for_key(&pair.mac).unwrap();
+    assert_eq!(scope.count_provider_objects(), 2);
+    // ECB is actually usable: the preceding failure must not silently use it.
+    let base = scope.bind(&pair.mac).unwrap();
+    let fields = [CounterKdfField::Counter(IntegerFormat {
+        width_bits: 8,
+        little_endian: false,
+    })];
+    assert!(
+        scope
+            .counter_kdf_aes128(
+                &base,
+                crate::key_scope::CounterKdfPath::AesEcb,
+                &fields,
+                readable(mac_template())
+            )
+            .is_ok()
+    );
 }

@@ -77,11 +77,23 @@ fixtures exercise the OS-backed key interface.
 ## Current YubiHSM flow
 
 Symmetric authentication binds two protected AES-128 objects, Key-ENC and
-Key-MAC. Counter KDF uses the source AES objects directly and produces three
-explicitly readable AES working objects. No source value read or extraction
-is needed, including for native YubiHSM AES keys. The resulting working-key
-values are read once into the client's zeroizing storage, and the
-entire derivation scope is destroyed. Host/card cryptograms use local S-MAC.
+Key-MAC. Each key prefers `CKM_SP800_108_COUNTER_KDF` when the slot and key
+permit derivation. Otherwise, a key that permits `CKM_AES_ECB` encryption uses
+the shared CMAC/counter-KDF construction through the source session's ordinary
+encryption operations. If the key also permits `CKM_AES_CBC`, one zero-IV CBC
+call handles all prepared CMAC blocks after one ECB call generates the subkeys.
+Otherwise, ECB operations handle each chained block. CBC errors propagate
+without an ECB retry. Both paths are selected before deriving anything; ENC
+and MAC may use different paths. An operational or output-policy failure is
+returned without retrying the other path.
+
+Counter-KDF operations create explicitly readable working objects, read them
+once, and destroy them. The ECB construction produces working bytes directly
+without importing them back into the source slot. Neither path reads or splits
+the source AES values. S-ENC, S-MAC, and S-RMAC use zeroizing client storage;
+partial results are dropped on failure, and the handshake session closes on
+completion. Host/card cryptograms use local S-MAC. The native counter-KDF and
+authentication fallback share the same CMAC/counter implementation.
 
 Asymmetric authentication binds a protected P-256 private credential and generates
 an ephemeral private key. Existing-slot credentials prefer
@@ -247,12 +259,10 @@ Choose derivation paths from the source's mechanisms and key permissions,
 without relying on backend kind. Prefer prefixed ECDH+KDF when available;
 otherwise require ordinary ECDH and the remaining composition/KDF operations.
 For explicitly named AES-128 pairs (`<name>.enc` and `<name>.mac`), prefer
-`CKM_SP800_108_COUNTER_KDF`. Consider an authentication-provider fallback that
-constructs CMAC and the counter KDF using `CKM_AES_ECB` when counter KDF is
-unavailable and the source keys permit encryption. Reuse the existing
-construction used for native YubiHSM AES keys rather than duplicating crypto
-in the authentication client. This provider-level fallback is future work;
-the current symmetric client requires the counter-KDF mechanism.
+`CKM_SP800_108_COUNTER_KDF`, with the implemented AES-ECB construction as the
+alternative when the key permits encryption. An external adapter must supply
+these session operations and capability checks; the loader itself remains
+future work.
 
 Select a permitted path before execution; an operational failure must not
 trigger a different path or weaken object policy. Long-term keys remain in the

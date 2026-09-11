@@ -382,30 +382,13 @@ pub(crate) fn aes_gmac_parameters(
     Ok(Some(parameters))
 }
 
-fn cmac_with_encryptor(
-    data: &[u8],
-    encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
-) -> Result<Vec<u8>, Error> {
-    use software_key_core::software_symmetric::{BlockCipherModeError, cmac_with};
-
-    cmac_with(AES_CMAC_LENGTH, data, encrypt).map_err(|error| match error {
-        BlockCipherModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
-        BlockCipherModeError::BlockOperation(error) => error,
-        BlockCipherModeError::InvalidBlockSize
-        | BlockCipherModeError::InvalidIvLength
-        | BlockCipherModeError::InvalidDataLength
-        | BlockCipherModeError::InvalidCounterBits
-        | BlockCipherModeError::InputTooLong => CKR_DEVICE_ERROR.into(),
-    })
-}
-
 pub(crate) fn yubihsm_aes_cmac(
     ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    cmac_with_encryptor(data, |block| {
+    crate::software_key_ops::cmac_with_encryptor(data, |block| {
         yubihsm_encrypt_ecb_blocks(ctx, session_handle, key_id, block)
     })
 }
