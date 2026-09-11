@@ -16,7 +16,7 @@ fn provider(connector: Rc<dyn crate::Connector>, label: &str) -> crate::NativeHs
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("credential {label:?} missing on {}", connector.name()));
     crate::NativeHsmAuth {
-        connector: connector,
+        connector,
         credential,
         version: info.version,
         trust_prefix: None,

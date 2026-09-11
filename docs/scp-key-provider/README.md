@@ -164,8 +164,9 @@ migration and virtual-token-native operations follow below.
 
 ### Physical YubiHSM-to-YubiHSM regression
 
-`yubihsm_to_yubihsm_asymmetric_authentication` is an ignored, explicitly
-provisioning test. Set `PKCS11RS_CROSS_HSM_SOURCE` and
+`yubihsm_to_yubihsm_asymmetric_authentication` and the three
+`yubihsm_to_yubihsm_symmetric_*` cases are ignored, explicitly provisioning
+tests. Set `PKCS11RS_CROSS_HSM_SOURCE` and
 `PKCS11RS_CROSS_HSM_TARGET` to distinct HSM serials, and supply the
 existing bootstrap login strings in `PKCS11RS_CROSS_HSM_SOURCE_PIN` and
 `PKCS11RS_CROSS_HSM_TARGET_PIN`. If bootstrap authentication uses a YubiKey,
@@ -175,27 +176,53 @@ connector URLs, for example `http://ubuntu3:12345`. Local USB and remote
 connector slots participate in the same test; the source and target serials
 still select the exact devices.
 The bootstrap credentials need permission to generate/delete the temporary
-source key and create/delete the target authentication key.
+source key (or import/delete AES keys for the symmetric cases) and
+create/delete the target authentication key.
 
 ```sh
-cargo test --lib yubihsm_to_yubihsm_asymmetric_authentication -- --ignored --nocapture
+cargo test --lib yubihsm_to_yubihsm -- --ignored --nocapture --test-threads=1
 ```
 
-The test generates a sensitive, non-extractable P-256 source token key,
+The asymmetric test generates a sensitive, non-extractable P-256 source token key,
 registers its public point as a temporary target authentication key, and logs
 into the target with the explicitly named source credential. It verifies
 public/private ID pairing, raw and prefixed derivation permissions, protected
-random requests, and an encrypted echo. Cleanup deletes only the temporary
+random requests, and an encrypted echo. Each case enables session recreation,
+waits 35 seconds without HSM traffic for the hardware session timeout, and
+checks that the first subsequent request succeeds with USER authorization
+retained. Cleanup deletes only the temporary
 objects and compares both native inventories with their initial snapshots.
-It never resets a device. Assertion failures also attempt cleanup; process
+The tests never reset a device. Assertion failures also attempt cleanup; process
 termination or device removal can prevent cleanup from completing.
+
+The symmetric cases provision a fresh random AES-128 pair as protected source
+token objects named `<label>.enc` and `<label>.mac`, and the corresponding target
+authentication key. All local provisioning-key bytes are zeroized before login.
+Actual PKCS #11 key policy selects the path; the test checks the selection
+without forcing it or mocking slot capabilities:
+
+| Case | CKA_DERIVE | CKA_ENCRYPT | CKA_ALLOWED_MECHANISMS |
+| --- | --- | --- | --- |
+| Counter KDF | true | false | SP800_108_COUNTER_KDF |
+| ECB+CBC | false | true | AES_ECB, AES_CBC |
+| ECB only | false | true | AES_ECB |
+
+Native key information verifies AES-128 and the absence of export-under-wrap
+capability. The import API grants native ECB/CBC encryption capabilities for
+`CKA_ENCRYPT=true`; the ECB-only case excludes CBC through its persisted
+PKCS #11 mechanism restriction. Source values remain unreadable through
+`CKA_VALUE`. Both source and target hardware sessions can expire during the
+idle period; the retained source authorization must also support recreation.
 
 Physical devices 1238075073 and 2545354682 passed authentication and protected
 commands in both source/target directions, bootstrapped through the existing
 `shared` YubiHSM Auth credential on YubiKey 37070618. Both devices' native
 inventories matched their pre-test snapshots after cleanup. The same test passes
 with source 2545354682 on local USB and target 1238075073 reached through
-`http://ubuntu3:12345`; both inventories return to their original 12 objects.
+`http://ubuntu3:12345`. The asymmetric path and all three symmetric paths passed
+authentication and recovery after 35 seconds idle in this topology. Symmetric
+selection was driven by the persisted usage flags and allowed-mechanism list.
+Both inventories returned to their original 12 objects after each case.
 
 ## 2. Migrate card derivation
 
