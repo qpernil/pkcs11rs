@@ -1371,7 +1371,7 @@ impl YubiHsmSlot {
         &self,
         authkey_id: u16,
         credential: crate::auth_slots::OrdinaryCredential,
-        password: &[u8],
+        password: Option<&[u8]>,
     ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         let material = credential.authorize(password, self.trust_prefix.clone())?;
         let session = material.authenticate(self.connector.as_ref(), authkey_id)?;
@@ -1546,10 +1546,11 @@ impl YubiHsmSlot {
     fn authenticate_selected_login(
         &self,
         selected: SelectedClientAuth,
-        password: &[u8],
+        password: Option<&[u8]>,
     ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         match selected {
             SelectedClientAuth::Direct(authkey_id) => {
+                let password = password.ok_or(CKR_ARGUMENTS_BAD)?;
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
@@ -1560,6 +1561,7 @@ impl YubiHsmSlot {
                 provider,
                 authkey_id,
             } => {
+                let password = password.ok_or(CKR_ARGUMENTS_BAD)?;
                 if password.len() > 16 {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
@@ -1589,21 +1591,7 @@ impl YubiHsmSlot {
                     provider.credential.label
                 ),
             ),
-            SelectedClientAuth::Ordinary { credential, .. } => {
-                if !credential.session.authorization_required()? {
-                    return Ok(Zeroizing::new(Vec::new()));
-                }
-                if !credential.pin_required {
-                    return Ok(Zeroizing::new(Vec::new()));
-                }
-                (
-                    format!("{} #{}", credential.title, credential.source),
-                    format!(
-                        "Authorize source token access for credential {:?}.",
-                        credential.label
-                    ),
-                )
-            }
+            SelectedClientAuth::Ordinary { .. } => return Err(CKR_ARGUMENTS_BAD.into()),
         };
         let title = format!("{source} accessing {}", self.label());
         pinentry.request(pinentry::Prompt {
@@ -1626,14 +1614,14 @@ impl YubiHsmSlot {
         config: &YubiHsmPublicDiscoveryConfig,
         selected: SelectedClientAuth,
     ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
-        let prompted;
-        let password = if let Some(password) = config.configured_password.as_ref() {
-            password.as_slice()
-        } else {
-            prompted = self.selected_password(&selected, &self.pinentry)?;
-            prompted.as_slice()
-        };
-        self.authenticate_selected_login(selected, password)
+        if let Some(password) = config.configured_password.as_ref() {
+            return self.authenticate_selected_login(selected, Some(password.as_slice()));
+        }
+        if matches!(selected, SelectedClientAuth::Ordinary { .. }) {
+            return self.authenticate_selected_login(selected, None);
+        }
+        let password = self.selected_password(&selected, &self.pinentry)?;
+        self.authenticate_selected_login(selected, Some(password.as_slice()))
     }
 
     fn select_login(
@@ -1726,19 +1714,29 @@ impl YubiHsmSlot {
         slot_id: Option<CK_SLOT_ID>,
         username: &[u8],
         password: &[u8],
+        pinentry: &pinentry::Pinentry,
         token_objects: &[TokenObject],
     ) -> Result<(), Error> {
         let selected = self.select_login(slot_id, username, token_objects)?;
-        self.login_selected(selected, password)
+        self.login_selected(selected, Some(password), pinentry)
     }
 
     fn login_selected(
         &mut self,
         selected: SelectedClientAuth,
-        password: &[u8],
+        password: Option<&[u8]>,
+        pinentry: &pinentry::Pinentry,
     ) -> Result<(), Error> {
         let _ = self.close_active_session("pre-login");
         self.clear_cached_private_objects()?;
+        let prompted;
+        let password =
+            if password.is_none() && !matches!(selected, SelectedClientAuth::Ordinary { .. }) {
+                prompted = self.selected_password(&selected, pinentry)?;
+                Some(prompted.as_slice())
+            } else {
+                password
+            };
         let (session, authkey_id, reauthentication) =
             self.authenticate_selected_login(selected, password)?;
         let session = RefCell::new(Some(session));
@@ -4257,40 +4255,25 @@ impl Slot for YubiHsmSlot {
     fn yubihsm_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         Some(self.connector.clone())
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         let (username, password) = split_yubihsm_login(pin)?;
         if let Some(password) = password {
-            log!(
-                2,
-                "YubiHSM combined login parsed {} selector bytes and {} password bytes",
-                username.len(),
-                password.len()
-            );
-            return self.login_user_for_slot(None, username, password, &[]);
-        }
-        Err(CKR_ARGUMENTS_BAD.into())
-    }
-    fn login_with_pinentry(
-        &mut self,
-        pin: &[u8],
-        pinentry: &pinentry::Pinentry,
-    ) -> Result<(), Error> {
-        let (username, password) = split_yubihsm_login(pin)?;
-        if let Some(password) = password {
-            return self.login_user_for_slot(None, username, password, &[]);
+            return self.login_user_for_slot(None, username, password, pinentry, &[]);
         }
         let selected = self.select_login(None, username, &[])?;
-        let password = self.selected_password(&selected, pinentry)?;
-        self.login_selected(selected, password.as_slice())
+        self.login_selected(selected, None, pinentry)
     }
     fn login_user(
         &mut self,
         slot_id: CK_SLOT_ID,
         username: &[u8],
-        password: &[u8],
+        password: Option<&[u8]>,
+        pinentry: &pinentry::Pinentry,
         token_objects: &[TokenObject],
     ) -> Result<(), Error> {
-        self.login_user_for_slot(Some(slot_id), username, password, token_objects)
+        let selected = self.select_login(Some(slot_id), username, token_objects)?;
+        self.login_selected(selected, password, pinentry)
     }
     fn login_user_uses_token_objects(&self, username: &[u8]) -> bool {
         matches!(
@@ -4303,20 +4286,6 @@ impl Slot for YubiHsmSlot {
     }
     fn supports_login_user(&self) -> bool {
         true
-    }
-    fn login_user_has_named_users(&self) -> bool {
-        true
-    }
-    fn login_user_without_pin(
-        &mut self,
-        slot_id: CK_SLOT_ID,
-        username: &[u8],
-        pinentry: &pinentry::Pinentry,
-        token_objects: &[TokenObject],
-    ) -> Result<(), Error> {
-        let selected = self.select_login(Some(slot_id), username, token_objects)?;
-        let password = self.selected_password(&selected, pinentry)?;
-        self.login_selected(selected, password.as_slice())
     }
     fn logout(&mut self) -> Result<(), Error> {
         if !self.has_session_role(YubiHsmSessionRole::User) {

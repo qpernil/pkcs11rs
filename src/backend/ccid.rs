@@ -293,13 +293,25 @@ impl Slot for HsmAuthSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, _pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         Err(CKR_USER_TYPE_INVALID.into())
     }
-    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        Err(CKR_USER_TYPE_INVALID.into())
-    }
-    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login_so(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let prompted;
+        let pin = match pin {
+            Some(pin) => pin,
+            None => {
+                let title = self.label();
+                let description =
+                    format!("Enter the YubiHSM Auth management password for {title}.");
+                prompted = pinentry.request(pinentry::Prompt {
+                    title: &title,
+                    description: &description,
+                    label: "Management password:",
+                })?;
+                prompted.as_slice()
+            }
+        };
         self.authenticated.set(false);
         self.management_key.get_mut().take();
         self.connector.clear_secure_channel();
@@ -311,16 +323,6 @@ impl Slot for HsmAuthSlot {
             .replace(HsmAuthManagementKey(key));
         self.authenticated.set(true);
         Ok(())
-    }
-    fn login_so_without_pin(&mut self, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        let title = self.label();
-        let description = format!("Enter the YubiHSM Auth management password for {title}.");
-        let pin = pinentry.request(pinentry::Prompt {
-            title: &title,
-            description: &description,
-            label: "Management password:",
-        })?;
-        self.login_so(pin.as_slice())
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
@@ -728,17 +730,11 @@ impl Slot for IssuerSecurityDomainSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        if !pin.is_empty() {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
+    fn login(&mut self, _pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         self.authenticated.set(true);
         Ok(())
-    }
-    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        self.login(&[])
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);

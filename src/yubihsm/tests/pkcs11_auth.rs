@@ -391,12 +391,12 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
             CKR_OK as CK_RV
         );
         assert!(
-            matches!(Slot::login_user(&mut slot, 7, selector.as_bytes(), b"wrong source pin", &[]),
+            matches!(login_user_slot(&mut slot, 7, selector.as_bytes(), b"wrong source pin", &[]),
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
         );
         assert_eq!(peer.create_session_count(), 0);
         assert!(!child.lock().unwrap().slot.login_is_active());
-        Slot::login_user(
+        login_user_slot(
             &mut slot,
             7,
             selector.as_bytes(),
@@ -419,7 +419,7 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         Slot::logout(&mut slot).unwrap();
         // A source authorized by the application is reused without submitting
         // the supplied bytes as another token PIN.
-        Slot::login_user(&mut slot, 7, selector.as_bytes(), b"not resubmitted", &[]).unwrap();
+        login_user_slot(&mut slot, 7, selector.as_bytes(), b"not resubmitted", &[]).unwrap();
         Slot::logout(&mut slot).unwrap();
         slot.public_discovery_config = configured_yubihsm_public_discovery_credential(Some(
             format!("{selector}:test source user pin").into(),
@@ -538,7 +538,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
             .ordinary_credentials(Some(&label), None, &std::sync::Weak::new(), true)
             .unwrap();
         assert_eq!(candidates.len(), 1);
-        let result = candidates.pop().unwrap().authorize(b"", None);
+        let result = candidates.pop().unwrap().authorize(Some(b""), None);
         if matches {
             assert!(result.is_ok());
         } else {
@@ -571,7 +571,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
                 .unwrap()
                 .pop()
                 .unwrap();
-            assert!(matches!(selected.authorize(b"", None),
+            assert!(matches!(selected.authorize(Some(b""), None),
                 Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV));
             for handle in aes {
                 fixture.owner.destroy(handle).unwrap();

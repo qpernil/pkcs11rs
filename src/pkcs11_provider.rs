@@ -135,10 +135,17 @@ impl ProviderSession {
         Ok(token.flags & CKF_LOGIN_REQUIRED as CK_FLAGS != 0)
     }
     pub(crate) fn authorize(&self, pin: &[u8]) -> Result<(), Error> {
+        self.authorize_optional(Some(pin))
+    }
+    pub(crate) fn authorize_optional(&self, pin: Option<&[u8]>) -> Result<(), Error> {
         if !self.authorization_required()? {
             return Ok(());
         }
-        match self.login(pin) {
+        let result = match pin {
+            Some(pin) => self.login(pin),
+            None => self.call(|| api::rust::login(self.handle, CKU_USER as _, std::ptr::null(), 0)),
+        };
+        match result {
             Err(Error::Generic(rv)) if rv == CKR_USER_ALREADY_LOGGED_IN as CK_RV => Ok(()),
             result => result,
         }

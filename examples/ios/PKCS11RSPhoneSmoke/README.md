@@ -123,9 +123,9 @@ After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials. For each YubiHSM slot it calls `C_LoginUser` with the
 provider-independent wildcard username `:*` and the prototype YubiHSM Auth
 credential password `password`. pkcs11rs compares available credential public
-points with that slot's publicly discovered `CKO_PUBLIC_KEY` projections. It
-prefers a matching credential from an attached YubiKey, then falls back to a
-matching platform credential and ignores the password for that candidate.
+points with that slot's publicly discovered `CKO_PUBLIC_KEY` projections and
+uses the unique matching source. Native YubiHSM Auth consumes the supplied
+credential password; a matching host credential ignores it.
 After a successful login, the app enumerates the objects again as an
 authenticated user, logs out, and closes the session. On iOS the module
 reconciles ordinary CryptoTokenKit USB smart-card readers before requesting

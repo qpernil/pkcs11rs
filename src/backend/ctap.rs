@@ -948,7 +948,8 @@ impl Slot for Fido2Slot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         self.authenticated.set(false);
         self.administration_authorization.take();
         self.credentials.get_mut().clear();
@@ -1311,7 +1312,8 @@ mod tests {
         let connector = Rc::new(crate::mock_yubikey::MockYubiKeyConnector::new().unwrap());
         crate::select_application(connector.as_ref(), &FIDO2_AID).unwrap();
         let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
-        slot.login(b"123456").unwrap();
+        slot.login(Some(b"123456"), &crate::pinentry::Pinentry::unconfigured())
+            .unwrap();
         assert!(slot.administration_authorization.is_some());
         slot.fido_preview_sign_registration().unwrap();
         assert!(slot.administration_authorization.is_none());
@@ -1319,11 +1321,16 @@ mod tests {
             matches!(slot.fido_preview_sign_registration(), Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as CK_RV)
         );
         slot.logout().unwrap();
-        slot.login(b"123456").unwrap();
+        slot.login(Some(b"123456"), &crate::pinentry::Pinentry::unconfigured())
+            .unwrap();
         slot.clear_session();
         assert!(slot.administration_authorization.is_none());
-        slot.login(b"123456").unwrap();
-        assert!(slot.login(b"wrong").is_err());
+        slot.login(Some(b"123456"), &crate::pinentry::Pinentry::unconfigured())
+            .unwrap();
+        assert!(
+            slot.login(Some(b"wrong"), &crate::pinentry::Pinentry::unconfigured())
+                .is_err()
+        );
         assert!(slot.administration_authorization.is_none());
     }
 
@@ -1736,11 +1743,11 @@ mod tests {
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
         ));
         assert!(matches!(
-            slot.login_user(0, b"alice", b"new-PIN", &[]),
-            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+            slot.login_user(0, b"alice", Some(b"new-PIN"), &crate::pinentry::Pinentry::unconfigured(), &[]),
+            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as CK_RV
         ));
         assert!(matches!(
-            slot.login_so(b"new-PIN"),
+            slot.login_so(Some(b"new-PIN"), &crate::pinentry::Pinentry::unconfigured()),
             Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV
         ));
     }

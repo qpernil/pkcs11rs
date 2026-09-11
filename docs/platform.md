@@ -84,8 +84,9 @@ match. `:*reserve@host` and universal `:*` match source public keys against the
 YubiHSM's discovered public authentication-key projections. Only asymmetric
 matching is automatic.
 
-The authentication consumer performs the same empty-PIN login before resolving
-the private key, accepting an already logged-in user session. The resolved token
+The authentication consumer performs USER login before resolving the private
+key. The Host backend accepts an omitted or supplied PIN and ignores its value,
+and also accepts an already logged-in user session. The resolved token
 key is bound through `Pkcs11Auth`. Static and ephemeral ECDH
 outputs remain protected session objects throughout the common derivation
 graph. Only the final working keys are read into the channel for local message

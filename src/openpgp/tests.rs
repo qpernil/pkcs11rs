@@ -266,7 +266,12 @@ fn openpgp_so_operations_use_pw3_and_reset_pw1() {
     let connector_trait: std::rc::Rc<dyn Connector> = connector.clone();
     let mut slot = crate::OpenPgpSlot::new(connector_trait, OPENPGP_AID.to_vec());
 
-    crate::Slot::login_so(&mut slot, b"12345678").unwrap();
+    crate::Slot::login_so(
+        &mut slot,
+        Some(b"12345678"),
+        &crate::pinentry::Pinentry::unconfigured(),
+    )
+    .unwrap();
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::init_user_pin(&mut slot, b"654321").unwrap();
     assert!(crate::Slot::login_is_active(&slot));
