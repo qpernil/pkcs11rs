@@ -113,6 +113,7 @@ fn yubihsm_objects_with_persisted_public(
         public_id: None,
         public_label: None,
         public_attributes,
+        primary_attributes: crate::key_metadata::KeyAttributes::new(),
     };
     crate::yubihsm_token_objects_with_generation(
         slot_id,
@@ -3260,6 +3261,7 @@ fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
         public_id: Some(b"public-id".to_vec()),
         public_label: Some("public label".to_owned()),
         public_attributes: crate::key_metadata::KeyAttributes::new(),
+        primary_attributes: crate::key_metadata::KeyAttributes::new(),
     };
     let objects = crate::yubihsm_token_objects_with_generation(
         99,

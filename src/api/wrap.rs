@@ -1045,6 +1045,7 @@ fn unwrap_key(
                 &imported.unique_id,
                 (!requested.id.is_empty()).then_some(requested.id.as_slice()),
                 (!requested.label.is_empty()).then_some(requested.label.as_str()),
+                Some(&requested),
             );
             let refresh = ctx.refresh_slot_token_objects(slot_id);
             if let Err(error) = metadata_result {
