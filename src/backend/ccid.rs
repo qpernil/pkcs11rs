@@ -128,6 +128,12 @@ impl HsmAuthSlot {
         application_aid: Vec<u8>,
         device: Arc<DeviceContext>,
     ) -> Self {
+        debug_assert!(
+            connector
+                .device_context()
+                .is_none_or(|source| Arc::ptr_eq(&source, &device)),
+            "the source session must guard the connector's physical device"
+        );
         let serial = device.identity(connector.connection_epoch()).serial;
         Self {
             connector,
@@ -170,6 +176,10 @@ impl HsmAuthSlot {
 }
 
 impl Slot for HsmAuthSlot {
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        Some("yubihsm-auth")
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -208,6 +218,15 @@ impl Slot for HsmAuthSlot {
             source: self.serial.clone(),
         }
         .authenticate(target, authkey_id, password)
+    }
+    fn additional_profile_ids(&self) -> &[CK_PROFILE_ID] {
+        &[CKP_YUBICO_HSMAUTH]
+    }
+    fn supports_software_keys(&self) -> bool {
+        false
+    }
+    fn software_mechanism_enabled(&self, _mechanism: CK_MECHANISM_TYPE) -> bool {
+        false
     }
     fn supports_public_projection(&self) -> bool {
         false
@@ -274,18 +293,11 @@ impl Slot for HsmAuthSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        if !pin.is_empty() {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
-        self.management_key.get_mut().take();
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
-        self.authenticated.set(true);
-        Ok(())
+    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_USER_TYPE_INVALID.into())
     }
     fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        self.login(&[])
+        Err(CKR_USER_TYPE_INVALID.into())
     }
     fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
@@ -328,6 +340,7 @@ impl Slot for HsmAuthSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        info.flags &= !((CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED) as CK_FLAGS);
         let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(&format!("HSM Auth #{}", identity.serial), &mut info.label);
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
@@ -497,7 +510,10 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
             slot_id: Some(slot_id),
             unique_id: hsmauth_credential_identity(credential),
             class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
-            key_type: CKK_GENERIC_SECRET as CK_KEY_TYPE,
+            key_type: match credential.algorithm {
+                HsmAuthAlgorithm::Aes128YubicoAuthentication => CKK_YUBICO_HSMAUTH_SYMMETRIC,
+                HsmAuthAlgorithm::EcP256YubicoAuthentication => CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+            },
             label: credential.label.clone(),
             id: id.clone(),
             token: true,
@@ -538,7 +554,7 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
                 ),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_EC as CK_KEY_TYPE,
-                label: format!("{} public key", credential.label),
+                label: credential.label.clone(),
                 id: id.clone(),
                 token: true,
                 private: false,
@@ -623,6 +639,14 @@ impl IssuerSecurityDomainSlot {
 }
 
 impl Slot for IssuerSecurityDomainSlot {
+    fn supports_security_domain_management(&self) -> bool {
+        true
+    }
+
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        Some("issuer-security-domain")
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

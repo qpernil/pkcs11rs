@@ -5,9 +5,9 @@ against the existing SCP client. Common composition mechanisms are implemented
 as described below. Direct YubiHSM symmetric/asymmetric
 derivation uses `Pkcs11Auth` over the Rust handlers shared with the C API;
 final working keys are read once for local message crypto. Slot preparation
-supports temporary software slots and existing registered slots. Configured
-selection, card derivation migration, [named credential lookup](credential-lookup.md),
-and native chainable derivation remain planned.
+supports temporary software slots and existing registered slots with configured
+[named credential lookup](credential-lookup.md). Card derivation migration and
+native chainable derivation remain planned.
 
 ## Actors and scope
 
@@ -29,7 +29,9 @@ SCP client in pkcs11rs ------------------------------------> key provider
 The provider does not receive an instruction to run an SCP state machine. Its
 commands generate, derive, and compose keys and verify the establishment receipt.
 The final working outputs explicitly permit value reads; long-term credentials
-and raw ECDH results remain protected. A native virtual-YubiHSM
+and static ECDH results remain protected. The preferred combined mechanism
+accepts an explicitly readable ephemeral agreement as prefix bytes; the
+standard composition path keeps both agreement objects protected. A native virtual-YubiHSM
 provider needs an independently established connection and authorization: it
 cannot depend on the very SCP channel whose keys it is being asked to create.
 Implementing the peer role is separate work, although peer fixtures are needed
@@ -60,10 +62,11 @@ handlers, without crossing the C ABI. SCP03 counter KDF creates readable final A
 creates readable final KDF blocks; their concatenation and extracted working
 AES keys are readable by inheritance. The receipt key is protected and verifies
 the receipt before the three working keys are read. All scope objects are
-released afterward. Protected inputs are never downgraded or read.
+released afterward. Protected inputs are never downgraded. The combined
+mechanism's ephemeral prefix is explicitly readable from creation.
 
 YubiHSM Auth supplies working bytes directly. Platform keys use native ECDH
-through the platform slot and the common protected session-object graph.
+through the host slot and the same combined-mechanism selection.
 Card structures retain local working keys and still use direct derivation.
 Hardware ECDH outputs in public PKCS #11 operations use software session objects;
 the native prefixed extension returns KDF bytes. None establishes native retention
@@ -88,7 +91,7 @@ Bind two protected AES-128 keys, Key-ENC and Key-MAC, through an authorized
 provider session. Their labels are `<label>.enc` and `<label>.mac`; exact lookup
 requires one `CKO_SECRET_KEY` / `CKK_AES` object for each role on the same slot.
 Counter KDF uses each source handle directly, without extraction or reading
-long-term values. Configured selection of arbitrary source slots remains planned.
+long-term values. Configured named selection supports ordinary source slots.
 For password login,
 the existing credential-input path uses PBKDF2-HMAC-SHA256 with salt `Yubico`,
 10,000 iterations, and 32 output bytes, split ENC then MAC. Password processing
@@ -116,7 +119,7 @@ failed handshakes. The first encrypted command uses counter one.
 ### Asymmetric authentication
 
 Generate a client ephemeral P-256 key and bind its authorized static P-256
-credential. Produce two protected 32-byte ECDH results:
+credential. The derivation combines two 32-byte ECDH results:
 
 ```text
 Ze = ECDH(client ephemeral private, target ephemeral public)
@@ -127,6 +130,14 @@ Kreceipt = M[0:16]
 S-ENC = M[16:32]; S-MAC = M[32:48]; S-RMAC = M[48:64]
 receipt = CMAC(Kreceipt, target ephemeral public || client ephemeral public)
 ```
+
+The existing-slot client prefers `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when
+advertised and permitted for the static key. It derives `Ze` as an explicitly
+readable ephemeral object and passes its bytes as the prefix for static ECDH
+and X9.63. `Zs` is never read by the client. A missing or excluded mechanism
+selects protected `CKD_NULL` ECDH objects followed by concatenation and SHA-256.
+Operational errors do not cause fallback. Direct authentication and recreation
+from a retained static agreement use the protected-object sequence.
 
 The receipt input is two uncompressed P-256 public points (65 bytes each),
 without the GlobalPlatform authentication TLVs. Verify all 16 receipt bytes,
@@ -363,8 +374,8 @@ session layer, not native YubiHSM volatile object storage.
 
 The PKCS #11 authentication adapter uses two protected AES keys as counter-KDF
 bases directly. Paired-key lookup resolves `<label>.enc` and `<label>.mac`
-through the prepared source session. Configured selection across arbitrary
-source slots remains planned.
+through the prepared source session. Explicit selectors name the source token,
+credential prefix, and target Authentication Key ID; the two AES IDs need not match.
 
 Its mechanism information reports the base-key range as
 128–256 **bits**, as required by the standard; object `CKA_VALUE_LEN` and KDF
@@ -455,15 +466,14 @@ lost working keys. Preserve transaction-scoped CCID lifetimes for card channels.
 
 ## Implementation order and acceptance checks
 
-See the [staged plan](README.md) for implementation order: connect configured
-provider selection and credential lookup, migrate card derivation, implement
+See the [staged plan](README.md) for remaining work: migrate card derivation, implement
 native virtual-HSM derivation, then qualify full channels with local message
 crypto. Instrumented tests must show final working-key reads at establishment and no
 provider calls for subsequent message encryption/MAC.
 
-The discovery-disabled Cargo suite passes with 758 main-library tests and
-27 ignored. Public mechanism tests exercise protected and readable SCP03/X9.63
-graphs on every slot kind. The YubiHSM fixed wire vectors exercise local working
+The discovery-disabled Cargo suite includes public mechanism tests exercising
+protected and readable SCP03/X9.63 graphs on ordinary slot kinds. Native HSM Auth
+slots expose their dedicated authentication operation. The YubiHSM fixed wire vectors exercise local working
 keys; deterministic asymmetric fixtures compare the complete derivation against
 an independent raw-key reference confined to tests. Persistent-source tests
 verify that temporary bindings never delete the credential. Scope tests cover

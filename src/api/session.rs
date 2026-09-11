@@ -215,7 +215,7 @@ ffi_entry_point! {
     }
 }
 
-fn get_session_info(
+pub(crate) fn get_session_info(
     session_handle: CK_SESSION_HANDLE,
     info_ptr: *mut CK_SESSION_INFO,
 ) -> Result<(), Error> {
@@ -546,10 +546,8 @@ pub(crate) fn open_session(
             return Err(CKR_TOKEN_NOT_PRESENT.into());
         }
         let handle = context.handles.allocate_session()?;
-        ctx.sessions.insert(
-            handle,
-            SessionContext::new(ctx.slot.open_session(slot_id, flags)),
-        );
+        let backend = ctx.slot.open_session(slot_id, flags);
+        ctx.sessions.insert(handle, SessionContext::new(backend));
         Ok(handle)
     })?;
     if let Err(error) = register_session_slot_in_context(context, handle, slot_id) {

@@ -26,6 +26,9 @@ pub(crate) struct Pkcs11KeyScope {
 #[derive(Clone)]
 pub(crate) struct BoundKey(Rc<ObjectHandle>);
 impl BoundKey {
+    pub(crate) fn authorize_source(&self, pin: &[u8]) -> Result<(), Error> {
+        self.0.session.authorize(pin)
+    }
     pub(crate) fn hsmauth_authenticate(
         &self,
         target: &dyn Connector,
@@ -144,7 +147,16 @@ impl PasswordCredentials {
         })
     }
     pub(crate) fn symmetric(&self) -> Result<SymmetricCredential, Error> {
-        SymmetricCredential::find(self.scope.session.clone(), "direct", false)
+        SymmetricCredential::new(
+            BoundKey::from_session(
+                self.scope.session.clone(),
+                self.scope.object(&self.enc)?.handle,
+            )?,
+            BoundKey::from_session(
+                self.scope.session.clone(),
+                self.scope.object(&self.mac)?.handle,
+            )?,
+        )
     }
     pub(crate) fn asymmetric(&self) -> Result<BoundKey, Error> {
         BoundKey::from_session(
@@ -333,6 +345,46 @@ impl Pkcs11KeyScope {
         template: TokenObjectTemplate,
     ) -> Result<KeyHandle, Error> {
         self.derive(base, Derivation::Ecdh(peer), template, 32)
+    }
+    pub(crate) fn can_derive(
+        &self,
+        base: &KeyHandle,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> Result<bool, Error> {
+        self.session
+            .can_derive(self.object(base)?.handle, mechanism)
+    }
+    pub(crate) fn prefixed_ecdh(
+        &mut self,
+        base: &KeyHandle,
+        peer: &[u8],
+        prefix: &[u8],
+        shared_info: &[u8],
+        template: TokenObjectTemplate,
+        length: usize,
+    ) -> Result<KeyHandle, Error> {
+        self.derive(
+            base,
+            Derivation::PrefixedEcdh {
+                peer,
+                prefix,
+                shared_info,
+            },
+            template,
+            length,
+        )
+    }
+    /// Export only an explicitly readable ephemeral agreement, never a static key.
+    pub(crate) fn read_ephemeral_agreement(
+        &self,
+        key: &KeyHandle,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        self.require_generic_length(key, 32)?;
+        let value = self.read(key, CKA_VALUE)?;
+        if value.len() != 32 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        Ok(value)
     }
     pub(crate) fn append_key(
         &mut self,

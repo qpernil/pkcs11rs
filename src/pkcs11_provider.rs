@@ -121,6 +121,28 @@ impl ProviderSession {
         }
         Ok(session)
     }
+    /// Authorize only a selected source. Never resubmit a PIN to an already
+    /// authorized token, and never cache it for later provider login.
+    pub(crate) fn authorization_required(&self) -> Result<bool, Error> {
+        let mut session: CK_SESSION_INFO = unsafe { std::mem::zeroed() };
+        self.call(|| api::rust::get_session_info(self.handle, &mut session))?;
+        if matches!(session.state, x if x == CKS_RO_USER_FUNCTIONS as CK_STATE || x == CKS_RW_USER_FUNCTIONS as CK_STATE)
+        {
+            return Ok(false);
+        }
+        let mut token: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+        self.call(|| api::rust::get_token_info(session.slotID, &mut token))?;
+        Ok(token.flags & CKF_LOGIN_REQUIRED as CK_FLAGS != 0)
+    }
+    pub(crate) fn authorize(&self, pin: &[u8]) -> Result<(), Error> {
+        if !self.authorization_required()? {
+            return Ok(());
+        }
+        match self.login(pin) {
+            Err(Error::Generic(rv)) if rv == CKR_USER_ALREADY_LOGGED_IN as CK_RV => Ok(()),
+            result => result,
+        }
+    }
     pub(crate) fn login(&self, pin: &[u8]) -> Result<(), Error> {
         self.call(|| api::rust::login(self.handle, CKU_USER as _, pin.as_ptr(), pin.len() as _))
     }

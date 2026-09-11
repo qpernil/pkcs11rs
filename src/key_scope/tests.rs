@@ -5,6 +5,29 @@ use software_key_core::counter_kdf::{CounterKdfField, IntegerFormat};
 fn password_credentials_share_a_slot_and_release_the_unused_key() {
     let mut credentials = PasswordCredentials::new(b"password").unwrap();
     let provider = Rc::downgrade(&credentials.scope.session.provider);
+    // The private preparation knows its creation handles. Labels can change
+    // or collide without changing which keys direct authentication uses.
+    let mut label = b"same label".to_vec();
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_LABEL as _,
+        pValue: label.as_mut_ptr().cast(),
+        ulValueLen: label.len() as _,
+    };
+    for key in [&credentials.enc, &credentials.mac, &credentials.asymmetric] {
+        let handle = credentials.scope.object(key).unwrap().handle;
+        assert_eq!(
+            credentials
+                .scope
+                .session
+                .call(|| crate::api::C_SetAttributeValue(
+                    credentials.scope.session.handle,
+                    handle,
+                    &mut attribute,
+                    1
+                )),
+            CKR_OK as CK_RV
+        );
+    }
     let symmetric = credentials.symmetric().unwrap();
     let asymmetric = credentials.asymmetric().unwrap();
     assert!(Rc::ptr_eq(&symmetric.enc.0.session, &asymmetric.0.session));
@@ -56,6 +79,7 @@ fn symmetric_pair_lookup_requires_exact_unique_aes_roles() {
     let create = |label: &str, key_type, size: usize| {
         let template = TokenObjectTemplate {
             label: label.to_owned(),
+            id: label.as_bytes().to_vec(),
             key_type: Some(key_type),
             ..authentication_aes_template()
         };

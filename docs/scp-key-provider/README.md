@@ -28,7 +28,7 @@ not execution location.
 
 ## Implemented foundation
 
-All slot kinds share common software session objects: software, YubiHSM, PIV,
+Ordinary slot kinds share common software session objects: software, YubiHSM, PIV,
 OpenPGP, FIDO2, and platform ECDH. Supported software keys, data objects, derivation outputs,
 and operations use this common layer. A software slot has no native mechanisms;
 each hardware slot's native list is merged with a filtered software list.
@@ -39,7 +39,7 @@ Public PKCS #11 entry points implement protected concatenation, bit extraction,
 SHA-256 key derivation, and AES-CMAC SP 800-108 counter KDF. Existing ECDH,
 EC generation, AES, and CMAC complete the required generic primitives.
 Tests exercise protected and readable derivation graphs through the actual
-public API on all slot kinds. See the [operation matrix](operation-matrix.md)
+public API on ordinary slot kinds; native HSM Auth uses its dedicated operation. See the [operation matrix](operation-matrix.md)
 and [integration baseline](../../integration/README.md).
 
 The YubiHSM client uses the ergonomic `Pkcs11Auth` session API for direct
@@ -53,21 +53,26 @@ handle allocator; it never copies the token or its credentials. Direct password
 authentication creates an isolated, nonpersistent software slot containing
 two protected AES-128 keys and a protected P-256 private key, derived using
 the existing Yubico password conventions. All three are session objects
-owned by one preparation session; authentication selects the target key type.
+owned by one preparation session; authentication selects the target key type
+and uses the creation handles directly, without name lookup.
 The unused credential is discarded after the attempt. The ordinary
 `SoftwareSlot` is used without a backing store; token-object creation remains write-protected. A dedicated
 credential session and separate handshake sessions provide the required lifetimes.
 Both preparation paths use the same derivation and session cleanup operations.
-The enabled platform slot supports exact label lookup and public-key matching;
-selection across arbitrary configured providers remains planned; native chainable
+Existing ordinary source slots support exact named lookup and asymmetric
+public-key matching. Native HSM Auth slots use the profile and credential types
+described in [named lookup](credential-lookup.md). Native chainable
 protected-object commands remain unimplemented.
 
 The [complete-channel tests](../../src/yubihsm/tests/pkcs11_auth.rs) run the same
 symmetric and asymmetric establishment sequence with a private slot and an
 existing persistent software slot registered in the public module. A separate
 YubiHSM protocol fixture covers native protected AES counter derivation. These
-are distinct checks: complete authentication with a hardware-backed source
-credential and configured source lookup still need end-to-end qualification.
+are distinct checks: configured source selection is exercised with persistent
+software credentials. PIV and OpenPGP protocol fixtures exercise native ECDH
+through their slot implementations, and host fixtures exercise the OS-backed
+key interface. Physical source-to-target testing remains a separate qualification
+step.
 
 ## Current YubiHSM flow
 
@@ -78,13 +83,21 @@ is needed, including for native YubiHSM AES keys. The resulting working-key
 values are read once into the client's zeroizing storage, and the
 entire derivation scope is destroyed. Host/card cryptograms use local S-MAC.
 
-Asymmetric authentication binds a protected P-256 private credential, generates
-an ephemeral private key, and performs both ECDH agreements into protected
-generic-secret objects. Their concatenation and the per-block counter/shared-info
-inputs remain protected. SHA-256 derivation explicitly creates readable final
-KDF blocks, which concatenate into readable material. This is necessary because
-concatenation and extraction inherit source sensitivity/non-extractability.
-No existing object's protection is weakened.
+Asymmetric authentication binds a protected P-256 private credential and generates
+an ephemeral private key. Existing-slot credentials prefer
+`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when advertised and permitted by the key.
+The ephemeral agreement is explicitly readable and supplied as prefix bytes;
+static ECDH and X9.63 remain one operation. The static agreement is never read
+by the authentication client. A supporting native HSM keeps it device-side;
+physical YubiHSM and host keys use zeroizing module memory for the KDF.
+
+If the combined mechanism is unavailable or excluded by key policy, both
+agreements use protected generic-secret objects. Concatenation and public
+counter/shared-info inputs remain protected; SHA-256 derivation creates readable
+KDF blocks, which concatenate into readable material. No existing object's
+protection is weakened, and a failed combined operation does not trigger fallback.
+Direct password authentication uses this standard graph so recreation can retain
+only a protected static agreement instead of the password-derived private key.
 
 The receipt key is extracted as a protected AES object and verifies the complete
 receipt before working keys are released. S-ENC, S-MAC, and S-RMAC are extracted
@@ -92,8 +105,8 @@ as readable AES objects and read once. The provider scope, including the
 receipt key, ephemeral key, KDF blocks, and agreements, is destroyed on success
 or failure. Only the final three AES values cross into message processing.
 
-Platform credentials use native ECDH token objects and the same protected
-session-object graph through `Pkcs11Auth`. Only explicitly enabled platform
+Platform credentials use native ECDH token objects and the same mechanism
+selection through `Pkcs11Auth`. Only explicitly enabled platform
 slots participate in named or automatic lookup. `ClientAuth` covers temporary
 direct credentials and token bindings on existing source slots. YubiHSM Auth
 credentials are selected through ordinary slot objects; the owning PKCS #11
@@ -108,33 +121,33 @@ authenticated device-command errors advance the channel and preserve its keys.
 Local command-validation errors leave it intact. Card SCP03/SCP11 message crypto
 also runs locally; their derivation graphs still need migration.
 
-## 1. Connect configured provider selection and named lookup
+## 1. Configured provider selection and named lookup
 
-Connect discovery/configuration to the existing `Pkcs11Provider::from_slot`
-preparation path and `BoundKey::from_session` binding. Authorize provider sessions
-before acquiring target slot/device locks. The prepared view avoids recursive
-public-module locking and suppresses internal tracing; it does not remove the
-need to reject direct and indirect provider dependency cycles. Preparation of a
-source slot whose mutex is already held fails rather than waiting on itself.
+The YubiHSM client selects registered source slots through public credential
+metadata, then authorizes exactly one selected source. Native HSM Auth slots
+advertise `CKP_YUBICO_HSMAUTH`; ordinary slots provide P-256 token keys or named
+AES pairs. See [source selection](../yubihsm-auth.md#generic-source-selection-and-authorization)
+for selector syntax, supported sources, and login behavior.
 
-Use the [named credential design](credential-lookup.md): one exact label within
-one provider identifies either a pair of protected AES keys labelled
-`<label>.enc` and `<label>.mac`, or a P-256 private credential. Missing or duplicate matches, wrong types, and incompatible
-output policies fail explicitly. Do not retain ordinary provider PINs to recover
-lost sessions; define authorization leases and revocation before integration.
+`Pkcs11Provider::from_slot` shares the source backend, authorization and object
+handles. The prepared view avoids recursive public-module locking and suppresses
+internal tracing. Preparation fails if the source slot mutex is already held;
+a target cannot bootstrap its source through itself. Ordinary source PINs are
+not retained. Existing authorization and key bindings remain subject to source
+logout, replacement and session loss.
 
-Derivation templates must permit the intended final value reads from creation.
-Use `CKA_SENSITIVE=false` and `CKA_EXTRACTABLE=true` on readable outputs, and
-honor all source restrictions. A provider that prohibits those outputs is
-incompatible with this client path; do not silently change policy or fall back
-to a different execution mode. Release intermediate objects after use and read
-only final working keys in the generic path, never long-term keys. Platform ECDH outputs follow the same session-object policy.
+Derivation templates permit the intended final value reads from creation,
+using `CKA_SENSITIVE=false` and `CKA_EXTRACTABLE=true` while honoring source
+restrictions. Incompatible policy fails without fallback. Intermediate objects
+are released after use; only final working keys leave the generic derivation
+path. Instrumented software-source tests cover both protocols, wrong PINs,
+authorization reuse, channel recreation, and source-object preservation.
+Platform and native-source tests cover public ambiguity before authorization;
+native tests count password-bearing requests to verify no candidate fallback.
 
-Acceptance: the YubiHSM client completes symmetric/asymmetric authentication
-through a separately configured slot. Instrumented tests show derivation and
-final value reads at establishment, with no provider calls during message processing.
-Tests cover missing credentials, duplicates, policy denial, failed receipts,
-partial reads, source revocation, cleanup, and unchanged wire vectors.
+Remaining qualification includes additional real hardware source-to-target combinations
+and provider dependency-cycle handling across retained bindings. Card protocol
+migration and virtual-token-native operations follow below.
 
 ## 2. Migrate card derivation
 

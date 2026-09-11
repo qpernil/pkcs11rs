@@ -185,13 +185,20 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert!(!debug.contains("discovery-password"));
 
     let credential =
-        crate::configured_yubihsm_public_discovery_credential(Some(":1003@reserve".into()))
+        crate::configured_yubihsm_public_discovery_credential(Some(":1003reserve@host:".into()))
             .unwrap()
             .unwrap();
     assert_eq!(credential.authkey_id, 0x1003);
-    assert!(credential.hsmauth_credential.is_none());
-    assert_eq!(credential.platform_credential.as_deref(), Some("reserve"));
-    assert!(credential.configured_password.is_none());
+    let selected = credential.hsmauth_credential.as_ref().unwrap();
+    assert_eq!(selected.label, "reserve");
+    assert_eq!(selected.source.as_deref(), Some("host"));
+    assert_eq!(
+        credential
+            .configured_password
+            .as_deref()
+            .map(|pin| pin.as_slice()),
+        Some(b"".as_slice())
+    );
 
     let credential = crate::configured_yubihsm_public_discovery_credential(Some(
         ":0001default key@12345678:password".into(),
@@ -211,12 +218,19 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert!(debug.contains("12345678"));
     assert!(debug.contains("[REDACTED]"));
 
+    // Named source PIN limits belong to the selected provider, not the syntax.
+    assert!(
+        crate::configured_yubihsm_public_discovery_credential(Some(
+            ":0001default:password-is-over-16-bytes".into(),
+        ))
+        .is_ok()
+    );
+
     for credential in [
         "",
         "1password",
         "zzzzpassword",
         ":0001default",
-        ":0001default:password-is-over-16-bytes",
         "0001short",
         "0001password-that-is-far-too-long-to-be-a-valid-yubihsm-authentication-key-password",
     ] {
@@ -1184,7 +1198,7 @@ fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
 }
 
 #[test]
-fn hsmauth_user_login_accepts_only_zero_length_pin_arguments() {
+fn hsmauth_user_login_is_unsupported_without_consuming_retries() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -1201,6 +1215,8 @@ fn hsmauth_user_login_accepts_only_zero_length_pin_arguments() {
     assert_eq!(token_info.ulMinPinLen, 0);
     assert_eq!(token_info.ulMaxPinLen, 32);
 
+    assert_eq!(token_info.flags & CKF_LOGIN_REQUIRED as CK_FLAGS, 0);
+    let calls = connector.commands.borrow().len();
     let mut nonempty = *b"ignored";
     assert_eq!(
         crate::api::C_Login(
@@ -1209,19 +1225,23 @@ fn hsmauth_user_login_accepts_only_zero_length_pin_arguments() {
             nonempty.as_mut_ptr(),
             nonempty.len() as CK_ULONG,
         ),
-        CKR_PIN_INCORRECT as CK_RV
+        CKR_USER_TYPE_INVALID as CK_RV
     );
     assert_eq!(
         crate::api::C_Login(session, CKU_USER as CK_USER_TYPE, ::std::ptr::null_mut(), 0,),
-        CKR_OK as CK_RV
+        CKR_USER_TYPE_INVALID as CK_RV
     );
-    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
     let mut ignored = [0xff];
     assert_eq!(
         crate::api::C_Login(session, CKU_USER as CK_USER_TYPE, ignored.as_mut_ptr(), 0,),
-        CKR_OK as CK_RV
+        CKR_USER_TYPE_INVALID as CK_RV
     );
-    assert_eq!(connector.secure_channel_starts.get(), 2);
+    assert_eq!(connector.secure_channel_starts.get(), 0);
+    assert_eq!(connector.commands.borrow().len(), calls);
 
     finalize_for_test();
 }
@@ -2584,13 +2604,21 @@ fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
 }
 
 #[test]
-fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
+fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
     let capabilities =
         crate::yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x10, 0x16, 0x32, 0x33, 0x34, 0x35]);
     let delegated_capabilities = crate::yubihsm_capabilities(&[0x04, 0x32]);
-    for (algorithm, length) in [
-        (crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, 32),
-        (crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, 64),
+    for (algorithm, length, key_type) in [
+        (
+            crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+            32,
+            crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
+        ),
+        (
+            crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+            64,
+            crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+        ),
     ] {
         let label = "session-auth".to_owned();
         let info = crate::yubihsm::ObjectInfo {
@@ -2610,7 +2638,11 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
         assert_eq!(objects.len(), 1);
         let object = &objects[0];
         assert_eq!(object.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
-        assert_eq!(object.key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
+        assert_eq!(object.key_type, key_type);
+        assert_eq!(
+            object.attribute_value(CKA_KEY_TYPE as _),
+            Some(crate::ulong_attribute(key_type))
+        );
         assert!(!object.encrypt);
         assert!(!object.decrypt);
         assert!(!object.sign);
@@ -2886,20 +2918,6 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
     assert!(!synthetic_public.wrap);
     assert!(!synthetic_public.unwrap);
     assert!(synthetic_public.extractable);
-
-    for algorithm in [crate::YUBIHSM_ALGO_EC_P256, crate::YUBIHSM_ALGO_X25519] {
-        let capabilities = crate::yubihsm_capabilities(&[0x38]);
-        let attributes = crate::yubihsm_capabilities_to_attributes(
-            crate::YUBIHSM_ASYMMETRIC_KEY,
-            algorithm,
-            &capabilities,
-        );
-        assert!(attributes.derive);
-        assert_eq!(
-            crate::yubihsm_asymmetric_allowed_mechanisms(algorithm, &capabilities),
-            Some(vec![crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE])
-        );
-    }
 }
 
 #[test]
@@ -8177,6 +8195,16 @@ impl crate::BackendSession for ConcurrentSession {
 }
 
 impl crate::Slot for ConcurrentSlot {
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        (self.kind == crate::SlotKind::Fido2).then_some("fido2")
+    }
+    fn accepts_legacy_fido_storage(&self) -> bool {
+        self.kind == crate::SlotKind::Fido2
+    }
+    fn refresh_objects_after_discovery(&self) -> bool {
+        self.kind == crate::SlotKind::YubiHsm
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -8202,7 +8230,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
             crate::SlotKind::Software => String::from("Concurrent software token"),
-            crate::SlotKind::Platform => String::from("Platform token"),
+            crate::SlotKind::Host => String::from("Host Keystore"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
             crate::SlotKind::Fido2 => String::from("Concurrent FIDO2"),
             crate::SlotKind::Ccid(application) => {
@@ -8219,7 +8247,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => "Synthetic token",
             crate::SlotKind::Software => "Software token",
-            crate::SlotKind::Platform => "Platform ECDH",
+            crate::SlotKind::Host => "Host Keystore",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",
@@ -8412,11 +8440,146 @@ impl crate::BackendSession for CompositeHardwareSigningSession {
 }
 
 impl crate::Slot for TestSlot {
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        match self.kind {
+            crate::SlotKind::Software | crate::SlotKind::YubiHsm => None,
+            crate::SlotKind::Fido2 | crate::SlotKind::Ccid(crate::CcidApplication::Fido2) => {
+                Some("fido2")
+            }
+            crate::SlotKind::Ccid(crate::CcidApplication::Piv) => Some("piv"),
+            crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => Some("openpgp"),
+            crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) => Some("yubihsm-auth"),
+            crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain) => {
+                Some("issuer-security-domain")
+            }
+            crate::SlotKind::Host => Some("platform"),
+            crate::SlotKind::Synthetic => Some("synthetic"),
+        }
+    }
+    fn accepts_legacy_fido_storage(&self) -> bool {
+        self.kind == crate::SlotKind::Fido2
+    }
+    fn supports_yubihsm_management(&self) -> bool {
+        self.kind == crate::SlotKind::YubiHsm
+    }
+    fn supports_security_domain_management(&self) -> bool {
+        self.kind == crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain)
+    }
+    fn token_mutations_require_login(&self) -> bool {
+        self.kind == crate::SlotKind::YubiHsm
+    }
+    fn token_objects_copyable(&self) -> bool {
+        self.kind != crate::SlotKind::YubiHsm
+    }
+    fn refresh_objects_after_discovery(&self) -> bool {
+        self.kind == crate::SlotKind::YubiHsm
+    }
+    fn import_public_wrap_key(
+        &mut self,
+        state: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        object: &crate::TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
+        if self.kind != crate::SlotKind::YubiHsm {
+            return Err((CKR_TEMPLATE_INCONSISTENT as CK_RV).into());
+        }
+        let (slot_id, _, _) = state.session_details(self, session)?;
+        crate::api::native::import_yubihsm_token_object_in_slot(
+            self, state, session, slot_id, object,
+        )
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn kind(&self) -> crate::SlotKind {
         self.kind
+    }
+
+    fn create_object(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<Option<CK_OBJECT_HANDLE>, crate::error::Error> {
+        match self.kind {
+            crate::SlotKind::Ccid(crate::CcidApplication::Piv) => {
+                crate::api::native::create_piv_object_in_slot(self, ctx, session, template)
+            }
+            crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => {
+                crate::api::native::create_openpgp_object_in_slot(self, ctx, session, template)
+            }
+            crate::SlotKind::Fido2 => {
+                crate::api::native::create_preview_sign_object_in_slot(self, ctx, session, template)
+            }
+            _ => Ok(None),
+        }
+    }
+    fn store_token_key(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        object: crate::TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
+        if self.kind == crate::SlotKind::YubiHsm {
+            crate::api::native::store_yubihsm_token_key_in_slot(self, ctx, session, object)
+        } else {
+            crate::api::native::store_common_token_key_in_slot(self, ctx, session, object)
+        }
+    }
+    fn store_data(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        object: crate::TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
+        if self.kind == crate::SlotKind::YubiHsm {
+            crate::api::native::store_yubihsm_data_in_slot(self, ctx, session, object)
+        } else {
+            crate::api::native::store_common_data_in_slot(self, ctx, session, object)
+        }
+    }
+    fn generate_key(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        mechanism: &CK_MECHANISM,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
+        if self.kind == crate::SlotKind::YubiHsm {
+            crate::api::native::generate_yubihsm_token_key_in_slot(
+                self, ctx, session, mechanism, template,
+            )
+        } else {
+            crate::api::native::generate_software_token_key_in_slot(
+                self, ctx, session, mechanism, template,
+            )
+        }
+    }
+    fn generate_key_pair(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        mechanism: &CK_MECHANISM,
+        public: &[CK_ATTRIBUTE],
+        private: &[CK_ATTRIBUTE],
+    ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), crate::error::Error> {
+        match self.kind {
+            crate::SlotKind::Ccid(crate::CcidApplication::Piv) => {
+                crate::api::native::generate_piv_token_pair_in_slot(
+                    self, ctx, session, mechanism, public, private,
+                )
+            }
+            crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => {
+                crate::api::native::generate_openpgp_token_pair_in_slot(
+                    self, ctx, session, mechanism, public, private,
+                )
+            }
+            crate::SlotKind::YubiHsm => crate::api::native::generate_yubihsm_token_pair_in_slot(
+                self, ctx, session, mechanism, public, private,
+            ),
+            _ => Err((CKR_FUNCTION_NOT_SUPPORTED as CK_RV).into()),
+        }
     }
 
     fn stores_software_token_keys(&self) -> bool {
@@ -8559,6 +8722,13 @@ impl crate::Slot for TestSlot {
             .is_none_or(|allowed| allowed.contains(&mechanism))
     }
 
+    fn key_mechanism_operations(
+        &self,
+        key: &crate::TokenObject,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> CK_FLAGS {
+        crate::backend::yubihsm_key_mechanism_operations(key, mechanism)
+    }
     fn backend_mechanisms(&self) -> Vec<crate::MechanismDetails> {
         self.mechanisms.clone()
     }

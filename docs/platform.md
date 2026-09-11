@@ -1,6 +1,6 @@
-# Platform ECDH slot
+# Host Keystore slot
 
-Enable the platform token explicitly:
+Enable the Host Keystore slot explicitly:
 
 ```json
 {"version": 1, "platform": {"enabled": true}}
@@ -11,12 +11,12 @@ false, and an explicit JSON value overrides the environment. This setting
 controls both PKCS #11 slot exposure and use of platform keys for YubiHSM
 authentication. There is no hidden platform-authentication provider when the
 slot is disabled. `hardware.discovery` does not control this explicitly enabled
-source. A `slots.serials` allowlist must include `PLATFORM00000001`; excluding
+source. A `slots.serials` allowlist must include `host`; excluding
 the slot also excludes its keys from authentication lookup.
 
-The token label is `Platform`, its model is `Platform ECDH`, and its serial is
-`PLATFORM00000001`. It is a non-removable OS token. macOS and iOS implement it
-using managed Secure Enclave P-256 keys; enabling it on an unsupported platform
+The token label is `Host Keystore`, its serial is `host`, and its model names
+the backend (`Secure Enclave` on macOS and iOS). It is a non-removable OS token.
+macOS and iOS implement it using managed Secure Enclave P-256 keys; enabling it on an unsupported platform
 returns `CKR_FUNCTION_NOT_SUPPORTED` during slot initialization.
 
 ## Objects and operations
@@ -77,10 +77,10 @@ certificate being installed.
 
 ## Authentication consumer
 
-YubiHSM login resolves `:1003@reserve` by exact `CKA_LABEL=reserve` on the
-enabled platform slot. The target Authentication Key ID remains `1003`.
+YubiHSM login resolves `:1003reserve@host` by exact `CKA_LABEL=reserve` on the
+enabled host slot. The target Authentication Key ID remains `1003`.
 Missing or duplicate private-key matches fail; lookup never chooses the first
-match. `:*@reserve` and universal `:*` match source public keys against the
+match. `:*reserve@host` and universal `:*` match source public keys against the
 YubiHSM's discovered public authentication-key projections. Only asymmetric
 matching is automatic.
 

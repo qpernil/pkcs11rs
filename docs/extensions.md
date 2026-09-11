@@ -24,7 +24,7 @@ free nor modify it. Deprecated standard aliases resolve to their current
 canonical names. The iPhone smoke app demonstrates the object-class and
 key-type helpers while rendering its public and authenticated inventories.
 
-## Vendor mechanisms, key types, and attributes
+## Vendor mechanisms, key types, attributes, and profiles
 
 The header declares the pkcs11rs vendor range and the identifiers used by:
 
@@ -35,9 +35,16 @@ The header declares the pkcs11rs vendor range and the identifiers used by:
 - [protected prefixed ECDH derivation](prefixed-ecdh-derive.md), through
   `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE`;
 - [experimental previewSign](preview-sign.md), through its key-pair generation,
-  derivation, signing, registration-key type, and metadata attributes; and
+  derivation, signing, registration-key type, and metadata attributes;
 - Yubico AES-CCM and RSA wrapping adaptations used by
-  [YubiHSM slots](yubihsm-auth.md).
+  [YubiHSM slots](yubihsm-auth.md); and
+- [native HSM Auth credential discovery](yubihsm-auth.md#hsm-auth-slot-discovery-and-execution),
+  through `CKP_YUBICO_HSMAUTH`, `CKK_YUBICO_HSMAUTH_SYMMETRIC`,
+  `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, and the retry-count and touch-required attributes.
+
+The HSM Auth key types describe algorithms on both YubiKey client credentials
+and target YubiHSM Authentication Key records. `CKP_YUBICO_HSMAUTH` advertises
+the native client operation; target HSM slots do not claim that profile.
 
 Mechanism presence and flags must still be discovered per slot with
 `C_GetMechanismList` and `C_GetMechanismInfo`; inclusion in the header does not
@@ -66,8 +73,8 @@ The nonstandard administration entry points are grouped by feature:
   Authentication Key and public projection. See
   [platform credential login](yubihsm-auth.md#platform-credential-login-architecture)
   and [iPhone provisioning](yubihsm-auth.md#provisioning-an-iphone-platform-credential).
-- `PKCS11RS_SoftwareExportPrivateKey` exports an extractable private key from a
-  named software slot as password-encrypted PKCS #8. See
+- `PKCS11RS_SoftwareExportPrivateKey` exports an extractable software private key
+  from any slot as password-encrypted PKCS #8. See
   [software private-key export](software.md#password-encrypted-pkcs-8-export).
 
 These calls operate on a normal PKCS #11 session handle and inherit the login,

@@ -1891,7 +1891,7 @@ private final class ModuleInspector {
         }
 
         var platformUsername = Array(
-            String(format: ":%04llX@%@", UInt64(platformAuthenticationKeyID), platformCredentialName)
+            String(format: ":%04llX%@@host", UInt64(platformAuthenticationKeyID), platformCredentialName)
                 .utf8
         )
         result = platformUsername.withUnsafeMutableBufferPointer { username in

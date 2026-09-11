@@ -4,8 +4,9 @@
 
 `pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
 applications, YubiHSM devices, and explicitly configured in-memory software
-tokens. Every slot supports common software session objects and keys;
-operations with hardware-held private keys remain on the device. Dedicated
+tokens. Ordinary slots support common software session objects and keys;
+the native HSM Auth slot exposes its dedicated credential operation.
+Operations with hardware-held private keys remain on the device. Dedicated
 software slots also support encrypted persistent keys, data, and certificates when local token storage
 is configured. See the [shared session layer](docs/architecture.md#shared-software-session-objects-and-mechanism-discovery).
 
@@ -189,19 +190,20 @@ slot's combined native and software session capabilities:
 
 | Slot | Profiles with the default software mechanism set |
 | --- | --- |
-| Platform ECDH | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| Host Keystore | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | Software, including temporary direct-auth slots | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | PIV, OpenPGP | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | YubiHSM | Baseline, Extended Provider, Authentication Token; Public Certificates Token when public discovery is configured |
-| YubiKey HSM Auth, FIDO2, Issuer Security Domain | Baseline, Extended Provider, Authentication Token; Public Certificates Token when token backing storage is enabled |
+| FIDO2, Issuer Security Domain | Baseline, Extended Provider, Authentication Token; Public Certificates Token when token backing storage is enabled |
+| YubiKey HSM Auth | Baseline, Yubico HSM Auth; Public Certificates Token when token backing storage is enabled |
 
 Extended Provider requires login support, including `C_LoginUser`, and the
 SHA-512/RSA operations required by its mandatory OASIS test. Authentication
 Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
 Eligibility uses the merged mechanism list, including the slot's filtered
-software mechanisms. HSM Auth meets these requirements through software
-session keys; its native credential metadata objects use the dedicated HSM
-Auth operation. Platform uses an empty-PIN login to gate private objects;
+software mechanisms. HSM Auth exposes native authentication credentials and
+its vendor-defined `CKP_YUBICO_HSMAUTH` contract; it has no software key operations
+or USER login. Platform uses an empty-PIN login to gate private objects;
 OS authorization still controls native key use.
 
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
@@ -721,38 +723,41 @@ export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-pas
 
 # Or a named platform-protected P-256 credential (macOS/iOS Secure Enclave)
 export PKCS11RS_PLATFORM_ENABLED=1
-export PKCS11RS_YUBIHSM_DISCOVERY=':00a5@reserve'
+export PKCS11RS_YUBIHSM_DISCOVERY=':00a5reserve@host:'
 ```
 
 The credential is tried independently on every YubiHSM. The module retains all
 objects whose effective `CKA_PRIVATE` is false; internal PKCS #11 metadata
 companions remain hidden. The public-certificate profile is advertised only on
-slots where authentication and public discovery succeed, independently of the
+slots with public discovery configured, independently of successful login or the
 currently provisioned object inventory. Malformed provisioned objects are
 logged and skipped individually. The discovery session is retained and reused
 until login, cleanup, reconnection, or secure-session invalidation. `C_Login`
 closes it and installs the user session; after `C_Logout`, the discovery session
 is reopened lazily by the next public hardware read. While the profile is
 active, user-login Authentication Keys must have exactly the same domains as
-the discovery Authentication Key. The value accepts the same direct or
-YubiHSM Auth selector as `C_Login`. The password may be omitted when
-`PKCS11RS_PINENTRY` is configured; each YubiHSM slot requests it lazily and
-caches it only after that slot authenticates successfully. A failed attempt
-does not populate another slot's cache. CCID applets, including YubiHSM Auth
+the discovery Authentication Key. The value accepts the same direct or named
+source selector as `C_Login`. The password may be omitted when
+`PKCS11RS_PINENTRY` is configured; each YubiHSM slot requests it lazily after
+selecting its source. Prompted passwords are not cached by default. Explicit
+session recreation retains only the source's documented reauthentication
+material; explicitly configured discovery passwords remain in zeroizing
+configuration storage. CCID applets, including YubiHSM Auth
 providers, are discovered before this YubiHSM discovery pass.
 
 For an asymmetric YubiHSM Auth credential, a provisioner can also persist its
 public point as an ordinary `CKO_PUBLIC_KEY` on each matching YubiHSM, using
 the Authentication Key ID as `CKA_ID`. A `C_LoginUser` caller can use `:*` to
-ask pkcs11rs to match these public points and try the resulting asymmetric
-credential/Authentication Key pairs for that target YubiHSM until one
-authenticates. Optional label and source constraints use
-`:*<label>[@<source>]`. This form requires successful public discovery and
-fails when there is no match or no candidate authenticates. The normal explicit
+ask pkcs11rs to match these public points against native HSM Auth and ordinary
+P-256 source credentials. Exactly one source credential and target Authentication
+Key ID must match before any source password is submitted. Optional label and
+source constraints use `:*<label>[@<source>]`. This form requires successful
+public discovery. Missing or ambiguous matches fail; an authentication failure
+is returned without trying another credential. The normal explicit
 `:AAAA<label>[@<source>]` form remains available.
 
-For a named platform credential, use `:AAAA@reserve` explicitly or
-`:*@reserve` to match its public point to a discovered Authentication Key
+For a named platform credential, use `:AAAAreserve@host` explicitly or
+`:*reserve@host` to match its public point to a discovered Authentication Key
 projection. These forms carry no password.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
@@ -1212,17 +1217,17 @@ morphs a surviving public aspect into a standalone public-key record. See
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.
 
-`C_CopyObject` is unsupported across a YubiHSM slot, including for public keys
+`C_CopyObject` is unsupported for YubiHSM token objects, including public keys
 whose implementation backing is an internal opaque record. Such objects report
 `CKA_COPYABLE=CK_FALSE`; use `C_CreateObject` to create an independent public
 key explicitly.
 
 The module has typed software private-key implementations for RSA, NIST P-224,
 P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,
-brainpoolP512r1, Ed25519, Ed448, X25519, and X448. They are reserved for named
-slots configured by `PKCS11RS_SOFTWARE_SLOTS`; hardware and applet slots neither
-advertise nor create generic software private keys. Their shared public-key
-implementation remains available for projected and imported public objects.
+brainpoolP512r1, Ed25519, Ed448, X25519, and X448. Ordinary slots expose these
+through their filtered software mechanism list for session objects; native HSM
+Auth slots exclude software keys. Shared public-key implementations support
+projected and imported public objects.
 A private template with `CKA_TOKEN=CK_TRUE` never falls back to software
 session storage. Encrypted persistent software private keys exist only in an
 explicitly named software slot with `PKCS11RS_TOKEN_STORAGE` configured.
@@ -1263,7 +1268,7 @@ them first; native virtual-YubiHSM commands then supply the same contract while
 keeping intermediate and working keys inside the device. The plan records the
 missing derivations, provider and locking boundaries, native object lifetimes,
 capability checks, and end-to-end completion criteria. Implementing a software
-mechanism in the common layer makes it available to every slot by default,
+mechanism in the common layer makes it available to ordinary slots by default,
 subject to the per-slot mechanism filter.
 
 ## Vendored Headers

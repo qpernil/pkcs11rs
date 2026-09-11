@@ -34,6 +34,8 @@ pub use wrap::*;
 
 #[cfg(test)]
 pub(crate) use hsmauth::*;
+#[cfg(test)]
+pub(crate) use software::PKCS11RS_SoftwareExportPrivateKey;
 
 #[cfg(feature = "abi-tests")]
 pub(crate) use crypt::AES_BLOCK_LENGTH;
@@ -61,12 +63,28 @@ pub(crate) use yubihsm::{YubiHsmEnrollment, yubihsm_enroll_device};
 /// Session routing, object policy, and mechanism execution remain in the handlers.
 pub(crate) mod rust {
     pub(crate) use super::crypt::{verify, verify_init};
-    pub(crate) use super::general::get_slot_list;
+    pub(crate) use super::general::{get_slot_list, get_token_info};
     pub(crate) use super::hsmauth::hsmauth_authenticate;
     pub(crate) use super::key::{derive_key, generate_key_pair};
     pub(crate) use super::object::{
         copy_object, create_object, destroy_object, find_objects, find_objects_final,
         find_objects_init, get_attribute_value,
     };
-    pub(crate) use super::session::{close_session, login, open_session};
+    pub(crate) use super::session::{close_session, get_session_info, login, open_session};
+}
+
+/// Backend object implementations; entry points invoke the selected slot's
+/// object API instead of switching on its backend kind.
+pub(crate) mod native {
+    pub(crate) use super::key::{
+        generate_openpgp_token_pair_in_slot, generate_piv_token_pair_in_slot,
+        generate_software_token_key_in_slot, generate_yubihsm_token_key_in_slot,
+        generate_yubihsm_token_pair_in_slot,
+    };
+    pub(crate) use super::object::{
+        create_openpgp_object_in_slot, create_piv_object_in_slot,
+        create_preview_sign_object_in_slot, import_yubihsm_token_object_in_slot,
+        store_common_data_in_slot, store_common_token_key_in_slot, store_yubihsm_data_in_slot,
+        store_yubihsm_token_key_in_slot,
+    };
 }

@@ -121,6 +121,8 @@ impl Fixture {
                     let mut template = authentication_aes_template();
                     template.token = token;
                     template.label = format!("SCP credential.{role}");
+                    // AES roles are selected by exact labels, independently of IDs.
+                    template.id = role.as_bytes().to_vec();
                     keys.push(owner.create(template, &[(CKA_VALUE, value)]).unwrap());
                 }
                 let pair =
@@ -342,4 +344,207 @@ fn asymmetric_complete_channel_uses_private_and_existing_pkcs11_auth() {
     for preparation in [Preparation::Private, Preparation::Existing] {
         exercise(preparation, Protocol::Asymmetric);
     }
+}
+
+#[test]
+fn registered_software_source_login_selects_before_authorization_for_both_protocols() {
+    let _serial = crate::test::TEST_LOCK.lock().unwrap();
+    for protocol in [Protocol::Symmetric, Protocol::Asymmetric] {
+        let mut fixture = Fixture::new(Preparation::Existing, protocol);
+        let child = fixture.existing.as_ref().unwrap().0.clone();
+        let serial = child.lock().unwrap().slot.serial().to_owned();
+        let peer = Rc::new(target(protocol));
+        let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
+        slot.auth_slots.register(&child).unwrap();
+        slot.recreate_sessions = true;
+        let selector = format!(":0001SCP credential@{serial}");
+        assert_eq!(
+            fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
+            CKR_OK as CK_RV
+        );
+        assert!(
+            matches!(Slot::login_user(&mut slot, 7, selector.as_bytes(), b"wrong source pin", &[]),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
+        );
+        assert_eq!(peer.create_session_count(), 0);
+        assert!(!child.lock().unwrap().slot.login_is_active());
+        Slot::login_user(
+            &mut slot,
+            7,
+            selector.as_bytes(),
+            b"test source user pin",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(peer.create_session_count(), 1);
+        peer.expire_next_session_message.set(true);
+        assert!(
+            !send_yubihsm_secure_command(
+                peer.as_ref(),
+                slot.session.as_ref(),
+                &Command::get_storage_info()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(peer.create_session_count(), 2);
+        Slot::logout(&mut slot).unwrap();
+        // A source authorized by the application is reused without submitting
+        // the supplied bytes as another token PIN.
+        Slot::login_user(&mut slot, 7, selector.as_bytes(), b"not resubmitted", &[]).unwrap();
+        Slot::logout(&mut slot).unwrap();
+        slot.public_discovery_config = configured_yubihsm_public_discovery_credential(Some(
+            format!("{selector}:test source user pin").into(),
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
+            CKR_OK as CK_RV
+        );
+        assert!(!Slot::token_objects(&slot, 7).unwrap().is_empty());
+        assert!(matches!(
+            slot.object_cache.borrow().discovery,
+            YubiHsmDiscoveryCache::Available { .. }
+        ));
+        Slot::clear_session(&mut slot);
+        drop(slot);
+        // Logout invalidates old private handles; re-resolve the same persistent
+        // objects before checking that authentication left the source intact.
+        fixture.keys = fixture
+            .owner
+            .find(&[
+                (CKA_TOKEN, &[CK_TRUE as u8]),
+                (
+                    CKA_CLASS,
+                    &((if matches!(protocol, Protocol::Symmetric) {
+                        CKO_SECRET_KEY
+                    } else {
+                        CKO_PRIVATE_KEY
+                    }) as CK_ULONG)
+                        .to_ne_bytes(),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            fixture.keys.len(),
+            if matches!(protocol, Protocol::Symmetric) {
+                2
+            } else {
+                1
+            }
+        );
+        fixture.release();
+    }
+}
+
+#[test]
+fn ordinary_asymmetric_pair_requires_both_label_and_id() {
+    let _serial = crate::test::TEST_LOCK.lock().unwrap();
+    let fixture = Fixture::new(Preparation::Existing, Protocol::Asymmetric);
+    let child = fixture.existing.as_ref().unwrap().0.clone();
+    let sources = crate::auth_slots::AuthSlots::default();
+    sources.register(&child).unwrap();
+    let Credential::Asymmetric(key) = &fixture.credential else {
+        unreachable!()
+    };
+    let mut scope = crate::key_scope::Pkcs11KeyScope::for_key(key).unwrap();
+    let bound = scope.bind(key).unwrap();
+    let point = scope.p256_public(&bound).unwrap();
+    drop(scope);
+    let mut encoded = vec![4, 65];
+    encoded.extend_from_slice(&point);
+    let value = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)
+        .unwrap()
+        .serialized()
+        .unwrap();
+    // Empty IDs still have to match. A unique ID alone must not authorize
+    // a differently named key, even when it has the same public point.
+    for (index, (same_label, private_id, public_id, matches)) in [
+        (true, b"".as_slice(), b"".as_slice(), true),
+        (true, b"private", b"", false),
+        (true, b"private", b"public", false),
+        (false, b"same", b"same", false),
+        (true, b"same", b"same", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let label = format!("pair {index}");
+        let public = fixture
+            .owner
+            .create(
+                TokenObjectTemplate {
+                    class: Some(CKO_PUBLIC_KEY as _),
+                    key_type: Some(CKK_EC as _),
+                    token: true,
+                    label: label.clone(),
+                    id: public_id.to_vec(),
+                    ..Default::default()
+                },
+                &[(CKA_EC_PARAMS, P256_PARAMS), (CKA_EC_POINT, &encoded)],
+            )
+            .unwrap();
+        let private = fixture
+            .owner
+            .create(
+                TokenObjectTemplate {
+                    token: true,
+                    label: if same_label {
+                        label.clone()
+                    } else {
+                        format!("{label} other")
+                    },
+                    id: private_id.to_vec(),
+                    ..ec_template()
+                },
+                &[(CKA_VALUE, &value), (CKA_EC_PARAMS, P256_PARAMS)],
+            )
+            .unwrap();
+        let mut candidates = sources
+            .ordinary_credentials(Some(&label), None, &std::sync::Weak::new(), true)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let result = candidates.pop().unwrap().authorize(b"", None);
+        if matches {
+            assert!(result.is_ok());
+        } else {
+            assert!(
+                matches!(result, Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV)
+            );
+        }
+        drop(result);
+        if !same_label {
+            // A published EC candidate must not turn into an AES credential
+            // just because its private-key pairing failed.
+            let mut aes = Vec::new();
+            for role in ["enc", "mac"] {
+                aes.push(
+                    fixture
+                        .owner
+                        .create(
+                            TokenObjectTemplate {
+                                token: true,
+                                label: format!("{label}.{role}"),
+                                ..authentication_aes_template()
+                            },
+                            &[(CKA_VALUE, &[0x42; 16])],
+                        )
+                        .unwrap(),
+                );
+            }
+            let selected = sources
+                .ordinary_credentials(Some(&label), None, &std::sync::Weak::new(), true)
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert!(matches!(selected.authorize(b"", None),
+                Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV));
+            for handle in aes {
+                fixture.owner.destroy(handle).unwrap();
+            }
+        }
+        fixture.owner.destroy(public).unwrap();
+        fixture.owner.destroy(private).unwrap();
+    }
+    fixture.release();
 }

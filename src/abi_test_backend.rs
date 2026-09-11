@@ -421,6 +421,10 @@ impl AbiScp03Slot {
 
 #[cfg(feature = "abi-tests")]
 impl Slot for AbiScp03Slot {
+    fn supports_security_domain_management(&self) -> bool {
+        true
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

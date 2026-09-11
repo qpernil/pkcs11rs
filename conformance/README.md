@@ -89,9 +89,9 @@ failure is not hidden by success in another case.
 The mandatory Extended and Authentication XML cases exercise `C_Login`, but
 omit the `C_LoginUser` function required by the profile prose. Rust and public
 ABI regressions separately cover named YubiHSM login and empty-username login
-on single-user slots. New-slot regressions also verify that HSM Auth software
-session signing does not invoke native credential operations, and that Platform
-requires empty-PIN login before exposing or using private objects.
+on single-user slots. Native HSM Auth regressions verify its vendor profile,
+credential key types, absent software mechanisms, and unsupported USER login.
+Platform requires empty-PIN login before exposing or using private objects.
 
 ## Interpretation and evidence
 

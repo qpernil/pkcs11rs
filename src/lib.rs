@@ -83,6 +83,7 @@ use configuration::{
 };
 
 mod auth_slots;
+mod key_mechanisms;
 mod key_scope;
 mod pkcs11_auth;
 mod pkcs11_provider;
@@ -266,8 +267,12 @@ struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
     format: CK_ULONG,
 }
 
-const CKA_YUBICO_HSMAUTH_ALGORITHM: CK_ATTRIBUTE_TYPE =
-    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5901;
+const CKP_YUBICO_HSMAUTH: CK_PROFILE_ID =
+    CKP_VENDOR_DEFINED as CK_PROFILE_ID | YUBICO_BASE_VENDOR | 1;
+const CKK_YUBICO_HSMAUTH_SYMMETRIC: CK_KEY_TYPE =
+    CKK_VENDOR_DEFINED as CK_KEY_TYPE | YUBICO_BASE_VENDOR | 38;
+const CKK_YUBICO_HSMAUTH_ASYMMETRIC: CK_KEY_TYPE =
+    CKK_VENDOR_DEFINED as CK_KEY_TYPE | YUBICO_BASE_VENDOR | 39;
 const CKA_YUBICO_HSMAUTH_RETRIES: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5902;
 const CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED: CK_ATTRIBUTE_TYPE =
@@ -468,28 +473,6 @@ fn yubihsm_capabilities_to_attributes(
         _ => {}
     }
     attributes
-}
-
-fn yubihsm_asymmetric_allowed_mechanisms(
-    algorithm: u8,
-    capabilities: &[u8; 8],
-) -> Option<Vec<CK_MECHANISM_TYPE>> {
-    if !(is_yubihsm_ec(algorithm) || is_yubihsm_montgomery(algorithm))
-        || !yubihsm_capability(capabilities, 0x38)
-    {
-        return None;
-    }
-    let mut mechanisms = vec![CKM_PKCS11RS_PREFIXED_ECDH_DERIVE];
-    if yubihsm_capability(capabilities, 0x0b) {
-        mechanisms.push(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE);
-    }
-    if is_yubihsm_ec(algorithm) && yubihsm_capability(capabilities, 0x07) {
-        mechanisms.push(CKM_ECDSA as CK_MECHANISM_TYPE);
-        mechanisms.extend(crate::mechanism::HASHED_ECDSA_MECHANISMS);
-    }
-    mechanisms.sort_unstable();
-    mechanisms.dedup();
-    Some(mechanisms)
 }
 
 fn yubihsm_attributes_to_capabilities(

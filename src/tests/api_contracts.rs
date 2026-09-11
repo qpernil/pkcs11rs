@@ -5,7 +5,7 @@ fn data_session_objects_share_visibility_and_follow_creator_and_login_lifetimes(
     let _guard = TEST_LOCK.lock().unwrap();
     for kind in [
         crate::SlotKind::Software,
-        crate::SlotKind::Platform,
+        crate::SlotKind::Host,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),
@@ -716,7 +716,7 @@ fn certificate_session_objects_are_shared_on_all_slots_and_validate_der() {
     let certificate = data_test_certificate();
     for kind in [
         crate::SlotKind::Software,
-        crate::SlotKind::Platform,
+        crate::SlotKind::Host,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),

@@ -420,11 +420,36 @@ impl PivSlot {
 }
 
 impl Slot for PivSlot {
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        Some("piv")
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn device_context(&self) -> Option<Arc<DeviceContext>> {
         Some(self.device.clone())
+    }
+
+    fn create_object(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
+        crate::api::native::create_piv_object_in_slot(self, ctx, session, template)
+    }
+    fn generate_key_pair(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        mechanism: &CK_MECHANISM,
+        public: &[CK_ATTRIBUTE],
+        private: &[CK_ATTRIBUTE],
+    ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+        crate::api::native::generate_piv_token_pair_in_slot(
+            self, ctx, session, mechanism, public, private,
+        )
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::Piv)
@@ -698,6 +723,19 @@ impl Slot for PivSlot {
         info.firmwareVersion.major = version.major;
         info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
         Ok(())
+    }
+    fn key_mechanism_operations(
+        &self,
+        key: &TokenObject,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> CK_FLAGS {
+        let mut flags = crate::key_mechanisms::operations(key, mechanism);
+        if let KeyMaterial::PivPrivate { algorithm, .. } = &key.material
+            && !piv_sign_mechanism_supported(*algorithm, mechanism)
+        {
+            flags &= !(CKF_SIGN as CK_FLAGS);
+        }
+        flags
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = Vec::new();

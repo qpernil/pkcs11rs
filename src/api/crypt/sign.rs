@@ -280,38 +280,7 @@ pub(super) fn ml_dsa_parameters(
     }))
 }
 
-pub(crate) fn hmac_key_type_and_length(
-    mechanism: CK_MECHANISM_TYPE,
-) -> Option<(CK_KEY_TYPE, usize)> {
-    match mechanism {
-        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
-            || x == CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE =>
-        {
-            Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, 20))
-        }
-        x if x == CKM_SHA224_HMAC as CK_MECHANISM_TYPE
-            || x == CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE =>
-        {
-            Some((CKK_SHA224_HMAC as CK_KEY_TYPE, 28))
-        }
-        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
-            || x == CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE =>
-        {
-            Some((CKK_SHA256_HMAC as CK_KEY_TYPE, 32))
-        }
-        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
-            || x == CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE =>
-        {
-            Some((CKK_SHA384_HMAC as CK_KEY_TYPE, 48))
-        }
-        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
-            || x == CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE =>
-        {
-            Some((CKK_SHA512_HMAC as CK_KEY_TYPE, 64))
-        }
-        _ => None,
-    }
-}
+pub(crate) use crate::key_mechanisms::hmac_key_type_and_length;
 
 pub(crate) fn hmac_output_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
     let Some((_, full_length)) = hmac_key_type_and_length(mechanism.mechanism) else {

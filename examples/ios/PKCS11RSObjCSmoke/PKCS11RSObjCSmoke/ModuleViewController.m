@@ -1453,7 +1453,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                           PKCS11RSReturnValue(logout)];
     }
 
-    NSString *selector = [NSString stringWithFormat:@":%04lX@%@",
+    NSString *selector = [NSString stringWithFormat:@":%04lX%@@host",
                                                      (unsigned long)PKCS11RSPlatformAuthenticationKeyID,
                                                      PKCS11RSPlatformCredentialName];
     NSMutableData *platformUsername =

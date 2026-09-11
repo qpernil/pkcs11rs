@@ -460,7 +460,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.stores_software_token_keys());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 88);
+        assert_eq!(mechanisms.len(), 89);
         assert_eq!(
             mechanisms
                 .iter()
@@ -553,6 +553,7 @@ mod tests {
                         CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE,
                     )
                 }
+                x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => (224, 521, CKF_DERIVE),
                 x if [CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE]
                     .map(|type_| type_ as CK_MECHANISM_TYPE)
                     .contains(&x) =>
