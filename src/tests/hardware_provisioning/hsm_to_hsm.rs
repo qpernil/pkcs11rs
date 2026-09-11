@@ -46,7 +46,7 @@ fn open(serial: &str) -> CK_SESSION_HANDLE {
         }
         Ok(matches[0])
     })
-    .unwrap_or_else(|e| panic!("expected one local HSM with serial {serial}: {e:?}"));
+    .unwrap_or_else(|e| panic!("expected one HSM with serial {serial}: {e:?}"));
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -71,7 +71,7 @@ fn login(session: CK_SESSION_HANDLE, pin: &str) {
 }
 
 #[test]
-#[ignore = "creates and removes temporary HSM keys; requires two explicit local serials and bootstrap PINs"]
+#[ignore = "creates and removes temporary HSM keys; requires two explicit serials and bootstrap PINs"]
 fn yubihsm_to_yubihsm_asymmetric_authentication() {
     let _guard = TEST_LOCK.lock().unwrap();
     let source = required("PKCS11RS_CROSS_HSM_SOURCE");
@@ -88,13 +88,20 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
                 .map(str::to_owned),
         );
     }
+    let urls: Vec<_> = std::env::var("PKCS11RS_CROSS_HSM_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect();
     finalize_for_test();
     assert_eq!(
         initialize_with_configuration(serde_json::json!({
             "version": 1, "hardware": {"discovery": true},
             "slots": {"serials": serials}, "ccid": {"applications": ["hsmauth"]},
             "software": {"slots": []}, "platform": {"enabled": false},
-            "yubihsm": {"urls": [], "public_discovery": null, "recreate_sessions": false}
+            "yubihsm": {"urls": urls, "public_discovery": null, "recreate_sessions": false}
         })),
         CKR_OK as CK_RV
     );

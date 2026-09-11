@@ -166,10 +166,14 @@ migration and virtual-token-native operations follow below.
 
 `yubihsm_to_yubihsm_asymmetric_authentication` is an ignored, explicitly
 provisioning test. Set `PKCS11RS_CROSS_HSM_SOURCE` and
-`PKCS11RS_CROSS_HSM_TARGET` to distinct local USB serials, and supply the
+`PKCS11RS_CROSS_HSM_TARGET` to distinct HSM serials, and supply the
 existing bootstrap login strings in `PKCS11RS_CROSS_HSM_SOURCE_PIN` and
 `PKCS11RS_CROSS_HSM_TARGET_PIN`. If bootstrap authentication uses a YubiKey,
 include its serial in the comma-separated `PKCS11RS_CROSS_HSM_HELPERS` list.
+For remote HSMs, set `PKCS11RS_CROSS_HSM_URLS` to a comma-separated list of
+connector URLs, for example `http://ubuntu3:12345`. Local USB and remote
+connector slots participate in the same test; the source and target serials
+still select the exact devices.
 The bootstrap credentials need permission to generate/delete the temporary
 source key and create/delete the target authentication key.
 
@@ -189,7 +193,9 @@ termination or device removal can prevent cleanup from completing.
 Physical devices 1238075073 and 2545354682 passed authentication and protected
 commands in both source/target directions, bootstrapped through the existing
 `shared` YubiHSM Auth credential on YubiKey 37070618. Both devices' native
-inventories matched their pre-test snapshots after cleanup.
+inventories matched their pre-test snapshots after cleanup. The same test passes
+with source 2545354682 on local USB and target 1238075073 reached through
+`http://ubuntu3:12345`; both inventories return to their original 12 objects.
 
 ## 2. Migrate card derivation
 
