@@ -203,8 +203,8 @@ Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
 Eligibility uses the merged mechanism list, including the slot's filtered
 software mechanisms. HSM Auth exposes native authentication credentials and
 its vendor-defined `CKP_YUBICO_HSMAUTH` contract; it has no software key operations
-or USER login. Platform uses an empty-PIN login to gate private objects;
-OS authorization still controls native key use.
+or USER login. Host login accepts either an omitted or supplied PIN and ignores
+its value; OS authorization still controls native key use.
 
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
 HSM Auth, Issuer Security Domain, and Platform) accept an empty username in

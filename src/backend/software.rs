@@ -176,7 +176,8 @@ impl Slot for SoftwareSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
         if let Some(store) = &self.store {
@@ -192,7 +193,12 @@ impl Slot for SoftwareSlot {
         Ok(())
     }
 
-    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login_so(
+        &mut self,
+        pin: Option<&[u8]>,
+        _pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
         let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;

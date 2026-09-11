@@ -63,14 +63,20 @@ impl Slot for AbiTestSlot {
         Box::new(AbiTestSession { slot_id, flags })
     }
 
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         if pin != b"1234" {
             return Err(CKR_PIN_INCORRECT.into());
         }
         Ok(())
     }
 
-    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login_so(
+        &mut self,
+        pin: Option<&[u8]>,
+        _pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         if pin != b"12345678" {
             return Err(CKR_PIN_INCORRECT.into());
         }
@@ -485,7 +491,8 @@ impl Slot for AbiScp03Slot {
         })
     }
 
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let pin = pin.unwrap_or(&[]);
         if pin != b"1234" {
             return Err(CKR_PIN_INCORRECT.into());
         }
@@ -500,10 +507,6 @@ impl Slot for AbiScp03Slot {
         )?);
         Ok(())
     }
-    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        self.login(&[])
-    }
-
     fn logout(&mut self) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
         Ok(())

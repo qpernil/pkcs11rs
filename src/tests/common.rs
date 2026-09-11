@@ -22,6 +22,10 @@ const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
 const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
+fn login_slot(slot: &mut dyn crate::Slot, pin: &[u8]) -> Result<(), crate::Error> {
+    crate::Slot::login(slot, Some(pin), &crate::pinentry::Pinentry::unconfigured())
+}
+
 pub(crate) fn initialize_with_configuration(configuration: serde_json::Value) -> CK_RV {
     let mut encoded = configuration.to_string().into_bytes();
     encoded.push(0);
@@ -733,7 +737,7 @@ fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
 #[test]
 fn yubihsm_generated_key_attestation_is_a_lazy_session_object() {
     let (mut slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    slot.login(b"0001password").unwrap();
+    login_slot(slot.as_mut(), b"0001password").unwrap();
     slot.token_objects(1).unwrap();
     commands.borrow_mut().clear();
 
@@ -785,7 +789,7 @@ fn yubihsm_generated_key_attestation_is_a_lazy_session_object() {
 #[test]
 fn yubihsm_imported_keys_do_not_expose_attestation_objects() {
     let mut slot = crate::yubihsm::tests::make_yubihsm_imported_key_test_slot();
-    slot.login(b"0001password").unwrap();
+    login_slot(slot.as_mut(), b"0001password").unwrap();
     slot.token_objects(1).unwrap();
 
     assert!(slot.session_objects(1).unwrap().is_empty());
@@ -3279,7 +3283,7 @@ fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
 #[test]
 fn yubihsm_created_metadata_object_is_applied_during_discovery() {
     let mut slot = crate::yubihsm::tests::make_yubihsm_metadata_test_slot(true);
-    slot.login(b"0001password").unwrap();
+    login_slot(slot.as_mut(), b"0001password").unwrap();
 
     let objects = slot.token_objects(99).unwrap();
     let private = objects
@@ -3303,7 +3307,7 @@ fn yubihsm_created_metadata_object_is_applied_during_discovery() {
 #[test]
 fn yubihsm_created_invalid_metadata_object_is_hidden_and_not_applied() {
     let mut slot = crate::yubihsm::tests::make_yubihsm_metadata_test_slot(false);
-    slot.login(b"0001password").unwrap();
+    login_slot(slot.as_mut(), b"0001password").unwrap();
 
     let objects = slot.token_objects(99).unwrap();
     assert!(
@@ -8289,7 +8293,11 @@ impl crate::Slot for ConcurrentSlot {
         })
     }
 
-    fn login(&mut self, _pin: &[u8]) -> Result<(), crate::error::Error> {
+    fn login(
+        &mut self,
+        _pin: Option<&[u8]>,
+        _pinentry: &crate::pinentry::Pinentry,
+    ) -> Result<(), crate::error::Error> {
         Ok(())
     }
 
@@ -8638,7 +8646,12 @@ impl crate::Slot for TestSlot {
         })
     }
 
-    fn login(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
+    fn login(
+        &mut self,
+        pin: Option<&[u8]>,
+        _pinentry: &crate::pinentry::Pinentry,
+    ) -> Result<(), crate::error::Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         if pin != b"1234" {
             return Err(CKR_PIN_INCORRECT.into());
         }
@@ -8647,7 +8660,12 @@ impl crate::Slot for TestSlot {
         Ok(())
     }
 
-    fn login_so(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
+    fn login_so(
+        &mut self,
+        pin: Option<&[u8]>,
+        _pinentry: &crate::pinentry::Pinentry,
+    ) -> Result<(), crate::error::Error> {
+        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         if pin != b"12345678" {
             return Err(CKR_PIN_INCORRECT.into());
         }

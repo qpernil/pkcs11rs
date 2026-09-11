@@ -404,8 +404,8 @@ impl Slot for WithoutMechanismSlot {
     fn open_session(&mut self, slot: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         self.0.open_session(slot, flags)
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        self.0.login(pin)
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        self.0.login(pin, pinentry)
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.0.logout()

@@ -73,9 +73,6 @@ impl Slot for HostSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
-    fn user_login_requires_pin(&self) -> bool {
-        false
-    }
     fn kind(&self) -> SlotKind {
         SlotKind::Host
     }
@@ -131,15 +128,9 @@ impl Slot for HostSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        if !pin.is_empty() {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
+    fn login(&mut self, _pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.logged_in = true;
         Ok(())
-    }
-    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        self.login(&[])
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.logged_in = false;

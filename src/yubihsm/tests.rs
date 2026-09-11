@@ -37,6 +37,27 @@ use virtual_yubihsm_core::{
 };
 
 const PASSWORD: &[u8] = b"password";
+
+fn login_slot(slot: &mut dyn Slot, pin: &[u8]) -> Result<(), crate::Error> {
+    Slot::login(slot, Some(pin), &crate::pinentry::Pinentry::unconfigured())
+}
+
+fn login_user_slot(
+    slot: &mut dyn Slot,
+    slot_id: crate::CK_SLOT_ID,
+    username: &[u8],
+    pin: &[u8],
+    token_objects: &[TokenObject],
+) -> Result<(), crate::Error> {
+    Slot::login_user(
+        slot,
+        slot_id,
+        username,
+        Some(pin),
+        &crate::pinentry::Pinentry::unconfigured(),
+        token_objects,
+    )
+}
 const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
 const DEVICE_STATIC_PRIVATE_KEY: [u8; 32] = [
@@ -1951,7 +1972,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&source_slot).unwrap();
     slot.recreate_sessions = true;
-    Slot::login_user(&mut slot, 1, b":1003reserve@host", b"", &[]).unwrap();
+    login_user_slot(&mut slot, 1, b":1003reserve@host", b"", &[]).unwrap();
     peer.expire_next_session_message.set(true);
     assert!(
         !send_yubihsm_secure_command(
@@ -1969,7 +1990,10 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
     slot.object_cache.get_mut().discovery = YubiHsmDiscoveryCache::Available {
         authkey_domains: u16::MAX,
     };
-    Slot::login_user(&mut slot, 1, b":*", b"", &[projection]).unwrap();
+    // The total wildcard may resolve to either native YubiHSM Auth or an
+    // ordinary source. A no-PIN source must receive its declared empty PIN,
+    // even when the caller supplies a password usable by native HSM Auth.
+    login_user_slot(&mut slot, 1, b":*", PASSWORD, &[projection]).unwrap();
     assert_eq!(peer.create_session_count(), 3);
     Slot::logout(&mut slot).unwrap();
 }
@@ -1979,7 +2003,7 @@ fn platform_authentication_requires_an_enabled_source_slot() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     assert!(
-        matches!(Slot::login_user(&mut slot, 1, b":1003reserve@host", b"", &[]),
+        matches!(login_user_slot(&mut slot, 1, b":1003reserve@host", b"", &[]),
         Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
     );
     assert_eq!(peer.create_session_count(), 0);
@@ -2674,7 +2698,7 @@ fn yubihsm_canonical_metadata_rejects_a_mismatched_primary_class() {
     }
 
     let mut slot = cache_test_slot(peer, false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     let private = objects
         .iter()
@@ -2715,7 +2739,7 @@ fn mismatched_canonical_public_material_does_not_hide_the_private_key() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let private = Slot::token_objects(&slot, 7)
         .unwrap()
         .into_iter()
@@ -2778,7 +2802,7 @@ fn deleting_the_only_public_aspect_leaves_a_canonical_legacy_shadow() {
     peer.add_public_certificate_pair();
     replace_metadata(&peer, 101, YUBIHSM_ASYMMETRIC_KEY, 1, 1, &[]);
     let mut slot = cache_test_slot(peer.clone(), false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let private = Slot::token_objects(&slot, 7)
         .unwrap()
         .into_iter()
@@ -2854,7 +2878,7 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
     );
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     let private = objects
         .iter()
@@ -2950,7 +2974,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     );
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
 
     let initial = Slot::token_objects(&slot, 7).unwrap();
     let private = initial
@@ -3095,7 +3119,7 @@ fn assert_invalid_legacy_metadata_is_shadowed(public_discovery: bool) {
     peer.metadata_objects.borrow_mut().get_mut(&101).unwrap().1[0] = b'X';
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     let private = objects
         .iter()
@@ -3149,7 +3173,7 @@ fn assert_invalid_canonical_metadata_suppresses_legacy_fallback(public_discovery
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     let private = objects
         .iter()
@@ -3263,7 +3287,7 @@ fn assert_lazy_cache_lifecycle(public_discovery: bool) {
         public_discovery
     );
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let logged_in = Slot::token_objects(&slot, 7).unwrap();
     let reads_after_enumeration = inner_command_count(&peer, CommandCode::GetOpaque);
     assert_eq!(
@@ -3346,7 +3370,7 @@ fn logged_in_discovery_reads_each_native_property_only_once() {
     let _ = Slot::token_objects(&slot, 7).unwrap();
     assert!(peer.inner_commands.borrow().is_empty());
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let first = Slot::token_objects(&slot, 7).unwrap();
     assert_eq!(inner_command_count(&peer, CommandCode::ListObjects), 1);
     for (id, object_type) in [
@@ -3500,7 +3524,7 @@ fn public_and_user_discovery_share_one_lazy_native_object_cache() {
     let public_key_reads_before_login = inner_command_count(&peer, CommandCode::GetPublicKey);
     let opaque_reads_before_login = inner_command_count(&peer, CommandCode::GetOpaque);
     peer.commands.borrow_mut().clear();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [10]);
 
     let logged_in = Slot::token_objects(&slot, 7).unwrap();
@@ -3563,7 +3587,7 @@ fn legacy_metadata_only_applies_to_the_current_target_sequence() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
 
     let initial = Slot::token_objects(&slot, 7).unwrap();
     let private = initial
@@ -3626,7 +3650,7 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let logged_in = Slot::token_objects(&slot, 7).unwrap();
     let private = logged_in
         .iter()
@@ -3676,7 +3700,7 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     );
 
     peer.objects.borrow_mut().clear();
-    Slot::login(&mut slot, b"0002password").unwrap();
+    login_slot(&mut slot, b"0002password").unwrap();
     let narrower_login = Slot::token_objects(&slot, 7).unwrap();
     assert!(narrower_login.iter().all(|object| !object.private));
     assert!(!narrower_login.iter().any(|object| {
@@ -3699,7 +3723,7 @@ fn yubihsm_logout_clears_private_cache_without_public_discovery_credential() {
 fn yubihsm_forced_session_clear_removes_private_cached_objects() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = cache_test_slot(peer, false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert!(
         Slot::token_objects(&slot, 7)
             .unwrap()
@@ -3721,7 +3745,7 @@ fn assert_sequence_change_invalidates_cached_value(public_discovery: bool) {
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let initial = Slot::token_objects(&slot, 7).unwrap();
     let initial_opaque = yubihsm_opaque_object(&initial, 4);
     let initial_unique_id = initial_opaque.unique_id.clone();
@@ -3775,7 +3799,7 @@ fn assert_reconnect_discards_cached_objects_and_values(public_discovery: bool) {
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     exercise_lazy_opaque_value_cache(&slot, &yubihsm_opaque_object(&objects, 4));
     Slot::logout(&mut slot).unwrap();
@@ -3799,7 +3823,7 @@ fn assert_reconnect_discards_cached_objects_and_values(public_discovery: bool) {
         public_discovery
     );
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let reconnected = Slot::token_objects(&slot, 7).unwrap();
     let opaque = yubihsm_opaque_object(&reconnected, 4);
     let KeyMaterial::YubiHsm { value, .. } = &opaque.material else {
@@ -3827,7 +3851,7 @@ fn assert_explicit_eviction_removes_cached_object(public_discovery: bool) {
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer, public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let objects = Slot::token_objects(&slot, 7).unwrap();
     assert!(objects.iter().any(|object| matches!(
         object.material,
@@ -3882,7 +3906,7 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         }));
     }
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let initial = Slot::token_objects(&slot, 7).unwrap();
     let private_key = initial
         .iter()
@@ -4189,7 +4213,7 @@ fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
     );
     assert_eq!(peer.create_session_count(), 0);
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(session_role(&slot), Some(YubiHsmSessionRole::User));
     Slot::logout(&mut slot).unwrap();
 
@@ -4436,7 +4460,7 @@ fn assert_failed_public_discovery_preserves_profile_after_user_login(
     );
     assert_eq!(slot.object_cache.borrow().discovery, expected);
 
-    Slot::login_user(&mut slot, 7, b"0001", PASSWORD, &[]).unwrap();
+    login_user_slot(&mut slot, 7, b"0001", PASSWORD, &[]).unwrap();
     assert!(Slot::login_is_active(&slot));
     assert!(
         Slot::token_objects(&slot, 7)
@@ -4565,7 +4589,7 @@ fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
                     if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
             ))
     );
-    assert!(Slot::login(&mut slot, b"0002password").is_ok());
+    assert!(login_slot(&mut slot, b"0002password").is_ok());
     assert!(session_is_active(&slot));
     Slot::logout(&mut slot).unwrap();
 }
@@ -4622,7 +4646,7 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
         ),
     );
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert!(session_is_active(&slot));
     assert_eq!(session_role(&slot), Some(YubiHsmSessionRole::User));
     assert!(Slot::backend_session_is_active(&slot));
@@ -4791,7 +4815,7 @@ fn yubihsm_user_login_requires_public_discovery_domains() {
 
     let closes_before_login = peer.closed_sessions.get();
     assert!(matches!(
-        Slot::login(&mut slot, b"0002password"),
+        login_slot(&mut slot, b"0002password"),
         Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as crate::CK_RV
     ));
     assert!(!session_is_active(&slot));
@@ -4805,7 +4829,7 @@ fn yubihsm_logged_out_lazy_read_requires_public_discovery_credential() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), false);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     let logged_in = Slot::token_objects(&slot, 7).unwrap();
     let certificate = yubihsm_opaque_object(&logged_in, 2);
     let KeyMaterial::YubiHsm { value, .. } = &certificate.material else {
@@ -5218,18 +5242,18 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     );
 
     assert!(matches!(
-        crate::Slot::login(&mut slot, b":000164656661756c74206b6579:password"),
+        login_slot(&mut slot, b":000164656661756c74206b6579:password"),
         Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
     ));
     #[cfg(unix)]
-    crate::Slot::login_with_pinentry(
+    crate::Slot::login(
         &mut slot,
-        b":0001default key@12345678",
+        Some(b":0001default key@12345678"),
         &pinentry.pinentry(),
     )
     .unwrap();
     #[cfg(not(unix))]
-    crate::Slot::login_user(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
+    login_user_slot(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -5252,7 +5276,26 @@ fn direct_authentication_key_id_uses_pinentry_for_its_password() {
         vec![crate::YUBIHSM_ALGO_RSA_2048],
     );
 
-    crate::Slot::login_with_pinentry(&mut slot, b"0001", &pinentry.pinentry()).unwrap();
+    crate::Slot::login(&mut slot, Some(b"0001"), &pinentry.pinentry()).unwrap();
+    let session =
+        crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
+    assert!(session.get_session_info().is_ok());
+    assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
+}
+
+#[cfg(unix)]
+#[test]
+fn named_direct_authentication_uses_the_callers_pinentry() {
+    let _guard = crate::test::TEST_LOCK.lock().unwrap();
+    let pinentry = crate::test::TestPinentry::new("password");
+    let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
+    let mut slot = crate::YubiHsmSlot::new(
+        yubihsm.clone(),
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_RSA_2048],
+    );
+
+    crate::Slot::login_user(&mut slot, 91, b"0001", None, &pinentry.pinentry(), &[]).unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -5273,7 +5316,7 @@ fn hsmauth_provider_selection_ignores_an_absent_matching_transport() {
         ])),
     );
 
-    crate::Slot::login_user(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
+    login_user_slot(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
     assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
 }
 
@@ -5291,7 +5334,7 @@ fn hsmauth_provider_selection_rejects_an_absent_transport() {
     );
 
     assert!(matches!(
-        crate::Slot::login_user(
+        login_user_slot(
             &mut slot,
             7,
             b":0001default key@12345678",
@@ -5342,7 +5385,7 @@ fn hsmauth_wildcard_ignores_symmetric_credentials_and_matches_the_public_project
     assert_eq!(resolved.len(), 1);
     assert_eq!(resolved[0].1, AUTHKEY_ID);
 
-    Slot::login_user(&mut slot, SLOT_ID, b":*", PASSWORD, &projections).unwrap();
+    login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &projections).unwrap();
 
     assert!(Slot::login_is_active(&slot));
     assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
@@ -5372,7 +5415,7 @@ fn hsmauth_wildcard_reports_an_unresolved_identity_separately_from_a_wrong_pin()
     };
 
     assert!(matches!(
-        Slot::login_user(&mut slot, SLOT_ID, b":*", PASSWORD, &[]),
+        login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &[]),
         Err(crate::Error::Generic(value))
             if value == crate::CKR_USER_TYPE_INVALID as crate::CK_RV
     ));
@@ -5470,7 +5513,7 @@ fn hsmauth_wildcard_rejects_duplicate_public_projections_before_authentication()
     ];
 
     assert!(
-        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*", PASSWORD, &projections),
+        matches!(login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &projections),
         Err(crate::Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as crate::CK_RV)
     );
     assert!(!Slot::login_is_active(&slot));
@@ -5539,7 +5582,7 @@ fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
         ])),
     );
 
-    crate::Slot::login(&mut slot, b":0001asymmetric:password").unwrap();
+    login_slot(&mut slot, b":0001asymmetric:password").unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 92, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -5789,7 +5832,7 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048]);
     slot.trust_prefix = Some(trust.prefix.clone());
 
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
     Slot::logout(&mut slot).unwrap();
     {
@@ -5807,14 +5850,14 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
     }
 
     peer.commands.borrow_mut().clear();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [67]);
     Slot::logout(&mut slot).unwrap();
 
     peer.use_symmetric_authentication(1);
     fs::write(&trust.path, b"invalidated trust entry").unwrap();
     peer.commands.borrow_mut().clear();
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [67, 10]);
     Slot::logout(&mut slot).unwrap();
 }
@@ -5823,7 +5866,7 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
 fn expired_user_session_logs_out_by_default() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(peer.create_session_count(), 1);
 
     peer.expire_next_session_message.set(true);
@@ -5847,7 +5890,7 @@ fn opted_in_symmetric_session_recreates_and_replays_once() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
     slot.recreate_sessions = true;
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
 
     peer.expire_next_session_message.set(true);
     assert_eq!(
@@ -5872,7 +5915,7 @@ fn opted_in_asymmetric_session_recreates_from_static_shared_secret() {
     peer.use_asymmetric_authentication(1);
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
     slot.recreate_sessions = true;
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
 
     peer.expire_next_session_message.set(true);
@@ -5896,7 +5939,7 @@ fn opted_in_hsmauth_session_invokes_the_credential_again() {
     ]));
     let mut slot = YubiHsmSlot::with_auth_slots(peer.clone(), (2, 4, 1), vec![], providers);
     slot.recreate_sessions = true;
-    Slot::login(&mut slot, b":0001default key@12345678:password").unwrap();
+    login_slot(&mut slot, b":0001default key@12345678:password").unwrap();
 
     peer.expire_next_session_message.set(true);
     send_yubihsm_secure_command(
@@ -5916,7 +5959,7 @@ fn transport_failure_never_recreates_or_replays() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
     slot.recreate_sessions = true;
-    Slot::login(&mut slot, b"0001password").unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
 
     peer.fail_next_session_message.set(true);
     assert!(matches!(
@@ -5959,7 +6002,7 @@ fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
         assert_eq!(authentication_key.inferred_authentication_algorithm, None);
     }
     peer.commands.borrow_mut().clear();
-    Slot::login(&mut slot, b"0002password").unwrap();
+    login_slot(&mut slot, b"0002password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [67]);
     Slot::logout(&mut slot).unwrap();
 
@@ -5968,7 +6011,7 @@ fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
     user_peer.list_authentication_key(2);
     let mut user_slot = YubiHsmSlot::new(user_peer.clone(), (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048]);
     user_slot.trust_prefix = Some(trust.prefix.clone());
-    Slot::login(&mut user_slot, b"0001password").unwrap();
+    login_slot(&mut user_slot, b"0001password").unwrap();
     Slot::token_objects(&user_slot, 8).unwrap();
     Slot::logout(&mut user_slot).unwrap();
     {
@@ -5984,13 +6027,13 @@ fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
         );
     }
     user_peer.commands.borrow_mut().clear();
-    Slot::login(&mut user_slot, b"0002password").unwrap();
+    login_slot(&mut user_slot, b"0002password").unwrap();
     assert_eq!(create_session_payload_lengths(&user_peer), [67]);
     Slot::logout(&mut user_slot).unwrap();
 
     user_peer.connection_epoch.set(1);
     user_peer.commands.borrow_mut().clear();
-    Slot::login(&mut user_slot, b"0002password").unwrap();
+    login_slot(&mut user_slot, b"0002password").unwrap();
     assert_eq!(create_session_payload_lengths(&user_peer), [10, 67]);
     Slot::logout(&mut user_slot).unwrap();
 }
@@ -6431,7 +6474,7 @@ fn hsmauth_source_session_retention_requires_opt_in_and_logout_releases_it() {
             .unwrap();
         let mut slot = YubiHsmSlot::with_auth_slots(target, (2, 4, 1), vec![], sources);
         slot.recreate_sessions = recreate;
-        Slot::login_user(&mut slot, 7, b":0001default key@12345678", PASSWORD, &[]).unwrap();
+        login_user_slot(&mut slot, 7, b":0001default key@12345678", PASSWORD, &[]).unwrap();
         assert_eq!(source.lock().unwrap().sessions.len(), usize::from(recreate));
         Slot::logout(&mut slot).unwrap();
         assert!(source.lock().unwrap().sessions.is_empty());
@@ -6477,13 +6520,13 @@ fn native_auth_selection_does_not_try_other_credentials_or_repeat_a_wrong_passwo
         &first_provider.credential,
     )];
     assert!(
-        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*", b"wrong", &projections),
+        matches!(login_user_slot(&mut slot, SLOT_ID, b":*", b"wrong", &projections),
         Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
     );
     assert_eq!(first.requests.get(), 0);
     assert_eq!(second.requests.get(), 0);
     assert!(
-        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*asymmetric@87654321", b"wrong", &projections),
+        matches!(login_user_slot(&mut slot, SLOT_ID, b":*asymmetric@87654321", b"wrong", &projections),
         Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
     );
     assert_eq!(first.requests.get(), 1);
@@ -6534,12 +6577,12 @@ fn ordinary_wildcard_selection_never_logs_in_to_resolve_public_ambiguity() {
         authkey_domains: u16::MAX,
     };
     assert!(
-        matches!(Slot::login_user(&mut slot, 7, b":*", b"", &[projection]),
+        matches!(login_user_slot(&mut slot, 7, b":*", b"", &[projection]),
         Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
     );
     assert!(!child.lock().unwrap().slot.login_is_active());
     assert_eq!(peer.create_session_count(), 0);
-    Slot::login_user(&mut slot, 7, b":1003first@host", b"", &[]).unwrap();
+    login_user_slot(&mut slot, 7, b":1003first@host", b"", &[]).unwrap();
     assert_eq!(peer.create_session_count(), 1);
     Slot::logout(&mut slot).unwrap();
 }
@@ -6736,5 +6779,5 @@ fn auth_source_exclusion_uses_reference_equality_not_serial() {
         )
         .unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].source, serial);
+    assert_eq!(candidates[0].label, "credential");
 }

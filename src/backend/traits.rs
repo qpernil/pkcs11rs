@@ -196,17 +196,9 @@ pub(crate) trait Slot {
     }
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession>;
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
-    fn login_with_pinentry(
-        &mut self,
-        pin: &[u8],
-        _pinentry: &pinentry::Pinentry,
-    ) -> Result<(), Error> {
-        self.login(pin)
-    }
-    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        Err(CKR_ARGUMENTS_BAD.into())
-    }
+    /// Authorize the user through this backend. `Some(&[])` is an explicitly
+    /// empty PIN; `None` requests the backend's protected or prompted path.
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error>;
     #[cfg(all(test, not(feature = "abi-tests")))]
     fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         None
@@ -273,11 +265,18 @@ pub(crate) trait Slot {
     fn login_user(
         &mut self,
         _slot_id: CK_SLOT_ID,
-        _username: &[u8],
-        _pin: &[u8],
+        username: &[u8],
+        _pin: Option<&[u8]>,
+        _pinentry: &pinentry::Pinentry,
         _token_objects: &[TokenObject],
     ) -> Result<(), Error> {
-        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+        if !self.supports_login_user() {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        if !username.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.login(_pin, _pinentry)
     }
     fn login_user_uses_token_objects(&self, _username: &[u8]) -> bool {
         false
@@ -285,25 +284,12 @@ pub(crate) trait Slot {
     fn supports_login_user(&self) -> bool {
         false
     }
-    /// Named principals need backend-specific selection. Single-user slots
-    /// accept an empty username and share the ordinary C_Login path instead.
-    fn login_user_has_named_users(&self) -> bool {
-        false
-    }
-    fn login_user_without_pin(
+    fn login_so(
         &mut self,
-        _slot_id: CK_SLOT_ID,
-        _username: &[u8],
+        _pin: Option<&[u8]>,
         _pinentry: &pinentry::Pinentry,
-        _token_objects: &[TokenObject],
     ) -> Result<(), Error> {
-        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
-    }
-    fn login_so(&mut self, _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_USER_TYPE_INVALID.into())
-    }
-    fn login_so_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        Err(CKR_ARGUMENTS_BAD.into())
     }
     fn set_pin(&mut self, _old_pin: &[u8], _new_pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
@@ -384,11 +370,6 @@ pub(crate) trait Slot {
     /// Installed backing storage enables public certificate provisioning on
     /// applets without native certificate storage. This is not an inventory check.
     fn set_public_certificate_storage_enabled(&mut self, _enabled: bool) {}
-    /// Whether USER authorization needs a caller-supplied PIN. False means
-    /// internal authentication clients can use an empty PIN without prompting.
-    fn user_login_requires_pin(&self) -> bool {
-        true
-    }
     fn supports_protected_authentication_path(&self) -> bool {
         false
     }

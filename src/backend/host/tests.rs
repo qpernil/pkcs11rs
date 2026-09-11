@@ -43,6 +43,15 @@ fn host_profiles_include_login_and_software_operations() {
     assert_ne!(info.flags & CKF_LOGIN_REQUIRED as CK_FLAGS, 0);
 }
 
+#[test]
+fn host_login_accepts_supplied_or_omitted_pins() {
+    let pinentry = crate::pinentry::Pinentry::unconfigured();
+    let mut slot = HostSlot::with_keys(Vec::new());
+    Slot::login(&mut slot, Some(b"any supplied PIN"), &pinentry).unwrap();
+    slot.logout().unwrap();
+    Slot::login(&mut slot, None, &pinentry).unwrap();
+}
+
 struct NativeKey {
     key: SoftwareSigningKey,
     calls: AtomicUsize,
@@ -205,9 +214,6 @@ fn host_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
             .unwrap()
             .as_slice(),
         &[CK_FALSE as u8]
-    );
-    assert!(
-        matches!(creator.login(b"wrong"), Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
     );
     assert!(find(&observer, CKO_PRIVATE_KEY).is_empty());
     let mut empty = [0u8];
