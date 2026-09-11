@@ -154,8 +154,9 @@ login-time enumeration, and cached credential metadata is cleared at logout.
 
 PKCS #11's `CKU_USER` is an authorization role here, not a named FIDO account.
 The ClientPIN is authenticator-wide, so successful PIN/UV token acquisition is
-the FIDO verification operation underlying `C_Login`. `C_LoginUser` remains
-unsupported for FIDO2 because CTAP PIN/UV authentication accepts no username.
+the FIDO verification operation underlying `C_Login`. `C_LoginUser` accepts
+only an empty username and follows the same PIN/UV authorization path as
+`C_Login`.
 The `user.id`, `user.name`, and `displayName` values returned with discoverable
 credentials are relying-party-scoped credential metadata, not authenticator
 login identities. Likewise, CTAP provides no Security Officer identity, so

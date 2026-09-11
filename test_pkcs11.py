@@ -5839,6 +5839,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             },
             ABI_TEST_PIV_SLOT_ID: {
                 CKP_BASELINE_PROVIDER,
+                CKP_EXTENDED_PROVIDER,
                 CKP_AUTHENTICATION_TOKEN,
                 CKP_PUBLIC_CERTIFICATES_TOKEN,
             },
@@ -6626,6 +6627,35 @@ class Pkcs11AbiTests(unittest.TestCase):
                     os.environ.pop("PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX", None)
                 else:
                     os.environ["PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX"] = previous_prefix
+
+    def test_abi_single_user_login_shares_ordinary_login_state(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
+        pin = (CK_BYTE * 6)(*b"123456")
+        username = (CK_BYTE * 4)(*b"user")
+        self.assertEqual(
+            self.lib.C_LoginUser(
+                session, CKU_USER, pin, len(pin), username, len(username)
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_LoginUser(session, CKU_USER, pin, len(pin), None, 0),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)),
+            CKR_USER_ALREADY_LOGGED_IN,
+        )
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_LoginUser(session, CKU_USER, pin, len(pin), None, 0),
+            CKR_USER_ALREADY_LOGGED_IN,
+        )
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
 
     def test_abi_yubihsm_fixture_supports_separate_login_username(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

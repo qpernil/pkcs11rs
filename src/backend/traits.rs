@@ -203,6 +203,11 @@ pub(crate) trait Slot {
     fn supports_login_user(&self) -> bool {
         false
     }
+    /// Named principals need backend-specific selection. Single-user slots
+    /// accept an empty username and share the ordinary C_Login path instead.
+    fn login_user_has_named_users(&self) -> bool {
+        false
+    }
     fn login_user_without_pin(
         &mut self,
         _slot_id: CK_SLOT_ID,
@@ -259,17 +264,44 @@ pub(crate) trait Slot {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn supports_extended_provider_profile(&self) -> bool {
-        false
+        // The 3.1/3.2 prose requires C_LoginUser even though the mandatory
+        // XML case only exercises C_Login. Check the merged slot capabilities
+        // used by that case, including software session-object operations.
+        if !self.supports_login_user() {
+            return false;
+        }
+        let mechanisms = self.mechanisms();
+        [
+            (CKM_SHA512, CKF_DIGEST),
+            (CKM_RSA_PKCS_KEY_PAIR_GEN, CKF_GENERATE_KEY_PAIR),
+            (
+                CKM_RSA_PKCS,
+                CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_WRAP | CKF_UNWRAP,
+            ),
+        ]
+        .into_iter()
+        .all(|(kind, flags)| {
+            mechanisms.iter().any(|mechanism| {
+                mechanism.type_ == kind as CK_MECHANISM_TYPE
+                    && mechanism.flags & flags as CK_FLAGS == flags as CK_FLAGS
+            })
+        })
     }
     fn supports_authentication_token_profile(&self) -> bool {
-        self.backend_mechanisms().iter().any(|mechanism| {
-            mechanism.type_ == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
-                && mechanism.flags & CKF_SIGN as CK_FLAGS != 0
-        })
+        self.supports_login_user()
+            && self.mechanisms().iter().any(|mechanism| {
+                mechanism.type_ == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+                    && mechanism.flags & CKF_SIGN as CK_FLAGS != 0
+                    && mechanism.min_key_size <= 2048
+                    && mechanism.max_key_size >= 2048
+            })
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
         false
     }
+    /// Installed backing storage enables public certificate provisioning on
+    /// applets without native certificate storage. This is not an inventory check.
+    fn set_public_certificate_storage_enabled(&mut self, _enabled: bool) {}
     fn supports_protected_authentication_path(&self) -> bool {
         false
     }
@@ -346,9 +378,6 @@ pub(crate) trait Slot {
     }
     fn destroy_software_private_object(&mut self, _unique_id: &str) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
-    }
-    fn private_objects_require_login(&self) -> bool {
-        true
     }
     /// Select host software mechanisms for this slot. Native capabilities remain
     /// separate. Backends can override this policy without changing key storage

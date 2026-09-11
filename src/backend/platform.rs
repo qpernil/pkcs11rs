@@ -13,6 +13,7 @@ pub(crate) struct PlatformSlot {
     // through exactly the same object projection and mechanism dispatch.
     keys: Option<Vec<NamedPlatformKey>>,
     objects: RefCell<Option<Vec<TokenObject>>>,
+    logged_in: bool,
 }
 impl PlatformSlot {
     pub(crate) fn new() -> Result<Self, Error> {
@@ -22,6 +23,7 @@ impl PlatformSlot {
         Ok(Self {
             keys: None,
             objects: RefCell::new(None),
+            logged_in: false,
         })
     }
     #[cfg(test)]
@@ -29,6 +31,7 @@ impl PlatformSlot {
         Self {
             keys: Some(keys),
             objects: RefCell::new(None),
+            logged_in: false,
         }
     }
     fn keys(&self) -> Result<Vec<NamedPlatformKey>, Error> {
@@ -100,11 +103,11 @@ impl Slot for PlatformSlot {
     fn is_present(&self) -> bool {
         true
     }
-    fn private_objects_require_login(&self) -> bool {
-        false
-    }
     fn login_is_active(&self) -> bool {
-        false
+        self.logged_in
+    }
+    fn clear_session(&mut self) {
+        self.logged_in = false;
     }
     fn flags(&self) -> CK_FLAGS {
         CKF_TOKEN_PRESENT as _
@@ -115,11 +118,25 @@ impl Slot for PlatformSlot {
     fn model(&self) -> &str {
         "Platform ECDH"
     }
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        Err(CKR_USER_TYPE_INVALID.into())
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        true
+    }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if !pin.is_empty() {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        self.logged_in = true;
+        Ok(())
+    }
+    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        self.login(&[])
     }
     fn logout(&mut self) -> Result<(), Error> {
-        Err(CKR_USER_NOT_LOGGED_IN.into())
+        self.logged_in = false;
+        Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         Ok(())
@@ -140,9 +157,13 @@ impl Slot for PlatformSlot {
         str_pad(self.manufacturer(), &mut info.manufacturerID);
         str_pad(self.product(), &mut info.model);
         str_pad(self.serial(), &mut info.serialNumber);
-        // OS access control governs native key use; no PKCS #11 PIN is accepted.
+        // Empty-PIN login gates private objects; OS access control still governs key use.
         // Persistent provisioning remains in the platform management API.
-        info.flags = (CKF_TOKEN_INITIALIZED | CKF_RNG | CKF_WRITE_PROTECTED) as _;
+        info.flags = (CKF_TOKEN_INITIALIZED
+            | CKF_RNG
+            | CKF_WRITE_PROTECTED
+            | CKF_LOGIN_REQUIRED
+            | CKF_USER_PIN_INITIALIZED) as _;
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as _;
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = CK_EFFECTIVELY_INFINITE as _;
@@ -200,6 +221,30 @@ impl Slot for PlatformSlot {
                 parameters: ec_curve_parameters(EcCurve::P256).to_vec(),
                 public_key: uncompressed[1..].to_vec(),
             };
+            for certificate in key.certificates().map_err(platform_error)? {
+                if crate::certificate_chain::public_key_info(&certificate)?
+                    != crate::ec_public_key_info(
+                        CKK_EC as _,
+                        Some(ec_curve_parameters(EcCurve::P256)),
+                        &uncompressed[1..],
+                    )
+                    .ok_or(CKR_DATA_INVALID)?
+                {
+                    return Err(CKR_PUBLIC_KEY_INVALID.into());
+                }
+                let fingerprint = hash(MessageDigest::Sha256, &certificate)?;
+                let mut object = super::traits::profile_token_object(slot_id, 0);
+                object.unique_id =
+                    format!("platform:{name}:{identity}:certificate:{fingerprint:x?}");
+                object.class = CKO_CERTIFICATE as _;
+                object.label = name.clone();
+                object.id = id.clone();
+                object.material = KeyMaterial::Certificate {
+                    instance: [0; 16],
+                    value: Zeroizing::new(certificate),
+                };
+                objects.push(object);
+            }
             let mut private = super::traits::profile_token_object(slot_id, 0);
             private.unique_id = format!("platform:{name}:{identity}:private");
             private.class = CKO_PRIVATE_KEY as _;

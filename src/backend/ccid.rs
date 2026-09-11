@@ -97,6 +97,7 @@ pub(crate) struct HsmAuthSlot {
     serial: String,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
+    public_certificate_storage_enabled: bool,
     management_key: RefCell<Option<HsmAuthManagementKey>>,
     info: RefCell<Option<HsmAuthInfo>>,
     #[cfg(test)]
@@ -134,6 +135,7 @@ impl HsmAuthSlot {
             serial,
             application_aid,
             authenticated: Cell::new(false),
+            public_certificate_storage_enabled: false,
             management_key: RefCell::new(None),
             info: RefCell::new(None),
             #[cfg(test)]
@@ -262,6 +264,15 @@ impl Slot for HsmAuthSlot {
     #[cfg(all(test, not(feature = "abi-tests")))]
     fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         Some(self.connector.clone())
+    }
+    fn set_public_certificate_storage_enabled(&mut self, enabled: bool) {
+        self.public_certificate_storage_enabled = enabled;
+    }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        self.public_certificate_storage_enabled
+    }
+    fn supports_login_user(&self) -> bool {
+        true
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         if !pin.is_empty() {
@@ -574,6 +585,7 @@ pub(crate) struct IssuerSecurityDomainSlot {
     serial: String,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
+    public_certificate_storage_enabled: bool,
     info: RefCell<Option<SecurityDomainInfo>>,
 }
 
@@ -596,6 +608,7 @@ impl IssuerSecurityDomainSlot {
             serial,
             application_aid,
             authenticated: Cell::new(false),
+            public_certificate_storage_enabled: false,
             info: RefCell::new(None),
         }
     }
@@ -681,6 +694,15 @@ impl Slot for IssuerSecurityDomainSlot {
     #[cfg(all(test, not(feature = "abi-tests")))]
     fn security_domain_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         Some(self.connector.clone())
+    }
+    fn set_public_certificate_storage_enabled(&mut self, enabled: bool) {
+        self.public_certificate_storage_enabled = enabled;
+    }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        self.public_certificate_storage_enabled
+    }
+    fn supports_login_user(&self) -> bool {
+        true
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         if !pin.is_empty() {

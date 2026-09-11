@@ -184,37 +184,49 @@ the future persistent, chainable generic-secret design are documented there.
 ## PKCS #11 3.2 profiles
 
 Every present slot advertises a public, immutable, token-resident
-`CKP_BASELINE_PROVIDER` object. Additional `CKO_PROFILE` objects are derived
-from the backend's advertised behavior:
+`CKP_BASELINE_PROVIDER` object. Additional `CKO_PROFILE` objects describe the
+slot's combined native and software session capabilities:
 
-| Profile | Availability |
+| Slot | Profiles with the default software mechanism set |
 | --- | --- |
-| `CKP_BASELINE_PROVIDER` | Every present slot |
-| `CKP_EXTENDED_PROVIDER` | YubiHSM slots, which provide the profile's required mechanism discovery and login functions |
-| `CKP_AUTHENTICATION_TOKEN` | Slots advertising signing-capable `CKM_SHA256_RSA_PKCS` |
-| `CKP_PUBLIC_CERTIFICATES_TOKEN` | PIV and OpenPGP slots; YubiHSM slots only after successful configured public discovery |
+| Platform ECDH | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| Software, including temporary direct-auth slots | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| PIV, OpenPGP | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| YubiHSM | Baseline, Extended Provider, Authentication Token; Public Certificates Token when public discovery is configured |
+| YubiKey HSM Auth, FIDO2, Issuer Security Domain | Baseline, Extended Provider, Authentication Token; Public Certificates Token when token backing storage is enabled |
 
-Each `CKO_PROFILE` object identifies one supported profile through its
-`CKA_PROFILE_ID` attribute and has a stable, distinct `CKA_UNIQUE_ID`. The
-YubiHSM public-certificates profile is based on an actual authenticated
-discovery result, not merely on the presence of configuration.
+Extended Provider requires login support, including `C_LoginUser`, and the
+SHA-512/RSA operations required by its mandatory OASIS test. Authentication
+Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
+Eligibility uses the merged mechanism list, including the slot's filtered
+software mechanisms. HSM Auth meets these requirements through software
+session keys; its native credential metadata objects use the dedicated HSM
+Auth operation. Platform uses an empty-PIN login to gate private objects;
+OS authorization still controls native key use.
 
-YubiHSM slots advertise the Extended Provider profile because the module
-provides its required mechanism discovery and authentication functions. The
-profile's RSA-wrapping requirement is interpreted as a capability requirement,
-not as requiring one particular mechanism identifier. Available wrapping
-mechanisms remain limited to the YubiHSM's standard and vendor-backed
-adaptations and depend on device capabilities.
+By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
+HSM Auth, Issuer Security Domain, and Platform) accept an empty username in
+`C_LoginUser`, with the same PIN, user-role, and
+session-state behavior as `C_Login`. Nonempty usernames are rejected.
+YubiHSM slots retain their named credential selectors. Neither Complete
+Provider nor HKDF TLS Token is claimed;
+the complete function/mechanism set and `CKM_HKDF_DATA`, respectively, are absent.
 
-The published OASIS `EXT-M-1-32` test binds RSA wrapping to `CKM_RSA_PKCS` and
-requires `CKF_WRAP` and `CKF_UNWRAP` on that mechanism. Physical YubiHSM
-firmware does not provide that direct wrapped-secret format, so its slot exposes
-RSA wrapping through `CKM_YUBICO_RSA_WRAP` and `CKM_RSA_AES_KEY_WRAP` and does
-not pass the literal check. A virtual YubiHSM advertises its direct PKCS #1
-secret-key wrapping extension through a dedicated device algorithm marker;
-only then does pkcs11rs add those flags and pass the literal test. Conformance
-evidence for a physical slot must identify the mechanism-identifier deviation
-and the capability-level interpretation used for its Extended Provider claim.
+Each profile object identifies one profile through `CKA_PROFILE_ID` and has a
+stable, distinct `CKA_UNIQUE_ID`. Claims describe enabled capabilities, not the
+current inventory or the outcome of a discovery attempt. Correctly provisioned
+objects and access settings are prerequisites for a conforming deployment and
+its qualification tests. In particular, Public Certificates requires public
+certificate discovery and matching key IDs/public-key objects. Software slots
+retain their capability claim even when empty or provisioned with private
+certificates; their encrypted storage and configured public-discovery behavior
+are unchanged. Platform certificate lookup is intrinsic to the enabled slot.
+
+The common software layer provides `CKM_RSA_PKCS` wrap/unwrap on session keys,
+including on physical YubiHSM slots. Native token-key operations remain limited
+by device capabilities. A merged mechanism's `CKF_HW` flag does not imply that
+every advertised operation or key size is supported by hardware. See
+[profile test execution and qualification](conformance/README.md).
 
 ## Threading
 

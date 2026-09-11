@@ -762,6 +762,97 @@ fn selected_aid_is_reused_only_within_its_transaction() {
 }
 
 #[test]
+fn production_slot_profiles_include_common_operations_and_single_user_login() {
+    let connector = || -> std::rc::Rc<dyn crate::Connector> {
+        std::rc::Rc::new(SelectableConnector {
+            present: std::sync::atomic::AtomicBool::new(true),
+            select_ok: std::sync::atomic::AtomicBool::new(false),
+            serial: "PROFILE0001",
+        })
+    };
+    let slots: Vec<(Box<dyn crate::Slot>, bool)> = vec![
+        (
+            Box::new(crate::SoftwareSlot::new("profiles".into(), 0)),
+            true,
+        ),
+        (
+            Box::new(crate::backend::platform::PlatformSlot::with_keys(Vec::new())),
+            true,
+        ),
+        (
+            Box::new(crate::HsmAuthSlot::new(
+                connector(),
+                crate::hsmauth::AID.to_vec(),
+            )),
+            false,
+        ),
+        (
+            Box::new(crate::IssuerSecurityDomainSlot::new(
+                connector(),
+                vec![0xa0],
+            )),
+            false,
+        ),
+        (
+            Box::new(crate::Fido2Slot::new(
+                connector(),
+                crate::ctap::FIDO2_AID.to_vec(),
+            )),
+            false,
+        ),
+        (
+            Box::new(crate::OpenPgpSlot::new(
+                connector(),
+                crate::openpgp::OPENPGP_AID.to_vec(),
+            )),
+            true,
+        ),
+        (
+            Box::new(crate::PivSlot::new_with_device(
+                connector(),
+                crate::piv::PIV_AID.to_vec(),
+                std::sync::Arc::new(crate::device::DeviceContext::test()),
+            )),
+            true,
+        ),
+    ];
+    for (mut slot, certificates) in slots {
+        assert!(slot.supports_login_user(), "{:?}", slot.kind());
+        assert!(!slot.login_user_has_named_users(), "{:?}", slot.kind());
+        let ids: Vec<_> = slot
+            .profile_objects(1)
+            .into_iter()
+            .map(|object| {
+                let crate::KeyMaterial::Profile { profile_id } = object.material else {
+                    panic!()
+                };
+                profile_id
+            })
+            .collect();
+        let mut expected = vec![
+            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
+            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
+            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
+        ];
+        if certificates {
+            expected.push(CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID);
+        }
+        assert_eq!(ids, expected, "{:?}", slot.kind());
+        slot.set_public_certificate_storage_enabled(true);
+        assert!(
+            slot.supports_public_certificates_token_profile(1),
+            "{:?}",
+            slot.kind()
+        );
+        slot.set_public_certificate_storage_enabled(false);
+        assert_eq!(
+            slot.supports_public_certificates_token_profile(1),
+            certificates
+        );
+    }
+}
+
+#[test]
 fn passive_ccid_slots_do_not_repeat_presence_select() {
     let connector = || -> std::rc::Rc<dyn crate::Connector> {
         std::rc::Rc::new(SelectableConnector {

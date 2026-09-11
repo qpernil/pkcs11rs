@@ -415,6 +415,23 @@ fn login_user(
     username: *const CK_UTF8CHAR,
     username_len: CK_ULONG,
 ) -> Result<(), Error> {
+    let named_users = with_session_context(session_handle, |ctx| {
+        let slot_id = ctx._get_session(session_handle)?.1.slotID();
+        let slot = ctx.get_slot(slot_id)?;
+        if !slot.supports_login_user() {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        Ok(slot.login_user_has_named_users())
+    })?;
+    if !named_users {
+        let username = unsafe { from_raw_parts(username, username_len as usize) }?;
+        if !username.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        // Reuse user/SO/context-specific authorization, protected PIN entry,
+        // and session-state transitions without retaining another PIN copy.
+        return login(session_handle, user_type, pin, pin_len);
+    }
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         let pinentry = ctx.pinentry.clone();

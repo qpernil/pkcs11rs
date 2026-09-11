@@ -4,16 +4,16 @@ use super::*;
 use crate::{
     CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_RV, CK_TOKEN_INFO, CKA_LABEL,
     CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
-    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER,
-    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, KeyMaterial,
-    Slot, TokenObject, YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
-    YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256,
-    YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_OPAQUE_DATA,
-    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
-    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519, YUBIHSM_ASYMMETRIC_KEY,
-    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
-    YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
-    YubiHsmSlot, configured_yubihsm_public_discovery_credential,
+    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_AUTHENTICATION_TOKEN, CKP_BASELINE_PROVIDER,
+    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
+    CKR_USER_NOT_LOGGED_IN, KeyMaterial, Slot, TokenObject, YUBIHSM_ALGO_AES128,
+    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
+    YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_ED448,
+    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
+    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519,
+    YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY,
+    YUBIHSM_WRAP_KEY, YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig,
+    YubiHsmSessionRole, YubiHsmSlot, configured_yubihsm_public_discovery_credential,
     key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
     parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command,
 };
@@ -3190,6 +3190,7 @@ fn yubihsm_without_public_discovery_configuration_exposes_provider_profiles_only
         HashSet::from([
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
             CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
+            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
         ])
     );
     assert!(
@@ -3947,6 +3948,7 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
         HashSet::from([
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
             CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
+            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
             CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID,
         ])
     );
@@ -4143,15 +4145,13 @@ fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
         Some(hsmauth_public_discovery_credential()),
     );
 
-    assert!(
-        !Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
-            matches!(
-                object.material,
-                KeyMaterial::Profile { profile_id }
-                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-            )
-        })
-    );
+    assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
     assert_eq!(
         slot.object_cache.borrow().discovery,
         YubiHsmDiscoveryCache::Unattempted
@@ -4358,7 +4358,7 @@ fn public_certificate_profile_does_not_require_provisioned_certificates() {
 }
 
 #[test]
-fn yubihsm_public_discovery_is_conditional_per_slot() {
+fn configured_public_certificate_profile_survives_discovery_failure() {
     let credential = public_discovery_credential("password");
     let successful_peer = Rc::new(ProtocolPeer::new());
     successful_peer.add_public_certificate_pair();
@@ -4378,7 +4378,7 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
             ))
     );
     assert!(
-        !Slot::token_objects(&failing, 8)
+        Slot::token_objects(&failing, 8)
             .unwrap()
             .iter()
             .any(|object| matches!(
@@ -4389,12 +4389,12 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
     );
 }
 
-fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
+fn assert_failed_public_discovery_preserves_profile_after_user_login(
     mut slot: YubiHsmSlot,
     expected: YubiHsmDiscoveryCache,
 ) {
     assert!(
-        !Slot::token_objects(&slot, 7)
+        Slot::token_objects(&slot, 7)
             .unwrap()
             .iter()
             .any(|object| matches!(
@@ -4408,7 +4408,7 @@ fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
     Slot::login_user(&mut slot, 7, b"0001", PASSWORD, &[]).unwrap();
     assert!(Slot::login_is_active(&slot));
     assert!(
-        !Slot::token_objects(&slot, 7)
+        Slot::token_objects(&slot, 7)
             .unwrap()
             .iter()
             .any(|object| matches!(
@@ -4420,7 +4420,7 @@ fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
 }
 
 #[test]
-fn unknown_public_discovery_authkey_does_not_gain_a_profile_from_user_login() {
+fn unknown_public_discovery_authkey_preserves_configured_profile_across_user_login() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let credential = configured_yubihsm_public_discovery_credential(Some("0003password".into()))
@@ -4428,26 +4428,26 @@ fn unknown_public_discovery_authkey_does_not_gain_a_profile_from_user_login() {
         .unwrap();
     let slot = public_discovery_test_slot(peer, credential);
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+    assert_failed_public_discovery_preserves_profile_after_user_login(
         slot,
         YubiHsmDiscoveryCache::Failed,
     );
 }
 
 #[test]
-fn public_discovery_secure_channel_fault_does_not_gain_a_profile_from_user_login() {
+fn public_discovery_secure_channel_fault_preserves_configured_profile_across_user_login() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let slot = public_discovery_test_slot(peer, public_discovery_credential("wrong password"));
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+    assert_failed_public_discovery_preserves_profile_after_user_login(
         slot,
         YubiHsmDiscoveryCache::Failed,
     );
 }
 
 #[test]
-fn missing_hsmauth_slot_does_not_gain_a_profile_from_user_login() {
+fn missing_hsmauth_slot_preserves_configured_profile_across_user_login() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
@@ -4458,14 +4458,14 @@ fn missing_hsmauth_slot_does_not_gain_a_profile_from_user_login() {
         Some(hsmauth_public_discovery_credential()),
     );
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+    assert_failed_public_discovery_preserves_profile_after_user_login(
         slot,
         YubiHsmDiscoveryCache::Unattempted,
     );
 }
 
 #[test]
-fn missing_hsmauth_credential_does_not_gain_a_profile_from_user_login() {
+fn missing_hsmauth_credential_preserves_configured_profile_across_user_login() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut provider = symmetric_hsmauth_provider("12345678");
@@ -4480,7 +4480,7 @@ fn missing_hsmauth_credential_does_not_gain_a_profile_from_user_login() {
         Some(hsmauth_public_discovery_credential()),
     );
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+    assert_failed_public_discovery_preserves_profile_after_user_login(
         slot,
         YubiHsmDiscoveryCache::Unattempted,
     );
@@ -4525,7 +4525,7 @@ fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
         public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
 
     assert!(
-        !Slot::token_objects(&slot, 7)
+        Slot::token_objects(&slot, 7)
             .unwrap()
             .iter()
             .any(|object| matches!(

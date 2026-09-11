@@ -16,6 +16,7 @@ use core_foundation::{
 };
 use security_framework::{
     access_control::{ProtectionMode, SecAccessControl},
+    certificate::SecCertificate,
     key::{Algorithm, SecKey},
 };
 use security_framework_sys::{
@@ -114,6 +115,11 @@ struct AppleEcdhCredential {
 }
 
 impl EcdhCredential for AppleEcdhCredential {
+    fn certificates(&self) -> Result<Vec<Vec<u8>>, PlatformCryptoError> {
+        let expected = self.public_key()?;
+        matching_certificates(&expected)
+    }
+
     fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError> {
         public_key(&self.key)
     }
@@ -228,6 +234,69 @@ fn find_secure_enclave_key(name: &str) -> Result<SecKey, PlatformCryptoError> {
 fn matching_secure_enclave_keys(name: &str) -> Result<Vec<SecKey>, PlatformCryptoError> {
     let tag = application_tag(name);
     secure_enclave_keys(Some(&tag))
+}
+
+fn matching_certificates(
+    expected: &SoftwarePublicKey,
+) -> Result<Vec<Vec<u8>>, PlatformCryptoError> {
+    let mut query = unsafe {
+        CFMutableDictionary::from_CFType_pairs(&[
+            (
+                kSecClass.to_void(),
+                security_framework_sys::item::kSecClassCertificate.to_void(),
+            ),
+            (kSecReturnRef.to_void(), CFBoolean::true_value().to_void()),
+            (kSecMatchLimit.to_void(), kSecMatchLimitAll.to_void()),
+        ])
+    };
+    use_data_protection_keychain(&mut query);
+    let mut result: CFTypeRef = ptr::null();
+    let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut result) };
+    if status == errSecItemNotFound {
+        return Ok(Vec::new());
+    }
+    if status != 0 {
+        return Err(backend_error(format!(
+            "Certificate lookup failed with OSStatus {status}"
+        )));
+    }
+    if result.is_null() {
+        return Ok(Vec::new());
+    }
+    let result = unsafe { CFType::wrap_under_create_rule(result) };
+    let values = if result.type_of() == CFArray::<CFType>::type_id() {
+        let array = unsafe { CFArray::<CFType>::wrap_under_get_rule(result.as_CFTypeRef().cast()) };
+        array
+            .iter()
+            .map(|value| (*value).clone())
+            .collect::<Vec<_>>()
+    } else {
+        vec![result]
+    };
+    let mut certificates = Vec::new();
+    for value in values {
+        if value.type_of() != SecCertificate::type_id() {
+            return Err(backend_error("Keychain returned a non-certificate"));
+        }
+        let certificate =
+            unsafe { SecCertificate::wrap_under_get_rule(value.as_CFTypeRef().cast_mut().cast()) };
+        let Ok(key) = certificate.public_key() else {
+            continue;
+        };
+        let Some(encoded) = key.external_representation() else {
+            continue;
+        };
+        let candidate = SoftwarePublicKey::Ec {
+            curve: EcCurve::P256,
+            uncompressed: encoded.to_vec(),
+        };
+        if &candidate == expected {
+            certificates.push(certificate.to_der());
+        }
+    }
+    certificates.sort();
+    certificates.dedup();
+    Ok(certificates)
 }
 
 fn secure_enclave_key_names() -> Result<Vec<String>, PlatformCryptoError> {

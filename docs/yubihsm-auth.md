@@ -204,25 +204,19 @@ corresponding `CKA_PROFILE_ID`:
 | Profile | When advertised |
 | --- | --- |
 | `CKP_BASELINE_PROVIDER` | Every present YubiHSM slot |
-| `CKP_EXTENDED_PROVIDER` | Every present YubiHSM slot |
-| `CKP_AUTHENTICATION_TOKEN` | The slot advertises signing-capable `CKM_SHA256_RSA_PKCS` |
-| `CKP_PUBLIC_CERTIFICATES_TOKEN` | Successful public discovery on that slot |
+| `CKP_EXTENDED_PROVIDER` | The merged mechanism set satisfies the Extended Provider requirements |
+| `CKP_AUTHENTICATION_TOKEN` | The merged mechanism set supports RSA-2048 `CKM_SHA256_RSA_PKCS` signing |
+| `CKP_PUBLIC_CERTIFICATES_TOKEN` | Public discovery is configured for that slot |
 
-YubiHSM slots advertise the Extended Provider profile because the module
-provides its required provider behavior through the YubiHSM's standard and
-vendor-backed wrapping adaptations. The RSA-wrapping requirement is interpreted
-as requiring the capability rather than one particular mechanism identifier.
-The profile is independent of the objects and algorithms currently provisioned
-on the device.
-
-The published OASIS `EXT-M-1-32` test specifically requires `CKF_WRAP` and
-`CKF_UNWRAP` on `CKM_RSA_PKCS`. Physical YubiHSM firmware does not provide that
-direct wrapped-secret format, so its slot exposes RSA-based wrapping through
-`CKM_YUBICO_RSA_WRAP` and `CKM_RSA_AES_KEY_WRAP` and does not pass the test
-literally. The virtual YubiHSM advertises a direct PKCS #1 secret-key wrapping
-extension through a dedicated algorithm marker; pkcs11rs adds the flags only
-when that marker is present. Qualification records for physical devices must
-state the deviation and capability-level interpretation.
+Profile eligibility uses the merged native and software session mechanisms.
+The common software layer supplies RSA-2048 signing and `CKM_RSA_PKCS`
+wrap/unwrap on session keys, including on physical YubiHSM slots. This satisfies
+the mechanism requirements of the mandatory Extended Provider and Authentication
+Token cases. Native token-key operations still depend on device capabilities;
+merged `CKF_HW` flags do not promise hardware support for every operation or
+key size. Public Certificates eligibility requires public-discovery
+configuration, independently of the current objects or discovery result.
+See [profile qualification](../conformance/README.md).
 
 Profile objects cannot be modified, copied, or destroyed. Configure a direct
 YubiHSM credential or a YubiHSM Auth credential to enable pre-login
@@ -871,6 +865,16 @@ use the existing names and storage without migration.
 
 ### HSM Auth slot discovery and execution
 
+The slot advertises Baseline, Extended Provider, and Authentication Token with
+the default software mechanism set. Extended and Authentication describe its
+software session-key operations, not cryptographic operations on native
+credential metadata. `C_LoginUser` accepts an empty username and uses the same
+user/SO login behavior as `C_Login`; nonempty usernames are rejected. Native
+credential passwords remain inputs to the dedicated authentication operation.
+The slot also claims Public Certificates when token backing storage is
+enabled. This storage can hold public certificates and matching public keys;
+the claim does not require them to be provisioned already.
+
 An HSM Auth applet is one PKCS #11 slot. Its credentials are public metadata
 objects (`CKO_SECRET_KEY`, `CKK_GENERIC_SECRET`, `CKA_TOKEN=true`) with protected,
 non-extractable values and a `CKA_YUBICO_HSMAUTH_ALGORITHM` discriminator.
@@ -948,8 +952,8 @@ Apple returns the ECDH secret from the Secure Enclave to the module. The module
 stores it as a protected, zeroizing session object; the private scalar remains
 in the Secure Enclave. The native key checks its managed identity before use,
 so deletion or replacement does not silently keep an obsolete binding usable.
-OS authorization governs the operation; there is no PKCS #11 login password
-for the platform slot.
+OS authorization governs the operation; the PKCS #11 platform source slot
+requires empty-PIN login to access private objects.
 
 #### Asymmetric handshake
 

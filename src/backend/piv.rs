@@ -480,6 +480,9 @@ impl Slot for PivSlot {
             management_authenticated: self.management_authenticated.clone(),
         })
     }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.management_authenticated.set(false);

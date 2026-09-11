@@ -1394,7 +1394,13 @@ impl YubiHsmSlot {
         };
         let slot = slot.clone();
         let provider = crate::pkcs11_provider::Pkcs11Provider::from_slot(slot)?;
-        crate::pkcs11_provider::ProviderSession::open(provider)
+        let session = crate::pkcs11_provider::ProviderSession::open(provider)?;
+        match session.login(&[]) {
+            Ok(()) => {}
+            Err(Error::Generic(rv)) if rv == CKR_USER_ALREADY_LOGGED_IN as CK_RV => {}
+            Err(error) => return Err(error),
+        }
+        Ok(session)
     }
 
     fn authenticate_resolved_platform_credential(
@@ -4222,7 +4228,13 @@ impl Slot for YubiHsmSlot {
                 | YubiHsmLoginUsername::PlatformWildcard(_))
         )
     }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        self.public_discovery_config.is_some()
+    }
     fn supports_login_user(&self) -> bool {
+        true
+    }
+    fn login_user_has_named_users(&self) -> bool {
         true
     }
     fn login_user_without_pin(
@@ -4333,6 +4345,7 @@ impl Slot for YubiHsmSlot {
     }
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         if !self.has_session_role(YubiHsmSessionRole::User) {
+            self.public_discovery_available(slot_id);
             return Ok(self.cached_objects());
         }
         let YubiHsmDiscoveredObjects {
@@ -4543,12 +4556,6 @@ impl Slot for YubiHsmSlot {
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
-    }
-    fn supports_extended_provider_profile(&self) -> bool {
-        true
-    }
-    fn supports_public_certificates_token_profile(&self, slot_id: CK_SLOT_ID) -> bool {
-        self.public_discovery_available(slot_id)
     }
     fn supports_protected_authentication_path(&self) -> bool {
         true
