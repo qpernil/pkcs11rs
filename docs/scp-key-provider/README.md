@@ -96,8 +96,9 @@ agreements use protected generic-secret objects. Concatenation and public
 counter/shared-info inputs remain protected; SHA-256 derivation creates readable
 KDF blocks, which concatenate into readable material. No existing object's
 protection is weakened, and a failed combined operation does not trigger fallback.
-Direct password authentication uses this standard graph so recreation can retain
-only a protected static agreement instead of the password-derived private key.
+Direct password authentication uses the same mechanism selection. When recreation
+is enabled, it retains the protected private-key credential and repeats ECDH
+for each handshake; no static agreement is retained between handshakes.
 
 The receipt key is extracted as a protected AES object and verifies the complete
 receipt before working keys are released. S-ENC, S-MAC, and S-RMAC are extracted

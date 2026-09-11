@@ -5648,8 +5648,9 @@ fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
 
 #[test]
 fn password_credentials_authenticate_both_target_key_types() {
+    use crate::pkcs11_auth::Pkcs11Auth;
     let trust = TestTrustEntry::new();
-    let credentials = PasswordCredentials::new(PASSWORD).unwrap();
+    let mut credentials = PasswordCredentials::new(PASSWORD).unwrap();
     let symmetric_peer = ProtocolPeer::new();
     let mut symmetric = SecureSession::authenticate_symmetric_detect_format(
         &symmetric_peer,
@@ -5660,7 +5661,7 @@ fn password_credentials_authenticate_both_target_key_types() {
     .unwrap();
     let asymmetric_peer = ProtocolPeer::new();
     asymmetric_peer.use_asymmetric_authentication(1);
-    let (mut asymmetric, material) = SecureSession::authenticate_asymmetric_detect_format(
+    let mut asymmetric = SecureSession::authenticate_asymmetric_detect_format(
         &asymmetric_peer,
         1,
         &credentials.asymmetric().unwrap(),
@@ -5668,9 +5669,42 @@ fn password_credentials_authenticate_both_target_key_types() {
     )
     .unwrap()
     .unwrap();
+    let material = Pkcs11AuthenticationMaterial::AsymmetricCredential {
+        credential: credentials.retain_asymmetric().unwrap(),
+        trust_prefix: Some(trust.prefix.clone()),
+    };
     drop(credentials);
+    let Pkcs11AuthenticationMaterial::AsymmetricCredential { credential, .. } = &material else {
+        panic!("recreation must retain a private-key credential")
+    };
+    let observer = crate::key_scope::Pkcs11KeyScope::for_key(credential).unwrap();
+    let assert_private_only = || {
+        assert_eq!(observer.count_provider_objects(), 1);
+        assert!(
+            observer
+                .session
+                .find(&[(
+                    crate::CKA_CLASS,
+                    &(CKO_SECRET_KEY as crate::CK_ULONG).to_ne_bytes()
+                )])
+                .unwrap()
+                .is_empty()
+        );
+        let handles = observer
+            .session
+            .find(&[(
+                crate::CKA_CLASS,
+                &(CKO_PRIVATE_KEY as crate::CK_ULONG).to_ne_bytes(),
+            )])
+            .unwrap();
+        assert_eq!(handles.len(), 1);
+        assert!(
+            matches!(observer.session.attribute(handles[0], crate::CKA_VALUE), Err(Error::Generic(rv)) if rv == crate::CKR_ATTRIBUTE_SENSITIVE as CK_RV)
+        );
+    };
+    assert_private_only();
     // Established channels own working keys, independently of the temporary
-    // password credentials. Only the asymmetric agreement remains for replay.
+    // password credentials. Recreation retains only the protected EC credential.
     for (session, peer) in [
         (&mut symmetric, &symmetric_peer),
         (&mut asymmetric, &asymmetric_peer),
@@ -5695,6 +5729,9 @@ fn password_credentials_authenticate_both_target_key_types() {
     recreated
         .send_command(&asymmetric_peer, &Command::close_session())
         .unwrap();
+    assert_private_only();
+    drop(material);
+    assert_eq!(observer.count_provider_objects(), 0);
 }
 
 #[test]

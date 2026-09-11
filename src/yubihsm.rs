@@ -240,7 +240,6 @@ pub(crate) enum Pkcs11AuthenticationMaterial {
         trust_prefix: Option<std::ffi::OsString>,
     },
     Symmetric(SymmetricCredential),
-    Asymmetric(BoundKey),
     AsymmetricCredential {
         credential: BoundKey,
         trust_prefix: Option<std::ffi::OsString>,
@@ -252,7 +251,6 @@ impl std::fmt::Debug for Pkcs11AuthenticationMaterial {
         match self {
             Self::HsmAuth { .. } => fmt.write_str("HsmAuth([PROTECTED])"),
             Self::Symmetric(_) => fmt.write_str("Symmetric([REDACTED])"),
-            Self::Asymmetric(_) => fmt.write_str("Asymmetric([REDACTED])"),
             Self::AsymmetricCredential { .. } => fmt.write_str("AsymmetricCredential([PROTECTED])"),
         }
     }
@@ -289,13 +287,6 @@ impl Pkcs11AuthenticationMaterial {
                 authkey_id,
                 static_keys,
             ),
-            Self::Asymmetric(static_secret) => {
-                SecureSession::authenticate_asymmetric_with_static_secret(
-                    connector,
-                    authkey_id,
-                    static_secret,
-                )
-            }
         }
     }
 }
@@ -507,6 +498,16 @@ impl SecureSession {
                         &credentials.asymmetric()?,
                         trust_prefix,
                     )?
+                    .map(|session| -> Result<_, Error> {
+                        Ok((
+                            session,
+                            Pkcs11AuthenticationMaterial::AsymmetricCredential {
+                                credential: credentials.retain_asymmetric()?,
+                                trust_prefix: trust_prefix.map(ToOwned::to_owned),
+                            },
+                        ))
+                    })
+                    .transpose()?
                 }
             };
             if let Some((session, material)) = authenticated {
@@ -789,8 +790,8 @@ impl SecureSession {
         authkey_id: u16,
         credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
-    ) -> Result<Option<(Self, Pkcs11AuthenticationMaterial)>, Error> {
-        let mut exchange = AsymmetricKeys::for_key(credential)?;
+    ) -> Result<Option<Self>, Error> {
+        let exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = match Self::begin_asymmetric(connector, authkey_id, &public) {
             Ok(handshake) => handshake,
@@ -799,42 +800,17 @@ impl SecureSession {
         };
         let result = (|| {
             let device_static = trusted_device_public_key(connector, trust_prefix)?;
-            let static_shared = exchange
-                .static_agreement(credential, &device_static)
-                .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))?;
-            // The existing opt-in recreation policy retains only this protected
-            // static agreement, not the password or long-term EC private key.
-            let keys = exchange
-                .finish(&static_shared, &handshake.context, &handshake.receipt)
-                .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))?;
-            Ok((keys, static_shared))
+            exchange
+                .finish_with_credential(
+                    credential,
+                    &device_static,
+                    &handshake.context,
+                    &handshake.receipt,
+                )
+                .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))
         })();
         match result {
-            Ok((keys, static_shared)) => Ok(Some((
-                Self::complete_asymmetric(handshake, keys),
-                Pkcs11AuthenticationMaterial::Asymmetric(static_shared),
-            ))),
-            Err(error) => {
-                Self::close_failed_asymmetric_handshake(connector, handshake);
-                Err(error)
-            }
-        }
-    }
-
-    fn authenticate_asymmetric_with_static_secret(
-        connector: &dyn Connector,
-        authkey_id: u16,
-        static_secret: &BoundKey,
-    ) -> Result<Self, Error> {
-        let exchange = AsymmetricKeys::for_key(static_secret)?;
-        let public = exchange.public_key()?;
-        let handshake = Self::begin_asymmetric(connector, authkey_id, &public)?;
-        match exchange
-            .finish(static_secret, &handshake.context, &handshake.receipt)
-            .map_err(|e| {
-                map_asymmetric_provider_error(e, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV)
-            }) {
-            Ok(keys) => Ok(Self::complete_asymmetric(handshake, keys)),
+            Ok(keys) => Ok(Some(Self::complete_asymmetric(handshake, keys))),
             Err(error) => {
                 Self::close_failed_asymmetric_handshake(connector, handshake);
                 Err(error)

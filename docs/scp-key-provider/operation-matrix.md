@@ -131,13 +131,14 @@ S-ENC = M[16:32]; S-MAC = M[32:48]; S-RMAC = M[48:64]
 receipt = CMAC(Kreceipt, target ephemeral public || client ephemeral public)
 ```
 
-The existing-slot client prefers `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when
+The client prefers `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when
 advertised and permitted for the static key. It derives `Ze` as an explicitly
 readable ephemeral object and passes its bytes as the prefix for static ECDH
 and X9.63. `Zs` is never read by the client. A missing or excluded mechanism
 selects protected `CKD_NULL` ECDH objects followed by concatenation and SHA-256.
 Operational errors do not cause fallback. Direct authentication and recreation
-from a retained static agreement use the protected-object sequence.
+use the same selection from a protected private-key credential, recomputing
+the static agreement for each handshake.
 
 The receipt input is two uncompressed P-256 public points (65 bytes each),
 without the GlobalPlatform authentication TLVs. Verify all 16 receipt bytes,

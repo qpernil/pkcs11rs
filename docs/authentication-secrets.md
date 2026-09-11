@@ -40,8 +40,9 @@ lifetime is distinct from retaining the login secret to authenticate again.
 `PKCS11RS_YUBIHSM_RECREATE_SESSIONS=1`, opts into retaining slot-local
 reauthentication material. Direct symmetric authentication retains a
 pair of protected AES-128 credential objects, Key-ENC and Key-MAC; direct
-asymmetric authentication retains a protected static ECDH shared-secret object.
-These are provider-session handles. Each retained direct credential or agreement
+asymmetric authentication retains its protected P-256 private-key credential.
+Static ECDH agreements are recomputed for each handshake and are not retained
+for recreation. These are provider-session handles. Each retained direct credential
 has a dedicated owning session; handshake sessions own the transient derivation
 objects. Closing the owning session deletes its session objects, and dropping
 the last private-provider reference releases the temporary software slot.

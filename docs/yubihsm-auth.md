@@ -23,8 +23,9 @@ Closing or invalidating the channel immediately clears all three working keys.
 
 Symmetric authentication binds two protected AES-128 objects, Key-ENC and
 Key-MAC, and uses counter KDF directly on those keys to create explicitly
-readable working keys. The source AES values are neither read nor split. Direct asymmetric authentication uses protected P-256/ECDH objects and
-composition, makes the final SHA-256 KDF blocks readable, and extracts AES keys.
+readable working keys. The source AES values are neither read nor split. Direct
+asymmetric authentication uses the same capability-based prefixed ECDH/KDF or
+protected standard composition path as an existing source credential.
 The receipt key remains protected and verifies the receipt before the working
 keys are read. All derivation objects are destroyed on completion or failure.
 Long-term credential and raw agreement values are never read into message code.
@@ -338,8 +339,9 @@ transport, framing, encryption, or response-MAC failure, and it does not run a
 keepalive or background timer.
 
 While opted in, direct symmetric authentication retains its two protected
-AES-128 credential objects. Direct asymmetric authentication retains only a protected
-static ECDH shared-secret object, not the password-derived private key. These
+AES-128 credential objects. Direct asymmetric authentication retains its protected
+P-256 private-key credential and recomputes ECDH for each handshake. Static
+agreement values are never retained for recreation. These
 are opaque references to zeroizing in-module objects. YubiHSM Auth
 authentication retains the selected provider and its zeroizing credential
 password; recreation invokes the applet's session-key calculation again. A
@@ -586,7 +588,7 @@ AES-128 `CKK_AES` objects for Key-ENC and Key-MAC, and a protected P-256
 uses them directly. Preparation retains no password copy. The existing Yubico provisioning derivations are preserved; they do not
 provide domain separation between the two credential types. The unused key is
 discarded after the attempt. Explicit session recreation retains only the
-selected AES pair or static ECDH agreement, as described above.
+selected AES pair or P-256 private-key credential, as described above.
 
 For direct authentication, the module first checks the ordinary `algorithm`
 field in cached Authentication Key object information. If object information
