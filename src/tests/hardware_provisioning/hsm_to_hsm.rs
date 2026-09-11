@@ -70,16 +70,8 @@ fn login(session: CK_SESSION_HANDLE, pin: &str) {
     );
 }
 
-#[test]
-#[ignore = "creates and removes temporary HSM keys; requires two explicit serials and bootstrap PINs"]
-fn yubihsm_to_yubihsm_asymmetric_authentication() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    let source = required("PKCS11RS_CROSS_HSM_SOURCE");
-    let target = required("PKCS11RS_CROSS_HSM_TARGET");
-    assert_ne!(source, target, "source and target must differ");
-    let source_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_SOURCE_PIN"));
-    let target_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_TARGET_PIN"));
-    let mut serials = vec![source.clone(), target.clone()];
+fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
+    let mut serials = vec![source.to_owned(), target.to_owned()];
     if let Ok(helpers) = std::env::var("PKCS11RS_CROSS_HSM_HELPERS") {
         serials.extend(
             helpers
@@ -101,7 +93,7 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
             "version": 1, "hardware": {"discovery": true},
             "slots": {"serials": serials}, "ccid": {"applications": ["hsmauth"]},
             "software": {"slots": []}, "platform": {"enabled": false},
-            "yubihsm": {"urls": urls, "public_discovery": null, "recreate_sessions": false}
+            "yubihsm": {"urls": urls, "public_discovery": null, "recreate_sessions": recreate_sessions}
         })),
         CKR_OK as CK_RV
     );
@@ -110,6 +102,39 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
         crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
+}
+
+fn verify_hardware_recreation(session: CK_SESSION_HANDLE, before: &[u8; 64]) {
+    eprintln!("waiting 35 seconds without HSM traffic for the hardware session timeout");
+    std::thread::sleep(std::time::Duration::from_secs(35));
+    let mut after = [0u8; 64];
+    assert_eq!(
+        crate::api::C_GenerateRandom(session, after.as_mut_ptr(), after.len() as _),
+        CKR_OK as CK_RV,
+        "the first request after hardware expiry must recreate the session"
+    );
+    assert_ne!(*before, after);
+    assert_eq!(
+        hardware_session_state(session),
+        CKS_RW_USER_FUNCTIONS as CK_STATE
+    );
+    let echo = b"encrypted traffic after hardware session recreation";
+    assert_eq!(
+        command(session, &crate::YubiHsmCommand::echo(echo).unwrap()).unwrap(),
+        echo
+    );
+}
+
+#[test]
+#[ignore = "creates and removes temporary HSM keys; requires two explicit serials and bootstrap PINs"]
+fn yubihsm_to_yubihsm_asymmetric_authentication() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = required("PKCS11RS_CROSS_HSM_SOURCE");
+    let target = required("PKCS11RS_CROSS_HSM_TARGET");
+    assert_ne!(source, target, "source and target must differ");
+    let source_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_SOURCE_PIN"));
+    let target_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_TARGET_PIN"));
+    initialize_cross_hsm(&source, &target, true);
     let source_session = open(&source);
     let target_session = open(&target);
     login(source_session, &source_pin);
@@ -261,6 +286,8 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
         eprintln!(
             "verified {source} -> {target}: protected source P-256, PKCS #11 login, two random requests and encrypted echo"
         );
+        verify_hardware_recreation(target_session, &first);
+        eprintln!("asymmetric recreation and protected traffic passed");
     }));
     let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rv = crate::api::C_Logout(target_session);
@@ -307,4 +334,281 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SymmetricPath {
+    Counter,
+    Cbc,
+    Ecb,
+}
+
+fn assert_symmetric_source_path(session: CK_SESSION_HANDLE, label: &str, expected: SymmetricPath) {
+    use crate::key_scope::{CounterKdfPath, Pkcs11KeyScope, SymmetricCredential};
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    let slot = crate::with_session_context(session, |ctx| Ok(ctx.slot_id)).unwrap();
+    let child = crate::with_context(|ctx| {
+        ctx.slot_contexts
+            .read()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?
+            .get(&slot)
+            .cloned()
+            .ok_or(CKR_SLOT_ID_INVALID.into())
+    })
+    .unwrap();
+    let owner = ProviderSession::open(Pkcs11Provider::from_slot(child).unwrap()).unwrap();
+    let pair = SymmetricCredential::find(owner, label, true).unwrap();
+    let mut scope = Pkcs11KeyScope::for_key(&pair.enc).unwrap();
+    for key in [&pair.enc, &pair.mac] {
+        let base = scope.bind(key).unwrap();
+        let path = scope.counter_kdf_path(&base).unwrap();
+        assert!(
+            matches!(
+                (expected, path),
+                (SymmetricPath::Counter, CounterKdfPath::Derive)
+                    | (SymmetricPath::Cbc, CounterKdfPath::AesCbc)
+                    | (SymmetricPath::Ecb, CounterKdfPath::AesEcb)
+            ),
+            "source key policy did not select {expected:?}"
+        );
+    }
+}
+
+fn symmetric_cross_hsm(path: SymmetricPath) {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = required("PKCS11RS_CROSS_HSM_SOURCE");
+    let target = required("PKCS11RS_CROSS_HSM_TARGET");
+    assert_ne!(source, target);
+    let source_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_SOURCE_PIN"));
+    let target_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_TARGET_PIN"));
+    initialize_cross_hsm(&source, &target, true);
+    let source_session = open(&source);
+    let target_session = open(&target);
+    login(source_session, &source_pin);
+    login(target_session, &target_pin);
+    let source_before = inventory(source_session);
+    let target_before = inventory(target_session);
+    let label = format!(
+        "p11-sym-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut handles = Vec::new();
+    let mut auth_id = None;
+    eprintln!(
+        "{path:?}: source {source}: {} objects; target {target}: {} objects",
+        source_before.len(),
+        target_before.len()
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Provision the same random ENC/MAC pair on both devices, then discard
+        // every local copy before authentication or recreation uses the keys.
+        {
+            let mut material = crate::Zeroizing::new([0u8; 32]);
+            getrandom::fill(&mut material[..]).unwrap();
+            for (role, value) in ["enc", "mac"]
+                .into_iter()
+                .zip(material.as_chunks_mut::<16>().0)
+            {
+                let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+                let mut key_type = CKK_AES as CK_KEY_TYPE;
+                let mut yes = CK_TRUE as CK_BBOOL;
+                let mut no = CK_FALSE as CK_BBOOL;
+                let mut derive = u8::from(matches!(path, SymmetricPath::Counter));
+                let mut encrypt = u8::from(!matches!(path, SymmetricPath::Counter));
+                let mut key_label = format!("{label}.{role}").into_bytes();
+                let mut allowed: Vec<CK_MECHANISM_TYPE> = match path {
+                    SymmetricPath::Counter => vec![CKM_SP800_108_COUNTER_KDF as _],
+                    SymmetricPath::Cbc => vec![CKM_AES_ECB as _, CKM_AES_CBC as _],
+                    SymmetricPath::Ecb => vec![CKM_AES_ECB as _],
+                };
+                let allowed = CK_ATTRIBUTE {
+                    type_: CKA_ALLOWED_MECHANISMS as _,
+                    pValue: allowed.as_mut_ptr().cast(),
+                    ulValueLen: std::mem::size_of_val(allowed.as_slice()) as _,
+                };
+                let mut template = [
+                    scalar_attribute(CKA_CLASS as _, &mut class),
+                    scalar_attribute(CKA_KEY_TYPE as _, &mut key_type),
+                    scalar_attribute(CKA_TOKEN as _, &mut yes),
+                    scalar_attribute(CKA_PRIVATE as _, &mut yes),
+                    scalar_attribute(CKA_SENSITIVE as _, &mut yes),
+                    scalar_attribute(CKA_EXTRACTABLE as _, &mut no),
+                    scalar_attribute(CKA_ENCRYPT as _, &mut encrypt),
+                    scalar_attribute(CKA_DECRYPT as _, &mut no),
+                    scalar_attribute(CKA_SIGN as _, &mut no),
+                    scalar_attribute(CKA_VERIFY as _, &mut no),
+                    scalar_attribute(CKA_DERIVE as _, &mut derive),
+                    bytes_attribute(CKA_LABEL as _, &mut key_label),
+                    bytes_attribute(CKA_VALUE as _, value),
+                    allowed,
+                ];
+                let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+                assert_eq!(
+                    crate::api::C_CreateObject(
+                        source_session,
+                        template.as_mut_ptr(),
+                        template.len() as _,
+                        &mut key
+                    ),
+                    CKR_OK as CK_RV
+                );
+                handles.push(key);
+                let mut hidden = CK_ATTRIBUTE {
+                    type_: CKA_VALUE as _,
+                    pValue: std::ptr::null_mut(),
+                    ulValueLen: 0,
+                };
+                assert_eq!(
+                    crate::api::C_GetAttributeValue(source_session, key, &mut hidden, 1),
+                    CKR_ATTRIBUTE_SENSITIVE as CK_RV
+                );
+                let id = read_hardware_attribute(source_session, key, CKA_ID as _);
+                let native_id = u16::from_be_bytes(id.as_slice().try_into().unwrap());
+                assert!(
+                    !source_before
+                        .iter()
+                        .any(|(id, kind, _)| *id == native_id
+                            && *kind == crate::YUBIHSM_SYMMETRIC_KEY)
+                );
+                let info = crate::YubiHsmObjectInfo::parse(
+                    &command(
+                        source_session,
+                        &crate::YubiHsmCommand::get_object_info(
+                            native_id,
+                            crate::YUBIHSM_SYMMETRIC_KEY,
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(info.algorithm, crate::YUBIHSM_ALGO_AES128);
+                assert!(
+                    !crate::yubihsm_capability(&info.capabilities, 0x10),
+                    "native key must not be exportable under wrap"
+                );
+                assert!(crate::yubihsm_capability(&info.capabilities, 0x33));
+                if matches!(path, SymmetricPath::Cbc) {
+                    assert!(crate::yubihsm_capability(&info.capabilities, 0x35));
+                }
+            }
+            let params = crate::yubihsm::DelegatedObjectParameters {
+                object: crate::YubiHsmObjectParameters {
+                    id: 0,
+                    label: &label,
+                    domains: 1,
+                    capabilities: crate::yubihsm_capabilities(&[0x00, 0x13]),
+                    algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                },
+                delegated_capabilities: [0; 8],
+            };
+            let put = crate::YubiHsmCommand::put_delegated_object(
+                crate::YubiHsmCommandCode::PutAuthenticationKey,
+                &params,
+                &material[..],
+            )
+            .unwrap();
+            let id =
+                crate::parse_yubihsm_object_id(&command(target_session, &put).unwrap()).unwrap();
+            auth_id = Some(id);
+            assert!(
+                !target_before
+                    .iter()
+                    .any(|(old, kind, _)| *old == id && *kind == crate::YUBIHSM_AUTHENTICATION_KEY)
+            );
+        }
+        assert_symmetric_source_path(source_session, &label, path);
+        assert_eq!(crate::api::C_Logout(target_session), CKR_OK as CK_RV);
+        let mut selector = format!(":{:04x}{label}@{source}", auth_id.unwrap()).into_bytes();
+        assert_eq!(
+            crate::api::C_LoginUser(
+                target_session,
+                CKU_USER as _,
+                std::ptr::null_mut(),
+                0,
+                selector.as_mut_ptr(),
+                selector.len() as _
+            ),
+            CKR_OK as CK_RV,
+            "{path:?} login through source AES token keys failed"
+        );
+        let mut before_expiry = [0u8; 64];
+        assert_eq!(
+            crate::api::C_GenerateRandom(
+                target_session,
+                before_expiry.as_mut_ptr(),
+                before_expiry.len() as _
+            ),
+            CKR_OK as CK_RV
+        );
+        let echo = b"physical symmetric HSM source authentication";
+        assert_eq!(
+            command(target_session, &crate::YubiHsmCommand::echo(echo).unwrap()).unwrap(),
+            echo
+        );
+        eprintln!(
+            "{path:?}: authenticated {source} -> {target}; waiting 35 seconds for hardware session expiry"
+        );
+        verify_hardware_recreation(target_session, &before_expiry);
+        eprintln!("{path:?}: recreation and protected traffic passed");
+    }));
+    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let rv = crate::api::C_Logout(target_session);
+        assert!(rv == CKR_OK as CK_RV || rv == CKR_USER_NOT_LOGGED_IN as CK_RV);
+        login(target_session, &target_pin);
+        if let Some(id) = auth_id {
+            assert!(
+                command(
+                    target_session,
+                    &crate::YubiHsmCommand::delete_object(id, crate::YUBIHSM_AUTHENTICATION_KEY)
+                )
+                .unwrap()
+                .is_empty()
+            );
+        }
+        for handle in handles {
+            assert_eq!(
+                crate::api::C_DestroyObject(source_session, handle),
+                CKR_OK as CK_RV
+            );
+        }
+        assert_eq!(
+            inventory(source_session),
+            source_before,
+            "source inventory differs after cleanup"
+        );
+        assert_eq!(
+            inventory(target_session),
+            target_before,
+            "target inventory differs after cleanup"
+        );
+        eprintln!("{path:?}: temporary objects removed; both inventories restored");
+    }));
+    finalize_for_test();
+    if let Err(error) = cleanup {
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[test]
+#[ignore = "provisions temporary HSM keys and waits for hardware session expiry"]
+fn yubihsm_to_yubihsm_symmetric_counter() {
+    symmetric_cross_hsm(SymmetricPath::Counter);
+}
+
+#[test]
+#[ignore = "provisions temporary HSM keys and waits for hardware session expiry"]
+fn yubihsm_to_yubihsm_symmetric_cbc() {
+    symmetric_cross_hsm(SymmetricPath::Cbc);
+}
+
+#[test]
+#[ignore = "provisions temporary HSM keys and waits for hardware session expiry"]
+fn yubihsm_to_yubihsm_symmetric_ecb() {
+    symmetric_cross_hsm(SymmetricPath::Ecb);
 }
