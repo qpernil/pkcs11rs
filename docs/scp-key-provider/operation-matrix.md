@@ -6,8 +6,10 @@ as described below. Direct YubiHSM symmetric/asymmetric
 derivation uses `Pkcs11Auth` over the Rust handlers shared with the C API;
 final working keys are read once for local message crypto. Slot preparation
 supports temporary software slots and existing registered slots with configured
-[named credential lookup](credential-lookup.md). Card derivation migration and
-native chainable derivation remain planned.
+[named credential lookup](credential-lookup.md). Card SCP03 S8 and SCP11a/b/c
+derivation also use `Pkcs11Auth`; fixed vectors, software and native providers,
+and physical YubiKey SCP qualification cover that path. Native chainable
+derivation remains planned.
 
 ## Actors and scope
 

@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(not(feature = "abi-tests"))]
+#[path = "hardware_tests.rs"]
+mod hardware_qualification;
 #[cfg(feature = "mock-yubikey")]
 #[path = "virtual_admin_tests.rs"]
 mod virtual_administration;

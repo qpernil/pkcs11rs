@@ -18,6 +18,7 @@ mod hardware_provisioning {
     use super::*;
     use std::rc::Rc;
 
+    mod card_scp;
     mod hsm_to_hsm;
     mod shared_symmetric;
 
