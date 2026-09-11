@@ -69,10 +69,10 @@ symmetric and asymmetric establishment sequence with a private slot and an
 existing persistent software slot registered in the public module. A separate
 YubiHSM protocol fixture covers native protected AES counter derivation. These
 are distinct checks: configured source selection is exercised with persistent
-software credentials. PIV and OpenPGP protocol fixtures exercise native ECDH
-through their slot implementations, and host fixtures exercise the OS-backed
-key interface. Physical source-to-target testing remains a separate qualification
-step.
+software credentials; the opt-in physical test below qualifies complete
+authentication using a native YubiHSM source key. PIV and OpenPGP protocol
+fixtures exercise native ECDH through their slot implementations, and host
+fixtures exercise the OS-backed key interface.
 
 ## Current YubiHSM flow
 
@@ -148,6 +148,35 @@ native tests count password-bearing requests to verify no candidate fallback.
 Remaining qualification includes additional real hardware source-to-target combinations
 and provider dependency-cycle handling across retained bindings. Card protocol
 migration and virtual-token-native operations follow below.
+
+### Physical YubiHSM-to-YubiHSM regression
+
+`yubihsm_to_yubihsm_asymmetric_authentication` is an ignored, explicitly
+provisioning test. Set `PKCS11RS_CROSS_HSM_SOURCE` and
+`PKCS11RS_CROSS_HSM_TARGET` to distinct local USB serials, and supply the
+existing bootstrap login strings in `PKCS11RS_CROSS_HSM_SOURCE_PIN` and
+`PKCS11RS_CROSS_HSM_TARGET_PIN`. If bootstrap authentication uses a YubiKey,
+include its serial in the comma-separated `PKCS11RS_CROSS_HSM_HELPERS` list.
+The bootstrap credentials need permission to generate/delete the temporary
+source key and create/delete the target authentication key.
+
+```sh
+cargo test --lib yubihsm_to_yubihsm_asymmetric_authentication -- --ignored --nocapture
+```
+
+The test generates a sensitive, non-extractable P-256 source token key,
+registers its public point as a temporary target authentication key, and logs
+into the target with the explicitly named source credential. It verifies
+public/private ID pairing, raw and prefixed derivation permissions, protected
+random requests, and an encrypted echo. Cleanup deletes only the temporary
+objects and compares both native inventories with their initial snapshots.
+It never resets a device. Assertion failures also attempt cleanup; process
+termination or device removal can prevent cleanup from completing.
+
+Physical devices 1238075073 and 2545354682 passed authentication and protected
+commands in both source/target directions, bootstrapped through the existing
+`shared` YubiHSM Auth credential on YubiKey 37070618. Both devices' native
+inventories matched their pre-test snapshots after cleanup.
 
 ## 2. Migrate card derivation
 
