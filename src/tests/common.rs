@@ -2337,10 +2337,10 @@ fn open_test_session(slot_id: CK_SLOT_ID) -> CK_SESSION_HANDLE {
     session
 }
 
-fn assert_no_public_certificates_profile(slot_id: CK_SLOT_ID) {
+fn assert_public_certificates_profile(slot_id: CK_SLOT_ID) {
     with_test_slot_context(slot_id, |context| {
         assert!(
-            !context
+            context
                 .resolved_objects()
                 .unwrap()
                 .iter()
@@ -2398,7 +2398,7 @@ fn assert_failed_hsmauth_public_discovery_through_both_login_apis(
         with_test_slot_context(SLOT_ID, |context| {
             context.refresh_slot_token_objects(SLOT_ID).unwrap();
         });
-        assert_no_public_certificates_profile(SLOT_ID);
+        assert_public_certificates_profile(SLOT_ID);
 
         let session = open_test_session(SLOT_ID);
         assert_eq!(
@@ -2410,7 +2410,7 @@ fn assert_failed_hsmauth_public_discovery_through_both_login_apis(
             assert_eq!(context.login_role, Some(crate::LoginRole::User));
             assert!(context.slot.login_is_active());
         });
-        assert_no_public_certificates_profile(SLOT_ID);
+        assert_public_certificates_profile(SLOT_ID);
         assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     }
     finalize_for_test();

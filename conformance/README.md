@@ -40,15 +40,11 @@ python3 conformance/run_oasis.py \
 
 Omit `--case` to execute every advertised case for which the selected token is
 provisioned. Without `--module`, the runner builds and uses the deterministic
-`abi-tests` backend. Its ordinary PIV fixture qualifies only the Baseline
-case because PIV labels are fixed by the applet architecture; its ordinary
-YubiHSM fixture qualifies Baseline, Extended, Authentication, and Public
-Certificates. The fixture represents the virtual YubiHSM, whose direct PKCS #1
-secret-key wrapping extension supplies the `CKF_WRAP` and `CKF_UNWRAP` flags on
-`CKM_RSA_PKCS` required by `EXT-M-1-32`. Physical YubiHSM firmware instead
-exposes RSA-based wrapping through `CKM_YUBICO_RSA_WRAP` and
-`CKM_RSA_AES_KEY_WRAP`; its Extended Provider claim uses the capability-level
-interpretation and does not pass that literal mechanism-identifier check.
+`abi-tests` backend. Its ordinary PIV fixture qualifies Baseline and Extended;
+its fixed applet labels do not match the Authentication and Public Certificates
+vectors. Its ordinary YubiHSM fixture qualifies all four cases. The merged
+software session mechanisms supply `CKM_RSA_PKCS` wrap/unwrap even when a
+physical device lacks that native token-key operation.
 With `--module`, every advertised profile is selected and failures are not
 filtered by the runner.
 
@@ -70,7 +66,8 @@ normal backend discovery and credentials before launching the runner. Keep
 secrets in the environment or the backend's credential source; result files do
 not include the PIN.
 
-The selected token must be provisioned for the cases being claimed:
+Profile advertisement describes enabled capabilities rather than current
+provisioning. The selected token must be provisioned for the cases being run:
 
 - `BL-M-1-32` and `EXT-M-1-32` require the mechanisms and flags named by their
   XML artifacts.
@@ -89,11 +86,12 @@ The selected token must be provisioned for the cases being claimed:
 Run only the profile or profiles the deployment intends to claim. A profile
 failure is not hidden by success in another case.
 
-For a physical YubiHSM Extended Provider claim, retain evidence for its
-supported RSA-based wrapping mechanisms and record the `EXT-M-1-32`
-mechanism-identifier deviation described above. The repository does not treat
-a filtered or omitted test as a passing result. For a virtual YubiHSM, retain
-the passing literal case together with the advertised extension marker.
+The mandatory Extended and Authentication XML cases exercise `C_Login`, but
+omit the `C_LoginUser` function required by the profile prose. Rust and public
+ABI regressions separately cover named YubiHSM login and empty-username login
+on single-user slots. New-slot regressions also verify that HSM Auth software
+session signing does not invoke native credential operations, and that Platform
+requires empty-PIN login before exposing or using private objects.
 
 ## Interpretation and evidence
 

@@ -53,6 +53,11 @@ impl std::error::Error for PlatformCryptoError {}
 pub trait EcdhCredential: Send + Sync {
     fn public_key(&self) -> Result<SoftwarePublicKey, PlatformCryptoError>;
 
+    /// Public DER certificates associated with this key, if provisioned.
+    fn certificates(&self) -> Result<Vec<Vec<u8>>, PlatformCryptoError> {
+        Ok(Vec::new())
+    }
+
     fn ecdh(
         &self,
         peer_public_key: &SoftwarePublicKey,

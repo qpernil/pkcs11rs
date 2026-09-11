@@ -410,8 +410,7 @@ fn crypt_init(
             key: operation_key,
             public_key: object.public_key.clone(),
             slot_id,
-            requires_login: object.private
-                && ctx.get_slot(slot_id)?.private_objects_require_login(),
+            requires_login: object.private,
             context_specific_extended: matches!(
                 &object.material,
                 KeyMaterial::OpenPgpPrivate { .. }

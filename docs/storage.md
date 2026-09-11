@@ -48,6 +48,12 @@ a FIDO-only compatibility path when the generic setting is absent. Slots
 without stable identity retain the unavailable provider rather than sharing an
 ambiguously addressed store.
 
+For YubiKey HSM Auth, FIDO2, and issuer security-domain slots, installing token
+backing storage enables the Public Certificates Token profile. The configured
+store may be empty; successful reads and existing certificates are not the
+capability gate. Provision conforming public certificate/public-key objects
+with matching IDs when using or qualifying that profile.
+
 Named software slots use the configured token name as their stable storage
 identity. When `PKCS11RS_TOKEN_STORAGE` is set, each name receives a distinct
 `software-name-<hex-encoded-name>` directory below `tokens-v1`. The provider

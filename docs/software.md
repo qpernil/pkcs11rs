@@ -35,6 +35,15 @@ token reports neither flag: `C_InitToken` sets `CKF_TOKEN_INITIALIZED`, and the
 first `C_InitPIN` separately sets `CKF_USER_PIN_INITIALIZED`. Software tokens
 have no protected authentication path. PINs contain 8–1024 UTF-8 bytes.
 
+The slot advertises Baseline, Extended Provider, Authentication Token, and
+Public Certificates Token with the default software mechanisms. These are
+capability claims: empty tokens, temporary direct-auth slots, and the current
+provisioning do not change them. Public Certificates qualification requires
+publicly discoverable certificates with matching key IDs and public-key
+objects. A deployment using the encrypted store configures public discovery
+for that purpose. Explicitly private certificates remain supported; there is
+no automatic publication or storage migration.
+
 ## Login and PIN initialization
 
 `C_Login(CKU_USER)` is required before private objects can be created, found,

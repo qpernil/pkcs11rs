@@ -1221,6 +1221,8 @@ impl SlotContext {
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
         token_storage: Box<dyn StorageProvider>,
     ) -> Result<Self, Error> {
+        let mut slot = slot;
+        slot.set_public_certificate_storage_enabled(token_storage.supports_mutation());
         let device = slot.device_context();
         let mut context = Self {
             slot_id,
@@ -1239,6 +1241,13 @@ impl SlotContext {
             backed_object_handles: HashMap::new(),
         };
         let mut token_objects = token_objects;
+        if token_objects
+            .iter()
+            .any(|object| object.class == CKO_PROFILE as CK_OBJECT_CLASS)
+        {
+            token_objects.retain(|object| object.class != CKO_PROFILE as CK_OBJECT_CLASS);
+            token_objects.extend(context.slot.profile_objects(slot_id));
+        }
         let stored = context.stored_token_objects()?;
         context.record_backed_objects(&stored);
         token_objects.extend(stored.into_iter().map(|(_, object)| object));
@@ -1530,8 +1539,7 @@ impl SlotContext {
         Ok((
             slot_id,
             session.flags(),
-            !self.slot.private_objects_require_login()
-                || self.login_role(slot_id) == Some(LoginRole::User),
+            self.login_role(slot_id) == Some(LoginRole::User),
         ))
     }
 
@@ -1760,6 +1768,8 @@ impl SlotContext {
         if self.slot.native_storage_provider().is_some() {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
+        self.slot
+            .set_public_certificate_storage_enabled(provider.supports_mutation());
         self.token_storage = provider;
         self.refresh_slot_token_objects(self.slot_id)
     }

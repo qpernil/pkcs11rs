@@ -519,6 +519,7 @@ pub(crate) struct Fido2Slot {
     credentials: RefCell<Vec<DiscoverableCredential>>,
     administration_authorization: Option<CredentialAuthorization>,
     authenticated: Cell<bool>,
+    public_certificate_storage_enabled: bool,
 }
 
 impl Fido2Slot {
@@ -560,6 +561,7 @@ impl Fido2Slot {
             credentials: RefCell::new(Vec::new()),
             administration_authorization: None,
             authenticated: Cell::new(false),
+            public_certificate_storage_enabled: false,
         }
     }
 
@@ -920,6 +922,15 @@ impl Slot for Fido2Slot {
         self.endpoint.open_session(slot_id, flags)
     }
 
+    fn set_public_certificate_storage_enabled(&mut self, enabled: bool) {
+        self.public_certificate_storage_enabled = enabled;
+    }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        self.public_certificate_storage_enabled
+    }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.administration_authorization.take();

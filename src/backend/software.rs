@@ -170,6 +170,12 @@ impl Slot for SoftwareSlot {
         Box::new(SoftwareSession { slot_id, flags })
     }
 
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        true
+    }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
@@ -269,10 +275,6 @@ impl Slot for SoftwareSlot {
     }
 
     fn stores_software_token_keys(&self) -> bool {
-        true
-    }
-
-    fn private_objects_require_login(&self) -> bool {
         true
     }
 

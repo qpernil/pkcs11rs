@@ -195,6 +195,9 @@ impl Slot for OpenPgpSlot {
             authenticated: self.authenticated.clone(),
         })
     }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.validate_user_pin(pin)?;
         self.connector
