@@ -1939,6 +1939,9 @@ pub(super) fn rsa_public_wrap_round_trip(slot_id: CK_SLOT_ID, pin: &[u8]) -> Res
             ),
         )?;
         let target_id = checked_attribute(session, target_private, CKA_ID as CK_ATTRIBUTE_TYPE)?;
+        if checked_attribute(session, target_public, CKA_ID as CK_ATTRIBUTE_TYPE)? != target_id {
+            return Err("generated EC public/private keys must share their default ID".to_owned());
+        }
 
         let mut modulus_bits = 2048 as CK_ULONG;
         let mut wrap = CK_TRUE as CK_BBOOL;

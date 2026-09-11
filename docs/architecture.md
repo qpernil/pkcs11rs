@@ -13,29 +13,50 @@ MODULE_CONTEXT: RwLock<Option<ModuleContext>>
         ├── slot ID -> Arc<Mutex<SlotContext>>
         │   └── SlotContext
         │       ├── Box<dyn Slot>
-        │       ├── slot login role
-        │       ├── token StorageProvider
-        │       ├── token and session object handles
-        │       └── session handle -> SessionContext
-        │           ├── Box<dyn BackendSession>
-        │           ├── memory StorageProvider
-        │           ├── find operation
-        │           ├── digest operation
-        │           ├── encrypt/decrypt operation
-        │           └── sign/verify operation
+        │       └── SlotState
+        │           ├── slot login role
+        │           ├── token StorageProvider
+        │           ├── token and session object handles
+        │           └── session handle -> SessionContext
+        │               ├── Box<dyn BackendSession>
+        │               ├── memory StorageProvider
+        │               ├── find operation
+        │               ├── digest operation
+        │               ├── encrypt/decrypt operation
+        │               └── sign/verify operation
         └── session handle -> owning slot ID
 ```
 
 ## Shared software session objects and mechanism discovery
 
-Every slot has a common host software layer, including named software, YubiHSM,
+Ordinary slots have a common host software layer, including named software, YubiHSM,
 PIV, OpenPGP, and FIDO2 slots. `CKA_TOKEN=CK_FALSE` (the default) creates session
 objects: generic data, X.509 certificates, public keys, asymmetric private keys, and supported secret
 keys. Import, generation, derivation, copy, and unwrap publish host-held key
 material through the shared object lifecycle. The creator session owns each
 object; other sessions on that slot can see it subject to login policy. Closing
 the creator destroys it, and logout destroys private session objects. Another
-slot cannot access it. Secret material uses zeroizing storage.
+slot cannot access it. Secret material uses zeroizing storage. The native-only
+HSM Auth slot excludes software private/secret key imports and mechanisms;
+public data, certificate storage, and credential metadata remain available.
+
+Generic operation routing uses advertised mechanisms, object material, and
+backend capabilities. Software-token persistence uses `stores_software_token_keys`;
+internal source authorization uses `user_login_requires_pin` to decide whether
+to prompt. Empty-PIN authorization still passes through ordinary login checks.
+Native object import, token storage, and key generation dispatch through methods
+on the main `Slot` trait. `SlotContext` owns that backend alongside `SlotState`,
+which holds sessions, handles, and storage bookkeeping. The fields can be borrowed
+separately for an operation; backend state is neither copied nor temporarily
+removed. Existing validation, publication, and failure cleanup remain shared.
+Native HSM Auth discovery and execution use its vendor profile. Authentication
+source discovery excludes the target by weak-reference equality before locking
+candidates, so two distinct slots with the same serial remain distinct sources.
+
+Storage namespaces, native administration support, token mutation policy, and
+discovery refresh behavior are backend-declared `Slot` capabilities. Ordinary
+source selection uses labels and serials uniformly; it has no platform-only
+selector or backend-kind filter. Slot kinds remain diagnostic metadata.
 
 `CKO_DATA` session objects support `CKA_APPLICATION`, `CKA_OBJECT_ID`, `CKA_VALUE`,
 and common storage attributes. Their payload and application metadata are
@@ -84,6 +105,24 @@ express separate hardware/software limits or holes in supported sizes. A token
 request or operation with an existing key still undergoes backend and key
 validation. The filter is an internal per-slot advertisement policy, not a
 JSON/environment option or a security boundary for software execution.
+
+### Per-key mechanism discovery
+
+`CKA_ALLOWED_MECHANISMS` is a computed view of the key type, class, usage flags,
+slot mechanism set, and explicit per-key restrictions. The shared `Slot` trait
+provides the default calculation and an operation-filter override for native
+keys. YubiHSM applies its actual per-object capability bitmap; PIV and OpenPGP
+reuse their native signing restrictions. Software session keys keep the common
+software capabilities regardless of the surrounding slot's native restrictions.
+Native HSM Auth credential types expose no ordinary cryptographic mechanisms.
+
+`C_GetAttributeValue`, `C_FindObjects` attribute matching, and authentication's
+mechanism selection use the same sorted list. Queries do no device I/O beyond
+normal object resolution. The calculated list is not persisted or copied back
+as policy. An absent configured list imposes no additional restriction; an
+explicitly empty list permits no mechanisms. An explicit list can only narrow
+actual capabilities. Mechanism-specific parameter constraints and current
+session authorization remain checked when an operation is attempted.
 
 ## Module lifecycle and locking
 
@@ -214,9 +253,9 @@ initialization.
 
 ## Slots, backends, and mechanisms
 
-`SlotContext` implements the behavior common to every PKCS #11 slot: session
-ownership, login role, object handles, and dispatch. Its boxed `Slot`
-implementation supplies the device- or applet-specific token metadata,
+`SlotContext` owns the backend and `SlotState`, which implements common session
+ownership, login role, and object-handle bookkeeping. The main `Slot` trait
+supplies object operations and backend capabilities. Its implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
 Backend mechanism lists describe complete slot operations. An operation may
@@ -419,10 +458,10 @@ YubiHSM slot observes the combined epoch and clears device-bound object,
 metadata, attestation, inferred authentication-algorithm, and public-discovery
 state.
 
-YubiHSM Auth applet connectors are shared with YubiHSM slots through
-synchronized provider handles. Credential selectors identify the target
-YubiHSM authentication-key ID, optional applet credential and source, and
-password separately; public-discovery runtime state is held by the target
+YubiHSM slots find native HSM Auth and ordinary source credentials through a
+weak index of PKCS #11 slots. Selected bindings hold a provider session and
+object handle. Credential selectors identify the target YubiHSM authentication-key
+ID, source credential and token, and password separately; public-discovery runtime state is held by the target
 YubiHSM slot, not globally.
 
 The focused `yubihsm-auth-client` crate owns the transport-independent APDU and
@@ -440,16 +479,15 @@ session. See [YubiHSM authentication](yubihsm-auth.md).
 
 An asymmetric credential's public point may be persisted as an ordinary public
 object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
-The optional `C_LoginUser` wildcard selector asks the target YubiHSM slot to
-compare those public projections with available asymmetric YubiHSM Auth
-credentials. The comparison uses the slot context's merged public token-object
-view, including generic persisted objects as well as backend-native objects.
-Each matching projection supplies an Authentication Key ID, and the candidates
-are tried in discovery order until one authenticates. Duplicate projections for
-the same credential are therefore valid candidates rather than an ambiguity.
-No match returns `CKR_USER_TYPE_INVALID`; rejection after an actual credential
-attempt returns the authentication error. This resolution depends on successful
-public discovery and does not change explicit selector behavior.
+The optional `C_LoginUser` wildcard selector compares those public projections
+with public P-256 credentials from ordinary source slots and native HSM Auth
+slots. The comparison uses the slot context's merged public token-object view,
+including generic persisted objects and backend-native objects. A unique source
+credential and target Authentication Key ID must be selected before submitting a
+source password. Multiple distinct matches return `CKR_TEMPLATE_INCONSISTENT`;
+no match returns `CKR_USER_TYPE_INVALID`. Authentication failure is returned
+without trying another credential. Public matching requires successful target
+public discovery; explicit selectors can instead name a source and target ID.
 
 ## Companion multi-device connector
 

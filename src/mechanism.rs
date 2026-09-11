@@ -396,6 +396,12 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
             flags: CKF_DERIVE as CK_FLAGS,
         },
         MechanismDetails {
+            type_: CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+            min_key_size: 224,
+            max_key_size: 521,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
             type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
             min_key_size: 224,
             max_key_size: 521,

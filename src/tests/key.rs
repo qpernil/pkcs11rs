@@ -115,7 +115,7 @@ fn generate_software_key_pair(
 }
 
 #[test]
-fn hsmauth_profiles_include_software_signing_and_single_user_login() {
+fn hsmauth_profiles_and_sessions_expose_only_native_authentication() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -137,8 +137,7 @@ fn hsmauth_profiles_include_software_signing_and_single_user_login() {
         ids,
         [
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID
+            crate::CKP_YUBICO_HSMAUTH
         ]
     );
     with_test_slot_context(HSMAUTH_ADMIN_SLOT_ID, |ctx| {
@@ -187,20 +186,20 @@ fn hsmauth_profiles_include_software_signing_and_single_user_login() {
             std::ptr::null_mut(),
             0
         ),
-        CKR_OK as CK_RV
+        CKR_USER_TYPE_INVALID as CK_RV
     );
     assert_eq!(
         crate::api::C_Login(session, CKU_USER as _, empty.as_mut_ptr(), 0),
-        CKR_USER_ALREADY_LOGGED_IN as CK_RV
+        CKR_USER_TYPE_INVALID as CK_RV
     );
-    let calls = connector.commands.borrow().len();
-    let (public, private) =
-        generate_software_key_pair(session, CKM_RSA_PKCS_KEY_PAIR_GEN as _, None);
-    sign_and_verify(session, public, private, CKM_SHA256_RSA_PKCS as _);
-    // Profile signing support belongs to the common session-object layer;
-    // HSM Auth applet credentials are still metadata/native-auth objects.
     assert_eq!(connector.commands.borrow().len(), calls);
-    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    with_test_slot_context(HSMAUTH_ADMIN_SLOT_ID, |ctx| {
+        assert!(ctx.slot.mechanisms().is_empty());
+    });
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
@@ -2043,7 +2042,7 @@ fn every_slot_materializes_typed_session_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     for kind in [
         crate::SlotKind::Software,
-        crate::SlotKind::Platform,
+        crate::SlotKind::Host,
         crate::SlotKind::YubiHsm,
         crate::SlotKind::Fido2,
         crate::SlotKind::Ccid(crate::CcidApplication::Piv),

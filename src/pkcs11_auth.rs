@@ -6,9 +6,16 @@ use software_key_core::counter_kdf::CounterKdfField;
 
 pub(crate) enum Derivation<'a> {
     Ecdh(&'a [u8]),
+    PrefixedEcdh {
+        peer: &'a [u8],
+        prefix: &'a [u8],
+        shared_info: &'a [u8],
+    },
     AppendKey(CK_OBJECT_HANDLE),
     AppendData(&'a [u8]),
-    Extract { offset_bits: usize },
+    Extract {
+        offset_bits: usize,
+    },
     Sha256,
     Counter(&'a [CounterKdfField<'a>]),
 }
@@ -34,6 +41,11 @@ pub(crate) trait Pkcs11Auth {
     fn copy(&self, key: CK_OBJECT_HANDLE) -> Result<CK_OBJECT_HANDLE, Error>;
     fn destroy(&self, key: CK_OBJECT_HANDLE) -> Result<(), Error>;
     fn attribute(&self, key: CK_OBJECT_HANDLE, kind: u32) -> Result<Zeroizing<Vec<u8>>, Error>;
+    fn can_derive(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> Result<bool, Error>;
     fn generate_p256(&self) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error>;
     fn derive(
         &self,
@@ -169,7 +181,10 @@ pub(crate) fn ec_template() -> TokenObjectTemplate {
         sensitive: Some(true),
         extractable: Some(false),
         derive: true,
-        allowed_mechanisms: Some(vec![CKM_ECDH1_DERIVE as _]),
+        allowed_mechanisms: Some(vec![
+            CKM_ECDH1_DERIVE as _,
+            CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+        ]),
         ..Default::default()
     }
 }
@@ -375,6 +390,26 @@ impl Pkcs11Auth for ProviderSession {
         output.truncate(attribute.ulValueLen as usize);
         Ok(output)
     }
+    fn can_derive(
+        &self,
+        key: CK_OBJECT_HANDLE,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> Result<bool, Error> {
+        self.call(|| {
+            with_session_context(self.handle, |ctx| {
+                let (slot, _, logged_in) = ctx.session_details(self.handle)?;
+                let key = ctx
+                    .resolve_object(key)?
+                    .filter(|key| key.is_visible_to(logged_in))
+                    .ok_or(CKR_KEY_HANDLE_INVALID)?;
+                Ok(key.derive
+                    && ctx
+                        .get_slot(slot)?
+                        .allowed_key_mechanisms(&key)
+                        .contains(&mechanism))
+            })
+        })
+    }
     fn generate_p256(&self) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
         let mut public = Attributes::new(TokenObjectTemplate {
             class: Some(CKO_PUBLIC_KEY as _),
@@ -419,6 +454,27 @@ impl Pkcs11Auth for ProviderSession {
                 self.derive_raw(
                     base,
                     parameter(CKM_ECDH1_DERIVE, &mut params),
+                    template,
+                    length,
+                )
+            }
+            Derivation::PrefixedEcdh {
+                peer,
+                prefix,
+                shared_info,
+            } => {
+                let mut params = CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
+                    kdf: CKD_SHA256_KDF as _,
+                    pSharedData: shared_info.as_ptr().cast_mut(),
+                    ulSharedDataLen: shared_info.len() as _,
+                    pPublicData: peer.as_ptr().cast_mut(),
+                    ulPublicDataLen: peer.len() as _,
+                    pPrefixData: prefix.as_ptr().cast_mut(),
+                    ulPrefixDataLen: prefix.len() as _,
+                };
+                self.derive_raw(
+                    base,
+                    parameter(CKM_PKCS11RS_PREFIXED_ECDH_DERIVE as u32, &mut params),
                     template,
                     length,
                 )

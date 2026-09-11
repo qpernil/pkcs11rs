@@ -6,6 +6,7 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         CKP_EXTENDED_PROVIDER => "PKCS #11 Extended Provider",
         CKP_AUTHENTICATION_TOKEN => "PKCS #11 Authentication Token",
         CKP_PUBLIC_CERTIFICATES_TOKEN => "PKCS #11 Public Certificates Token",
+        x if x as CK_PROFILE_ID == CKP_YUBICO_HSMAUTH => "Yubico HSM Auth",
         _ => "PKCS #11 Profile",
     };
     TokenObject {
@@ -69,7 +70,7 @@ pub(crate) enum SlotKind {
     #[cfg(any(test, feature = "abi-tests"))]
     Synthetic,
     Software,
-    Platform,
+    Host,
     YubiHsm,
     Fido2,
     Ccid(CcidApplication),
@@ -94,11 +95,92 @@ pub(crate) trait Slot {
         }
         .physical_key()
     }
+    /// Shared storage directory for this applet; None means backend-owned or
+    /// unavailable token storage. These names are part of the on-disk format.
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        None
+    }
+    fn accepts_legacy_fido_storage(&self) -> bool {
+        false
+    }
+    fn supports_yubihsm_management(&self) -> bool {
+        false
+    }
+    fn supports_security_domain_management(&self) -> bool {
+        false
+    }
+    fn token_mutations_require_login(&self) -> bool {
+        false
+    }
+    fn token_objects_copyable(&self) -> bool {
+        true
+    }
+    fn refresh_objects_after_discovery(&self) -> bool {
+        false
+    }
+    fn import_public_wrap_key(
+        &mut self,
+        _state: &mut crate::context::SlotState,
+        _session: CK_SESSION_HANDLE,
+        _object: &TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        Err(CKR_TEMPLATE_INCONSISTENT.into())
+    }
     fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
         None
     }
     fn native_storage_objects_are_backend_managed(&self) -> bool {
         false
+    }
+    /// Shared context reference used only for reference equality, never for
+    /// recursively locking the slot during authentication.
+    fn set_context_reference(&mut self, _context: std::sync::Weak<Mutex<SlotContext>>) {}
+    /// Handle a native import, or return None for common object creation.
+    /// State belongs to this slot and is borrowed separately from the backend.
+    fn create_object(
+        &mut self,
+        _ctx: &mut crate::context::SlotState,
+        _session: CK_SESSION_HANDLE,
+        _template: &[CK_ATTRIBUTE],
+    ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
+        Ok(None)
+    }
+    fn store_token_key(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        object: TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        crate::api::native::store_common_token_key_in_slot(self, ctx, session, object)
+    }
+    fn store_data(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        object: TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        crate::api::native::store_common_data_in_slot(self, ctx, session, object)
+    }
+    fn generate_key(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        mechanism: &CK_MECHANISM,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        crate::api::native::generate_software_token_key_in_slot(
+            self, ctx, session, mechanism, template,
+        )
+    }
+    fn generate_key_pair(
+        &mut self,
+        _ctx: &mut crate::context::SlotState,
+        _session: CK_SESSION_HANDLE,
+        _mechanism: &CK_MECHANISM,
+        _public: &[CK_ATTRIBUTE],
+        _private: &[CK_ATTRIBUTE],
+    ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
@@ -302,16 +384,30 @@ pub(crate) trait Slot {
     /// Installed backing storage enables public certificate provisioning on
     /// applets without native certificate storage. This is not an inventory check.
     fn set_public_certificate_storage_enabled(&mut self, _enabled: bool) {}
+    /// Whether USER authorization needs a caller-supplied PIN. False means
+    /// internal authentication clients can use an empty PIN without prompting.
+    fn user_login_requires_pin(&self) -> bool {
+        true
+    }
     fn supports_protected_authentication_path(&self) -> bool {
         false
     }
+    fn additional_profile_ids(&self) -> &[CK_PROFILE_ID] {
+        &[]
+    }
     fn profile_objects(&self, slot_id: CK_SLOT_ID) -> Vec<TokenObject> {
-        profile_token_objects(
+        let mut objects = profile_token_objects(
             slot_id,
             self.supports_extended_provider_profile(),
             self.supports_authentication_token_profile(),
             self.supports_public_certificates_token_profile(slot_id),
-        )
+        );
+        objects.extend(
+            self.additional_profile_ids()
+                .iter()
+                .map(|profile| profile_token_object(slot_id, *profile)),
+        );
+        objects
     }
     fn backend_token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
@@ -379,11 +475,24 @@ pub(crate) trait Slot {
     fn destroy_software_private_object(&mut self, _unique_id: &str) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    /// Select host software mechanisms for this slot. Native capabilities remain
-    /// separate. Backends can override this policy without changing key storage
-    /// or the PKCS #11 entry points.
+    /// Whether the common object layer may import software private/secret keys.
+    fn supports_software_keys(&self) -> bool {
+        true
+    }
+    /// Select host software mechanisms independently of native capabilities.
     fn software_mechanism_enabled(&self, _mechanism: CK_MECHANISM_TYPE) -> bool {
         true
+    }
+    /// Native backends can restrict operations for their own key material.
+    fn key_mechanism_operations(
+        &self,
+        key: &TokenObject,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> CK_FLAGS {
+        crate::key_mechanisms::operations(key, mechanism)
+    }
+    fn allowed_key_mechanisms(&self, key: &TokenObject) -> Vec<CK_MECHANISM_TYPE> {
+        crate::key_mechanisms::allowed(self, key)
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();

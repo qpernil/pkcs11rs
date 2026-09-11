@@ -4,18 +4,18 @@ use crate::platform_crypto::{
 };
 use crate::*;
 
-pub(crate) const PLATFORM_SERIAL: &str = "PLATFORM00000001";
+pub(crate) const HOST_SERIAL: &str = "host";
 
 type NamedPlatformKey = (String, Arc<dyn EcdhCredential>);
 
-pub(crate) struct PlatformSlot {
+pub(crate) struct HostSlot {
     // None enumerates the managed OS store. Fixtures supply native-key handles
     // through exactly the same object projection and mechanism dispatch.
     keys: Option<Vec<NamedPlatformKey>>,
     objects: RefCell<Option<Vec<TokenObject>>>,
     logged_in: bool,
 }
-impl PlatformSlot {
+impl HostSlot {
     pub(crate) fn new() -> Result<Self, Error> {
         if !cfg!(any(target_os = "macos", target_os = "ios")) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
@@ -53,9 +53,9 @@ impl PlatformSlot {
             .collect()
     }
 }
-impl std::fmt::Debug for PlatformSlot {
+impl std::fmt::Debug for HostSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlatformSlot").finish_non_exhaustive()
+        f.debug_struct("HostSlot").finish_non_exhaustive()
     }
 }
 pub(crate) fn platform_error(error: PlatformCryptoError) -> Error {
@@ -69,27 +69,30 @@ pub(crate) fn platform_error(error: PlatformCryptoError) -> Error {
         _ => CKR_DEVICE_ERROR.into(),
     }
 }
-impl Slot for PlatformSlot {
+impl Slot for HostSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn user_login_requires_pin(&self) -> bool {
+        false
+    }
     fn kind(&self) -> SlotKind {
-        SlotKind::Platform
+        SlotKind::Host
     }
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
         None
     }
     fn name(&self) -> String {
-        "pkcs11rs platform slot".to_owned()
+        "pkcs11rs host slot".to_owned()
     }
     fn manufacturer(&self) -> &str {
         "pkcs11rs"
     }
     fn product(&self) -> &str {
-        "Platform ECDH"
+        "Host Keystore"
     }
     fn serial(&self) -> &str {
-        PLATFORM_SERIAL
+        HOST_SERIAL
     }
     fn major(&self) -> u8 {
         1
@@ -113,10 +116,14 @@ impl Slot for PlatformSlot {
         CKF_TOKEN_PRESENT as _
     }
     fn label(&self) -> String {
-        "Platform".to_owned()
+        "Host Keystore".to_owned()
     }
     fn model(&self) -> &str {
-        "Platform ECDH"
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            "Secure Enclave"
+        } else {
+            "Host Keystore"
+        }
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
         true
@@ -142,7 +149,7 @@ impl Slot for PlatformSlot {
         Ok(())
     }
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
-        Box::new(PlatformSession { slot_id, flags })
+        Box::new(HostSession { slot_id, flags })
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         str_pad(&self.name(), &mut info.slotDescription);
@@ -153,9 +160,9 @@ impl Slot for PlatformSlot {
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        str_pad("Platform", &mut info.label);
+        str_pad(&self.label(), &mut info.label);
         str_pad(self.manufacturer(), &mut info.manufacturerID);
-        str_pad(self.product(), &mut info.model);
+        str_pad(self.model(), &mut info.model);
         str_pad(self.serial(), &mut info.serialNumber);
         // Empty-PIN login gates private objects; OS access control still governs key use.
         // Persistent provisioning remains in the platform management API.
@@ -257,8 +264,7 @@ impl Slot for PlatformSlot {
             private.always_sensitive = true;
             private.never_extractable = true;
             private.key_gen_mechanism = Some(CKM_EC_KEY_PAIR_GEN as _);
-            private.allowed_mechanisms =
-                Some(vec![CKM_ECDH1_DERIVE as _, CKM_ECDH1_COFACTOR_DERIVE as _]);
+            private.allowed_mechanisms = None;
             private.public_key = Some(public.clone());
             private.material = KeyMaterial::PlatformPrivate(key);
             let mut projected = private.clone();
@@ -279,11 +285,11 @@ impl Slot for PlatformSlot {
     }
 }
 #[derive(Debug)]
-struct PlatformSession {
+struct HostSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
 }
-impl BackendSession for PlatformSession {
+impl BackendSession for HostSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

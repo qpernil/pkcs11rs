@@ -6,17 +6,16 @@ use crate::piv;
 use crate::pkcs11::*;
 use crate::{
     CKA_PKCS11RS_FIDO_RP_ID, CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
-    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_ALGORITHM,
-    CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY,
-    CKA_YUBICO_TOUCH_POLICY, Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm,
-    OpenPgpClient, OpenPgpKeyRef, PivClient, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
-    YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState, der_octet_string,
-    edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
-    is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa, montgomery_curve_from_parameters,
-    montgomery_curve_parameters, openpgp_signature_requires_context_specific_login,
-    piv_algorithm_from_certificate, piv_effective_pin_policy, piv_public_key_from_certificate,
-    send_yubihsm_secure_command, yubihsm_capabilities_to_attributes, yubihsm_capability,
-    yubihsm_ec_parameters,
+    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_RETRIES,
+    CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, Connector,
+    Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
+    PivClient, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand,
+    YubiHsmSessionState, der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters,
+    hash, is_yubihsm_ec, is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa,
+    montgomery_curve_from_parameters, montgomery_curve_parameters,
+    openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
+    piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
+    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters,
 };
 use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
 #[cfg(test)]
@@ -1168,13 +1167,6 @@ impl TokenObject {
         if is_common_storage_attribute(attribute_type) {
             return true;
         }
-        if attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
-            && self.is_key_object()
-            && self.allowed_mechanisms.is_none()
-        {
-            return false;
-        }
-
         let standard = match self.class {
             x if x == CKO_DATA as CK_OBJECT_CLASS => matches!(
                 attribute_type,
@@ -1260,9 +1252,7 @@ impl TokenObject {
             KeyMaterial::OpenPgpPrivate { .. } => attribute_type == CKA_YUBICO_TOUCH_POLICY,
             KeyMaterial::HsmAuthCredential { .. } => matches!(
                 attribute_type,
-                CKA_YUBICO_HSMAUTH_ALGORITHM
-                    | CKA_YUBICO_HSMAUTH_RETRIES
-                    | CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED
+                CKA_YUBICO_HSMAUTH_RETRIES | CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED
             ),
             KeyMaterial::FidoPreviewCredential { .. }
             | KeyMaterial::PreviewSignRegistration { .. } => {
@@ -1325,7 +1315,6 @@ impl TokenObject {
             .collect::<Vec<_>>();
         for attribute_type in [
             CKA_PKCS11RS_PIV_OBJECT_TAG,
-            CKA_YUBICO_HSMAUTH_ALGORITHM,
             CKA_YUBICO_HSMAUTH_RETRIES,
             CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
             CKA_YUBICO_TOUCH_POLICY,
@@ -1817,12 +1806,6 @@ impl TokenObject {
             x if x == CKA_SEED as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::SoftwarePrivate(key) => {
                     key.ml_dsa_seed().or_else(|| key.ml_kem_seed())
-                }
-                _ => None,
-            },
-            x if x == CKA_YUBICO_HSMAUTH_ALGORITHM => match &self.material {
-                KeyMaterial::HsmAuthCredential { algorithm, .. } => {
-                    Some(ulong_attribute(*algorithm as CK_ULONG))
                 }
                 _ => None,
             },

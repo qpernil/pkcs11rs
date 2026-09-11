@@ -4,8 +4,8 @@ use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[test]
-fn platform_profiles_include_login_and_software_operations() {
-    let slot = PlatformSlot::with_keys(Vec::new());
+fn host_profiles_include_login_and_software_operations() {
+    let slot = HostSlot::with_keys(Vec::new());
     let ids: Vec<_> = slot
         .profile_objects(1)
         .into_iter()
@@ -28,6 +28,18 @@ fn platform_profiles_include_login_and_software_operations() {
     assert!(slot.supports_public_certificates_token_profile(1));
     let mut info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
     slot.get_token_info(&mut info).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&info.serialNumber).trim_end(),
+        "host"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&info.label).trim_end(),
+        "Host Keystore"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&info.model).trim_end(),
+        slot.model()
+    );
     assert_ne!(info.flags & CKF_LOGIN_REQUIRED as CK_FLAGS, 0);
 }
 
@@ -150,7 +162,7 @@ fn derive(
 }
 
 #[test]
-fn platform_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
+fn host_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
     let signing = crate::certificate_builder::p256_key();
     let certificate = crate::certificate_builder::p256_certificate(
         signing.verifying_key(),
@@ -171,7 +183,7 @@ fn platform_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
         calls: AtomicUsize::new(0),
         revoked: AtomicBool::new(false),
     });
-    let slot = PlatformSlot::with_keys(vec![("agreement".to_owned(), native.clone())]);
+    let slot = HostSlot::with_keys(vec![("agreement".to_owned(), native.clone())]);
     let provider = Pkcs11Provider::new(Box::new(slot)).unwrap();
     let creator = ProviderSession::open(provider.clone()).unwrap();
     let observer = ProviderSession::open(provider).unwrap();
@@ -280,6 +292,39 @@ fn platform_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
         hash(MessageDigest::Sha256, &reference).unwrap()
     );
     assert_eq!(native.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        creator
+            .can_derive(private, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
+            .unwrap()
+    );
+    let prefix = [0x5a; 32];
+    let combined = creator
+        .derive(
+            private,
+            Derivation::PrefixedEcdh {
+                peer: &peer_public,
+                prefix: &prefix,
+                shared_info: &[0x3c, 0x88, 0x10],
+            },
+            TokenObjectTemplate {
+                class: Some(CKO_SECRET_KEY as _),
+                key_type: Some(CKK_GENERIC_SECRET as _),
+                private: true,
+                sensitive: Some(false),
+                extractable: Some(true),
+                ..Default::default()
+            },
+            64,
+        )
+        .unwrap();
+    let mut composite = Zeroizing::new(prefix.to_vec());
+    composite.extend_from_slice(&reference);
+    let expected =
+        software_key_core::secure_channel::x963_kdf_sha256(&composite, &[0x3c, 0x88, 0x10], 64)
+            .unwrap();
+    assert_eq!(creator.attribute(combined, CKA_VALUE).unwrap(), expected);
+    assert_eq!(native.calls.load(Ordering::SeqCst), 2);
+
     native.revoked.store(true, Ordering::SeqCst);
     assert_eq!(
         derive(&creator, private, &mut peer_public),

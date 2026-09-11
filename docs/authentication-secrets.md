@@ -50,9 +50,11 @@ these sessions. YubiHSM Auth retains its selected token-object binding, the
 owning PKCS #11 session, and the credential password. This password is still
 retained only under the explicit recreation opt-in.
 Secret material uses zeroizing storage and is dropped on logout, invalidation,
-finalization, or session replacement. A platform-backed credential retains a bound token-key reference and its
-PKCS #11 provider session through `ClientAuth`; the key stays in the OS
-store. Platform authentication requires the explicitly enabled platform slot. See [YubiHSM authentication](yubihsm-auth.md)
+finalization, or session replacement. An ordinary source credential retains
+bound token-key references and their PKCS #11 provider session through
+`ClientAuth`; the keys stay in the source slot. Its login PIN is not retained:
+source logout or loss of authorization requires fresh source authentication.
+Platform authentication requires the explicitly enabled host slot. See [YubiHSM authentication](yubihsm-auth.md)
 for recovery conditions and replay restrictions.
 
 ### Configured discovery credentials

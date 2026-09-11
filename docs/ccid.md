@@ -236,7 +236,10 @@ authenticator advertises that extension. See [`fido2.md`](fido2.md) for the
 object mapping and local hardware probes, and
 [`preview-sign.md`](preview-sign.md) for the separate experimental lifecycle.
 
-The YubiHSM Auth applet exposes credential metadata in its own slot. Those
+The YubiHSM Auth applet exposes credential metadata in its own slot, advertised
+by `CKP_YUBICO_HSMAUTH`. Symmetric and asymmetric credentials use
+`CKK_YUBICO_HSMAUTH_SYMMETRIC` and `CKK_YUBICO_HSMAUTH_ASYMMETRIC`,
+respectively. Those
 credentials are also available as authentication providers to every ordinary
 local or remote YubiHSM slot. They do not create additional PKCS #11 slots. See
 [`yubihsm-auth.md`](yubihsm-auth.md) for the resulting slot layout and login

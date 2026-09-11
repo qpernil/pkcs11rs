@@ -4,7 +4,7 @@ const MIN_EXPORT_PASSWORD_LENGTH: usize = 8;
 const MAX_EXPORT_PASSWORD_LENGTH: usize = 1024;
 
 ffi_entry_point! {
-    /// Export an extractable private key from a named software slot as a DER
+    /// Export an extractable software private key from any slot as a DER
     /// PKCS #8 `EncryptedPrivateKeyInfo`.
     ///
     /// The PKCS #11 user login authorizes access to the private key. `password`
@@ -46,9 +46,6 @@ fn software_export_private_key(
 
     with_session_context(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::Software {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
         if !ctx.is_slot_user_logged_in(slot_id) {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }

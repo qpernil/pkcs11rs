@@ -705,10 +705,6 @@ fn wrap_key(
             return Ok(());
         }
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
-        let slot = ctx.get_slot(slot_id)?;
-        if slot.kind() != SlotKind::YubiHsm {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
         if !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
@@ -934,10 +930,6 @@ fn unwrap_key(
             return Ok(());
         }
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
-        let slot = ctx.get_slot(slot_id)?;
-        if slot.kind() != SlotKind::YubiHsm {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
         if !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }

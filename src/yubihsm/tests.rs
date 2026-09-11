@@ -1766,6 +1766,7 @@ impl Connector for SymmetricHsmAuthPeer {
 
 #[derive(Debug)]
 struct AsymmetricHsmAuthPeer {
+    requests: Cell<usize>,
     ephemeral_key: SoftwareSigningKey,
     public_key: Vec<u8>,
     fail_calculate: bool,
@@ -1782,6 +1783,7 @@ impl AsymmetricHsmAuthPeer {
         Self {
             ephemeral_key,
             public_key,
+            requests: Cell::new(0),
             fail_calculate: false,
         }
     }
@@ -1817,6 +1819,7 @@ impl Connector for AsymmetricHsmAuthPeer {
         4096
     }
     fn send_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        self.requests.set(self.requests.get() + 1);
         let password = test_tlv_value(&command.data, 0x73)?;
         if password != [PASSWORD, &[0; 8]].concat() {
             return Ok(crate::ResponseApdu {
@@ -1925,7 +1928,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
     peer.provision_asymmetric_authentication_public_key(AUTHKEY_ID, &uncompressed)
         .unwrap();
 
-    let source = crate::backend::platform::PlatformSlot::with_keys(vec![(
+    let source = crate::backend::host::HostSlot::with_keys(vec![(
         "reserve".to_owned(),
         Arc::new(credential),
     )]);
@@ -1948,7 +1951,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&source_slot).unwrap();
     slot.recreate_sessions = true;
-    Slot::login_user(&mut slot, 1, b":1003@reserve", b"", &[]).unwrap();
+    Slot::login_user(&mut slot, 1, b":1003reserve@host", b"", &[]).unwrap();
     peer.expire_next_session_message.set(true);
     assert!(
         !send_yubihsm_secure_command(
@@ -1976,8 +1979,8 @@ fn platform_authentication_requires_an_enabled_source_slot() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     assert!(
-        matches!(Slot::login_user(&mut slot, 1, b":1003@reserve", b"", &[]),
-        Err(Error::Generic(rv)) if rv == crate::CKR_FUNCTION_NOT_SUPPORTED as CK_RV)
+        matches!(Slot::login_user(&mut slot, 1, b":1003reserve@host", b"", &[]),
+        Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
     );
     assert_eq!(peer.create_session_count(), 0);
 }
@@ -2039,9 +2042,10 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
         crate::YubiHsmLoginUsername::Direct(0)
     ));
     assert_eq!(
-        crate::parse_yubihsm_login_username(b":1003@reserve").unwrap(),
-        crate::YubiHsmLoginUsername::Platform(crate::PlatformLogin {
-            name: "reserve",
+        crate::parse_yubihsm_login_username(b":1003reserve@host").unwrap(),
+        crate::YubiHsmLoginUsername::HsmAuth(crate::HsmAuthLogin {
+            label: "reserve",
+            source: Some("host"),
             authkey_id: 0x1003,
         })
     );
@@ -2064,10 +2068,29 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
             source: Some("87654321"),
         })
     );
+    // Generic slot labels must retain the platform credential name capacity.
+    let long_label = "a".repeat(80);
+    let named = format!(":1003{long_label}@host");
     assert_eq!(
-        crate::parse_yubihsm_login_username(b":*@reserve").unwrap(),
-        crate::YubiHsmLoginUsername::PlatformWildcard(crate::PlatformWildcardLogin {
-            name: "reserve",
+        crate::parse_yubihsm_login_username(named.as_bytes()).unwrap(),
+        crate::YubiHsmLoginUsername::HsmAuth(crate::HsmAuthLogin {
+            label: &long_label,
+            source: Some("host"),
+            authkey_id: 0x1003,
+        })
+    );
+    assert_eq!(
+        crate::parse_yubihsm_login_username(b":*@host").unwrap(),
+        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
+            label: None,
+            source: Some("host"),
+        })
+    );
+    assert_eq!(
+        crate::parse_yubihsm_login_username(b":*reserve@host").unwrap(),
+        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
+            label: Some("reserve"),
+            source: Some("host"),
         })
     );
 }
@@ -2091,8 +2114,8 @@ fn yubihsm_login_splits_username_from_password() {
         (b":0001default@12345678".as_slice(), None)
     );
     assert_eq!(
-        crate::split_yubihsm_login(b":1003@reserve").unwrap(),
-        (b":1003@reserve".as_slice(), None)
+        crate::split_yubihsm_login(b":1003reserve@host").unwrap(),
+        (b":1003reserve@host".as_slice(), None)
     );
     assert_eq!(
         crate::split_yubihsm_login(b":0001default:").unwrap(),
@@ -2117,6 +2140,7 @@ fn yubihsm_login_rejects_malformed_usernames() {
         b"@00ff",
         b"@xyz1",
         b":1003@12345678",
+        b":1003@reserve",
     ] {
         assert!(
             crate::parse_yubihsm_login_username(username).is_err(),
@@ -5405,7 +5429,7 @@ fn hsmauth_wildcard_can_be_narrowed_by_source() {
 }
 
 #[test]
-fn hsmauth_wildcard_tries_duplicate_public_projections_until_authentication_succeeds() {
+fn hsmauth_wildcard_rejects_duplicate_public_projections_before_authentication() {
     const SLOT_ID: crate::CK_SLOT_ID = 7;
     const ASYMMETRIC_AUTHKEY_ID: u16 = 1;
     const SYMMETRIC_AUTHKEY_ID: u16 = 2;
@@ -5438,10 +5462,12 @@ fn hsmauth_wildcard_tries_duplicate_public_projections_until_authentication_succ
         ),
     ];
 
-    Slot::login_user(&mut slot, SLOT_ID, b":*", PASSWORD, &projections).unwrap();
-
-    assert!(Slot::login_is_active(&slot));
-    assert_eq!(create_session_payload_lengths(&yubihsm), [67, 67]);
+    assert!(
+        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*", PASSWORD, &projections),
+        Err(crate::Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as crate::CK_RV)
+    );
+    assert!(!Slot::login_is_active(&slot));
+    assert!(create_session_payload_lengths(&yubihsm).is_empty());
 }
 
 #[test]
@@ -6149,8 +6175,12 @@ fn cleared_local_keys_invalidate_channel_without_sending_or_recreating_keys() {
 struct InventoryHsmAuthPeer {
     label: RefCell<Option<String>>,
     public_key: RefCell<Option<Vec<u8>>>,
+    device: Arc<crate::device::DeviceContext>,
 }
 impl Connector for InventoryHsmAuthPeer {
+    fn device_context(&self) -> Option<Arc<crate::device::DeviceContext>> {
+        Some(self.device.clone())
+    }
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -6222,10 +6252,12 @@ fn hsmauth_native_operation_uses_session_handles_and_revalidates_inventory() {
     let peer = Rc::new(InventoryHsmAuthPeer {
         label: RefCell::new(Some("first".into())),
         public_key: RefCell::new(None),
+        device: Arc::new(crate::device::DeviceContext::test()),
     });
-    let source = ModuleContext::private_slot(Box::new(crate::HsmAuthSlot::new(
+    let source = ModuleContext::private_slot(Box::new(crate::HsmAuthSlot::new_with_device(
         peer.clone(),
         crate::hsmauth::AID.to_vec(),
+        peer.device.clone(),
     )))
     .unwrap();
     let slot = source
@@ -6270,29 +6302,19 @@ fn hsmauth_native_operation_uses_session_handles_and_revalidates_inventory() {
     assert_eq!(find(b"second").len(), 1);
     let selected = source
         .auth_slots
-        .with_hsmauth_credential(
-            &crate::HsmAuthLogin {
-                authkey_id: 1,
-                label: "second",
-                source: None,
-            },
-            |credential| Ok(credential.credential.label.clone()),
-        )
+        .hsmauth_credentials(Some("second"), None, false)
         .unwrap();
-    assert_eq!(selected, "second");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].credential.label, "second");
+    drop(selected);
     assert!(
         source
             .auth_slots
-            .with_hsmauth_credential(
-                &crate::HsmAuthLogin {
-                    authkey_id: 1,
-                    label: "first",
-                    source: None
-                },
-                |_| Ok(()),
-            )
-            .is_err()
+            .hsmauth_credentials(Some("first"), None, false)
+            .unwrap()
+            .is_empty()
     );
+
     let profile = session
         .find(&[(CKA_CLASS, &(CKO_PROFILE as CK_ULONG).to_ne_bytes())])
         .unwrap()[0];
@@ -6324,10 +6346,12 @@ fn hsmauth_asymmetric_replacement_does_not_rebind_an_old_credential() {
     let peer = Rc::new(InventoryHsmAuthPeer {
         label: RefCell::new(Some("same name".into())),
         public_key: RefCell::new(Some(first)),
+        device: Arc::new(crate::device::DeviceContext::test()),
     });
-    let provider = Pkcs11Provider::new(Box::new(crate::HsmAuthSlot::new(
+    let provider = Pkcs11Provider::new(Box::new(crate::HsmAuthSlot::new_with_device(
         peer.clone(),
         crate::hsmauth::AID.to_vec(),
+        peer.device.clone(),
     )))
     .unwrap();
     let session = ProviderSession::open(provider).unwrap();
@@ -6378,4 +6402,295 @@ fn hsmauth_source_session_retention_requires_opt_in_and_logout_releases_it() {
                 .any(|object| matches!(object.material, KeyMaterial::HsmAuthCredential { .. }))
         );
     }
+}
+
+#[test]
+fn native_auth_selection_does_not_try_other_credentials_or_repeat_a_wrong_password() {
+    const SLOT_ID: crate::CK_SLOT_ID = 7;
+    let first = Rc::new(AsymmetricHsmAuthPeer::new());
+    let second = Rc::new(AsymmetricHsmAuthPeer::new());
+    let mut first_provider = asymmetric_hsmauth_provider(first.clone());
+    set_hsmauth_provider_static_public_key(&mut first_provider);
+    let mut second_provider = asymmetric_hsmauth_provider(second.clone());
+    second_provider.source = "99999999".to_owned();
+    set_hsmauth_provider_static_public_key(&mut second_provider);
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(1);
+    let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        peer.clone(),
+        (2, 4, 1),
+        Vec::new(),
+        Arc::new(crate::auth_slots::AuthSlots::from_native_fixtures(vec![
+            first_provider.clone(),
+            second_provider,
+        ])),
+        Some(public_discovery_credential("password")),
+    );
+    let projections = vec![install_hsmauth_public_projection(
+        &mut slot,
+        SLOT_ID,
+        1,
+        &first_provider.credential,
+    )];
+    assert!(
+        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*", b"wrong", &projections),
+        Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
+    );
+    assert_eq!(first.requests.get(), 0);
+    assert_eq!(second.requests.get(), 0);
+    assert!(
+        matches!(Slot::login_user(&mut slot, SLOT_ID, b":*asymmetric@87654321", b"wrong", &projections),
+        Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
+    );
+    assert_eq!(first.requests.get(), 1);
+    assert_eq!(second.requests.get(), 0);
+    assert_eq!(peer.create_session_count(), 0);
+}
+
+#[test]
+fn ordinary_wildcard_selection_never_logs_in_to_resolve_public_ambiguity() {
+    const AUTHKEY_ID: u16 = 0x1003;
+    let credential = Arc::new(SoftwarePlatformCredential(
+        test_private_key(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 7,
+        ])
+        .unwrap(),
+    ));
+    let SoftwarePublicKey::Ec { uncompressed, .. } = credential.0.public_key() else {
+        panic!()
+    };
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.provision_asymmetric_authentication_public_key(AUTHKEY_ID, &uncompressed)
+        .unwrap();
+    let source = crate::backend::host::HostSlot::with_keys(vec![
+        ("first".to_owned(), credential.clone()),
+        ("second".to_owned(), credential),
+    ]);
+    let mut projection = source
+        .token_objects(1)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    projection.id = AUTHKEY_ID.to_be_bytes().to_vec();
+    let context = crate::ModuleContext::private_slot(Box::new(source)).unwrap();
+    let child = context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
+    slot.auth_slots.register(&child).unwrap();
+    slot.public_discovery_config = Some(public_discovery_credential("password"));
+    slot.object_cache.get_mut().connection_epoch = slot.connector.connection_epoch();
+    slot.object_cache.get_mut().discovery = YubiHsmDiscoveryCache::Available {
+        authkey_domains: u16::MAX,
+    };
+    assert!(
+        matches!(Slot::login_user(&mut slot, 7, b":*", b"", &[projection]),
+        Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
+    );
+    assert!(!child.lock().unwrap().slot.login_is_active());
+    assert_eq!(peer.create_session_count(), 0);
+    Slot::login_user(&mut slot, 7, b":1003first@host", b"", &[]).unwrap();
+    assert_eq!(peer.create_session_count(), 1);
+    Slot::logout(&mut slot).unwrap();
+}
+
+#[test]
+fn target_authentication_key_types_do_not_advertise_native_hsmauth() {
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    use crate::*;
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.authkey_domains.borrow_mut().insert(3, u16::MAX);
+    peer.use_asymmetric_authentication(3);
+    peer.list_authentication_key(2);
+    peer.list_authentication_key(3);
+    let source = ModuleContext::private_slot(Box::new(YubiHsmSlot::new(
+        peer.clone(),
+        (2, 4, 1),
+        Vec::new(),
+    )))
+    .unwrap();
+    let child = source
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    source.auth_slots.register(&child).unwrap();
+    let session = ProviderSession::open(Pkcs11Provider::from_slot(child).unwrap()).unwrap();
+    session.login(b"0001password").unwrap();
+    assert!(
+        session
+            .find(&[
+                (CKA_CLASS, &(CKO_PROFILE as CK_ULONG).to_ne_bytes()),
+                (CKA_PROFILE_ID, &crate::CKP_YUBICO_HSMAUTH.to_ne_bytes()),
+            ])
+            .unwrap()
+            .is_empty()
+    );
+    let target = ProtocolPeer::new();
+    for key_type in [
+        crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
+        crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+    ] {
+        let keys = session
+            .find(&[
+                (CKA_TOKEN, &[CK_TRUE as u8]),
+                (CKA_CLASS, &(CKO_SECRET_KEY as CK_ULONG).to_ne_bytes()),
+                (CKA_KEY_TYPE, &key_type.to_ne_bytes()),
+            ])
+            .unwrap();
+        assert!(!keys.is_empty());
+        for handle in keys {
+            assert!(
+                matches!(session.hsmauth_authenticate(handle, &target, 1, PASSWORD, None),
+                Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV)
+            );
+        }
+    }
+    assert!(
+        source
+            .auth_slots
+            .hsmauth_credentials(None, None, false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(peer.create_session_count(), 1);
+    assert_eq!(target.create_session_count(), 0);
+}
+
+#[test]
+fn software_private_export_on_hardware_slots_requires_login_and_extractability() {
+    use crate::pkcs11_auth::Pkcs11Auth;
+    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+    use crate::*;
+    let peer = Rc::new(ProtocolPeer::new());
+    let context =
+        ModuleContext::private_slot(Box::new(YubiHsmSlot::new(peer, (2, 4, 1), Vec::new())))
+            .unwrap();
+    let child = context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let session = ProviderSession::open(Pkcs11Provider::from_slot(child).unwrap()).unwrap();
+    session.login(b"0001password").unwrap();
+    let value = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)
+        .unwrap()
+        .serialized()
+        .unwrap();
+    let mut exported_key = 0;
+    let password = b"export password";
+    for extractable in [false, true] {
+        let key = session
+            .create(
+                TokenObjectTemplate {
+                    extractable: Some(extractable),
+                    ..crate::pkcs11_auth::ec_template()
+                },
+                &[
+                    (CKA_VALUE, &value),
+                    (CKA_EC_PARAMS, crate::pkcs11_auth::P256_PARAMS),
+                ],
+            )
+            .unwrap();
+        let mut length = 0;
+        let rv = session.call(|| {
+            api::PKCS11RS_SoftwareExportPrivateKey(
+                session.handle,
+                key,
+                password.as_ptr(),
+                password.len() as _,
+                std::ptr::null_mut(),
+                &mut length,
+            )
+        });
+        assert_eq!(
+            rv,
+            if extractable {
+                CKR_OK
+            } else {
+                CKR_KEY_UNEXTRACTABLE
+            } as CK_RV
+        );
+        if extractable {
+            assert!(length > 0);
+            let mut encrypted = vec![0; length as usize];
+            assert_eq!(
+                session.call(|| api::PKCS11RS_SoftwareExportPrivateKey(
+                    session.handle,
+                    key,
+                    password.as_ptr(),
+                    password.len() as _,
+                    encrypted.as_mut_ptr(),
+                    &mut length,
+                )),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(encrypted[0], 0x30);
+            exported_key = key;
+        }
+    }
+    assert_eq!(
+        session.call(|| api::C_Logout(session.handle)),
+        CKR_OK as CK_RV
+    );
+    let mut length = 0;
+    assert_eq!(
+        session.call(|| api::PKCS11RS_SoftwareExportPrivateKey(
+            session.handle,
+            exported_key,
+            password.as_ptr(),
+            password.len() as _,
+            std::ptr::null_mut(),
+            &mut length,
+        )),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+}
+
+#[test]
+fn auth_source_exclusion_uses_reference_equality_not_serial() {
+    use crate::*;
+    let sources = crate::auth_slots::AuthSlots::default();
+    let make = || {
+        let context = ModuleContext::private_slot(Box::new(
+            crate::backend::host::HostSlot::with_keys(Vec::new()),
+        ))
+        .unwrap();
+        context
+            .slot_contexts
+            .read()
+            .unwrap()
+            .get(&1)
+            .unwrap()
+            .clone()
+    };
+    let first = make();
+    let second = make();
+    sources.register(&first).unwrap();
+    sources.register(&second).unwrap();
+    let serial = second.lock().unwrap().slot.serial().to_owned();
+    // The two slots have identical metadata. Hold the target lock to prove it
+    // is excluded by reference before enumeration tries to acquire that lock.
+    let _target_lock = first.lock().unwrap();
+    let candidates = sources
+        .ordinary_credentials(
+            Some("credential"),
+            Some(&serial),
+            &Arc::downgrade(&first),
+            true,
+        )
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].source, serial);
 }

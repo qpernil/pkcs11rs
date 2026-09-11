@@ -1,8 +1,9 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    import_yubihsm_token_object, piv_key_object_handles, publish_software_secret_object,
-    required_template_value, validate_software_secret_length, validate_unique_template,
-    yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
+    import_yubihsm_token_object_in_slot, persist_software_private_object_in_slot,
+    piv_key_object_handles_in_slot, publish_software_secret_object, required_template_value,
+    validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
+    yubihsm_id, yubihsm_object_parameters,
 };
 use crate::software_key_ops::agreement::software_ecdh;
 use crate::*;
@@ -47,37 +48,10 @@ fn generate_key(
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_GENERATE as CK_FLAGS)?;
         let token = optional_bool_template_attribute(templ, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
             .unwrap_or(false);
-        if token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
-            let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
-            validate_new_object_access(&object, flags, logged_in)?;
-            let response = ctx
-                ._get_session(session_handle)?
-                .1
-                .yubihsm_command(&command)?;
-            let id = parse_yubihsm_object_id(&response)?;
-            ctx.refresh_slot_token_objects(slot_id)?;
-            let (handle, imported) = ctx
-                .resolved_objects()?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
-                        && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
-                })
-                .ok_or(CKR_DEVICE_ERROR)?;
-            let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-                slot_id,
-                &imported.unique_id,
-                (!object.id.is_empty()).then_some(object.id.as_slice()),
-                (!object.label.is_empty()).then_some(object.label.as_str()),
-            );
-            let refresh = ctx.refresh_slot_token_objects(slot_id);
-            if let Err(error) = metadata_result {
-                let _ = refresh;
-                return Err(error);
-            }
-            refresh?;
-            *key_handle = handle;
+        if token {
+            *key_handle =
+                ctx.slot
+                    .generate_key(&mut ctx.state, session_handle, mechanism, templ)?;
             return Ok(());
         }
         let key = generate_key_object(mechanism, templ)?;
@@ -457,11 +431,8 @@ pub(crate) fn generate_key_pair(
             *private_handle = private;
             return Ok(());
         }
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
-            if mechanism.mechanism != CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN
-                || !mechanism.pParameter.is_null()
-                || mechanism.ulParameterLen != 0
-            {
+        if mechanism.mechanism == CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
             let mut public_object = key_pair_object(
@@ -501,143 +472,16 @@ pub(crate) fn generate_key_pair(
             *private_handle = ctx.insert_object(private_object)?;
             return Ok(());
         }
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
-            let generation =
-                piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;
-            validate_new_object_access(&generation.public_object, flags, logged_in)?;
-            validate_new_object_access(&generation.private_object, flags, logged_in)?;
-            let replaced = piv_key_object_handles(ctx, slot_id, generation.slot)?;
-            ctx._get_slot_mut(slot_id)?.piv_generate_key_pair(
-                generation.slot,
-                generation.algorithm,
-                generation.pin_policy,
-                generation.touch_policy,
-            )?;
-            for (handle, _, _) in replaced {
-                ctx.remove_object_handle(handle);
-            }
-            ctx.refresh_slot_token_objects(slot_id)?;
-            *private_handle = find_piv_key_handle(
-                ctx,
-                slot_id,
-                generation.slot,
-                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-            )?;
-            *public_handle = find_piv_key_handle(
-                ctx,
-                slot_id,
-                generation.slot,
-                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-            )?;
-            return Ok(());
-        }
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::OpenPgp) {
-            let generation =
-                openpgp_generate_key_pair_parameters(mechanism, public_template, private_template)?;
-            validate_new_object_access(&generation.public_object, flags, logged_in)?;
-            validate_new_object_access(&generation.private_object, flags, logged_in)?;
-            ctx._get_slot_mut(slot_id)?
-                .openpgp_generate_key_pair(generation.key_ref, generation.algorithm)?;
-            if generation.touch_policy != 0 {
-                ctx._get_slot_mut(slot_id)?
-                    .openpgp_set_touch_policy(generation.key_ref, generation.touch_policy)?;
-            }
-            ctx.refresh_slot_token_objects(slot_id)?;
-            *private_handle = find_openpgp_key_handle(
-                ctx,
-                slot_id,
-                generation.key_ref,
-                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-            )?;
-            *public_handle = find_openpgp_key_handle(
-                ctx,
-                slot_id,
-                generation.key_ref,
-                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-            )?;
-            return Ok(());
-        }
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
-        let (private_object, public_object, command) =
-            yubihsm_generate_key_pair_command(mechanism, public_template, private_template)?;
-        let wrap_key = command.code() == YubiHsmCommandCode::GenerateWrapKey;
-        let private_object_type = if wrap_key {
-            YUBIHSM_WRAP_KEY
-        } else {
-            YUBIHSM_ASYMMETRIC_KEY
-        };
-        validate_new_object_access(&private_object, flags, logged_in)?;
-        validate_new_object_access(&public_object, flags, logged_in)?;
-        let response = ctx
-            ._get_session(session_handle)?
-            .1
-            .yubihsm_command(&command)?;
-        let id = parse_yubihsm_object_id(&response)?;
-        ctx.refresh_slot_token_objects(slot_id)?;
-        let (private, imported_private) = ctx
-            .resolved_objects()?
-            .into_iter()
-            .find(|(_, object)| {
-                object.slot_id == Some(slot_id)
-                    && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                    && matches!(
-                        &object.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type,
-                            ..
-                        } if *object_id == id && *object_type == private_object_type
-                    )
-            })
-            .ok_or(CKR_DEVICE_ERROR)?;
-        let private_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-            slot_id,
-            &imported_private.unique_id,
-            (!private_object.id.is_empty()).then_some(private_object.id.as_slice()),
-            (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
-        );
-        let refresh = ctx.refresh_slot_token_objects(slot_id);
-        if let Err(error) = private_result {
-            let _ = refresh;
-            return Err(error);
-        }
-        refresh?;
-        let imported_private = ctx.resolve_object(private)?.ok_or(CKR_DEVICE_ERROR)?;
-        let mut projected = project_public_key_object(&imported_private, public_template)?;
-        projected.local = true;
-        projected.key_gen_mechanism = Some(mechanism.mechanism);
-        let public = if projected.wrap {
-            import_yubihsm_token_object(ctx, session_handle, slot_id, &projected)?
-        } else if projected.token {
-            ctx.get_slot(slot_id)?.yubihsm_persist_public_projection(
-                slot_id,
-                &imported_private.unique_id,
-                &projected,
-            )?;
-            ctx.refresh_slot_token_objects(slot_id)?;
-            ctx.resolved_objects()?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                        && matches!(
-                            object.material,
-                            KeyMaterial::YubiHsm {
-                                id: object_id,
-                                object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
-                                ..
-                            } if object_id == id
-                        )
-                })
-                .map(|(handle, _)| handle)
-                .ok_or(CKR_DEVICE_ERROR)?
-        } else {
-            ctx.store_backed_object(session_handle, projected)?
-        };
-        *private_handle = private;
+
+        let (public, private) = ctx.slot.generate_key_pair(
+            &mut ctx.state,
+            session_handle,
+            mechanism,
+            public_template,
+            private_template,
+        )?;
         *public_handle = public;
+        *private_handle = private;
         Ok(())
     })
 }
@@ -788,21 +632,6 @@ pub(super) fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> 
     .ok_or_else(|| CKR_CURVE_NOT_SUPPORTED.into())
 }
 
-pub(super) fn find_openpgp_key_handle(
-    ctx: &SlotContext,
-    slot_id: CK_SLOT_ID,
-    key_ref: OpenPgpKeyRef,
-    class: CK_OBJECT_CLASS,
-) -> Result<CK_OBJECT_HANDLE, Error> {
-    ctx.resolved_objects()?
-        .into_iter()
-        .find(|(_, object)| {
-            object.slot_id == Some(slot_id) && object.class == class && object.id == [key_ref as u8]
-        })
-        .map(|(handle, _)| handle)
-        .ok_or_else(|| CKR_DEVICE_ERROR.into())
-}
-
 struct PivGeneration {
     slot: piv::Slot,
     algorithm: piv::Algorithm,
@@ -940,23 +769,6 @@ fn piv_generation_25519_algorithm(
         return Err(CKR_CURVE_NOT_SUPPORTED.into());
     }
     Ok(algorithm)
-}
-
-pub(super) fn find_piv_key_handle(
-    ctx: &SlotContext,
-    slot_id: CK_SLOT_ID,
-    piv_slot: piv::Slot,
-    class: CK_OBJECT_CLASS,
-) -> Result<CK_OBJECT_HANDLE, Error> {
-    ctx.resolved_objects()?
-        .into_iter()
-        .find(|(_, object)| {
-            object.slot_id == Some(slot_id)
-                && object.class == class
-                && object.id == [piv_slot.cka_id()]
-        })
-        .map(|(handle, _)| handle)
-        .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }
 
 pub(super) fn key_pair_object(
@@ -1605,11 +1417,9 @@ pub(crate) fn derive_key(
             let projected = project_public_key_object(&base, templ)?;
             validate_new_object_access(&projected, flags, logged_in)?;
             if projected.wrap {
-                if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
-                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
-                }
                 *key_handle =
-                    import_yubihsm_token_object(ctx, session_handle, slot_id, &projected)?;
+                    ctx.slot
+                        .import_public_wrap_key(&mut ctx.state, session_handle, &projected)?;
             } else if projected.token
                 && matches!(
                     &base.material,
@@ -1632,9 +1442,6 @@ pub(crate) fn derive_key(
                     } => (*id, YUBIHSM_WRAP_KEY_PUBLIC),
                     _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
                 };
-                if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
-                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
-                }
                 ctx.get_slot(slot_id)?.yubihsm_persist_public_projection(
                     slot_id,
                     &base.unique_id,
@@ -1750,8 +1557,8 @@ pub(crate) fn derive_key(
     {
         return Err(CKR_MECHANISM_INVALID.into());
     }
-    let protected = mechanism.mechanism == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE;
-    let (kdf, shared_data, public_data, prefix_data) = if protected {
+    let prefixed = mechanism.mechanism == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE;
+    let (kdf, shared_data, public_data, prefix_data) = if prefixed {
         if mechanism.ulParameterLen as usize
             != std::mem::size_of::<CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
         {
@@ -1832,6 +1639,14 @@ pub(crate) fn derive_key(
         if !object.derive {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        if ctx
+            .slot
+            .key_mechanism_operations(&object, mechanism.mechanism)
+            & CKF_DERIVE as CK_FLAGS
+            == 0
+        {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
         #[derive(Clone)]
         enum DeriveSource {
             Software(Box<SoftwarePrivateKeyMaterial>),
@@ -1910,16 +1725,18 @@ pub(crate) fn derive_key(
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
-        match &source {
+        // A native KDF-only key must never be downgraded to raw ECDH. Keys
+        // permitting raw ECDH can use the common in-module KDF implementation.
+        let native_kdf = match &source {
             DeriveSource::YubiHsm { capabilities, .. } => {
-                let capability = if protected { 0x38 } else { 0x0b };
-                if !yubihsm_capability(capabilities, capability) {
+                let native = prefixed && yubihsm_capability(capabilities, 0x38);
+                if !native && !yubihsm_capability(capabilities, 0x0b) {
                     return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
                 }
+                native
             }
-            _ if protected => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
-            _ => {}
-        }
+            _ => false,
+        };
         match &source {
             DeriveSource::Piv {
                 slot, pin_policy, ..
@@ -1996,7 +1813,7 @@ pub(crate) fn derive_key(
             derived_secret_object(templ, expected_length, maximum_length)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
-        let kdf_selector = if protected {
+        let kdf_selector = if native_kdf {
             Some(ecdh_kdf_hash_selector(kdf)?)
         } else {
             None
@@ -2007,7 +1824,7 @@ pub(crate) fn derive_key(
                     curve: EcCurve::P256,
                     uncompressed: public_data.to_vec(),
                 })
-                .map_err(crate::backend::platform::platform_error)?,
+                .map_err(crate::backend::host::platform_error)?,
             DeriveSource::Software(key) => software_ecdh(key.as_ref(), public_data)?,
             DeriveSource::Piv {
                 slot,
@@ -2029,7 +1846,7 @@ pub(crate) fn derive_key(
                 public_data,
                 pin_policy,
             )?),
-            DeriveSource::YubiHsm { id, .. } if protected => {
+            DeriveSource::YubiHsm { id, .. } if native_kdf => {
                 Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
                     &YubiHsmCommand::derive_ecdh_kdf(
                         id,
@@ -2047,7 +1864,7 @@ pub(crate) fn derive_key(
                 )?)
             }
         };
-        let expected_result_length = if protected {
+        let expected_result_length = if native_kdf {
             requested_length
         } else {
             expected_length
@@ -2063,8 +1880,12 @@ pub(crate) fn derive_key(
                 derived.truncate(requested_length);
             }
             EcdhKdf::X963(digest) => {
-                if !protected {
-                    derived = x963_kdf(digest, &derived, shared_data, requested_length)?;
+                if !native_kdf {
+                    let mut input =
+                        Zeroizing::new(Vec::with_capacity(prefix_data.len() + derived.len()));
+                    input.extend_from_slice(prefix_data);
+                    input.extend_from_slice(&derived);
+                    derived = x963_kdf(digest, &input, shared_data, requested_length)?;
                 }
             }
         }
@@ -2365,4 +2186,267 @@ ffi_entry_point! {
         });
         map(result)
     }
+}
+
+pub(crate) fn generate_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    templ: &[CK_ATTRIBUTE],
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+
+    let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
+    validate_new_object_access(&object, flags, logged_in)?;
+    let response = ctx
+        ._get_session(slot, session_handle)?
+        .1
+        .yubihsm_command(&command)?;
+    let id = parse_yubihsm_object_id(&response)?;
+    ctx.refresh_slot_token_objects(slot, slot_id)?;
+    let (handle, imported) = ctx.resolved_objects(slot)?
+                .into_iter()
+                .find(|(_, object)| {
+                    object.slot_id == Some(slot_id)
+                        && object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+                        && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
+                })
+                .ok_or(CKR_DEVICE_ERROR)?;
+    let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
+        slot_id,
+        &imported.unique_id,
+        (!object.id.is_empty()).then_some(object.id.as_slice()),
+        (!object.label.is_empty()).then_some(object.label.as_str()),
+    );
+    let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
+    if let Err(error) = metadata_result {
+        let _ = refresh;
+        return Err(error);
+    }
+    refresh?;
+    Ok(handle)
+}
+
+pub(crate) fn generate_software_token_key_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    templ: &[CK_ATTRIBUTE],
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    let (slot_id, flags, logged_in) = ctx.session_details(slot, session)?;
+    let key = generate_key_object(mechanism, templ)?;
+    validate_new_object_access(&key, flags, logged_in)?;
+    if !key.private {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    persist_software_private_object_in_slot(slot, ctx, slot_id, &key)
+}
+
+pub(crate) fn generate_piv_token_pair_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+
+    let generation =
+        piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;
+    validate_new_object_access(&generation.public_object, flags, logged_in)?;
+    validate_new_object_access(&generation.private_object, flags, logged_in)?;
+    let replaced = piv_key_object_handles_in_slot(slot, ctx, slot_id, generation.slot)?;
+    ctx._get_slot_mut(slot, slot_id)?.piv_generate_key_pair(
+        generation.slot,
+        generation.algorithm,
+        generation.pin_policy,
+        generation.touch_policy,
+    )?;
+    for (handle, _, _) in replaced {
+        ctx.remove_object_handle(handle);
+    }
+    ctx.refresh_slot_token_objects(slot, slot_id)?;
+    let private = find_piv_key_handle_in_slot(
+        slot,
+        ctx,
+        slot_id,
+        generation.slot,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+    )?;
+    let public = find_piv_key_handle_in_slot(
+        slot,
+        ctx,
+        slot_id,
+        generation.slot,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+    )?;
+    Ok((public, private))
+}
+
+pub(crate) fn generate_openpgp_token_pair_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+
+    let generation =
+        openpgp_generate_key_pair_parameters(mechanism, public_template, private_template)?;
+    validate_new_object_access(&generation.public_object, flags, logged_in)?;
+    validate_new_object_access(&generation.private_object, flags, logged_in)?;
+    ctx._get_slot_mut(slot, slot_id)?
+        .openpgp_generate_key_pair(generation.key_ref, generation.algorithm)?;
+    if generation.touch_policy != 0 {
+        ctx._get_slot_mut(slot, slot_id)?
+            .openpgp_set_touch_policy(generation.key_ref, generation.touch_policy)?;
+    }
+    ctx.refresh_slot_token_objects(slot, slot_id)?;
+    let private = find_openpgp_key_handle_in_slot(
+        slot,
+        ctx,
+        slot_id,
+        generation.key_ref,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+    )?;
+    let public = find_openpgp_key_handle_in_slot(
+        slot,
+        ctx,
+        slot_id,
+        generation.key_ref,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+    )?;
+    Ok((public, private))
+}
+
+pub(crate) fn generate_yubihsm_token_pair_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+
+    let (private_object, public_object, command) =
+        yubihsm_generate_key_pair_command(mechanism, public_template, private_template)?;
+    let wrap_key = command.code() == YubiHsmCommandCode::GenerateWrapKey;
+    let private_object_type = if wrap_key {
+        YUBIHSM_WRAP_KEY
+    } else {
+        YUBIHSM_ASYMMETRIC_KEY
+    };
+    validate_new_object_access(&private_object, flags, logged_in)?;
+    validate_new_object_access(&public_object, flags, logged_in)?;
+    let response = ctx
+        ._get_session(slot, session_handle)?
+        .1
+        .yubihsm_command(&command)?;
+    let id = parse_yubihsm_object_id(&response)?;
+    ctx.refresh_slot_token_objects(slot, slot_id)?;
+    let (private, imported_private) = ctx
+        .resolved_objects(slot)?
+        .into_iter()
+        .find(|(_, object)| {
+            object.slot_id == Some(slot_id)
+                && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && matches!(
+                    &object.material,
+                    KeyMaterial::YubiHsm {
+                        id: object_id,
+                        object_type,
+                        ..
+                    } if *object_id == id && *object_type == private_object_type
+                )
+        })
+        .ok_or(CKR_DEVICE_ERROR)?;
+    let private_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
+        slot_id,
+        &imported_private.unique_id,
+        (!private_object.id.is_empty()).then_some(private_object.id.as_slice()),
+        (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
+    );
+    let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
+    if let Err(error) = private_result {
+        let _ = refresh;
+        return Err(error);
+    }
+    refresh?;
+    let imported_private = ctx.resolve_object(slot, private)?.ok_or(CKR_DEVICE_ERROR)?;
+    let mut projected = project_public_key_object(&imported_private, public_template)?;
+    if !projected.wrap && template_attribute(public_template, CKA_ID as CK_ATTRIBUTE_TYPE).is_none()
+    {
+        // The device may allocate the native ID during generation. Keep the
+        // default public projection paired with that returned private object.
+        projected.id = imported_private.id.clone();
+    }
+    projected.local = true;
+    projected.key_gen_mechanism = Some(mechanism.mechanism);
+    let public = if projected.wrap {
+        import_yubihsm_token_object_in_slot(slot, ctx, session_handle, slot_id, &projected)?
+    } else if projected.token {
+        ctx.get_slot(slot, slot_id)?
+            .yubihsm_persist_public_projection(slot_id, &imported_private.unique_id, &projected)?;
+        ctx.refresh_slot_token_objects(slot, slot_id)?;
+        ctx.resolved_objects(slot)?
+            .into_iter()
+            .find(|(_, object)| {
+                object.slot_id == Some(slot_id)
+                    && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && matches!(
+                        object.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                            ..
+                        } if object_id == id
+                    )
+            })
+            .map(|(handle, _)| handle)
+            .ok_or(CKR_DEVICE_ERROR)?
+    } else {
+        ctx.store_backed_object(slot, session_handle, projected)?
+    };
+
+    Ok((public, private))
+}
+
+pub(super) fn find_piv_key_handle_in_slot<S: Slot + ?Sized>(
+    slot: &S,
+    ctx: &crate::context::SlotState,
+    slot_id: CK_SLOT_ID,
+    piv_slot: piv::Slot,
+    class: CK_OBJECT_CLASS,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    ctx.resolved_objects(slot)?
+        .into_iter()
+        .find(|(_, object)| {
+            object.slot_id == Some(slot_id)
+                && object.class == class
+                && object.id == [piv_slot.cka_id()]
+        })
+        .map(|(handle, _)| handle)
+        .ok_or_else(|| CKR_DEVICE_ERROR.into())
+}
+
+pub(super) fn find_openpgp_key_handle_in_slot<S: Slot + ?Sized>(
+    slot: &S,
+    ctx: &crate::context::SlotState,
+    slot_id: CK_SLOT_ID,
+    key_ref: OpenPgpKeyRef,
+    class: CK_OBJECT_CLASS,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    ctx.resolved_objects(slot)?
+        .into_iter()
+        .find(|(_, object)| {
+            object.slot_id == Some(slot_id) && object.class == class && object.id == [key_ref as u8]
+        })
+        .map(|(handle, _)| handle)
+        .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }

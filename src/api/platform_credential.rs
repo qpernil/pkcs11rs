@@ -272,7 +272,7 @@ fn platform_crypto_error(error: crate::platform_crypto::PlatformCryptoError) -> 
 fn validate_provisioning_session(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+        if !ctx.get_slot(slot_id)?.supports_yubihsm_management() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
@@ -317,7 +317,7 @@ pub(crate) fn provision_platform_credential(
     let raw_public_key = uncompressed.get(1..).ok_or(CKR_DEVICE_ERROR)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+        if !ctx.get_slot(slot_id)?.supports_yubihsm_management() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
@@ -451,7 +451,7 @@ pub(crate) fn unprovision_platform_credential(
     let raw_public_key = uncompressed.get(1..).ok_or(CKR_DEVICE_ERROR)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+        if !ctx.get_slot(slot_id)?.supports_yubihsm_management() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {

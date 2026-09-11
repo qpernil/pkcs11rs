@@ -222,7 +222,7 @@ ffi_entry_point! {
     }
 }
 
-fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
+pub(crate) fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     let info = unsafe { as_mut(info_ptr) }?;
     with_slot_context_mut(slotID, |ctx| {
         let slot = ctx.get_present_slot(slotID)?;

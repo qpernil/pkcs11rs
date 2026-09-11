@@ -1,5 +1,7 @@
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
+#[cfg(test)]
+use crate::SlotKind;
 #[cfg(not(feature = "abi-tests"))]
 use crate::configured_yubihsm_public_discovery_credential_with_pinentry;
 #[cfg(feature = "native-hardware")]
@@ -22,8 +24,8 @@ use crate::{
     HsmAuthSlot, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
     IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PcscAppletConnector,
     PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector, SignatureOperation,
-    Slot, SlotKind, SoftwareSlot, SwitchableFidoEndpoint, TokenObject,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    Slot, SoftwareSlot, SwitchableFidoEndpoint, TokenObject, YubiHsmPublicDiscoveryConfig,
+    YubiHsmSlot, YubiKeyClient,
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad,
 };
@@ -54,19 +56,19 @@ impl TokenStorageConfig {
         Ok(Self { root })
     }
 
-    fn token_root(&self, key: &PhysicalDeviceKey, kind: SlotKind) -> PathBuf {
+    fn token_root(&self, key: &PhysicalDeviceKey, namespace: &str) -> PathBuf {
         self.root
             .join(TOKEN_STORAGE_SCHEMA_DIRECTORY)
             .join(physical_device_directory(key))
-            .join(slot_storage_directory(kind))
+            .join(namespace)
     }
 
     fn provider(
         &self,
         key: &PhysicalDeviceKey,
-        kind: SlotKind,
+        namespace: &str,
     ) -> Result<LocalStorageProvider, Error> {
-        LocalStorageProvider::open(self.token_root(key, kind))
+        LocalStorageProvider::open(self.token_root(key, namespace))
             .map_err(crate::backed_object::storage_error)
     }
 
@@ -156,21 +158,6 @@ fn physical_device_directory(key: &PhysicalDeviceKey) -> String {
     }
 }
 
-fn slot_storage_directory(kind: SlotKind) -> &'static str {
-    match kind {
-        #[cfg(any(test, feature = "abi-tests"))]
-        SlotKind::Synthetic => "synthetic",
-        SlotKind::Software => "software",
-        SlotKind::Platform => "platform",
-        SlotKind::YubiHsm => "yubihsm",
-        SlotKind::Fido2 | SlotKind::Ccid(CcidApplication::Fido2) => "fido2",
-        SlotKind::Ccid(CcidApplication::Piv) => "piv",
-        SlotKind::Ccid(CcidApplication::OpenPgp) => "openpgp",
-        SlotKind::Ccid(CcidApplication::HsmAuth) => "yubihsm-auth",
-        SlotKind::Ccid(CcidApplication::IssuerSecurityDomain) => "issuer-security-domain",
-    }
-}
-
 fn encode_path_component(value: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(value.len() * 2);
@@ -186,14 +173,11 @@ fn token_storage_for_slot(
     token_storage: Option<&TokenStorageConfig>,
     fido_storage: Option<&FidoStorageConfig>,
 ) -> Result<Box<dyn StorageProvider>, Error> {
-    if slot.kind() == SlotKind::YubiHsm {
+    let Some(namespace) = slot.shared_storage_namespace() else {
         return Ok(Box::new(UnavailableStorageProvider));
-    }
-    if slot.kind() == SlotKind::Software {
-        return Ok(Box::new(UnavailableStorageProvider));
-    }
+    };
     let configured =
-        token_storage.is_some() || (slot.kind() == SlotKind::Fido2 && fido_storage.is_some());
+        token_storage.is_some() || (slot.accepts_legacy_fido_storage() && fido_storage.is_some());
     if !configured {
         return Ok(Box::new(UnavailableStorageProvider));
     }
@@ -206,7 +190,7 @@ fn token_storage_for_slot(
         return Ok(Box::new(UnavailableStorageProvider));
     };
     let provider = if let Some(config) = token_storage {
-        config.provider(&key, slot.kind())?
+        config.provider(&key, namespace)?
     } else {
         fido_storage.ok_or(CKR_GENERAL_ERROR)?.provider(&key)?
     };
@@ -320,8 +304,13 @@ impl Drop for NfcMountRegistration {
 
 // Mutable token state shared by every PKCS #11 session opened on this slot.
 pub(crate) struct SlotContext {
-    pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) slot: Box<dyn Slot>,
+    pub(crate) state: SlotState,
+}
+
+/// PKCS #11 sessions, object handles, and storage state, separate from the backend.
+pub(crate) struct SlotState {
+    pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) device: Option<Arc<crate::device::DeviceContext>>,
     handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
@@ -334,6 +323,18 @@ pub(crate) struct SlotContext {
     backed_token_objects: HashMap<String, TokenObject>,
     backed_object_references: HashMap<String, crate::storage::ContentReference>,
     backed_object_handles: HashMap<CK_OBJECT_HANDLE, crate::storage::ContentReference>,
+}
+
+impl std::ops::Deref for SlotContext {
+    type Target = SlotState;
+    fn deref(&self) -> &SlotState {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for SlotContext {
+    fn deref_mut(&mut self) -> &mut SlotState {
+        &mut self.state
+    }
 }
 
 // Mutable PKCS #11 operation state belonging to one application session.
@@ -574,8 +575,15 @@ impl SlotContextRegistry {
         self.session_slots.get(&session_handle).copied()
     }
 
-    fn insert_yubihsm_slot_context(&mut self, slot_id: CK_SLOT_ID, context: SlotContext) {
-        self.slots.insert(slot_id, Arc::new(Mutex::new(context)));
+    fn insert_yubihsm_slot_context(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        context: SlotContext,
+    ) -> Result<(), Error> {
+        let context = Arc::new(Mutex::new(context));
+        self.auth_slots.register(&context)?;
+        self.slots.insert(slot_id, context);
+        Ok(())
     }
 
     fn insert_slot_contexts(
@@ -606,7 +614,7 @@ impl SlotContextRegistry {
         let mut storage_error = None;
         for (slot_id, slot, token_objects) in slots {
             let configured_storage = token_storage.is_some()
-                || (slot.kind() == SlotKind::Fido2 && fido_storage.is_some());
+                || (slot.accepts_legacy_fido_storage() && fido_storage.is_some());
             let context = token_storage_for_slot(slot.as_ref(), token_storage, fido_storage)
                 .and_then(|token_storage| {
                     SlotContext::new_with_storage(
@@ -778,6 +786,7 @@ impl std::fmt::Debug for SlotContext {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("SlotContext")
             .field("slot_id", &self.slot_id)
+            .field("kind", &self.slot.kind())
             .field("slot", &self.slot)
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
@@ -1151,7 +1160,7 @@ impl ModuleContext {
             pinentry,
             trust_store,
         )?;
-        slot_contexts.insert_yubihsm_slot_context(slot_id, context);
+        slot_contexts.insert_yubihsm_slot_context(slot_id, context)?;
         Ok(())
     }
 
@@ -1225,20 +1234,22 @@ impl SlotContext {
         slot.set_public_certificate_storage_enabled(token_storage.supports_mutation());
         let device = slot.device_context();
         let mut context = Self {
-            slot_id,
             slot,
-            device,
-            handles,
-            pinentry,
-            trust_store,
-            token_storage,
-            sessions: HashMap::new(),
-            login_role: None,
-            memory_objects: HashMap::new(),
-            token_object_handles: HashMap::new(),
-            backed_token_objects: HashMap::new(),
-            backed_object_references: HashMap::new(),
-            backed_object_handles: HashMap::new(),
+            state: SlotState {
+                slot_id,
+                device,
+                handles,
+                pinentry,
+                trust_store,
+                token_storage,
+                sessions: HashMap::new(),
+                login_role: None,
+                memory_objects: HashMap::new(),
+                token_object_handles: HashMap::new(),
+                backed_token_objects: HashMap::new(),
+                backed_object_references: HashMap::new(),
+                backed_object_handles: HashMap::new(),
+            },
         };
         let mut token_objects = token_objects;
         if token_objects
@@ -1255,19 +1266,164 @@ impl SlotContext {
         Ok(context)
     }
 
-    fn token_storage_provider(&self) -> &dyn StorageProvider {
-        self.slot
-            .native_storage_provider()
-            .unwrap_or(self.token_storage.as_ref())
-    }
-
     fn stored_token_objects(
         &self,
     ) -> Result<Vec<(crate::storage::ContentReference, TokenObject)>, Error> {
-        if self.slot.native_storage_objects_are_backend_managed() {
+        self.state.stored_token_objects(&*self.slot)
+    }
+
+    pub(crate) fn store_backed_object(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+        object: TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        self.state
+            .store_backed_object(&mut *self.slot, session_handle, object)
+    }
+
+    pub(crate) fn destroy_backed_object(
+        &mut self,
+        handle: CK_OBJECT_HANDLE,
+        object: &TokenObject,
+    ) -> Result<bool, Error> {
+        self.state
+            .destroy_backed_object(&mut *self.slot, handle, object)
+    }
+
+    pub(crate) fn replace_backed_object(
+        &mut self,
+        handle: CK_OBJECT_HANDLE,
+        previous: &TokenObject,
+        replacement: TokenObject,
+    ) -> Result<bool, Error> {
+        self.state
+            .replace_backed_object(&mut *self.slot, handle, previous, replacement)
+    }
+
+    pub(crate) fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
+        self.state.get_slot(&*self.slot, slot_id)
+    }
+
+    pub(crate) fn get_present_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
+        self.state.get_present_slot(&*self.slot, slot_id)
+    }
+
+    pub(crate) fn _get_slot_mut(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<&mut (dyn Slot + '_), Error> {
+        self.state._get_slot_mut(&mut *self.slot, slot_id)
+    }
+
+    pub(crate) fn _get_session(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(&(dyn Slot + '_), &(dyn BackendSession + '_)), Error> {
+        self.state._get_session(&*self.slot, session_handle)
+    }
+
+    pub(crate) fn session_details(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(CK_SLOT_ID, CK_FLAGS, bool), Error> {
+        self.state.session_details(&*self.slot, session_handle)
+    }
+
+    pub(crate) fn login_role(&self, slot_id: CK_SLOT_ID) -> Option<LoginRole> {
+        self.state.login_role(&*self.slot, slot_id)
+    }
+
+    pub(crate) fn is_slot_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
+        self.state.is_slot_logged_in(&*self.slot, slot_id)
+    }
+
+    pub(crate) fn is_slot_user_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
+        self.state.is_slot_user_logged_in(&*self.slot, slot_id)
+    }
+
+    pub(crate) fn reconcile_login_state(&mut self, slot_id: CK_SLOT_ID) {
+        self.state.reconcile_login_state(&mut *self.slot, slot_id)
+    }
+
+    pub(crate) fn resolve_object(
+        &self,
+        handle: CK_OBJECT_HANDLE,
+    ) -> Result<Option<TokenObject>, Error> {
+        self.state.resolve_object(&*self.slot, handle)
+    }
+
+    pub(crate) fn resolved_objects(&self) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
+        self.state.resolved_objects(&*self.slot)
+    }
+
+    pub(crate) fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
+        self.state
+            .refresh_slot_token_objects(&mut *self.slot, slot_id)
+    }
+
+    pub(crate) fn refresh_slot_token_objects_with_rebindings(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        rebindings: &[(CK_OBJECT_HANDLE, String)],
+    ) -> Result<(), Error> {
+        self.state
+            .refresh_slot_token_objects_with_rebindings(&mut *self.slot, slot_id, rebindings)
+    }
+
+    pub(crate) fn init_token(
+        &mut self,
+        so_pin: &[u8],
+        label: [CK_UTF8CHAR; 32],
+    ) -> Result<(), Error> {
+        self.state.init_token(&mut *self.slot, so_pin, label)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_token_storage_provider(
+        &mut self,
+        provider: Box<dyn StorageProvider>,
+    ) -> Result<(), Error> {
+        self.state
+            .set_token_storage_provider(&mut *self.slot, provider)
+    }
+
+    pub(crate) fn insert_session_objects(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(), Error> {
+        self.state
+            .insert_session_objects(&mut *self.slot, slot_id, session_handle)
+    }
+
+    pub(crate) fn logout_slot(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
+        self.state.logout_slot(&mut *self.slot, slot_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_slot_state(&mut self, slot_id: CK_SLOT_ID, remove_token_objects: bool) {
+        self.state
+            .close_slot_state(&mut *self.slot, slot_id, remove_token_objects)
+    }
+}
+
+impl SlotState {
+    fn token_storage_provider<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+    ) -> &'a dyn StorageProvider {
+        slot.native_storage_provider()
+            .unwrap_or(self.token_storage.as_ref())
+    }
+
+    fn stored_token_objects<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+    ) -> Result<Vec<(crate::storage::ContentReference, TokenObject)>, Error> {
+        if slot.native_storage_objects_are_backend_managed() {
             return Ok(Vec::new());
         }
-        stored_objects(self.token_storage_provider(), self.slot_id, true)
+        stored_objects(self.token_storage_provider(slot), self.slot_id, true)
     }
 
     fn record_backed_objects(
@@ -1291,13 +1447,14 @@ impl SlotContext {
         }
     }
 
-    pub(crate) fn store_backed_object(
-        &mut self,
+    pub(crate) fn store_backed_object<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         session_handle: CK_SESSION_HANDLE,
         mut object: TokenObject,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
         let reference = if object.token {
-            put_backed_object(self.token_storage_provider(), &object)?
+            put_backed_object(self.token_storage_provider(slot), &object)?
         } else {
             let session = self.get_session_context(session_handle)?;
             put_backed_object(&session.storage, &object)?
@@ -1307,7 +1464,7 @@ impl SlotContext {
             self.backed_object_references
                 .insert(object.unique_id.clone(), reference.clone());
             let unique_id = object.unique_id.clone();
-            self.refresh_slot_token_objects(self.slot_id)?;
+            self.refresh_slot_token_objects(slot, self.slot_id)?;
             let handle = self
                 .token_object_handles
                 .iter()
@@ -1345,8 +1502,9 @@ impl SlotContext {
             })
     }
 
-    pub(crate) fn destroy_backed_object(
-        &mut self,
+    pub(crate) fn destroy_backed_object<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         handle: CK_OBJECT_HANDLE,
         object: &TokenObject,
     ) -> Result<bool, Error> {
@@ -1366,7 +1524,7 @@ impl SlotContext {
         let deleted = if shared {
             true
         } else if object.token {
-            self.token_storage_provider()
+            self.token_storage_provider(slot)
                 .delete(&reference)
                 .map_err(crate::backed_object::storage_error)?
         } else {
@@ -1384,15 +1542,16 @@ impl SlotContext {
             self.backed_object_references.remove(&object.unique_id);
         }
         if object.token {
-            self.refresh_slot_token_objects(self.slot_id)?;
+            self.refresh_slot_token_objects(slot, self.slot_id)?;
         } else {
             self.remove_object_handle(handle);
         }
         Ok(true)
     }
 
-    pub(crate) fn replace_backed_object(
-        &mut self,
+    pub(crate) fn replace_backed_object<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         handle: CK_OBJECT_HANDLE,
         previous: &TokenObject,
         mut replacement: TokenObject,
@@ -1410,7 +1569,7 @@ impl SlotContext {
             return Ok(false);
         };
         let replacement_reference = if replacement.token {
-            put_backed_object(self.token_storage_provider(), &replacement)?
+            put_backed_object(self.token_storage_provider(slot), &replacement)?
         } else {
             let creator = previous.creator_session.ok_or(CKR_DEVICE_ERROR)?;
             put_backed_object(&self.get_session_context(creator)?.storage, &replacement)?
@@ -1418,7 +1577,7 @@ impl SlotContext {
         let shared = self.backed_reference_is_shared(handle, &previous_reference, previous);
         if replacement_reference != previous_reference && !shared {
             let deleted = if replacement.token {
-                self.token_storage_provider()
+                self.token_storage_provider(slot)
                     .delete(&previous_reference)
                     .map_err(crate::backed_object::storage_error)?
             } else {
@@ -1443,8 +1602,8 @@ impl SlotContext {
         self.backed_object_handles
             .insert(handle, replacement_reference);
         if replacement.token {
-            let mut objects = self.slot.token_objects(self.slot_id)?;
-            let stored = self.stored_token_objects()?;
+            let mut objects = slot.token_objects(self.slot_id)?;
+            let stored = self.stored_token_objects(slot)?;
             self.record_backed_objects(&stored);
             objects.extend(stored.into_iter().map(|(_, object)| object));
             self.reconcile_slot_token_objects_with_rebindings(
@@ -1468,42 +1627,57 @@ impl SlotContext {
         }
     }
 
-    pub(crate) fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
+    pub(crate) fn get_slot<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<&'a S, Error> {
         self.require_slot_id(slot_id)?;
-        Ok(self.slot.as_ref())
+        Ok(slot)
     }
-    pub(crate) fn get_present_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
-        let slot = self.get_slot(slot_id)?;
+
+    pub(crate) fn get_present_slot<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<&'a S, Error> {
+        let slot = self.get_slot(slot, slot_id)?;
         if slot.is_present() {
             Ok(slot)
         } else {
             Err(CKR_TOKEN_NOT_PRESENT.into())
         }
     }
-    pub(crate) fn _get_slot_mut(
-        &mut self,
+
+    pub(crate) fn _get_slot_mut<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         slot_id: CK_SLOT_ID,
-    ) -> Result<&mut (dyn Slot + '_), Error> {
+    ) -> Result<&'a mut S, Error> {
         self.require_slot_id(slot_id)?;
-        Ok(self.slot.as_mut())
+        Ok(slot)
     }
-    pub(crate) fn get_session_(
-        &self,
+
+    pub(crate) fn get_session_<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
         session_handle: CK_SESSION_HANDLE,
-    ) -> Option<(&(dyn Slot + '_), &(dyn BackendSession + '_))> {
+    ) -> Option<(&'a S, &'a (dyn BackendSession + 'a))> {
         let session = self.sessions.get(&session_handle)?;
-        (session.backend().slotID() == self.slot_id)
-            .then_some((self.slot.as_ref(), session.backend()))
+        (session.backend().slotID() == self.slot_id).then_some((slot, session.backend()))
     }
-    pub(crate) fn _get_session(
-        &self,
+
+    pub(crate) fn _get_session<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
         session_handle: CK_SESSION_HANDLE,
-    ) -> Result<(&(dyn Slot + '_), &(dyn BackendSession + '_)), Error> {
-        match self.get_session_(session_handle) {
+    ) -> Result<(&'a S, &'a (dyn BackendSession + 'a)), Error> {
+        match self.get_session_(slot, session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into()),
         }
     }
+
     pub(crate) fn get_session_context(
         &self,
         session_handle: CK_SESSION_HANDLE,
@@ -1517,6 +1691,7 @@ impl SlotContext {
         }
         Ok(session)
     }
+
     pub(crate) fn get_session_context_mut(
         &mut self,
         session_handle: CK_SESSION_HANDLE,
@@ -1530,35 +1705,53 @@ impl SlotContext {
         }
         Ok(session)
     }
-    pub(crate) fn session_details(
-        &self,
+
+    pub(crate) fn session_details<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
         session_handle: CK_SESSION_HANDLE,
     ) -> Result<(CK_SLOT_ID, CK_FLAGS, bool), Error> {
-        let session = self._get_session(session_handle)?.1;
+        let session = self._get_session(slot, session_handle)?.1;
         let slot_id = session.slotID();
         Ok((
             slot_id,
             session.flags(),
-            self.login_role(slot_id) == Some(LoginRole::User),
+            self.login_role(slot, slot_id) == Some(LoginRole::User),
         ))
     }
 
-    pub(crate) fn login_role(&self, slot_id: CK_SLOT_ID) -> Option<LoginRole> {
-        (slot_id == self.slot_id && self.slot.login_is_active())
+    pub(crate) fn login_role<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        slot_id: CK_SLOT_ID,
+    ) -> Option<LoginRole> {
+        (slot_id == self.slot_id && slot.login_is_active())
             .then_some(self.login_role)
             .flatten()
     }
 
-    pub(crate) fn is_slot_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
-        self.login_role(slot_id).is_some()
+    pub(crate) fn is_slot_logged_in<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        slot_id: CK_SLOT_ID,
+    ) -> bool {
+        self.login_role(slot, slot_id).is_some()
     }
 
-    pub(crate) fn is_slot_user_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
-        self.login_role(slot_id) == Some(LoginRole::User)
+    pub(crate) fn is_slot_user_logged_in<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        slot_id: CK_SLOT_ID,
+    ) -> bool {
+        self.login_role(slot, slot_id) == Some(LoginRole::User)
     }
 
-    pub(crate) fn reconcile_login_state(&mut self, slot_id: CK_SLOT_ID) {
-        if self.login_role.is_some() && !self.is_slot_logged_in(slot_id) {
+    pub(crate) fn reconcile_login_state<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
+        slot_id: CK_SLOT_ID,
+    ) {
+        if self.login_role.is_some() && !self.is_slot_logged_in(slot, slot_id) {
             self.clear_login_state(slot_id);
         }
     }
@@ -1575,8 +1768,9 @@ impl SlotContext {
         Ok(handle)
     }
 
-    pub(crate) fn resolve_object(
-        &self,
+    pub(crate) fn resolve_object<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
         handle: CK_OBJECT_HANDLE,
     ) -> Result<Option<TokenObject>, Error> {
         if let Some(object) = self.memory_objects.get(&handle) {
@@ -1588,7 +1782,7 @@ impl SlotContext {
         if let Some(object) = self.backed_token_objects.get(&locator.unique_id) {
             return Ok(Some(object.clone()));
         }
-        self.slot.token_object(self.slot_id, &locator.unique_id)
+        slot.token_object(self.slot_id, &locator.unique_id)
     }
 
     pub(crate) fn is_native_token_object_handle(&self, handle: CK_OBJECT_HANDLE) -> bool {
@@ -1596,14 +1790,16 @@ impl SlotContext {
             && !self.backed_object_handles.contains_key(&handle)
     }
 
-    pub(crate) fn resolved_objects(&self) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
+    pub(crate) fn resolved_objects<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+    ) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
         let mut objects = self
             .memory_objects
             .iter()
             .map(|(handle, object)| (*handle, object.clone()))
             .collect::<Vec<_>>();
-        let mut token_objects = self
-            .slot
+        let mut token_objects = slot
             .token_objects(self.slot_id)?
             .into_iter()
             .filter(|object| object.token)
@@ -1730,57 +1926,64 @@ impl SlotContext {
         Ok(())
     }
 
-    pub(crate) fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
-        self.refresh_slot_token_objects_with_rebindings(slot_id, &[])
+    pub(crate) fn refresh_slot_token_objects<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<(), Error> {
+        self.refresh_slot_token_objects_with_rebindings(slot, slot_id, &[])
     }
 
-    pub(crate) fn refresh_slot_token_objects_with_rebindings(
-        &mut self,
+    pub(crate) fn refresh_slot_token_objects_with_rebindings<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         slot_id: CK_SLOT_ID,
         rebindings: &[(CK_OBJECT_HANDLE, String)],
     ) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
-        let mut objects = self.slot.token_objects(slot_id)?;
-        let stored = self.stored_token_objects()?;
+        let mut objects = slot.token_objects(slot_id)?;
+        let stored = self.stored_token_objects(slot)?;
         self.record_backed_objects(&stored);
         objects.extend(stored.into_iter().map(|(_, object)| object));
         self.reconcile_slot_token_objects_with_rebindings(slot_id, objects, rebindings)
     }
 
-    pub(crate) fn init_token(
-        &mut self,
+    pub(crate) fn init_token<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         so_pin: &[u8],
         label: [CK_UTF8CHAR; 32],
     ) -> Result<(), Error> {
         if !self.sessions.is_empty() {
             return Err(CKR_SESSION_EXISTS.into());
         }
-        self.slot.init_token(so_pin, label)?;
+        slot.init_token(so_pin, label)?;
         self.login_role = None;
-        self.refresh_slot_token_objects(self.slot_id)
+        self.refresh_slot_token_objects(slot, self.slot_id)
     }
 
     #[cfg(test)]
-    pub(crate) fn set_token_storage_provider(
-        &mut self,
+    pub(crate) fn set_token_storage_provider<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         provider: Box<dyn StorageProvider>,
     ) -> Result<(), Error> {
-        if self.slot.native_storage_provider().is_some() {
+        if slot.native_storage_provider().is_some() {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
-        self.slot
-            .set_public_certificate_storage_enabled(provider.supports_mutation());
+        slot.set_public_certificate_storage_enabled(provider.supports_mutation());
         self.token_storage = provider;
-        self.refresh_slot_token_objects(self.slot_id)
+        self.refresh_slot_token_objects(slot, self.slot_id)
     }
 
-    pub(crate) fn insert_session_objects(
-        &mut self,
+    pub(crate) fn insert_session_objects<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
         slot_id: CK_SLOT_ID,
         session_handle: CK_SESSION_HANDLE,
     ) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
-        let objects = self.slot.session_objects(slot_id)?;
+        let objects = slot.session_objects(slot_id)?;
         for mut object in objects.into_iter().filter(|object| !object.token) {
             if !object.unique_id.is_empty()
                 && self
@@ -1808,22 +2011,34 @@ impl SlotContext {
             .retain(|_, object| object.token || !object.private);
     }
 
-    pub(crate) fn logout_slot(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
-        self._get_slot_mut(slot_id)?.logout()?;
+    pub(crate) fn logout_slot<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<(), Error> {
+        self._get_slot_mut(slot, slot_id)?.logout()?;
         self.clear_login_state(slot_id);
-        if self.get_slot(slot_id)?.refresh_token_objects_after_logout() {
-            self.refresh_slot_token_objects(slot_id)?;
+        if self
+            .get_slot(slot, slot_id)?
+            .refresh_token_objects_after_logout()
+        {
+            self.refresh_slot_token_objects(slot, slot_id)?;
         }
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) fn close_slot_state(&mut self, slot_id: CK_SLOT_ID, remove_token_objects: bool) {
+    pub(crate) fn close_slot_state<'a, S: Slot + ?Sized>(
+        &'a mut self,
+        slot: &'a mut S,
+        slot_id: CK_SLOT_ID,
+        remove_token_objects: bool,
+    ) {
         if self.require_slot_id(slot_id).is_err() {
             return;
         }
         self.login_role = None;
-        self.slot.clear_session();
+        slot.clear_session();
         self.sessions.clear();
         self.memory_objects
             .retain(|_, object| !remove_token_objects && object.token);
@@ -2530,11 +2745,9 @@ impl ModuleContext {
                 )?;
             }
         }
-        if self.platform_enabled
-            && self.serial_is_visible(crate::backend::platform::PLATFORM_SERIAL)
-        {
+        if self.platform_enabled && self.serial_is_visible(crate::backend::host::HOST_SERIAL) {
             let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
-            let slot = Box::new(crate::backend::platform::PlatformSlot::new()?);
+            let slot = Box::new(crate::backend::host::HostSlot::new()?);
             let objects = slot.token_objects(slot_id)?;
             slot_contexts.insert_slot_contexts(
                 vec![(slot_id, slot, objects)],
@@ -2784,17 +2997,17 @@ impl ModuleContext {
                 }
             }
         }
-        let yubihsm_slot_ids = slot_contexts
+        let refresh_slot_ids = slot_contexts
             .keys()
             .filter(|slot_id| {
                 slot_contexts
                     .get(slot_id)
                     .and_then(|context| context.lock().ok())
-                    .is_some_and(|context| context.slot.kind() == SlotKind::YubiHsm)
+                    .is_some_and(|context| context.slot.refresh_objects_after_discovery())
             })
             .copied()
             .collect::<Vec<_>>();
-        for slot_id in yubihsm_slot_ids {
+        for slot_id in refresh_slot_ids {
             if let Some(context) = slot_contexts.get(&slot_id) {
                 match context.lock() {
                     Ok(mut context) => {
@@ -3051,7 +3264,7 @@ impl ModuleContext {
                     {
                         return Err(CKR_CANT_LOCK.into());
                     }
-                    slot_contexts.insert_yubihsm_slot_context(slot_id, prepared.context);
+                    slot_contexts.insert_yubihsm_slot_context(slot_id, prepared.context)?;
                     slot_contexts
                         .discovered_slots
                         .insert(prepared.identity, prepared.registration);
@@ -3683,7 +3896,7 @@ mod discovery_tests {
         assert!(
             context
                 .auth_slots
-                .matching(SlotKind::Platform)
+                .matching(SlotKind::Host)
                 .unwrap()
                 .is_empty()
         );
@@ -3941,6 +4154,18 @@ mod discovery_tests {
             )
         };
         assert!(first_connector.is_present());
+
+        let auth_sources = context.auth_slots.matching(SlotKind::YubiHsm).unwrap();
+        assert_eq!(auth_sources.len(), 1);
+        assert!(Arc::ptr_eq(
+            &auth_sources[0],
+            context
+                .slot_contexts
+                .read()
+                .unwrap()
+                .get(&first_slot_id)
+                .unwrap()
+        ));
 
         context.refresh_discovery().unwrap();
         let second_slot_id = {
@@ -4267,7 +4492,7 @@ mod discovery_tests {
             .unwrap();
         assert_eq!(config.root(), generic.0);
         assert_eq!(
-            config.token_root(&key("12345678"), SlotKind::Fido2),
+            config.token_root(&key("12345678"), "fido2"),
             generic
                 .0
                 .join(TOKEN_STORAGE_SCHEMA_DIRECTORY)
@@ -4275,7 +4500,7 @@ mod discovery_tests {
                 .join("fido2")
         );
         assert_eq!(
-            config.token_root(&key("12345678"), SlotKind::Ccid(CcidApplication::Piv)),
+            config.token_root(&key("12345678"), "piv"),
             generic
                 .0
                 .join(TOKEN_STORAGE_SCHEMA_DIRECTORY)

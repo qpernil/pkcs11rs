@@ -201,8 +201,9 @@ impl SessionKeys {
     }
 }
 
-/// Handshake-owned key arena. Long-term keys and ECDH agreements remain
-/// protected; successful receipt verification releases only working AES keys.
+/// Handshake-owned key arena. Static keys and agreements remain protected.
+/// The combined KDF path exports only the ephemeral agreement as its prefix;
+/// successful receipt verification releases the working AES keys.
 pub(super) struct AsymmetricKeys {
     scope: Pkcs11KeyScope,
     ephemeral: KeyHandle,
@@ -232,6 +233,45 @@ impl AsymmetricKeys {
         let shared = self.scope.ecdh(&base, peer, agreement_template())?;
         self.scope.destroy(&base)?;
         self.scope.take_key(&shared)
+    }
+
+    pub(super) fn finish_with_credential(
+        mut self,
+        credential: &BoundKey,
+        peer: &[u8],
+        context: &[u8; 130],
+        receipt: &[u8; 16],
+    ) -> Result<SessionKeys, Error> {
+        let base = self.scope.bind(credential)?;
+        if !self
+            .scope
+            .can_derive(&base, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)?
+        {
+            self.scope.destroy(&base)?;
+            let shared = self.static_agreement(credential, peer)?;
+            return self.finish(&shared, context, receipt);
+        }
+        if self.public_key()?.as_slice() != &context[..65] {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let ephemeral_shared = self.scope.ecdh(
+            &self.ephemeral,
+            &context[65..],
+            readable(generic_template(&[])),
+        )?;
+        let prefix = self.scope.read_ephemeral_agreement(&ephemeral_shared)?;
+        self.scope.destroy(&ephemeral_shared)?;
+        // This is a capability decision, not an error-based retry. A failed
+        // combined operation must never fall back to exporting a static secret.
+        let material = self.scope.prefixed_ecdh(
+            &base,
+            peer,
+            &prefix,
+            &super::SCP11_SHARED_INFO,
+            readable(generic_template(&[CKM_EXTRACT_KEY_FROM_KEY as _])),
+            64,
+        )?;
+        finish_asymmetric(self.scope, material, context, receipt)
     }
 
     pub(super) fn finish(

@@ -1,7 +1,8 @@
 # Software secret keys, derivation, and wrapping
 
-Every slot provides AES, 3DES, generic-secret, and hash-specific HMAC keys
-as host software session objects. Named software slots additionally provide
+Ordinary slots provide AES, 3DES, generic-secret, and hash-specific HMAC keys
+as host software session objects. The native HSM Auth slot excludes software
+keys and mechanisms. Named software slots additionally provide
 encrypted private token objects. Hardware token requests retain backend
 capability and persistence restrictions. See the
 [shared session layer](architecture.md#shared-software-session-objects-and-mechanism-discovery). The user-facing

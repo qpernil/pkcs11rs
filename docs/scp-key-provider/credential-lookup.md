@@ -1,113 +1,116 @@
-# Proposed named SCP credential lookup
+# Named SCP credential lookup
 
-This is the next storage/selection layer for the [SCP key-provider plan](README.md).
-Selection across arbitrary providers is a design, not an implemented configuration
-format. The enabled platform slot already supports exact label lookup and
-public-key projection matching through the existing platform selector syntax. The YubiHSM client
-derives channel keys through the `Pkcs11Auth` Rust session API,
-then reads the final working AES keys for local message crypto; its configured input paths use password-derived credentials,
-YubiHSM Auth, or platform credentials. A resolver must connect stored token
-objects to the existing slot/session adapter without extracting long-term values.
+YubiHSM authentication selects credentials from enabled PKCS #11 source slots.
+Ordinary source keys feed the shared `Pkcs11Auth` Rust session API. Native HSM
+Auth slots advertise `CKP_YUBICO_HSMAUTH` and use their session-bound native
+operation. Both paths keep long-term values out of the client's message code;
+final working AES keys are read once for local secure messaging. See
+[YubiHSM authentication](../yubihsm-auth.md) for selector syntax and the
+[SCP key-provider plan](README.md) for remaining card and virtual-device work.
 
 ## One name identifies one credential
 
-Resolve `(provider identity, credential name, protocol profile)` before opening
-the target secure channel. Provider identity selects one token independently
-of the target device. For an asymmetric credential, the name is an exact
-`CKA_LABEL` match within that token. A symmetric credential name expands to `<name>.enc` and
-`<name>.mac`. Each lookup requires `CKA_TOKEN=true` and the expected class/type.
-Names are not globally unique.
-Use standard `C_FindObjects` semantics where the provider is a PKCS #11 token;
-a native adapter can use its device's object enumeration and label fields.
+The explicit selector `:AAAA<label>@<source serial>` identifies a target
+Authentication Key ID, credential name, and source token. Asymmetric public
+matching also supports `:*` and narrower wildcard selectors. A platform key uses
+the same syntax: `:AAAA<label>@host`. Names are not
+globally unique; a serial collision or duplicate matching credential is an
+ambiguity, not permission to choose the first result.
 
-| Profile | Persistent credential | Required operation |
+| Credential | Source objects | Pairing |
 | --- | --- | --- |
-| YubiHSM symmetric | Two `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each, labelled `<name>.enc` and `<name>.mac` | Counter KDF directly on the protected AES handles |
-| YubiHSM asymmetric | One `CKO_PRIVATE_KEY`, `CKK_EC`, P-256 | ECDH into a protected generic-secret session object |
+| Ordinary symmetric | Two token `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each | Exact labels `<name>.enc` and `<name>.mac`; `CKA_ID` is not compared |
+| Ordinary asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_EC`, P-256, with a public projection for automatic selection | Public and private keys must have both identical `CKA_LABEL` and identical `CKA_ID`, including empty IDs |
+| Native HSM Auth symmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_SYMMETRIC` | Exact credential label |
+| Native HSM Auth asymmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, plus P-256 public projection | Credential and projection share both `CKA_LABEL` and `CKA_ID` |
 
-Validate protection, key type/size or curve, derive permission, allowed
-mechanisms, and all applicable output-template restrictions before sending
-`CreateSession`. Long-term bindings and agreement inputs stay protected. Final working outputs
-are private session objects explicitly permitting value reads. SCP03 counter
-KDF creates readable AES outputs; SCP11 creates readable hash blocks before
-concatenation/extraction, preserving the mechanism inheritance rules. Unimplemented policy features
-must fail explicitly; a resolver must not strip a source's restrictions to
-make it usable. The session adapter forwards nested policy templates to the
-same validation and merging handlers used by the C API.
+Target YubiHSM Authentication Key records share the vendor authentication key
+types, but their slots do not advertise `CKP_YUBICO_HSMAUTH`. They remain
+non-operational metadata and are excluded from native source discovery.
 
-A missing name returns a missing-credential error. Multiple matches return an
-ambiguity error; never pick the first enumeration result. A matching label with
-an incompatible type/profile is a configuration error, not a request to try
-password authentication. PKCS #11 does not make labels unique, so provisioning
-must check collisions as well as lookup. Device label-length/encoding limits
-must be applied explicitly, without truncation or normalization that aliases
-names. Key bytes must never participate in name matching.
+Every existing-source lookup requires `CKA_TOKEN=true` and the expected object
+class/type. Symmetric keys require explicit selection: each role must resolve
+to exactly one AES-128 key. Different native IDs are valid for the two roles.
+Missing keys return `CKR_KEY_HANDLE_INVALID`; duplicate matches return
+`CKR_TEMPLATE_INCONSISTENT`. A name matching both an ordinary asymmetric key and
+symmetric roles is ambiguous. No failure causes password-based protocol fallback.
 
-The target Authentication Key ID remains a separate setting: it identifies
-the peer's matching authentication record, not the client's stored credential.
-Changing a credential name must not silently change that target ID.
+A directly supplied password prepares both credential types as protected
+session objects in a temporary software slot. Preparation retains the handles
+returned by key creation and uses them directly, without searching by label.
+It releases the unused type after selecting the target authentication protocol.
 
-## Binding, authorization, and lifetime
+The target Authentication Key ID identifies the peer's authentication record;
+it is independent of the source objects' IDs and labels. Automatic asymmetric
+matching compares public points with the target's public token projections;
+the matching projection's two-byte ID supplies the target Authentication Key ID.
 
-Resolve and authorize the provider independently of the target channel. Never
-acquire a second public slot lock underneath an existing target slot lock or
-bootstrap a provider through the channel it is helping establish. Reject direct
-and indirect provider dependency cycles.
+## Selection and authorization
 
-The resolver returns an opaque key reference tied to the provider's identity,
-object instance, and authorization lifetime during establishment. A binding shares access to an
-existing object; it does not copy its value, create a weaker object, or take
-ownership of deleting the persistent credential. Scope cleanup destroys only
-channel-owned temporary and working objects.
+Enumeration uses public objects and never submits a password to discover which
+source is suitable. A unique source credential and target ID must be selected
+before authorization. Explicit source/name selection can defer private lookup
+until that source is authorized; hidden credentials cannot participate in public
+wildcard matching. Slots without matching token credentials contribute no
+candidate, regardless of their backend kind.
 
-A future resolver needs an authorization lease or equivalent revocation check:
-logout, provider disconnect, replacement, or session loss must invalidate
-bindings and dependent derivation operations. After final working keys have
-been read, the established target channel uses its own local lifetime; removing
-the derivation provider cannot revoke those already exported keys. The existing
-in-module retained-reference primitive alone is not a complete token-login revocation mechanism. Do not
-retain a login PIN/password to renew that lease. Preserve the explicit existing
-session-recreation exception and its documented scope.
+An ordinary source session reuses existing USER authorization, otherwise uses
+the selected source's ordinary login when `CKF_LOGIN_REQUIRED` is set. Platform
+uses an empty PIN. No other source is tried after a failed login. Source PIN
+length and policy belong to the selected provider. Native HSM Auth credentials
+use their credential password in the native operation; their slot has no USER
+login. SO management authorization remains separate.
 
-Resolve once per authentication attempt. Do not repeatedly search by name for
-every message. A deleted/replaced object or lost provider invalidates the bound
-instance; an old handle must never silently bind to a replacement with the same
-label. A fresh authorized attempt may resolve the name again. Avoid claiming
-`CKA_ID` or a numeric device ID is a permanent instance identifier when the
-provider can reuse it.
+Native discovery uses the advertised profile followed by explicit searches for
+the two credential key types. Further native authentication protocols can define
+their own profiles, key types, and operations without changing ordinary key
+selection. The source index contains weak slot references and capabilities,
+not a separate credential inventory.
 
-## Storage and execution
+## Binding and lifetime
 
-The software token can persist these standard object types using its existing
-encrypted store. The virtual YubiHSM needs protected generic-secret storage and
-volatile derivation outputs in addition to its EC private-key support. Its
-native adapter must preserve the same lookup and authorization semantics.
-The symmetric profile uses separate AES token keys on software and native
-providers. It requires no generic-secret splitting and can use physical
-YubiHSM keys without exporting them. The prepared-session pair resolver uses
-the short `.enc` and `.mac` suffixes to identify roles; `CKA_ID` remains the
-provider's native identity. Each suffix must resolve to exactly one AES-128
-key. Missing matches return `CKR_KEY_HANDLE_INVALID`; duplicate matches return
-`CKR_TEMPLATE_INCONSISTENT`. The resolver also accepts session objects for
-private direct-password preparation. Configured source selection remains planned.
+Resolve once per authentication attempt. A bound reference keeps the selected
+provider session and object handle; it does not copy the long-term value or
+own deletion of a persistent credential. Derivation checks key type/size,
+permissions, mechanism restrictions, and output policy through the same handlers
+as the public API. Handshake scopes own transient objects and release them on
+success or failure.
 
-Message encryption and CMAC execute locally using final working keys read once
-at establishment. There is no alternate execution mode. A source policy that
-prohibits the required readable outputs must fail explicitly, without weakening
-existing objects or switching providers. Scope cleanup destroys derivation
-objects; the established channel owns and zeroizes its local working bytes.
+Logout, provider loss, deletion, or detectable replacement invalidates a binding.
+An old handle must not silently resolve a new object with the same label. Native
+HSM Auth inventory can detect asymmetric replacement by public key; it cannot
+distinguish replacement of a symmetric credential under the same label because
+the applet supplies no symmetric-key fingerprint. Neither `CKA_ID` nor a reusable
+native object ID is a permanent object-instance identifier.
 
-## Acceptance checks and implementation order
+Established channels own their exported working keys, so removal of the source
+cannot revoke an already established channel. Source PINs are not cached for
+recreation. The explicit session-recreation option retains only the documented
+source bindings or native credential password; see the
+[authentication secret policy](../authentication-secrets.md).
 
-1. Implement exact provider-scoped lookup and duplicate/missing/type errors,
-   initially against an authorized software token with provisioned fixtures.
-2. Bind stored symmetric and P-256 credentials to the existing derivation
-   graphs; exercise repeated authentication while preserving source objects.
-3. Add revocation, object replacement, cross-provider isolation, and dependency
-   cycle tests. Verify cleanup after receipt rejection and partial derivation.
-4. Implement the virtual-device storage and native protected-object commands;
-   run the same lookup and channel tests through its actual device interface.
+Releasing a retained ordinary credential closes its owning source session;
+it does not explicitly log out the source token. Closing the last source
+session logs it out, while other sessions retain their shared authorization.
+Another caller's explicit source logout invalidates authorization for
+recreation; the client does not silently log the source back in.
 
-Choose the user-facing configuration syntax with the resolver implementation,
-reusing existing provider/slot selectors rather than introducing another
-independent discovery scheme.
+A YubiHSM cannot bootstrap its own source authentication through the target
+channel. Initial discovery rejects a busy source instead of silently omitting
+it and potentially hiding ambiguity. Dependency-cycle handling across retained
+provider bindings remains a qualification item; avoid mutually dependent
+source/target authentication chains.
+
+## Storage and remaining qualification
+
+The software token persists ordinary AES and EC credentials in its encrypted
+store. Physical YubiHSM AES keys can supply counter KDF without exporting their
+values; derived session objects use the common in-module layer. Native
+virtual-YubiHSM protected generic-secret storage and volatile derivation outputs
+remain part of the virtual-device plan.
+
+Regression tests cover exact names, independent symmetric IDs, asymmetric
+label-and-ID pairing, public ambiguity without login, selected-source failure
+without fallback, private and persistent software sources, recreation, and
+cleanup. Remaining work includes retained-binding dependency cycles and native
+virtual-device execution of the same channel tests over its device interface.

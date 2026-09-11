@@ -142,11 +142,36 @@ pub(crate) fn openpgp_signature_requires_context_specific_login(
 }
 
 impl Slot for OpenPgpSlot {
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        Some("openpgp")
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn device_context(&self) -> Option<Arc<DeviceContext>> {
         Some(self.device.clone())
+    }
+
+    fn create_object(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
+        crate::api::native::create_openpgp_object_in_slot(self, ctx, session, template)
+    }
+    fn generate_key_pair(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        mechanism: &CK_MECHANISM,
+        public: &[CK_ATTRIBUTE],
+        private: &[CK_ATTRIBUTE],
+    ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
+        crate::api::native::generate_openpgp_token_pair_in_slot(
+            self, ctx, session, mechanism, public, private,
+        )
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::OpenPgp)
@@ -471,6 +496,19 @@ impl Slot for OpenPgpSlot {
         info.ulMinPinLen = self.pin_min.min(self.admin_pin_min) as CK_ULONG;
         info.ulMaxPinLen = self.pin_max.max(self.admin_pin_max) as CK_ULONG;
         Ok(())
+    }
+    fn key_mechanism_operations(
+        &self,
+        key: &TokenObject,
+        mechanism: CK_MECHANISM_TYPE,
+    ) -> CK_FLAGS {
+        let mut flags = crate::key_mechanisms::operations(key, mechanism);
+        if let KeyMaterial::OpenPgpPrivate { algorithm, .. } = &key.material
+            && !openpgp_sign_mechanism_supported(*algorithm, mechanism)
+        {
+            flags &= !(CKF_SIGN as CK_FLAGS);
+        }
+        flags
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = Vec::new();

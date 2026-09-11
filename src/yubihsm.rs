@@ -743,13 +743,17 @@ impl SecureSession {
         credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Self, Error> {
-        let mut exchange = AsymmetricKeys::for_key(credential)?;
+        let exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = Self::begin_asymmetric(connector, authkey_id, &public)?;
         let result = (|| {
             let device_static = trusted_device_public_key(connector, trust_prefix)?;
-            let static_shared = exchange.static_agreement(credential, &device_static)?;
-            exchange.finish(&static_shared, &handshake.context, &handshake.receipt)
+            exchange.finish_with_credential(
+                credential,
+                &device_static,
+                &handshake.context,
+                &handshake.receipt,
+            )
         })()
         .map_err(|e| map_asymmetric_provider_error(e, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV));
         match result {

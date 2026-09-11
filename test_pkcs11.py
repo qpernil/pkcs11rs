@@ -144,6 +144,8 @@ CKO_CERTIFICATE = 0x00000001
 CKO_PROFILE = 0x00000009
 CKC_X_509 = 0x00000000
 CKK_GENERIC_SECRET = 0x00000010
+CKK_YUBICO_HSMAUTH_SYMMETRIC = 0xD9554226
+CKK_YUBICO_HSMAUTH_ASYMMETRIC = 0xD9554227
 CKK_RSA = 0x00000000
 CKK_EC = 0x00000003
 CKK_AES = 0x0000001F
@@ -1749,7 +1751,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                     "Private Key Object; RSA",
                     "Public Key Object; RSA",
                     "Secret Key Object; AES",
-                    "Secret Key Object; Generic secret",
+                    # OpenSC may display vendor key types by number; the ABI
+                    # authentication-key test checks their exact identifiers.
                     "Certificate Object; type = X.509 cert",
                     "Data object",
                     "Profile object",
@@ -5258,7 +5261,7 @@ class Pkcs11AbiTests(unittest.TestCase):
 
                 hardware_session = self.open_slot_session(ABI_TEST_SLOT_ID)
                 rv, _ = export_key(hardware_session, 1)
-                self.assertEqual(rv, CKR_FUNCTION_NOT_SUPPORTED)
+                self.assertEqual(rv, CKR_USER_NOT_LOGGED_IN)
                 self.assertEqual(
                     self.lib.C_CloseSession(hardware_session),
                     CKR_OK,
@@ -7797,12 +7800,15 @@ fn main() {
             CKR_OK,
         )
 
-    def test_abi_yubihsm_authentication_keys_are_generic_secrets(self) -> None:
+    def test_abi_yubihsm_authentication_keys_have_algorithm_types(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
 
-        for object_id, expected_length in ((4, 32), (7, 64)):
+        for object_id, expected_length, expected_type in (
+            (4, 32, CKK_YUBICO_HSMAUTH_SYMMETRIC),
+            (7, 64, CKK_YUBICO_HSMAUTH_ASYMMETRIC),
+        ):
             key_id = (CK_BYTE * 2)(0, object_id)
             template = (CK_ATTRIBUTE * 1)(
                 CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id))
@@ -7858,7 +7864,7 @@ fn main() {
                 CKR_OK,
             )
             self.assertEqual(object_class.value, CKO_SECRET_KEY)
-            self.assertEqual(key_type.value, CKK_GENERIC_SECRET)
+            self.assertEqual(key_type.value, expected_type)
             self.assertEqual(value_len.value, expected_length)
             self.assertEqual(
                 generation_mechanism.value, CK_UNAVAILABLE_INFORMATION
@@ -9586,7 +9592,7 @@ fn main() {
             CKR_SESSION_HANDLE_INVALID,
         )
 
-    def test_unavailable_extension_mechanisms_are_rejected(self) -> None:
+    def test_extension_mechanism_availability_and_key_validation(self) -> None:
         session = self.initialize_and_open_session()
 
         assertion = CK_MECHANISM(CKM_PKCS11RS_FIDO_ASSERTION, None, 0)
@@ -9594,6 +9600,15 @@ fn main() {
             self.lib.C_SignInit(session, ctypes.byref(assertion), 2),
             CKR_MECHANISM_INVALID,
         )
+
+        info = CK_MECHANISM_INFO()
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(
+                ABI_TEST_SLOT_ID, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE, ctypes.byref(info)
+            ),
+            CKR_OK,
+        )
+        self.assertTrue(info.flags & CKF_DERIVE)
 
         shared_data = (CK_BYTE * 1)(0x01)
         public_data = (CK_BYTE * 1)(0x04)
@@ -9617,12 +9632,12 @@ fn main() {
             self.lib.C_DeriveKey(
                 session,
                 ctypes.byref(mechanism),
-                2,
+                0,
                 None,
                 0,
                 ctypes.byref(derived_key),
             ),
-            CKR_MECHANISM_INVALID,
+            CKR_KEY_HANDLE_INVALID,
         )
 
     def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:

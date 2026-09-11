@@ -330,7 +330,11 @@ fn validate_hsmauth_session(
     session_handle: CK_SESSION_HANDLE,
 ) -> Result<CK_SLOT_ID, Error> {
     let (slot_id, flags, _) = ctx.session_details(session_handle)?;
-    if ctx.get_slot(slot_id)?.kind() != SlotKind::Ccid(CcidApplication::HsmAuth) {
+    if !ctx
+        .get_slot(slot_id)?
+        .additional_profile_ids()
+        .contains(&CKP_YUBICO_HSMAUTH)
+    {
         return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
     }
     if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
@@ -376,7 +380,11 @@ pub(crate) fn hsmauth_authenticate(
 ) -> Result<YubiHsmSecureSession, Error> {
     with_session_context_mut(session, |ctx| {
         let slot_id = ctx._get_session(session)?.1.slotID();
-        if ctx.get_slot(slot_id)?.kind() != SlotKind::Ccid(CcidApplication::HsmAuth) {
+        if !ctx
+            .get_slot(slot_id)?
+            .additional_profile_ids()
+            .contains(&CKP_YUBICO_HSMAUTH)
+        {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         // Revalidate the handle against the current applet inventory, including

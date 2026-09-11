@@ -847,6 +847,14 @@ fn fido2_token_objects(
 }
 
 impl Slot for Fido2Slot {
+    fn accepts_legacy_fido_storage(&self) -> bool {
+        true
+    }
+
+    fn shared_storage_namespace(&self) -> Option<&'static str> {
+        Some("fido2")
+    }
+
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -855,6 +863,15 @@ impl Slot for Fido2Slot {
     }
     fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
         self.endpoint.device_operation_kind()
+    }
+
+    fn create_object(
+        &mut self,
+        ctx: &mut crate::context::SlotState,
+        session: CK_SESSION_HANDLE,
+        template: &[CK_ATTRIBUTE],
+    ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
+        crate::api::native::create_preview_sign_object_in_slot(self, ctx, session, template)
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Fido2

@@ -1,10 +1,11 @@
 # Protected prefixed ECDH derivation
 
-`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` maps PKCS #11 `C_DeriveKey` onto the
-virtual YubiHSM `DeriveEcdhKdf` extension. It performs ECDH with a private key
-held by the HSM, prefixes the raw agreement with caller-supplied material, and
-applies a mandatory ANSI X9.63 KDF without exposing the HSM-computed ECDH
-secret.
+`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` performs ECDH, prefixes the raw agreement
+with caller-supplied bytes, and applies a mandatory ANSI X9.63 KDF in one
+PKCS #11 `C_DeriveKey` operation. Its parameters contain one peer public key
+and prefix bytes; no second key handle is needed. A supporting virtual YubiHSM
+executes the `DeriveEcdhKdf` extension without exposing its raw ECDH result.
+Other supported ECDH sources use the module's common KDF implementation.
 
 ## Parameters and operation
 
@@ -44,9 +45,11 @@ X25519, and 56 raw bytes for X448.
 
 ## Availability and key policy
 
-A YubiHSM slot advertises the mechanism only when its algorithm list contains
-the virtual `ECDH KDF` extension identifier `57` and it supports at least one
-eligible curve. The supported curves are P-224, P-256, P-384, P-521,
+The common software mechanism set includes this operation. Software, host,
+PIV/OpenPGP, and physical YubiHSM ECDH keys can use it when their per-key
+permissions allow ECDH. A YubiHSM slot also advertises native hardware support
+when its algorithm list contains the virtual `ECDH KDF` identifier `57` and
+it supports an eligible curve. The supported curves are P-224, P-256, P-384, P-521,
 secp256k1, Brainpool P-256, P-384, P-512, X25519, and X448.
 
 The HSM command requires the separate `derive-ecdh-kdf` capability bit `0x38`
@@ -73,7 +76,10 @@ creator destroys it; logout also destroys it when `CKA_PRIVATE=CK_TRUE`.
 Persistent derived software keys require a backend that supports encrypted
 software-key storage; YubiHSM slots reject that request.
 
-The reusable raw ECDH secret remains inside the HSM. The final KDF output is
+With the native extension, the reusable raw ECDH secret remains inside the HSM.
+With physical YubiHSM or host keys, native ECDH returns the raw agreement to
+the module, which applies the KDF in zeroizing memory. It never returns the
+static agreement to the authentication client. The final KDF output is
 visible to the trusted provider process; the object's policy controls whether
 the PKCS #11 caller can read or export it. See the
 [shared session layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
@@ -89,6 +95,16 @@ S    = 3c 88 10
 Hash = SHA-256
 L    = 64
 ```
+
+Existing-slot authentication prefers this mechanism when both slot advertisement
+and the key's computed `CKA_ALLOWED_MECHANISMS` permit it. The client derives
+and reads only the ephemeral agreement `P`, then supplies it as prefix bytes
+for static ECDH plus KDF. A missing or excluded mechanism selects the standard
+protected-object ECDH/concatenation/SHA-256 sequence. Operational failures are
+returned without retrying through the fallback. Direct password authentication
+and recreation from an already retained static agreement use the standard
+sequence, preserving the documented retention of the static agreement rather
+than the password-derived private key.
 
 The 64-byte result is divided as follows:
 
@@ -125,7 +141,7 @@ advances.
 
 ## Security boundary
 
-The source HSM performs static ECDH and the complete X9.63 KDF. Its reusable
+When the native extension is used, the source HSM performs static ECDH and the complete X9.63 KDF. Its reusable
 static ECDH result never crosses the device boundary. The caller-visible
 ephemeral agreement, transcript, and final keys are specific to the target's
 fresh ephemeral key and therefore to that target session.
