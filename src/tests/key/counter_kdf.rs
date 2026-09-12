@@ -17,7 +17,7 @@ fn bytes(value: &mut [u8]) -> CK_PRF_DATA_PARAM {
 }
 
 // Owning boxes/buffers keep every nested C parameter stable when this fixture moves.
-struct Parameters {
+pub(super) struct Parameters {
     counter: Box<CK_SP800_108_COUNTER_FORMAT>,
     length: Box<CK_SP800_108_DKM_LENGTH_FORMAT>,
     _label: Vec<u8>,
@@ -27,7 +27,7 @@ struct Parameters {
 }
 
 impl Parameters {
-    fn scp03(constant: u8) -> Self {
+    pub(super) fn scp03(constant: u8) -> Self {
         let mut counter = Box::new(CK_SP800_108_COUNTER_FORMAT {
             bLittleEndian: CK_FALSE as CK_BBOOL,
             ulWidthInBits: 8,
@@ -63,7 +63,7 @@ impl Parameters {
         }
     }
 
-    fn mechanism(&mut self) -> CK_MECHANISM {
+    pub(super) fn mechanism(&mut self) -> CK_MECHANISM {
         CK_MECHANISM {
             mechanism: CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE,
             pParameter: (&mut self.params as *mut CK_SP800_108_KDF_PARAMS).cast(),

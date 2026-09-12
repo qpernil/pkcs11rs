@@ -5,6 +5,7 @@ mod object;
 mod otp;
 mod protocol;
 mod response;
+mod session_object;
 mod wrapping;
 
 #[cfg(test)]
@@ -25,6 +26,10 @@ use response::{
     ImportedObject, LogEntries, ObjectEntry, OtpDecryption, StorageInfo, require_empty,
 };
 pub(crate) use response::{ObjectInfo, PublicKey, parse_object_id, parse_object_list};
+pub(crate) use session_object::{
+    FLAG_DERIVE as SESSION_OBJECT_DERIVE, FLAG_READABLE as SESSION_OBJECT_READABLE,
+    FLAG_VERIFY as SESSION_OBJECT_VERIFY, SessionObjectKind, SessionObjectSource,
+};
 pub(crate) use wrapping::RsaWrapParameters;
 
 #[cfg(test)]

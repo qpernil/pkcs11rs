@@ -149,6 +149,28 @@ pub(super) fn derive(
             .ok_or(CKR_TEMPLATE_INCOMPLETE)? as usize;
         let (object, length) = derived_secret_object(template, length, 1024)?;
         validate_new_object_access(&object, flags, logged_in)?;
+        if super::native_session_objects_enabled(ctx, session)?
+            && !object.token
+            && let Some(source) = super::native_session_object_source(&base)
+        {
+            let command = YubiHsmCommand::derive_session_counter(
+                super::native_session_object_flags(&object),
+                super::native_session_object_kind(&object)?,
+                length,
+                source,
+                &fields,
+            )?;
+            let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
+            let handle = super::parse_native_session_handle(&response)?;
+            let mut object = object;
+            object.always_sensitive = base.always_sensitive && object.sensitive;
+            object.never_extractable = base.never_extractable && !object.extractable;
+            object.local = false;
+            object.key_gen_mechanism = Some(CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE);
+            *output =
+                super::publish_native_session_secret(ctx, session, slot, object, handle, length)?;
+            return Ok(());
+        }
         let object = crate::software_key_ops::derive_counter_key_with(
             &base,
             &fields,

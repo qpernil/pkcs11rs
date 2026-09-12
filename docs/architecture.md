@@ -41,9 +41,10 @@ HSM Auth slot excludes software private/secret key imports and mechanisms;
 public data, certificate storage, and credential metadata remain available.
 
 Generic operation routing uses advertised mechanisms, object material, and
-backend capabilities. Software-token persistence uses `stores_software_token_keys`;
-internal source authorization uses `user_login_requires_pin` to decide whether
-to prompt. Empty-PIN authorization still passes through ordinary login checks.
+backend capabilities. Software-token persistence uses
+`stores_software_token_keys`. Login always passes the supplied PIN through the
+common session path; each backend validates, uses, or ignores it according to
+that slot's authentication contract.
 Native object import, token storage, and key generation dispatch through methods
 on the main `Slot` trait. `SlotContext` owns that backend alongside `SlotState`,
 which holds sessions, handles, and storage bookkeeping. The fields can be borrowed
@@ -78,11 +79,26 @@ deletion, but payload replacement is read-only. Native data reports
 other nonempty values and rejects `CKA_PRIVATE=true` rather than losing these
 attributes. PIV token imports retain their native slot/tag rules.
 
-Hardware ECDH and protected prefixed ECDH return ordinary software secret keys.
+Hardware ECDH and protected prefixed ECDH normally return ordinary software secret keys.
 The template selects the supported key type, usage, sensitivity, and
 extractability; the result can be copied, used for host cryptography, and
 removed through the same APIs as an imported or generated session key. There
 is no separate synthetic-result key type or forced read-only usage policy.
+
+A YubiHSM advertising algorithm 61 can instead back supported P-256,
+generic-secret, and AES session objects with its secure session. Native commands
+cover P-256 generation and ECDH, key/data concatenation, extraction, SHA-256,
+SP 800-108 counter KDF, AES-CMAC verification, reads, and deletion. The PKCS #11
+creator session still owns the object, while all sessions on the slot can use
+its handle. The backing secure session remains alive for that lifetime; loss or
+recreation invalidates native handles rather than rebinding them.
+
+Native outputs preserve the requested readability, derivation, and verification
+policy. A readable result requesting an operation outside the native command set
+is read once and published as a software session key. A protected result cannot
+be materialized and fails if its requested operations cannot be honored
+natively. Mechanisms covered by algorithm 61 retain `CKF_HW` in the merged slot
+advertisement.
 
 `CKA_TOKEN=CK_TRUE` selects persistent backend storage. Hardware generation and
 import retain their native mechanism, key-size, curve, and authorization limits;

@@ -42,6 +42,303 @@ fn unreadable(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) {
     );
 }
 
+fn generate_native_p256(session: CK_SESSION_HANDLE) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut parameters = crate::pkcs11_auth::P256_PARAMS.to_vec();
+    let mut can_derive = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut public_template = [bytes_attribute(
+        CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+        &mut parameters,
+    )];
+    let mut private_template = [
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut can_derive),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+    ];
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV
+    );
+    (public, private)
+}
+
+fn native_protected_graph(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    peer: &mut [u8],
+    readable: bool,
+) -> CK_OBJECT_HANDLE {
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut generic = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut ecdh_length = 32 as CK_ULONG;
+    let mut intermediate_sensitive = CK_BBOOL::from(!readable);
+    let mut intermediate_extractable = CK_BBOOL::from(readable);
+    let mut protected = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut generic),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut ecdh_length),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(
+            CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            &mut intermediate_sensitive,
+        ),
+        scalar_attribute(
+            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            &mut intermediate_extractable,
+        ),
+    ];
+    let secret = derive_key_object(session, private, peer, &mut protected);
+    if !readable {
+        unreadable(session, secret);
+    }
+
+    let mut suffix = b"native protected graph".to_vec();
+    let mut data = CK_KEY_DERIVATION_STRING_DATA {
+        pData: suffix.as_mut_ptr(),
+        ulLen: suffix.len() as CK_ULONG,
+    };
+    let mut append = mechanism(
+        CKM_CONCATENATE_BASE_AND_DATA as CK_MECHANISM_TYPE,
+        &mut data,
+    );
+    let appended = derive(session, &mut append, secret, &mut protected);
+    if !readable {
+        unreadable(session, appended);
+    }
+
+    let mut hash = CK_MECHANISM {
+        mechanism: CKM_SHA256_KEY_DERIVATION as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let hashed = derive(session, &mut hash, appended, &mut protected);
+    if !readable {
+        unreadable(session, hashed);
+    }
+
+    let mut offset = 0 as CK_EXTRACT_PARAMS;
+    let mut extract = mechanism(CKM_EXTRACT_KEY_FROM_KEY as CK_MECHANISM_TYPE, &mut offset);
+    let mut aes = CKK_AES as CK_KEY_TYPE;
+    let mut aes_length = 16 as CK_ULONG;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut output_sensitive = CK_BBOOL::from(!readable);
+    let mut output_extractable = CK_BBOOL::from(readable);
+    let mut output = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut aes),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut aes_length),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut output_sensitive),
+        scalar_attribute(
+            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            &mut output_extractable,
+        ),
+    ];
+    derive(session, &mut extract, hashed, &mut output)
+}
+
+fn native_counter_key(
+    session: CK_SESSION_HANDLE,
+    base: CK_OBJECT_HANDLE,
+    readable: bool,
+    software_operations: bool,
+) -> CK_OBJECT_HANDLE {
+    let mut parameters = super::counter_kdf::Parameters::scp03(0x04);
+    let mut mechanism = parameters.mechanism();
+    let mut aes = CKK_AES as CK_KEY_TYPE;
+    let mut length = 16 as CK_ULONG;
+    let mut can_derive = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut encrypt = CK_BBOOL::from(software_operations);
+    let mut sensitive = CK_BBOOL::from(!readable);
+    let mut extractable = CK_BBOOL::from(readable);
+    let mut template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut aes),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut can_derive),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut encrypt),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+    ];
+    derive(session, &mut mechanism, base, &mut template)
+}
+
+#[test]
+fn virtual_yubihsm_native_session_graph_uses_public_pkcs11_and_session_lifetime() {
+    const SLOT: CK_SLOT_ID = 84;
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (slot, control) = crate::yubihsm::tests::make_yubihsm_native_session_test_slot();
+    install_test_slot_with_backend(SLOT, slot);
+    for mechanism in [
+        CKM_EC_KEY_PAIR_GEN,
+        CKM_ECDH1_DERIVE,
+        CKM_CONCATENATE_BASE_AND_KEY,
+        CKM_CONCATENATE_BASE_AND_DATA,
+        CKM_SHA256_KEY_DERIVATION,
+        CKM_EXTRACT_KEY_FROM_KEY,
+        CKM_SP800_108_COUNTER_KDF,
+        CKM_AES_CMAC,
+    ] {
+        let mut info = CK_MECHANISM_INFO {
+            ulMinKeySize: 0,
+            ulMaxKeySize: 0,
+            flags: 0,
+        };
+        assert_eq!(
+            crate::C_GetMechanismInfo(SLOT, mechanism as CK_MECHANISM_TYPE, &mut info),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(
+            info.flags & CKF_HW as CK_FLAGS,
+            0,
+            "mechanism {mechanism:#x}"
+        );
+    }
+    let mut owner = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut owner,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut password = b"0001password".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            owner,
+            CKU_USER as CK_USER_TYPE,
+            password.as_mut_ptr(),
+            password.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut observer = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut observer,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let (first_public, first_private) = generate_native_p256(owner);
+    let (second_public, second_private) = generate_native_p256(owner);
+    let mut second_point = object_ec_point(owner, second_public);
+    let protected = native_protected_graph(owner, first_private, &mut second_point, false);
+    unreadable(owner, protected);
+    unreadable(observer, protected);
+
+    let mut first_point = object_ec_point(owner, first_public);
+    let native_readable = native_protected_graph(owner, second_private, &mut first_point, true);
+    let protected = native_counter_key(owner, protected, false, false);
+    let readable = native_counter_key(owner, native_readable, true, true);
+    let key = object_value(owner, readable);
+    assert_eq!(key.len(), 16);
+    let mut object_size = 0;
+    assert_eq!(
+        crate::api::C_GetObjectSize(owner, native_readable, &mut object_size),
+        CKR_OK as CK_RV
+    );
+    assert!(object_size >= key.len() as CK_ULONG);
+
+    let mut ecb = CK_MECHANISM {
+        mechanism: CKM_AES_ECB as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut plaintext = [0x5a; 16];
+    let mut ciphertext = [0; 16];
+    let mut ciphertext_length = ciphertext.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_EncryptInit(owner, &mut ecb, readable),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Encrypt(
+            owner,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(ciphertext_length, 16);
+
+    let mut message = b"native session CMAC".to_vec();
+    let mut mac = crate::secure_channel_crypto::aes_cmac(&key, &message).unwrap();
+    let mut cmac = CK_MECHANISM {
+        mechanism: CKM_AES_CMAC as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_VerifyInit(observer, &mut cmac, protected),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            observer,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            mac.as_mut_ptr(),
+            mac.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    control.expire_next_command();
+    let mut stale_value = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(owner, native_readable, &mut stale_value, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetAttributeValue(owner, native_readable, &mut stale_value, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::api::C_CloseSession(owner), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_VerifyInit(observer, &mut cmac, protected),
+        CKR_KEY_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(crate::api::C_CloseSession(observer), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
 #[test]
 fn secret_composition_runs_protected_x963_graph_on_every_slot_kind() {
     x963_graph_on_every_slot_kind(false);

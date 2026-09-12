@@ -1,6 +1,6 @@
 //! Generic protected-secret composition; no protocol-specific layouts belong here.
 use super::*;
-use crate::software_key_ops::composition::{SecretDerivation, execute_secret_derivation, secret};
+use crate::software_key_ops::composition::{SecretDerivation, execute_secret_derivation};
 
 pub(super) fn supports(mechanism: CK_MECHANISM_TYPE) -> bool {
     matches!(mechanism, x if x == CKM_CONCATENATE_BASE_AND_KEY as CK_MECHANISM_TYPE
@@ -67,7 +67,6 @@ pub(super) fn derive(
             .resolve_object(base_handle)?
             .filter(|key| key.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
-        secret(&base, mechanism.mechanism)?;
         let other = if let Operation::AppendKey(handle) = operation {
             Some(
                 ctx.resolve_object(handle)?
@@ -150,6 +149,54 @@ pub(super) fn derive(
                 base.never_extractable && other.as_ref().is_none_or(|key| key.never_extractable);
         }
         validate_new_object_access(&object, flags, logged_in)?;
+        if super::native_session_objects_enabled(ctx, session)?
+            && let Some(base_handle) = super::native_session_object_handle(&base)
+            && let Some(command) = match operation {
+                SecretDerivation::AppendKey(_) => other
+                    .as_ref()
+                    .and_then(super::native_session_object_handle)
+                    .map(|other_handle| {
+                        YubiHsmCommand::derive_session_append_key(
+                            super::native_session_object_flags(&object),
+                            super::native_session_object_kind(&object)?,
+                            length,
+                            base_handle,
+                            other_handle,
+                        )
+                    })
+                    .transpose()?,
+                SecretDerivation::AppendData(data) => {
+                    Some(YubiHsmCommand::derive_session_append_data(
+                        super::native_session_object_flags(&object),
+                        super::native_session_object_kind(&object)?,
+                        length,
+                        base_handle,
+                        data,
+                    )?)
+                }
+                SecretDerivation::Extract(offset) => Some(YubiHsmCommand::derive_session_extract(
+                    super::native_session_object_flags(&object),
+                    super::native_session_object_kind(&object)?,
+                    length,
+                    base_handle,
+                    offset,
+                )?),
+                SecretDerivation::Sha256 => Some(YubiHsmCommand::derive_session_sha256(
+                    super::native_session_object_flags(&object),
+                    super::native_session_object_kind(&object)?,
+                    length,
+                    base_handle,
+                )?),
+            }
+        {
+            object.local = false;
+            object.key_gen_mechanism = Some(operation.mechanism());
+            let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
+            let handle = super::parse_native_session_handle(&response)?;
+            *output =
+                super::publish_native_session_secret(ctx, session, slot, object, handle, length)?;
+            return Ok(());
+        }
         object = execute_secret_derivation(&base, operation, object, length)?;
         *output = publish_software_secret_object(ctx, session, slot, object)?;
         Ok(())

@@ -759,6 +759,9 @@ pub(crate) trait BackendSession {
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn supports_native_session_objects(&self) -> bool {
+        false
+    }
     fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }

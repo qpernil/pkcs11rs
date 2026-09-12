@@ -328,6 +328,13 @@ pub(crate) enum KeyMaterial {
         public_key: Vec<u8>,
         value: Rc<RefCell<Option<Vec<u8>>>>,
     },
+    /// A volatile object owned by the current native YubiHSM secure session.
+    /// The PKCS #11 object carries policy; only this opaque handle crosses the
+    /// module/device boundary until an explicitly readable value is requested.
+    YubiHsmSessionObject {
+        handle: u64,
+        length: usize,
+    },
     YubiHsmAttestation {
         connector: Rc<dyn Connector>,
         session: Rc<RefCell<YubiHsmSessionState>>,
@@ -384,6 +391,11 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("id", id)
                 .field("object_type", object_type)
                 .field("algorithm", algorithm)
+                .field("length", length)
+                .finish(),
+            Self::YubiHsmSessionObject { handle, length } => fmt
+                .debug_struct("YubiHsmSessionObject")
+                .field("handle", handle)
                 .field("length", length)
                 .finish(),
             Self::YubiHsmAttestation {
@@ -1274,7 +1286,10 @@ impl TokenObject {
             && attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
         {
             return self.sensitive
-                || (matches!(self.material, KeyMaterial::SoftwareSecret(_)) && !self.extractable);
+                || (matches!(
+                    self.material,
+                    KeyMaterial::SoftwareSecret(_) | KeyMaterial::YubiHsmSessionObject { .. }
+                ) && !self.extractable);
         }
         if self.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || !self.sensitive {
             return false;
@@ -1411,7 +1426,8 @@ impl TokenObject {
                 | KeyMaterial::YubiHsmAttestation { cache, .. }
                 if cache.borrow().is_unattempted()
         );
-        self.attribute_types()
+        let attributes = self
+            .attribute_types()
             .into_iter()
             .filter(|&attribute_type| {
                 !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
@@ -1419,7 +1435,16 @@ impl TokenObject {
             .filter(|&attribute_type| !self.attribute_is_sensitive(attribute_type))
             .filter_map(|attribute_type| self.attribute_value(attribute_type))
             .map(|value| value.len() as CK_ULONG)
-            .sum()
+            .sum::<CK_ULONG>();
+        let deferred_native_value = match self.material {
+            KeyMaterial::YubiHsmSessionObject { length, .. }
+                if !self.attribute_is_sensitive(CKA_VALUE as CK_ATTRIBUTE_TYPE) =>
+            {
+                length as CK_ULONG
+            }
+            _ => 0,
+        };
+        attributes.saturating_add(deferred_native_value)
     }
 
     pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
@@ -1501,7 +1526,10 @@ impl TokenObject {
                 Some(bool_attribute(false))
             }
             x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
-                && matches!(self.material, KeyMaterial::YubiHsm { .. }) =>
+                && matches!(
+                    self.material,
+                    KeyMaterial::YubiHsm { .. } | KeyMaterial::YubiHsmSessionObject { .. }
+                ) =>
             {
                 Some(bool_attribute(false))
             }
@@ -1591,6 +1619,11 @@ impl TokenObject {
                 }
                 KeyMaterial::HsmAuthCredential { .. } => Some(ulong_attribute(32)),
                 KeyMaterial::YubiHsm { length, .. }
+                    if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+                {
+                    Some(ulong_attribute(*length as CK_ULONG))
+                }
+                KeyMaterial::YubiHsmSessionObject { length, .. }
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
                     Some(ulong_attribute(*length as CK_ULONG))
@@ -1971,6 +2004,7 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
             && !matches!(&self.material, KeyMaterial::SoftwarePrivate(_))
             && !matches!(&self.material, KeyMaterial::SoftwareSecret(_))
+            && !matches!(&self.material, KeyMaterial::YubiHsmSessionObject { .. })
             && !matches!(
                 &self.material,
                 KeyMaterial::YubiHsm { capabilities, .. }

@@ -79,6 +79,10 @@ pub(crate) enum CommandCode {
     ExportRsaWrapped = 0x76,
     ImportRsaWrapped = 0x77,
     DeriveEcdhKdf = 0x78,
+    DeriveSessionObject = 0x79,
+    ReadSessionObject = 0x7a,
+    VerifySessionObject = 0x7b,
+    DeleteSessionObject = 0x7c,
 }
 
 pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
@@ -146,6 +150,10 @@ pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::ExportRsaWrapped,
     CommandCode::ImportRsaWrapped,
     CommandCode::DeriveEcdhKdf,
+    CommandCode::DeriveSessionObject,
+    CommandCode::ReadSessionObject,
+    CommandCode::VerifySessionObject,
+    CommandCode::DeleteSessionObject,
 ];
 
 impl TryFrom<u8> for CommandCode {

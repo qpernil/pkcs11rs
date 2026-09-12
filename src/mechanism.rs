@@ -17,8 +17,8 @@ use crate::{
     YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1, YUBIHSM_ALGO_RSA_PKCS1_SHA256,
     YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512, YUBIHSM_ALGO_RSA_PKCS1_WRAP,
     YUBIHSM_ALGO_RSA_PSS_SHA1, YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384,
-    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519, as_mut, map,
-    with_slot_context_mut,
+    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_SESSION_KEY_DERIVATION, YUBIHSM_ALGO_X448,
+    YUBIHSM_ALGO_X25519, as_mut, map, with_slot_context_mut,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -1109,6 +1109,76 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 flags: (CKF_HW | CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE)
                     as CK_FLAGS,
             });
+        }
+    }
+    if algorithms.contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION) {
+        for native in [
+            MechanismDetails {
+                type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                min_key_size: 256,
+                max_key_size: 256,
+                flags: (CKF_HW | CKF_GENERATE_KEY_PAIR | CKF_EC_F_P | CKF_EC_NAMEDCURVE)
+                    as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+                min_key_size: 256,
+                max_key_size: 256,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE,
+                min_key_size: 128,
+                max_key_size: 256,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_CONCATENATE_BASE_AND_KEY as CK_MECHANISM_TYPE,
+                min_key_size: 1,
+                max_key_size: 1024,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_CONCATENATE_BASE_AND_DATA as CK_MECHANISM_TYPE,
+                min_key_size: 1,
+                max_key_size: 1024,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_EXTRACT_KEY_FROM_KEY as CK_MECHANISM_TYPE,
+                min_key_size: 1,
+                max_key_size: 1024,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_SHA256_KEY_DERIVATION as CK_MECHANISM_TYPE,
+                min_key_size: 1,
+                max_key_size: 1024,
+                flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_AES_CMAC as CK_MECHANISM_TYPE,
+                min_key_size: 16,
+                max_key_size: 32,
+                flags: (CKF_HW | CKF_VERIFY) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE,
+                min_key_size: 16,
+                max_key_size: 32,
+                flags: (CKF_HW | CKF_VERIFY) as CK_FLAGS,
+            },
+        ] {
+            if let Some(existing) = mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.type_ == native.type_)
+            {
+                existing.min_key_size = existing.min_key_size.min(native.min_key_size);
+                existing.max_key_size = existing.max_key_size.max(native.max_key_size);
+                existing.flags |= native.flags;
+            } else {
+                mechanisms.push(native);
+            }
         }
     }
     mechanisms

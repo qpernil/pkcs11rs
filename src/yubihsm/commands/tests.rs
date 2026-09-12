@@ -82,6 +82,10 @@ fn all_sample_commands() -> Vec<Command> {
         Command::key_data(CommandCode::SignEcdsa, 1, &[0; 32]).unwrap(),
         Command::key_data(CommandCode::DeriveEcdh, 1, &[0; 65]).unwrap(),
         Command::derive_ecdh_kdf(1, 3, 64, &[0; 65], &[0; 32], &[0x3c, 0x88, 0x10]).unwrap(),
+        Command::generate_session_p256(super::session_object::FLAG_DERIVE).unwrap(),
+        Command::read_session_object(1),
+        Command::verify_session_object(1, &[0; 16], b"data").unwrap(),
+        Command::delete_session_object(1),
         Command::delete_object(1, 2),
         Command::decrypt_oaep(1, 32, &[0; 256], &[0; 32]).unwrap(),
         Command::generate_object(CommandCode::GenerateHmacKey, &object("hmac-gen")).unwrap(),
@@ -171,7 +175,7 @@ fn device_info_page_zero_uses_the_legacy_empty_request() {
 #[test]
 fn every_official_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
-    assert_eq!(commands.len(), 64);
+    assert_eq!(commands.len(), 68);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
     assert_eq!(
         commands
@@ -189,7 +193,7 @@ fn every_official_command_code_has_a_sample_request() {
             .filter(|command| (**command as u8) >= 0x40)
             .map(|command| *command as u8)
             .collect::<Vec<_>>(),
-        (0x40..=0x78).collect::<Vec<_>>()
+        (0x40..=0x7c).collect::<Vec<_>>()
     );
 }
 
