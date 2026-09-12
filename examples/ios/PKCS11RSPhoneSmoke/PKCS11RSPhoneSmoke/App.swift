@@ -27,44 +27,17 @@ private let softwareMlDsaMessageLength = 32
 private let softwareMlKemLabel = "iPhone smoke ML-KEM-1024"
 private let softwareMlKemID = Array("iphone-smoke-ml-kem-1024".utf8)
 private let softwareMlKemSecretLength = 32
-private let ckaYubicoHsmAuthAlgorithm =
-    CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5901)
+private let ckkYubicoHsmAuthSymmetric =
+    CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x59554200) | CK_KEY_TYPE(38)
+private let ckkYubicoHsmAuthAsymmetric =
+    CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x59554200) | CK_KEY_TYPE(39)
 private let ckaYubicoHsmAuthRetries =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5902)
 private let ckaYubicoHsmAuthTouchRequired =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5903)
 
-private struct HsmAuthCredential {
-    let label: String
-    let source: String
-    let algorithm: CK_ULONG
-    let retries: CK_ULONG
-    let touchRequired: Bool
-
-    var algorithmName: String {
-        switch algorithm {
-        case 38:
-            return "symmetric AES-128"
-        case 39:
-            return "asymmetric P-256"
-        default:
-            return "algorithm \(algorithm)"
-        }
-    }
-
-    var description: String {
-        "\(label.debugDescription) @ \(source), \(algorithmName), retries \(retries), touch \(touchRequired ? "required" : "not required")"
-    }
-}
-
-private struct ObjectInspection {
-    let description: String
-    let credential: HsmAuthCredential?
-}
-
 private struct ObjectInventory {
     var lines: [String]
-    let credentials: [HsmAuthCredential]
 }
 
 private struct SlotInventory {
@@ -162,27 +135,24 @@ private func hexString(_ bytes: ArraySlice<UInt8>) -> String {
 
 private func objectDescription(
     session: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-    source: String?
-) -> ObjectInspection {
+    object: CK_OBJECT_HANDLE
+) -> String {
     var objectClass = CK_OBJECT_CLASS()
     var keyType = CK_KEY_TYPE()
-    var hsmAuthAlgorithm = CK_ULONG()
     var hsmAuthRetries = CK_ULONG()
     var hsmAuthTouchRequired = CK_BBOOL()
     var label = [UInt8](repeating: 0, count: objectAttributeBufferCapacity)
     var identifier = [UInt8](repeating: 0, count: objectAttributeBufferCapacity)
     var ecPoint = [UInt8](repeating: 0, count: objectAttributeBufferCapacity)
-    var attributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 8)
+    var attributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 7)
 
     let result = withUnsafeMutablePointer(to: &objectClass) { objectClassPointer in
         withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
-            withUnsafeMutablePointer(to: &hsmAuthAlgorithm) { algorithmPointer in
-                withUnsafeMutablePointer(to: &hsmAuthRetries) { retriesPointer in
-                    withUnsafeMutablePointer(to: &hsmAuthTouchRequired) { touchPointer in
-                        label.withUnsafeMutableBytes { labelBuffer in
-                            identifier.withUnsafeMutableBytes { identifierBuffer in
-                                ecPoint.withUnsafeMutableBytes { ecPointBuffer in
+            withUnsafeMutablePointer(to: &hsmAuthRetries) { retriesPointer in
+                withUnsafeMutablePointer(to: &hsmAuthTouchRequired) { touchPointer in
+                    label.withUnsafeMutableBytes { labelBuffer in
+                        identifier.withUnsafeMutableBytes { identifierBuffer in
+                            ecPoint.withUnsafeMutableBytes { ecPointBuffer in
                                     attributes[0].type = CK_ATTRIBUTE_TYPE(CKA_CLASS)
                                     attributes[0].pValue = UnsafeMutableRawPointer(objectClassPointer)
                                     attributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_OBJECT_CLASS>.size)
@@ -195,18 +165,15 @@ private func objectDescription(
                                     attributes[3].type = CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE)
                                     attributes[3].pValue = UnsafeMutableRawPointer(keyTypePointer)
                                     attributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
-                                    attributes[4].type = ckaYubicoHsmAuthAlgorithm
-                                    attributes[4].pValue = UnsafeMutableRawPointer(algorithmPointer)
+                                    attributes[4].type = ckaYubicoHsmAuthRetries
+                                    attributes[4].pValue = UnsafeMutableRawPointer(retriesPointer)
                                     attributes[4].ulValueLen = CK_ULONG(MemoryLayout<CK_ULONG>.size)
-                                    attributes[5].type = ckaYubicoHsmAuthRetries
-                                    attributes[5].pValue = UnsafeMutableRawPointer(retriesPointer)
-                                    attributes[5].ulValueLen = CK_ULONG(MemoryLayout<CK_ULONG>.size)
-                                    attributes[6].type = ckaYubicoHsmAuthTouchRequired
-                                    attributes[6].pValue = UnsafeMutableRawPointer(touchPointer)
-                                    attributes[6].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                                    attributes[7].type = CK_ATTRIBUTE_TYPE(CKA_EC_POINT)
-                                    attributes[7].pValue = ecPointBuffer.baseAddress
-                                    attributes[7].ulValueLen = CK_ULONG(ecPointBuffer.count)
+                                    attributes[5].type = ckaYubicoHsmAuthTouchRequired
+                                    attributes[5].pValue = UnsafeMutableRawPointer(touchPointer)
+                                    attributes[5].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                                    attributes[6].type = CK_ATTRIBUTE_TYPE(CKA_EC_POINT)
+                                    attributes[6].pValue = ecPointBuffer.baseAddress
+                                    attributes[6].ulValueLen = CK_ULONG(ecPointBuffer.count)
                                     return attributes.withUnsafeMutableBufferPointer { buffer in
                                         C_GetAttributeValue(
                                             session,
@@ -217,7 +184,6 @@ private func objectDescription(
                                     }
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -230,14 +196,12 @@ private func objectDescription(
     } else {
         parts.append("class unavailable")
     }
-    var objectLabel: String?
     if let length = availableLength(
         attributes[1],
         capacity: objectAttributeBufferCapacity
     ) {
         let value = String(decoding: label.prefix(length), as: UTF8.self)
         if !value.isEmpty {
-            objectLabel = value
             parts.append("label=\(value.debugDescription)")
         }
     }
@@ -260,39 +224,28 @@ private func objectDescription(
     {
         parts.append("attributes failed: \(result)")
     }
-    let hasHsmAuthMetadata =
-        attributes[4].ulValueLen == CK_ULONG(MemoryLayout<CK_ULONG>.size)
-        && attributes[5].ulValueLen == CK_ULONG(MemoryLayout<CK_ULONG>.size)
-        && attributes[6].ulValueLen == CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-    let credential: HsmAuthCredential? = if hasHsmAuthMetadata,
-                                            let objectLabel,
-                                            let source
+    if attributes[4].ulValueLen == CK_ULONG(MemoryLayout<CK_ULONG>.size),
+       attributes[5].ulValueLen == CK_ULONG(MemoryLayout<CK_BBOOL>.size)
     {
-        HsmAuthCredential(
-            label: objectLabel,
-            source: source,
-            algorithm: hsmAuthAlgorithm,
-            retries: hsmAuthRetries,
-            touchRequired: hsmAuthTouchRequired != CK_BBOOL(CK_FALSE)
-        )
-    } else {
-        nil
+        let algorithmName: String? = switch keyType {
+        case ckkYubicoHsmAuthSymmetric: "symmetric AES-128"
+        case ckkYubicoHsmAuthAsymmetric: "asymmetric P-256"
+        default: nil
+        }
+        if let algorithmName {
+            parts.append("YubiHSM Auth \(algorithmName)")
+            parts.append("retries=\(hsmAuthRetries)")
+            parts.append(
+                "touch=\(hsmAuthTouchRequired != CK_BBOOL(CK_FALSE))"
+            )
+        }
     }
-    if let credential {
-        parts.append("YubiHSM Auth \(credential.algorithmName)")
-        parts.append("retries=\(credential.retries)")
-        parts.append("touch=\(credential.touchRequired)")
-    }
-    return ObjectInspection(
-        description: parts.joined(separator: ", "),
-        credential: credential
-    )
+    return parts.joined(separator: ", ")
 }
 
 private func objectInventory(
     session: CK_SESSION_HANDLE,
-    title: String,
-    source: String? = nil
+    title: String
 ) -> ObjectInventory {
     var objects = [CK_OBJECT_HANDLE]()
     var failure: String?
@@ -333,19 +286,13 @@ private func objectInventory(
         failure = "C_FindObjectsInit failed: \(findInitResult)"
     }
 
-    let inspections = objects.map {
-        objectDescription(session: session, object: $0, source: source)
-    }
+    let descriptions = objects.map { objectDescription(session: session, object: $0) }
     var lines = ["", "\(title): \(objects.count)"]
-    lines.append(contentsOf: inspections.map(\.description))
+    lines.append(contentsOf: descriptions)
     if let failure {
         lines.append("  \(failure)")
     }
-    let credentials = inspections.compactMap(\.credential)
-    return ObjectInventory(
-        lines: lines,
-        credentials: credentials
-    )
+    return ObjectInventory(lines: lines)
 }
 
 private func softwareTokenLabel() -> [UInt8] {
@@ -1061,7 +1008,7 @@ private func softwareObjectInventory(
         let initialize = initializeSoftwareToken(slot: slot)
         guard initialize == CKR_OK else {
             lines.append("  C_InitToken failed: \(initialize)")
-            return ObjectInventory(lines: lines, credentials: [])
+            return ObjectInventory(lines: lines)
         }
         lines.append("  initialized persistent token")
     }
@@ -1076,7 +1023,7 @@ private func softwareObjectInventory(
     )
     guard open == CKR_OK else {
         lines.append("  C_OpenSession failed: \(open)")
-        return ObjectInventory(lines: lines, credentials: [])
+        return ObjectInventory(lines: lines)
     }
 
     var failure: String?
@@ -1327,8 +1274,7 @@ private func softwareObjectInventory(
 
     var inventory = if let failure {
         ObjectInventory(
-            lines: ["", "Objects: skipped after \(failure)"],
-            credentials: []
+            lines: ["", "Objects: skipped after \(failure)"]
         )
     } else {
         objectInventory(session: session, title: "Objects (authenticated software session)")
@@ -1351,8 +1297,7 @@ private func softwareObjectInventory(
 }
 
 private func publicObjectInventory(
-    slot: CK_SLOT_ID,
-    source: String
+    slot: CK_SLOT_ID
 ) -> ObjectInventory {
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
@@ -1364,15 +1309,13 @@ private func publicObjectInventory(
     )
     guard openResult == CKR_OK else {
         return ObjectInventory(
-            lines: ["", "Objects: C_OpenSession failed: \(openResult)"],
-            credentials: []
+            lines: ["", "Objects: C_OpenSession failed: \(openResult)"]
         )
     }
 
     var inventory = objectInventory(
         session: session,
-        title: "Objects (public session)",
-        source: source
+        title: "Objects (public session)"
     )
     let closeResult = C_CloseSession(session)
     if closeResult != CKR_OK {
@@ -1650,12 +1593,11 @@ private final class ModuleInspector {
             let tokenLabel = paddedString(tokenInfo.label)
             let tokenModel = paddedString(tokenInfo.model)
             let serial = paddedString(tokenInfo.serialNumber)
-            let source = serial.isEmpty ? description : serial
             let managesSoftwareToken = tokenModel == softwareTokenModel
                 && tokenLabel == softwareTokenName
             let objects = managesSoftwareToken
                 ? softwareObjectInventory(slot: slot, tokenInfo: tokenInfo)
-                : publicObjectInventory(slot: slot, source: source)
+                : publicObjectInventory(slot: slot)
             slotInventories.append(SlotInventory(
                 slot: slot,
                 description: description,
@@ -1669,16 +1611,6 @@ private final class ModuleInspector {
         slotInventories = slotInventories.filter { !$0.isYubiHsm }
             + slotInventories.filter(\.isYubiHsm)
 
-        let credentials = slotInventories.flatMap(\.objects.credentials)
-        lines.append("")
-        lines.append("YubiHSM Auth credentials: \(credentials.count)")
-        if credentials.isEmpty {
-            lines.append(
-                "  Discovery produced no credential (canceled, unavailable, or unsupported token)."
-            )
-        } else {
-            lines.append(contentsOf: credentials.map { "  \($0.description)" })
-        }
         for inventory in slotInventories {
             lines.append("")
             lines.append("Slot \(inventory.slot): \(inventory.description)")
