@@ -111,12 +111,12 @@ source/target authentication chains.
 
 The software token persists ordinary AES and EC credentials in its encrypted
 store. Physical YubiHSM AES keys can supply counter KDF without exporting their
-values; derived session objects use the common in-module layer. Native
-virtual-YubiHSM protected generic-secret storage and volatile derivation outputs
-remain part of the virtual-device plan.
+values; derived session objects use the common in-module layer. A virtual
+YubiHSM advertising algorithm 61 can keep the supported derivation graph in
+protected volatile objects owned by its authenticated secure session.
 
 Regression tests cover exact names, independent symmetric IDs, asymmetric
 label-and-ID pairing, public ambiguity without login, selected-source failure
 without fallback, private and persistent software sources, recreation, and
-cleanup. Remaining work includes retained-binding dependency cycles and native
-virtual-device execution of the same channel tests over its device interface.
+cleanup. Remaining work includes retained-binding dependency cycles and complete
+channel tests using a virtual YubiHSM as the derivation provider.

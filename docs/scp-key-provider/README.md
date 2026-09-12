@@ -264,26 +264,31 @@ through `Pkcs11Auth`. Three fresh SCP11a handshakes and protected reads pass
 without exporting the native host private scalar. See the
 [hardware tests and device-capacity constraints](../scp11.md#issuer-sd-key-provisioning).
 
-## 3. Implement native virtual-YubiHSM derivation
+## Native virtual-YubiHSM derivation
 
-Add generic protected-object commands using software-key-core: agreement,
-composition, extraction, and counter/hash KDF. Reuse the same operation graph
-and source policies as the software provider. The existing prefixed-ECDH command
-returns KDF bytes and alone does not provide the generic chainable contract.
+Algorithm 61 and capability `derive-session-key` add generic protected-object
+commands using software-key-core: volatile P-256 generation and ECDH,
+composition, extraction, SHA-256, SP 800-108 counter KDF, AES-CMAC verification,
+policy-controlled reads, and deletion. pkcs11rs maps the standard PKCS #11
+operation graph to those commands and marks the covered mechanisms with
+`CKF_HW`.
 
-Provide persistent generic-secret/private-key storage with exact label lookup,
-and bounded volatile intermediate/output objects. Define capabilities, domains,
-policy inheritance, identifiers, atomic creation, audit behavior, expiration,
-and cleanup together. Avoid NVM writes for channel establishment and teardown.
-Native backing-session loss invalidates dependent handles without rebinding
-stale identifiers. Only policy-permitted final working values are exported.
+Long-term credentials remain ordinary persistent P-256 or AES objects. The
+bounded intermediate/output store contains at most 64 objects per authenticated
+secure session, uses random nonzero 64-bit handles, and performs no NVM writes.
+Native backing-session loss invalidates dependent PKCS #11 handles without
+rebinding stale identifiers. Each operation creates its output atomically and
+enforces the session, source capability, domain, and output-policy rules. Only
+outputs created with readable policy can be exported.
 
-Map these native operations into the PKCS #11 provider. A merged mechanism list
-or `CKF_HW` alone is insufficient proof of native derivation; verify object
-placement and command traces. Unsupported native operations fail explicitly.
-The provider needs no per-message AES/CMAC traffic for this client workflow.
+The public PKCS #11 regression builds the complete native graph, verifies
+protected values and cross-session use, forces secure-session recreation, and
+checks stale handles and creator-session cleanup. A readable native result that
+requests a software-only operation is read once and materialized as a common
+software session object. Protected outputs are never downgraded. The provider
+needs no per-message AES/CMAC traffic for this client workflow.
 
-## 4. Qualify complete channels with virtual-HSM derivation
+## Remaining end-to-end qualification
 
 Use a virtual YubiHSM as the client's derivation provider and a compatible peer
 as the target. After provisioning, long-term credentials and ECDH secrets stay

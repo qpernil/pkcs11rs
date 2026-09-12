@@ -29,7 +29,8 @@ pub(crate) mod trust;
 pub(crate) use commands::ObjectFilter;
 pub(crate) use commands::{
     Command, CommandCode, DelegatedObjectParameters, ObjectInfo, ObjectParameters, PublicKey,
-    RsaWrapParameters, parse_object_id, parse_object_list,
+    RsaWrapParameters, SESSION_OBJECT_DERIVE, SESSION_OBJECT_READABLE, SESSION_OBJECT_VERIFY,
+    SessionObjectKind, SessionObjectSource, parse_object_id, parse_object_list,
 };
 
 const COMMAND_CREATE_SESSION: u8 = CommandCode::CreateSession as u8;

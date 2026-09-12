@@ -6,8 +6,9 @@ as described below. Direct YubiHSM symmetric/asymmetric
 derivation uses `Pkcs11Auth` over the Rust handlers shared with the C API;
 final working keys are read once for local message crypto. Slot preparation
 supports temporary software slots and existing registered slots with configured
-[named credential lookup](credential-lookup.md). Card derivation migration and
-native chainable derivation remain planned.
+[named credential lookup](credential-lookup.md). Native virtual-YubiHSM
+chainable derivation implements the same operation contract. Card derivation
+migration remains planned.
 
 ## Actors and scope
 
@@ -70,11 +71,12 @@ YubiHSM Auth supplies working bytes directly. Platform keys use native ECDH
 through the host slot and the same combined-mechanism selection.
 Card structures retain local working keys after derivation through the same
 provider operations. Their static SCP03 DEK remains a protected provider binding.
-Hardware ECDH outputs in public PKCS #11 operations use software session objects;
-the native prefixed extension returns KDF bytes. None establishes native retention
-of the entire derivation graph. Mechanism names below specify the intended
-API contract; existing public mechanism tests do not constitute client adapter
-integration.
+Physical YubiHSM firmware uses software session objects for ECDH outputs, while
+its native prefixed extension returns KDF bytes. A virtual YubiHSM advertising
+algorithm 61 retains supported intermediates through protected volatile device
+objects. The public PKCS #11 regression verifies that native graph and its
+lifetime, but complete SCP client integration against that provider remains to
+be qualified.
 
 Notation: `||` concatenates bytes, `BE16/BE32/BE128` encode unsigned integers
 in big-endian order, and `[a:b]` selects byte offsets with an exclusive end.
@@ -334,14 +336,17 @@ The two concatenation mechanisms, extraction, SHA-256 key derivation, and
 single-output AES-CMAC counter KDF are implemented in the common layer,
 subject to the slot's software filter. Counter KDF can also use a protected
 YubiHSM AES base through native AES-ECB-backed CMAC, without reading the base
-value or requiring its public sign/encrypt flags. The result is a common session
-object. Native chainable composition objects remain unimplemented. Mechanism
-advertising does not promise where an individual operation executes.
+value or requiring its public sign/encrypt flags. On a virtual YubiHSM that
+advertises algorithm 61, supported results and intermediates are protected
+volatile device objects. Mechanism advertising describes total slot capability;
+`CKF_HW` marks mechanisms covered by this native extension.
 
 ### Implemented composition behavior
 
-Inputs and outputs use ordinary software secret objects, including protected
-session keys on hardware slots. No native key is exported for these operations.
+Inputs and outputs use ordinary PKCS #11 secret session objects. Their material
+is software-backed on ordinary and physical-HSM slots. Algorithm-61 YubiHSM
+slots place supported objects in the backing secure session and export only
+results whose template explicitly permits reading.
 Both key inputs must be visible in the slot and permit derivation and the
 selected mechanism; both derive-template policies constrain a concatenated
 result. Creation, storage, and creator-session cleanup use the common layer.
@@ -479,12 +484,11 @@ device-command errors keep the channel usable; local validation errors leave
 its keys, counters, and MAC chain intact. Reconnection never silently recreates
 lost working keys. Preserve transaction-scoped CCID lifetimes for card channels.
 
-## Implementation order and acceptance checks
+## Remaining acceptance checks
 
-See the [staged plan](README.md) for remaining work: implement
-native virtual-HSM derivation, then qualify full channels with local message
-crypto. Instrumented tests must show final working-key reads at establishment and no
-provider calls for subsequent message encryption/MAC.
+See the [key-provider design](README.md) for the remaining complete-channel
+qualification. Instrumented tests must show final working-key reads at
+establishment and no provider calls for subsequent message encryption/MAC.
 
 The discovery-disabled Cargo suite includes public mechanism tests exercising
 protected and readable SCP03/X9.63 graphs on ordinary slot kinds. Native HSM Auth

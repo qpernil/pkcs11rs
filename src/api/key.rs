@@ -12,6 +12,138 @@ use zeroize::Zeroize;
 mod counter_kdf;
 mod secret_derive;
 
+pub(super) fn native_session_objects_enabled(
+    ctx: &SlotContext,
+    session: CK_SESSION_HANDLE,
+) -> Result<bool, Error> {
+    Ok(ctx
+        ._get_session(session)?
+        .1
+        .supports_native_session_objects())
+}
+
+pub(super) fn native_session_object_handle(object: &TokenObject) -> Option<u64> {
+    match object.material {
+        KeyMaterial::YubiHsmSessionObject { handle, .. } => Some(handle),
+        _ => None,
+    }
+}
+
+pub(super) fn native_session_object_source(
+    object: &TokenObject,
+) -> Option<YubiHsmSessionObjectSource> {
+    match object.material {
+        KeyMaterial::YubiHsmSessionObject { handle, .. } => {
+            Some(YubiHsmSessionObjectSource::Volatile(handle))
+        }
+        KeyMaterial::YubiHsm {
+            id,
+            object_type: YUBIHSM_ASYMMETRIC_KEY,
+            ..
+        } => Some(YubiHsmSessionObjectSource::PersistentAsymmetric(id)),
+        KeyMaterial::YubiHsm {
+            id,
+            object_type: YUBIHSM_SYMMETRIC_KEY,
+            ..
+        } => Some(YubiHsmSessionObjectSource::PersistentSymmetric(id)),
+        _ => None,
+    }
+}
+
+pub(super) fn native_session_object_flags(object: &TokenObject) -> u8 {
+    let mut flags = 0;
+    if !object.sensitive && object.extractable {
+        flags |= SESSION_OBJECT_READABLE;
+    }
+    if object.derive {
+        flags |= SESSION_OBJECT_DERIVE;
+    }
+    if object.verify {
+        flags |= SESSION_OBJECT_VERIFY;
+    }
+    flags
+}
+
+fn native_session_object_supports_requested_operations(object: &TokenObject) -> bool {
+    !object.encrypt
+        && !object.decrypt
+        && !object.sign
+        && !object.wrap
+        && !object.unwrap
+        && !object.encapsulate
+        && !object.decapsulate
+        && (!object.verify || object.key_type == CKK_AES as CK_KEY_TYPE)
+}
+
+pub(super) fn native_session_object_kind(
+    object: &TokenObject,
+) -> Result<YubiHsmSessionObjectKind, Error> {
+    match object.key_type {
+        x if x == CKK_GENERIC_SECRET as CK_KEY_TYPE => Ok(YubiHsmSessionObjectKind::GenericSecret),
+        x if x == CKK_AES as CK_KEY_TYPE => Ok(YubiHsmSessionObjectKind::Aes),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
+}
+
+pub(super) fn parse_native_session_handle(response: &[u8]) -> Result<u64, Error> {
+    response
+        .try_into()
+        .map(u64::from_be_bytes)
+        .map_err(|_| CKR_DEVICE_ERROR.into())
+}
+
+pub(super) fn publish_native_session_secret(
+    ctx: &mut SlotContext,
+    session: CK_SESSION_HANDLE,
+    slot: CK_SLOT_ID,
+    mut object: TokenObject,
+    handle: u64,
+    length: usize,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    if object.token {
+        let _ = ctx
+            ._get_session(session)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::delete_session_object(handle));
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    if !native_session_object_supports_requested_operations(&object) {
+        if object.sensitive || !object.extractable {
+            let _ = ctx
+                ._get_session(session)?
+                .1
+                .yubihsm_command(&YubiHsmCommand::delete_session_object(handle));
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+        let value = ctx
+            ._get_session(session)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::read_session_object(handle));
+        let _ = ctx
+            ._get_session(session)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::delete_session_object(handle));
+        let value = value?;
+        if value.len() != length {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        object.material = KeyMaterial::SoftwareSecret(Zeroizing::new(value));
+    } else {
+        object.material = KeyMaterial::YubiHsmSessionObject { handle, length };
+    }
+    object.set_creator(session, slot);
+    match ctx.insert_object(object) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            let _ = ctx
+                ._get_session(session)?
+                .1
+                .yubihsm_command(&YubiHsmCommand::delete_session_object(handle));
+            Err(error)
+        }
+    }
+}
+
 ffi_entry_point! {
     pub fn C_GenerateKey(
         session_handle: CK_SESSION_HANDLE,
@@ -362,6 +494,90 @@ pub(crate) fn generate_key_pair(
         let private_token =
             optional_bool_template_attribute(private_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
                 .unwrap_or(false);
+        let public_token =
+            optional_bool_template_attribute(public_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
+                .unwrap_or(false);
+        if !private_token
+            && !public_token
+            && mechanism.mechanism == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            && native_session_objects_enabled(ctx, session_handle)?
+        {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let parameters =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if parameters.as_slice() != crate::pkcs11_auth::P256_PARAMS {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            let mut public_object = software_key_pair_object(
+                public_template,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                CKK_EC as CK_KEY_TYPE,
+            )?;
+            let mut private_object = software_key_pair_object(
+                private_template,
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                CKK_EC as CK_KEY_TYPE,
+            )?;
+            if private_object.derive
+                && native_session_object_supports_requested_operations(&private_object)
+            {
+                validate_new_object_access(&public_object, flags, logged_in)?;
+                validate_new_object_access(&private_object, flags, logged_in)?;
+                let response = ctx._get_session(session_handle)?.1.yubihsm_command(
+                    &YubiHsmCommand::generate_session_p256(native_session_object_flags(
+                        &private_object,
+                    ))?,
+                )?;
+                if response.len() != 8 + 65 || response[8] != 0x04 {
+                    return Err(CKR_DEVICE_ERROR.into());
+                }
+                let native =
+                    u64::from_be_bytes(response[..8].try_into().map_err(|_| CKR_DEVICE_ERROR)?);
+                public_object.material = KeyMaterial::Public(PublicKeyMaterial::Ec {
+                    parameters: crate::pkcs11_auth::P256_PARAMS.to_vec(),
+                    public_key: response[9..].to_vec(),
+                });
+                private_object.public_key = Some(PublicKeyMaterial::Ec {
+                    parameters: crate::pkcs11_auth::P256_PARAMS.to_vec(),
+                    public_key: response[9..].to_vec(),
+                });
+                public_object.local = true;
+                private_object.local = true;
+                public_object.key_gen_mechanism = Some(mechanism.mechanism);
+                private_object.key_gen_mechanism = Some(mechanism.mechanism);
+                private_object.material = KeyMaterial::YubiHsmSessionObject {
+                    handle: native,
+                    length: 32,
+                };
+                private_object.set_creator(session_handle, slot_id);
+                let private = match ctx.insert_object(private_object) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        let _ = ctx
+                            ._get_session(session_handle)?
+                            .1
+                            .yubihsm_command(&YubiHsmCommand::delete_session_object(native));
+                        return Err(error);
+                    }
+                };
+                let public = match ctx.store_backed_object(session_handle, public_object) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        ctx.remove_object_handle(private);
+                        let _ = ctx
+                            ._get_session(session_handle)?
+                            .1
+                            .yubihsm_command(&YubiHsmCommand::delete_session_object(native));
+                        return Err(error);
+                    }
+                };
+                *public_handle = public;
+                *private_handle = private;
+                return Ok(());
+            }
+        }
         if (!private_token || ctx.get_slot(slot_id)?.stores_software_token_keys())
             && matches!(
                 mechanism.mechanism,
@@ -1666,6 +1882,9 @@ pub(crate) fn derive_key(
                 algorithm: u8,
                 capabilities: [u8; 8],
             },
+            YubiHsmSession {
+                handle: u64,
+            },
         }
         let source = match &object.material {
             KeyMaterial::PlatformPrivate(key) => DeriveSource::Platform(key.clone()),
@@ -1707,6 +1926,11 @@ pub(crate) fn derive_key(
                     capabilities: *capabilities,
                 }
             }
+            KeyMaterial::YubiHsmSessionObject { handle, .. }
+                if object.key_type == CKK_EC as CK_KEY_TYPE =>
+            {
+                DeriveSource::YubiHsmSession { handle: *handle }
+            }
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
         let source_is_montgomery = match &source {
@@ -1719,6 +1943,7 @@ pub(crate) fn derive_key(
                 *algorithm == OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
             }
             DeriveSource::YubiHsm { algorithm, .. } => is_yubihsm_montgomery(*algorithm),
+            DeriveSource::YubiHsmSession { .. } => false,
         };
         if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
             && source_is_montgomery
@@ -1791,6 +2016,7 @@ pub(crate) fn derive_key(
                 (coordinate_length, coordinate_length * 2 + 1, true)
             }
             DeriveSource::YubiHsm { .. } => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            DeriveSource::YubiHsmSession { .. } => (32, 65, true),
         };
         // Raw points can coincidentally be valid DER OCTET STRINGs. Prefer
         // the curve's raw encoding when its length already matches.
@@ -1818,6 +2044,46 @@ pub(crate) fn derive_key(
         } else {
             None
         };
+        if matches!(kdf, EcdhKdf::Null)
+            && !derived_object.token
+            && native_session_objects_enabled(ctx, session_handle)?
+            && let Some(source) = match &source {
+                DeriveSource::YubiHsm { id, .. } => {
+                    Some(YubiHsmSessionObjectSource::PersistentAsymmetric(*id))
+                }
+                DeriveSource::YubiHsmSession { handle } => {
+                    Some(YubiHsmSessionObjectSource::Volatile(*handle))
+                }
+                _ => None,
+            }
+        {
+            let command = YubiHsmCommand::derive_session_ecdh(
+                native_session_object_flags(&derived_object),
+                native_session_object_kind(&derived_object)?,
+                requested_length,
+                source,
+                public_data,
+            )?;
+            let response = ctx
+                ._get_session(session_handle)?
+                .1
+                .yubihsm_command(&command)?;
+            let handle = parse_native_session_handle(&response)?;
+            derived_object.always_sensitive = object.always_sensitive && derived_object.sensitive;
+            derived_object.never_extractable =
+                object.never_extractable && !derived_object.extractable;
+            derived_object.local = false;
+            derived_object.key_gen_mechanism = Some(mechanism.mechanism);
+            *key_handle = publish_native_session_secret(
+                ctx,
+                session_handle,
+                slot_id,
+                derived_object,
+                handle,
+                requested_length,
+            )?;
+            return Ok(());
+        }
         let mut derived = match source {
             DeriveSource::Platform(key) => key
                 .ecdh(&SoftwarePublicKey::Ec {
@@ -1862,6 +2128,9 @@ pub(crate) fn derive_key(
                 Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
                     &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
                 )?)
+            }
+            DeriveSource::YubiHsmSession { .. } => {
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }
         };
         let expected_result_length = if native_kdf {

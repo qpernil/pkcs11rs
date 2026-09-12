@@ -154,14 +154,14 @@ secret; SHA-256 length extension cannot replace that prefix.
 This mechanism does **not** claim that the final session keys remain inside the
 source HSM.
 
-## Future protected-key composition
+## Native protected-key composition
 
-The [SCP03/SCP11 key-operation plan](scp-key-provider/README.md) uses one protocol
-implementation with interchangeable software and native key providers. The
-native goal protects long-term credentials and agreement inputs during
-derivation, then permits final working-key reads for local message crypto.
-There is no message-crypto placement option. Generic chainable device objects
-remain planned; the existing command returns KDF bytes to the host.
+The [SCP03/SCP11 key-provider design](scp-key-provider/README.md) uses one
+protocol implementation with interchangeable software and native key providers.
+The native path protects long-term credentials and agreement inputs during
+derivation, then permits final working-key reads for local message crypto. There
+is no message-crypto placement option. The one-shot command returns KDF bytes to
+the host; virtual YubiHSM algorithm 61 supplies generic chainable device objects.
 
 The [client operation matrix](scp-key-provider/operation-matrix.md) specifies
 the initial generic mechanism set and distinguishes the YubiHSM and
@@ -170,35 +170,31 @@ imports keys through its encrypted channel, with no DEK. Card SCP11 uses the
 same X9.63 construction but takes a fifth key for its administration DEK;
 its receipt transcript and secure-message framing also differ.
 
-The missing abstraction is a protected base object plus derivation parameters
-and an output template atomically creating another chainable device key object.
-Generic-secret intermediates, extraction into AES working keys, and the required
-agreement, composition, and KDF operations should be generic building blocks,
-without introducing an SCP-specific object model. Select the initial mechanism
-set from the actual SCP03/SCP11 operation matrix; broader HKDF, SP 800-108,
-composition, or other derivation families can use the same foundation.
+The native abstraction takes a protected base object, mechanism parameters, and
+an output template and atomically creates another chainable object. It supports
+volatile P-256 generation and ECDH, generic-secret intermediates, key/data
+composition, SHA-256, SP 800-108 counter KDF, extraction into AES working keys,
+AES-CMAC verification, controlled reads, and deletion without an SCP-specific
+object model.
 
-Prefer bounded volatile native session objects for intermediates and working
-AES keys. For the four-key construction described above, a protected 64-byte
+Bounded volatile native session objects hold intermediates and working AES keys.
+For the four-key construction described above, a protected 64-byte
 result can feed extraction of receipt, S-ENC, S-MAC, and S-RMAC objects without
 persisting ephemeral keys. For the local-message client, final KDF outputs must
 permit readable working keys from creation, while long-term keys and raw
-agreements remain protected; extraction cannot weaken source policy. The capacity and identifiers
-must cover the complete operation graph, not assume that only the intermediate
-needs session lifetime. Persistent generic-secret and AES output remain useful
-for deliberate token-object requests; they are not the default channel-key
-lifetime. Any persistent temporary-key fallback requires explicit deletion,
-storage bounds, and crash/orphan recovery.
+agreements remain protected; extraction cannot weaken source policy. Each
+authenticated secure session holds at most 64 such objects. Their random,
+nonzero 64-bit handles are never persisted or valid in another secure session.
 
-Native session objects must be scoped to authenticated device authority, carry
-appropriate capabilities and domain policy, and be cleared on session close,
+Native session objects are scoped to authenticated device authority, carry
+explicit readable/derive/verify policy, and are cleared on session close,
 timeout, authentication replacement or failure, and protocol invalidation. The
-provider must retain the native session while dependent PKCS #11 handles exist,
-then invalidate those handles when their backing session is lost. Exact command
-and object encoding is part of the planned implementation.
+provider retains the native session while dependent PKCS #11 handles exist,
+then invalidates those handles when their backing session is lost.
 
-`CKA_TOKEN=CK_FALSE` alone does not promise device residence. Current hardware
-ECDH outputs use the common host software session layer, which can also perform
-AES and MAC operations locally. Native placement and dispatch must be explicit
-for device-side derivation. Established channels use local working bytes. Existing physical firmware needs equivalent
-native support before that stronger boundary can be claimed.
+`CKA_TOKEN=CK_FALSE` alone does not promise device residence. Physical YubiHSM
+firmware uses the common host software session layer for outputs that it cannot
+hold. A virtual device advertising algorithm 61 uses explicit native placement
+for the supported graph and reports those mechanisms with `CKF_HW`. Readable
+outputs needing software-only operations are materialized once; protected
+outputs are never downgraded. Established channels use local working bytes.

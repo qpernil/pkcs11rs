@@ -151,6 +151,7 @@ pub(crate) struct ProtocolPeer {
     device: RefCell<VirtualYubiHsm>,
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
+    native_session_commands: Cell<bool>,
     objects: RefCell<Vec<u16>>,
     metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
     authkey_domains: RefCell<HashMap<u16, u16>>,
@@ -224,6 +225,7 @@ impl ProtocolPeer {
             device: RefCell::new(Self::new_virtual_device()),
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
+            native_session_commands: Cell::new(false),
             objects: RefCell::new(vec![1]),
             metadata_objects: RefCell::new(HashMap::new()),
             authkey_domains: RefCell::new(HashMap::from([(1, 0xffff), (2, 0xffff)])),
@@ -258,7 +260,7 @@ impl ProtocolPeer {
             version: [2, 4, 1],
             serial: 0x0102_0304,
             log_capacity: 62,
-            algorithms: vec![1, 2],
+            algorithms: (1..=crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION).collect(),
             part_number: *b"78CLUFX5000P\0",
         };
         VirtualYubiHsm::factory_default_with_device_static_private(
@@ -681,6 +683,18 @@ impl ProtocolPeer {
                     .borrow_mut()
                     .push((inner.command, inner.data.clone()));
                 if inner.command == CommandCode::PutAuthenticationKey as u8 {
+                    return None;
+                }
+                if self.native_session_commands.get()
+                    && [
+                    CommandCode::DeriveSessionObject,
+                    CommandCode::ReadSessionObject,
+                    CommandCode::VerifySessionObject,
+                    CommandCode::DeleteSessionObject,
+                ]
+                .iter()
+                .any(|command| *command as u8 == inner.command)
+                {
                     return None;
                 }
                 let result = (|| -> Result<(u8, Vec<u8>), Error> {
@@ -1514,6 +1528,28 @@ pub(crate) fn make_yubihsm_test_slot() -> (
     );
     slot.trust_prefix = Some(trust.prefix.clone());
     (Box::new(slot), commands, corrupt_response_mac, trust)
+}
+
+pub(crate) struct NativeSessionTestControl(Rc<ProtocolPeer>);
+
+impl NativeSessionTestControl {
+    pub(crate) fn expire_next_command(&self) {
+        self.0.expire_next_session_message.set(true);
+    }
+}
+
+pub(crate) fn make_yubihsm_native_session_test_slot()
+-> (Box<dyn crate::Slot>, NativeSessionTestControl) {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.native_session_commands.set(true);
+    let control = NativeSessionTestControl(peer.clone());
+    let mut slot = crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
+    );
+    slot.recreate_sessions = true;
+    (Box::new(slot), control)
 }
 
 pub(crate) fn make_yubihsm_provisioning_test_slot()
