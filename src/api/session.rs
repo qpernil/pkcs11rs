@@ -575,6 +575,15 @@ pub(crate) fn close_session(session_handle: CK_SESSION_HANDLE) -> Result<(), Err
             })
             .collect::<Vec<_>>();
         for handle in creator_objects {
+            if let Some(TokenObject {
+                material: KeyMaterial::YubiHsmSessionObject { handle, .. },
+                ..
+            }) = ctx.memory_objects.get(&handle)
+            {
+                let _ = session
+                    .backend()
+                    .yubihsm_command(&YubiHsmCommand::delete_session_object(*handle));
+            }
             ctx.remove_object_handle(handle);
         }
         log!(2, "C_CloseSession removed {:?}", (session_handle, session));

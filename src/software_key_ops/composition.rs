@@ -18,29 +18,29 @@ impl SecretDerivation<'_> {
         }
     }
     pub(crate) fn validate_inputs(self, base: &TokenObject) -> Result<(), Error> {
-        secret(base, self.mechanism())?;
+        secret_length(base, self.mechanism())?;
         if let Self::AppendKey(other) = self {
-            secret(other, self.mechanism())?;
+            secret_length(other, self.mechanism())?;
         }
         Ok(())
     }
     pub(crate) fn available(self, base: &TokenObject) -> Result<usize, Error> {
-        let base_value = secret(base, self.mechanism())?;
+        let base_length = secret_length(base, self.mechanism())?;
         let other_value = if let Self::AppendKey(other) = self {
-            Some(secret(other, self.mechanism())?)
+            Some(secret_length(other, self.mechanism())?)
         } else {
             None
         };
         let available = match self {
-            SecretDerivation::AppendKey(_) => base_value
-                .len()
-                .checked_add(other_value.ok_or(CKR_KEY_HANDLE_INVALID)?.len()),
-            SecretDerivation::AppendData(data) => base_value.len().checked_add(data.len()),
+            SecretDerivation::AppendKey(_) => {
+                base_length.checked_add(other_value.ok_or(CKR_KEY_HANDLE_INVALID)?)
+            }
+            SecretDerivation::AppendData(data) => base_length.checked_add(data.len()),
             SecretDerivation::Extract(offset) => {
-                if offset >= base_value.len() * 8 {
+                if offset >= base_length * 8 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                Some(base_value.len())
+                Some(base_length)
             }
             SecretDerivation::Sha256 => Some(32),
         }
@@ -50,14 +50,31 @@ impl SecretDerivation<'_> {
     }
 }
 
-pub(crate) fn secret(object: &TokenObject, mechanism: CK_MECHANISM_TYPE) -> Result<&[u8], Error> {
+pub(crate) fn secret_length(
+    object: &TokenObject,
+    mechanism: CK_MECHANISM_TYPE,
+) -> Result<usize, Error> {
     require_key_mechanism(object, mechanism)?;
-    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS || !object.derive {
+        return Err(if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
+            CKR_KEY_TYPE_INCONSISTENT.into()
+        } else {
+            CKR_KEY_FUNCTION_NOT_PERMITTED.into()
+        });
     }
-    if !object.derive {
-        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+    let length = match &object.material {
+        KeyMaterial::SoftwareSecret(value) => value.len(),
+        KeyMaterial::YubiHsmSessionObject { length, .. } => *length,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    if !(1..=1024).contains(&length) {
+        return Err(CKR_KEY_SIZE_RANGE.into());
     }
+    Ok(length)
+}
+
+pub(crate) fn secret(object: &TokenObject, mechanism: CK_MECHANISM_TYPE) -> Result<&[u8], Error> {
+    secret_length(object, mechanism)?;
     let KeyMaterial::SoftwareSecret(value) = &object.material else {
         // Native material must never be exported to implement a software mechanism.
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());

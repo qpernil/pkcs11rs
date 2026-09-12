@@ -179,8 +179,9 @@ documented under [RSA public wrap keys](docs/yubihsm-auth.md#rsa-public-wrap-key
 The vendor
 [`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE`](docs/prefixed-ecdh-derive.md) mechanism
 keeps a reusable static ECDH agreement inside a supporting YubiHSM while
-deriving session-specific key material. The current compatibility object and
-the future persistent, chainable generic-secret design are documented there.
+deriving session-specific key material. Virtual YubiHSMs that advertise the
+native session-key extension can also keep chainable derivation intermediates
+inside the device; the placement and fallback rules are documented there.
 
 ## PKCS #11 3.2 profiles
 
@@ -1256,20 +1257,20 @@ AES-256-CBC and retains the inner PKCS #9 label and ID attributes.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader
   configuration are not yet provided by this repository.
 
-## Planned: SCP03/SCP11 through PKCS #11 key operations
+## SCP03/SCP11 through PKCS #11 key operations
 
-The [staged implementation plan](docs/scp-key-provider/README.md) starts with
-the completed common session-object layer and ends with a virtual YubiHSM
-performing all secret-key operations for complete SCP03/SCP11 exchanges,
-including AES encryption/decryption and CMAC for the protected traffic.
+The [key-provider design](docs/scp-key-provider/README.md) uses the common
+session-object layer for SCP03/SCP11 derivation. Long-term keys, ECDH
+agreements, and intermediate objects remain in the provider; only the final
+working keys are exported once for local AES and CMAC message crypto.
 
-The protocol uses PKCS #11 key handles and operations. A software slot supplies
-them first; native virtual-YubiHSM commands then supply the same contract while
-keeping intermediate and working keys inside the device. The plan records the
-missing derivations, provider and locking boundaries, native object lifetimes,
-capability checks, and end-to-end completion criteria. Implementing a software
-mechanism in the common layer makes it available to ordinary slots by default,
-subject to the per-slot mechanism filter.
+The protocol uses PKCS #11 key handles and operations. Software-backed session
+objects provide the common contract. A virtual YubiHSM advertising algorithm 61
+uses protected device-session objects for supported generation, agreement,
+composition, KDF, extraction, and verification operations. Native coverage is
+reported with `CKF_HW`; a readable result needing a software-only operation is
+materialized once into the common layer. Complete channel qualification with a
+virtual YubiHSM derivation provider remains the integration milestone.
 
 ## Vendored Headers
 

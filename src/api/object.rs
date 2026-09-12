@@ -1729,6 +1729,13 @@ pub(crate) fn destroy_object(
             ctx.refresh_slot_token_objects_with_rebindings(slot_id, &rebindings)?;
             return Ok(());
         }
+        if let KeyMaterial::YubiHsmSessionObject { handle, .. } = stored_object.material {
+            ctx._get_session(session_handle)?
+                .1
+                .yubihsm_command(&YubiHsmCommand::delete_session_object(handle))?;
+            ctx.remove_object_handle(object);
+            return Ok(());
+        }
         ctx.remove_object_handle(object);
         Ok(())
     })
@@ -1971,6 +1978,18 @@ fn object_attribute_value(
     {
         let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
         return Ok(piv_certificate_attribute(&payload, attribute_type));
+    }
+    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+        && let KeyMaterial::YubiHsmSessionObject { handle, length } = object.material
+    {
+        let value = ctx
+            ._get_session(session_handle)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::read_session_object(handle))?;
+        if value.len() != length {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        return Ok(Some(value));
     }
     if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
         && let KeyMaterial::YubiHsm {

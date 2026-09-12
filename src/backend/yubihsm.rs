@@ -4249,6 +4249,9 @@ impl Slot for YubiHsmSlot {
             flags,
             connector: self.connector.clone(),
             session: self.session.clone(),
+            native_session_objects: self
+                .algorithms
+                .contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION),
         })
     }
     #[cfg(all(test, not(feature = "abi-tests")))]
@@ -4772,6 +4775,7 @@ pub(crate) struct YubiHsmSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<YubiHsmSessionState>>,
+    native_session_objects: bool,
 }
 
 impl BackendSession for YubiHsmSession {
@@ -4801,6 +4805,9 @@ impl BackendSession for YubiHsmSession {
     }
     fn yubihsm_command(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         self.send_secure_cmd(command)
+    }
+    fn supports_native_session_objects(&self) -> bool {
+        self.native_session_objects
     }
     fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
         crate::get_yubihsm_device_public_key(self.connector.as_ref()).map(Vec::from)

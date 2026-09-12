@@ -172,6 +172,10 @@ pub(crate) fn counter_base_key(base: &TokenObject) -> Result<CounterCmacKey<'_>,
             }
             Ok(CounterCmacKey::YubiHsm(*id))
         }
+        KeyMaterial::YubiHsmSessionObject { handle, length } if matches!(*length, 16 | 24 | 32) => {
+            let _ = handle;
+            Ok(CounterCmacKey::YubiHsmSession)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
@@ -181,6 +185,7 @@ pub(crate) fn counter_base_key(base: &TokenObject) -> Result<CounterCmacKey<'_>,
 pub(crate) enum CounterCmacKey<'a> {
     Software(&'a [u8]),
     YubiHsm(u16),
+    YubiHsmSession,
 }
 
 impl CounterCmacKey<'_> {
@@ -198,6 +203,7 @@ impl CounterCmacKey<'_> {
                     .try_into()
                     .map_err(|_| CKR_DEVICE_ERROR.into())
             }
+            Self::YubiHsmSession => Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         }
     }
 }

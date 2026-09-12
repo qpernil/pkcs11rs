@@ -130,6 +130,7 @@ pub(crate) fn verify_init(
                         algorithm: YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256,
                         ..
                     } | KeyMaterial::SoftwareSecret(_)
+                        | KeyMaterial::YubiHsmSessionObject { .. }
                 )))
             || hmac_key_is_invalid
             || (!aes_mac_mechanism
@@ -280,6 +281,19 @@ pub(crate) fn verify(
                     Some(parameters) => software_aes_gmac(key, parameters, data)?,
                     None => software_aes_cmac(key, data)?,
                 },
+                KeyMaterial::YubiHsmSessionObject { handle, .. } => {
+                    if operation.gmac.is_some() {
+                        return Err(CKR_MECHANISM_INVALID.into());
+                    }
+                    let response = ctx._get_session(session_handle)?.1.yubihsm_command(
+                        &YubiHsmCommand::verify_session_object(*handle, signature, data)?,
+                    )?;
+                    return match response.as_slice() {
+                        [1] => Ok(()),
+                        [0] => Err(CKR_SIGNATURE_INVALID.into()),
+                        _ => Err(CKR_DEVICE_ERROR.into()),
+                    };
+                }
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             };
             expected.truncate(mac_length);

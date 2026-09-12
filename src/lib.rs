@@ -158,7 +158,9 @@ use yubihsm::{
     ObjectParameters as YubiHsmObjectParameters,
     Pkcs11AuthenticationMaterial as YubiHsmPkcs11AuthenticationMaterial,
     PublicKey as YubiHsmPublicKey, RsaWrapParameters as YubiHsmRsaWrapParameters,
-    SecureSession as YubiHsmSecureSession,
+    SESSION_OBJECT_DERIVE, SESSION_OBJECT_READABLE, SESSION_OBJECT_VERIFY,
+    SecureSession as YubiHsmSecureSession, SessionObjectKind as YubiHsmSessionObjectKind,
+    SessionObjectSource as YubiHsmSessionObjectSource,
     device_public_key_bytes as get_yubihsm_device_public_key,
     get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
     parse_object_list as parse_yubihsm_object_list,
@@ -242,6 +244,7 @@ mod yubihsm_algorithm {
     pub(super) const YUBIHSM_ALGO_RSA_PKCS1_WRAP: u8 = 58;
     pub(super) const YUBIHSM_ALGO_X448: u8 = 59;
     pub(super) const YUBIHSM_ALGO_ED448: u8 = 60;
+    pub(super) const YUBIHSM_ALGO_SESSION_KEY_DERIVATION: u8 = 61;
 }
 use yubihsm_algorithm::*;
 
