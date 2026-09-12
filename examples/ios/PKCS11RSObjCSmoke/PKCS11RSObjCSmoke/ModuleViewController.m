@@ -26,8 +26,6 @@ enum {
     PKCS11RSMLDSAMessageLength = 32,
     PKCS11RSMLKEMSecretLength = 32,
 };
-static const CK_ATTRIBUTE_TYPE PKCS11RSHsmAuthAlgorithm =
-    CKA_VENDOR_DEFINED | 0x5901UL;
 static const CK_ATTRIBUTE_TYPE PKCS11RSHsmAuthRetries =
     CKA_VENDOR_DEFINED | 0x5902UL;
 static const CK_ATTRIBUTE_TYPE PKCS11RSHsmAuthTouchRequired =
@@ -80,53 +78,19 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return [storage subdataWithRange:NSMakeRange(0, (NSUInteger)attribute.ulValueLen)];
 }
 
-@interface PKCS11RSHsmAuthCredential : NSObject
-@property(nonatomic, copy) NSString *label;
-@property(nonatomic, copy) NSString *source;
-@property(nonatomic) CK_ULONG algorithm;
-@property(nonatomic) CK_ULONG retries;
-@property(nonatomic) BOOL touchRequired;
-- (NSString *)algorithmName;
-@end
-
-@implementation PKCS11RSHsmAuthCredential
-
-- (NSString *)algorithmName {
-    switch (self.algorithm) {
-        case 38:
+static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
+    switch (keyType) {
+        case CKK_YUBICO_HSMAUTH_SYMMETRIC:
             return @"symmetric AES-128";
-        case 39:
+        case CKK_YUBICO_HSMAUTH_ASYMMETRIC:
             return @"asymmetric P-256";
         default:
-            return [NSString stringWithFormat:@"algorithm %lu", (unsigned long)self.algorithm];
+            return nil;
     }
 }
 
-- (NSString *)description {
-    return [NSString stringWithFormat:@"\"%@\" @ %@, %@, retries %lu, touch %@",
-                                      self.label,
-                                      self.source,
-                                      self.algorithmName,
-                                      (unsigned long)self.retries,
-                                      self.touchRequired ? @"required" : @"not required"];
-}
-
-@end
-
-
-@interface PKCS11RSObjectInspection : NSObject
-@property(nonatomic, copy) NSString *line;
-@property(nonatomic, strong, nullable) PKCS11RSHsmAuthCredential *credential;
-@end
-
-
-@implementation PKCS11RSObjectInspection
-@end
-
-
 @interface PKCS11RSObjectInventory : NSObject
 @property(nonatomic, copy) NSArray<NSString *> *lines;
-@property(nonatomic, copy) NSArray<PKCS11RSHsmAuthCredential *> *credentials;
 @end
 
 
@@ -416,12 +380,10 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
-- (PKCS11RSObjectInspection *)inspectObject:(CK_OBJECT_HANDLE)object
-                                  inSession:(CK_SESSION_HANDLE)session
-                                     source:(nullable NSString *)source {
+- (NSString *)descriptionForObject:(CK_OBJECT_HANDLE)object
+                         inSession:(CK_SESSION_HANDLE)session {
     CK_OBJECT_CLASS objectClass = 0;
     CK_KEY_TYPE keyType = 0;
-    CK_ULONG algorithm = 0;
     CK_ULONG retries = 0;
     CK_BBOOL touchRequired = CK_FALSE;
     NSMutableData *labelStorage = [NSMutableData dataWithLength:PKCS11RSAttributeCapacity];
@@ -432,7 +394,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         {CKA_LABEL, labelStorage.mutableBytes, labelStorage.length},
         {CKA_ID, identifierStorage.mutableBytes, identifierStorage.length},
         {CKA_KEY_TYPE, &keyType, sizeof(keyType)},
-        {PKCS11RSHsmAuthAlgorithm, &algorithm, sizeof(algorithm)},
         {PKCS11RSHsmAuthRetries, &retries, sizeof(retries)},
         {PKCS11RSHsmAuthTouchRequired, &touchRequired, sizeof(touchRequired)},
         {CKA_EC_POINT, ecPointStorage.mutableBytes, ecPointStorage.length},
@@ -471,32 +432,23 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                     PKCS11RSReturnValue(result)]];
     }
 
-    PKCS11RSObjectInspection *inspection = [[PKCS11RSObjectInspection alloc] init];
+    NSString *algorithmName = PKCS11RSHsmAuthAlgorithmName(keyType);
     BOOL hasCredentialMetadata =
-        attributes[4].ulValueLen == sizeof(algorithm) &&
-        attributes[5].ulValueLen == sizeof(retries) &&
-        attributes[6].ulValueLen == sizeof(touchRequired);
-    if (hasCredentialMetadata && label.length > 0 && source.length > 0) {
-        PKCS11RSHsmAuthCredential *credential = [[PKCS11RSHsmAuthCredential alloc] init];
-        credential.label = label;
-        credential.source = source;
-        credential.algorithm = algorithm;
-        credential.retries = retries;
-        credential.touchRequired = touchRequired != CK_FALSE;
-        inspection.credential = credential;
-        [parts addObject:[NSString stringWithFormat:@"YubiHSM Auth %@", credential.algorithmName]];
+        algorithmName != nil &&
+        attributes[4].ulValueLen == sizeof(retries) &&
+        attributes[5].ulValueLen == sizeof(touchRequired);
+    if (hasCredentialMetadata) {
+        [parts addObject:[NSString stringWithFormat:@"YubiHSM Auth %@", algorithmName]];
         [parts addObject:[NSString stringWithFormat:@"retries=%lu", (unsigned long)retries]];
         [parts addObject:[NSString stringWithFormat:@"touch=%@",
-                                                    credential.touchRequired ? @"true" : @"false"]];
+                                                    touchRequired != CK_FALSE ? @"true" : @"false"]];
     }
 
-    inspection.line = [parts componentsJoinedByString:@", "];
-    return inspection;
+    return [parts componentsJoinedByString:@", "];
 }
 
 - (PKCS11RSObjectInventory *)objectInventoryForSession:(CK_SESSION_HANDLE)session
-                                                  title:(NSString *)title
-                                                 source:(nullable NSString *)source {
+                                                  title:(NSString *)title {
     NSMutableArray<NSNumber *> *objects = [[NSMutableArray alloc] init];
     NSString *failure = nil;
     CK_RV result = C_FindObjectsInit(session, NULL_PTR, 0);
@@ -534,16 +486,9 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
 
     NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] initWithObjects:
         @"", [NSString stringWithFormat:@"%@: %lu", title, (unsigned long)objects.count], nil];
-    NSMutableArray<PKCS11RSHsmAuthCredential *> *credentials = [[NSMutableArray alloc] init];
     for (NSNumber *object in objects) {
-        PKCS11RSObjectInspection *inspection =
-            [self inspectObject:(CK_OBJECT_HANDLE)object.unsignedLongValue
-                      inSession:session
-                         source:source];
-        [lines addObject:inspection.line];
-        if (inspection.credential != nil) {
-            [credentials addObject:inspection.credential];
-        }
+        [lines addObject:[self descriptionForObject:(CK_OBJECT_HANDLE)object.unsignedLongValue
+                                          inSession:session]];
     }
     if (failure != nil) {
         [lines addObject:[NSString stringWithFormat:@"  %@", failure]];
@@ -551,7 +496,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
 
     PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
     inventory.lines = lines;
-    inventory.credentials = credentials;
     return inventory;
 }
 
@@ -981,7 +925,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                          PKCS11RSReturnValue(initialize)]];
             PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
             inventory.lines = prefix;
-            inventory.credentials = @[];
             return inventory;
         }
         [prefix addObject:@"  initialized persistent token"];
@@ -998,7 +941,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                      PKCS11RSReturnValue(result)]];
         PKCS11RSObjectInventory *inventory = [[PKCS11RSObjectInventory alloc] init];
         inventory.lines = prefix;
-        inventory.credentials = @[];
         return inventory;
     }
 
@@ -1264,15 +1206,13 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     PKCS11RSObjectInventory *inventory = nil;
     if (failure == nil) {
         inventory = [self objectInventoryForSession:session
-                                              title:@"Objects (authenticated software session)"
-                                             source:nil];
+                                              title:@"Objects (authenticated software session)"];
     } else {
         inventory = [[PKCS11RSObjectInventory alloc] init];
         inventory.lines = @[
             @"",
             [NSString stringWithFormat:@"Objects: skipped after %@", failure],
         ];
-        inventory.credentials = @[];
         [prefix addObject:[NSString stringWithFormat:@"  %@", failure]];
     }
 
@@ -1294,8 +1234,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return inventory;
 }
 
-- (PKCS11RSObjectInventory *)publicObjectInventoryForSlot:(CK_SLOT_ID)slot
-                                                   source:(NSString *)source {
+- (PKCS11RSObjectInventory *)publicObjectInventoryForSlot:(CK_SLOT_ID)slot {
     CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
     CK_RV result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
     if (result != CKR_OK) {
@@ -1305,12 +1244,10 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             [NSString stringWithFormat:@"Objects: C_OpenSession failed: %@",
                                        PKCS11RSReturnValue(result)],
         ];
-        inventory.credentials = @[];
         return inventory;
     }
     PKCS11RSObjectInventory *inventory = [self objectInventoryForSession:session
-                                                                   title:@"Objects (public session)"
-                                                                  source:source];
+                                                                   title:@"Objects (public session)"];
     result = C_CloseSession(session);
     if (result != CKR_OK) {
         inventory.lines = [inventory.lines arrayByAddingObject:
@@ -1349,8 +1286,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                     username,
                                                     PKCS11RSReturnValue(result)]];
         PKCS11RSObjectInventory *inventory = [self objectInventoryForSession:session
-                                                                       title:@"Objects (authenticated session)"
-                                                                      source:nil];
+                                                                       title:@"Objects (authenticated session)"];
         [lines addObjectsFromArray:inventory.lines];
         CK_RV logout = C_Logout(session);
         [lines addObject:[NSString stringWithFormat:@"C_Logout: %@",
@@ -1761,7 +1697,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                                                    sizeof(tokenInformation.model));
         NSString *serial = PKCS11RSFixedString(tokenInformation.serialNumber,
                                                sizeof(tokenInformation.serialNumber));
-        NSString *source = serial.length == 0 ? description : serial;
         PKCS11RSSlotInventory *inventory = [[PKCS11RSSlotInventory alloc] init];
         inventory.slot = slots[index];
         inventory.slotDescription = description;
@@ -1773,7 +1708,7 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             [tokenLabel isEqualToString:PKCS11RSSoftwareTokenName];
         inventory.objects = managesSoftwareToken
             ? [self softwareObjectInventoryForSlot:slots[index] tokenInfo:tokenInformation]
-            : [self publicObjectInventoryForSlot:slots[index] source:source];
+            : [self publicObjectInventoryForSlot:slots[index]];
         [slotInventories addObject:inventory];
     }
 
@@ -1790,20 +1725,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     }
     slotInventories = orderedSlots;
 
-    NSMutableArray<PKCS11RSHsmAuthCredential *> *credentials = [[NSMutableArray alloc] init];
-    for (PKCS11RSSlotInventory *inventory in slotInventories) {
-        [credentials addObjectsFromArray:inventory.objects.credentials];
-    }
-    [report appendFormat:@"\nYubiHSM Auth credentials: %lu\n",
-                         (unsigned long)credentials.count];
-    if (credentials.count == 0) {
-        [report appendString:
-            @"  Discovery produced no credential (canceled, unavailable, or unsupported token).\n"];
-    } else {
-        for (PKCS11RSHsmAuthCredential *credential in credentials) {
-            [report appendFormat:@"  %@\n", credential.description];
-        }
-    }
     for (PKCS11RSSlotInventory *inventory in slotInventories) {
         [report appendFormat:@"\nSlot %lu: %@\n",
                              (unsigned long)inventory.slot,
