@@ -306,30 +306,65 @@ for destructive/exhaustion tests and keep physical devices intact.
 ## Future direction: external PKCS #11 sources
 
 Explore adapting a separately loaded PKCS #11 module as an authentication
-source through the `Pkcs11Auth` session contract. This is a tentative direction,
+source. Represent each selected external slot as an external-backed `Slot` with
+the common pkcs11rs software overlay, so `Pkcs11Auth` can use the same operation
+graph as it does for built-in PIV, OpenPGP, host, software, and YubiHSM slots.
+The external slot retains its token identity, login state, persistent objects,
+and native operations. Locally generated keys and explicitly readable derived
+results become ordinary pkcs11rs session objects. This is a tentative direction,
 not an implemented loader or a prerequisite for the work above. Module
-configuration and identity/selector syntax remain design decisions for a
-concrete integration. General module aggregation and re-exposure as ordinary
-pkcs11rs slots are outside this plan:
+configuration and identity/selector syntax remain design decisions.
+
+This adapter is a generalization of the existing native-backed slot pattern used
+by PIV, OpenPGP, host, and YubiHSM backends, rather than a separate authentication
+fallback. The built-in PIV slot is the clearest precedent: its resident private
+key performs native ECDH through the PIV backend, the readable agreement is
+published as a common software session object, and `Pkcs11Auth` performs the
+remaining composition and KDF operations without a PIV-specific authentication
+path. An external-backed slot should reproduce that behavior at the slot
+boundary, so no fallback outside `Pkcs11Auth` is required. The shared derive
+handler currently dispatches native key material by provider; a future external
+adapter should use a generic backend operation rather than add external-module
+logic to authentication.
+
+The first implementation can keep these adapters private to authentication
+source resolution. General module aggregation and re-exposure through
+`C_GetSlotList` are outside this plan:
 [p11-kit’s proxy module](https://p11-glue.github.io/p11-glue/p11-kit/manual/sharing.html)
 already exposes the slots of multiple configured modules through one PKCS #11
-interface. The proposed adapter supplies credentials for YubiHSM authentication,
-without recreating that aggregation facility.
+interface.
 
 Choose derivation paths from the source's mechanisms and key permissions,
-without relying on backend kind. Prefer prefixed ECDH+KDF when available;
-otherwise require ordinary ECDH and the remaining composition/KDF operations.
+without relying on backend kind. Prefer prefixed ECDH+KDF when available. An
+external module with ordinary ECDH and protected composition/KDF operations can
+retain all intermediate objects in that module. A limited source such as a PIV
+module may instead produce an explicitly readable raw ECDH result; the adapter
+materializes it as a local, protected software session object and completes
+concatenation, X9.63 SHA-256, extraction, and receipt verification through the
+common overlay. Generate the independent ephemeral agreement locally so the
+external module needs to operate only on its long-term credential. Destroy and
+zeroize the transferred agreement immediately after materialization, and repeat
+ECDH rather than retain it for channel recreation.
+
+Readable raw ECDH is a compatibility fallback with a weaker isolation boundary:
+the long-term private key remains in the source token, but its agreement enters
+client memory. Request a non-sensitive, extractable session result and fail if
+the source rejects that output policy. A source that permits neither a complete
+protected graph nor readable raw ECDH is incompatible; never weaken an existing
+key's policy or retry a different path after an operational failure.
+
 For explicitly named AES-128 pairs (`<name>.enc` and `<name>.mac`), prefer
 `CKM_SP800_108_COUNTER_KDF`, with the implemented AES-ECB construction as the
 alternative when the key permits encryption. An external adapter must supply
-these session operations and capability checks; the loader itself remains
+the required native operations and capability checks; the common overlay
+supplies its ordinary software session operations. The loader itself remains
 future work.
 
 Select a permitted path before execution; an operational failure must not
 trigger a different path or weaken object policy. Long-term keys remain in the
-source token. Qualify the required output policies and intermediate-object
-operations explicitly rather than assuming an external module offers the
-common software layer supplied by pkcs11rs.
+source token. Per-key capability projection must distinguish opaque external
+objects from local software session objects so the overlay does not claim it
+can operate on material the adapter cannot read.
 
 Retain the selected source session for channel recreation without retaining
 its login PIN. Target logout releases that session through normal session
