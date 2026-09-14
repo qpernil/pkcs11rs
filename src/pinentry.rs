@@ -1,10 +1,18 @@
-use crate::{
-    CKR_ARGUMENTS_BAD, CKR_CANCEL, CKR_CANT_LOCK, CKR_FUNCTION_FAILED, CKR_PIN_INVALID, Error,
-};
+use crate::{CKR_ARGUMENTS_BAD, CKR_CANT_LOCK, Error};
+#[cfg(not(target_os = "ios"))]
+use crate::{CKR_CANCEL, CKR_FUNCTION_FAILED, CKR_PIN_INVALID};
 use std::{ffi::OsString, sync::Mutex};
 use zeroize::Zeroizing;
 
+#[cfg(not(target_os = "ios"))]
 pub(crate) use crate::pinentry_client::Prompt;
+
+#[cfg(target_os = "ios")]
+pub(crate) struct Prompt<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) description: &'a str,
+    pub(crate) label: &'a str,
+}
 
 pub(crate) struct Pinentry {
     program: Mutex<Option<OsString>>,
@@ -50,6 +58,7 @@ impl Pinentry {
             .unwrap_or(false)
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn request(&self, prompt: Prompt<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
         let program = self
             .program
@@ -80,6 +89,13 @@ impl Pinentry {
         }
         result
     }
+
+    // A native application callback will implement the protected path on iOS.
+    // Until it is installed, a null PIN has no usable protected path.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn request(&self, _prompt: Prompt<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -93,6 +109,10 @@ pub(crate) fn configure_for_test(value: Option<OsString>) -> Result<(), Error> {
 
 fn parse_configuration(value: Option<OsString>) -> Result<Option<OsString>, Error> {
     if value.as_ref().is_some_and(|value| value.is_empty()) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    #[cfg(target_os = "ios")]
+    if value.is_some() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(value)

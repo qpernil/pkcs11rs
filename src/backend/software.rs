@@ -176,8 +176,20 @@ impl Slot for SoftwareSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let prompted;
+        let pin = match pin {
+            Some(pin) => pin,
+            None => {
+                let title = self.label();
+                prompted = pinentry.request(pinentry::Prompt {
+                    title: &title,
+                    description: "Enter the software token user PIN.",
+                    label: "User PIN:",
+                })?;
+                prompted.as_slice()
+            }
+        };
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
         if let Some(store) = &self.store {
@@ -193,12 +205,20 @@ impl Slot for SoftwareSlot {
         Ok(())
     }
 
-    fn login_so(
-        &mut self,
-        pin: Option<&[u8]>,
-        _pinentry: &pinentry::Pinentry,
-    ) -> Result<(), Error> {
-        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
+    fn login_so(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let prompted;
+        let pin = match pin {
+            Some(pin) => pin,
+            None => {
+                let title = self.label();
+                prompted = pinentry.request(pinentry::Prompt {
+                    title: &title,
+                    description: "Enter the software token security officer PIN.",
+                    label: "Security officer PIN:",
+                })?;
+                prompted.as_slice()
+            }
+        };
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
         let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
@@ -214,6 +234,10 @@ impl Slot for SoftwareSlot {
         }
         self.clear_sensitive_state();
         Ok(())
+    }
+
+    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
+        pinentry.is_configured()
     }
 
     fn init_slot(&mut self) -> Result<(), Error> {
@@ -434,6 +458,24 @@ impl BackendSession for SoftwareSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn null_pin_uses_the_configured_protected_path() {
+        let _guard = crate::test::TEST_LOCK.lock().unwrap();
+        let configured = crate::test::TestPinentry::new("password");
+        let pinentry = configured.pinentry();
+        let mut slot = SoftwareSlot::new(String::from("prompted"), 0);
+
+        assert!(slot.supports_protected_authentication_path(&pinentry));
+        Slot::login(&mut slot, None, &pinentry).unwrap();
+        assert!(slot.login_is_active());
+        Slot::logout(&mut slot).unwrap();
+        assert!(
+            !slot
+                .supports_protected_authentication_path(&crate::pinentry::Pinentry::unconfigured())
+        );
+    }
 
     #[test]
     fn metadata_identifies_a_non_hardware_slot() {

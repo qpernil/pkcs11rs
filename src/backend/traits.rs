@@ -370,7 +370,7 @@ pub(crate) trait Slot {
     /// Installed backing storage enables public certificate provisioning on
     /// applets without native certificate storage. This is not an inventory check.
     fn set_public_certificate_storage_enabled(&mut self, _enabled: bool) {}
-    fn supports_protected_authentication_path(&self) -> bool {
+    fn supports_protected_authentication_path(&self, _pinentry: &pinentry::Pinentry) -> bool {
         false
     }
     fn additional_profile_ids(&self) -> &[CK_PROFILE_ID] {

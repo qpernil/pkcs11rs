@@ -677,6 +677,8 @@ make discovery circular.
 Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
 password through pinentry while retaining the username as the authentication
 selector. A nonnull pointer with zero length remains an explicitly empty
+password. Wildcard selectors are never packed into the `C_Login` PIN field;
+`C_Login` rejects them because a wildcard applies to the username, not the
 password.
 
 The YubiHSM token reports a stable 0-through-215-byte PIN envelope. The minimum
@@ -828,8 +830,11 @@ for a native dialog that does not require a controlling terminal.
 
 The variable is read during `C_Initialize`; leaving it unset disables
 interactive prompting, and an empty value makes initialization return
-`CKR_ARGUMENTS_BAD`. When enabled, YubiHSM and YubiHSM Auth token information
-includes `CKF_PROTECTED_AUTHENTICATION_PATH`.
+`CKR_ARGUMENTS_BAD`. Desktop builds use the configured external program. iOS
+builds do not include the process-based client and reject this setting; a
+native application prompt provider will implement the same backend-facing
+interface. When a provider is available, every backend that can use it reports
+`CKF_PROTECTED_AUTHENTICATION_PATH`.
 
 The module starts one configured process per prompt and communicates through
 the Assuan protocol over pipes. Prompts are serialized, secrets are never

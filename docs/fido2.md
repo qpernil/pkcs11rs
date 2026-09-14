@@ -157,6 +157,9 @@ The ClientPIN is authenticator-wide, so successful PIN/UV token acquisition is
 the FIDO verification operation underlying `C_Login`. `C_LoginUser` accepts
 only an empty username and follows the same PIN/UV authorization path as
 `C_Login`.
+When a prompt provider is configured, the token reports
+`CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for the
+authenticator-wide ClientPIN.
 The `user.id`, `user.name`, and `displayName` values returned with discoverable
 credentials are relying-party-scoped credential metadata, not authenticator
 login identities. Likewise, CTAP provides no Security Officer identity, so

@@ -227,7 +227,7 @@ pub(crate) fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) ->
     with_slot_context_mut(slotID, |ctx| {
         let slot = ctx.get_present_slot(slotID)?;
         slot.get_token_info(info)?;
-        if ctx.pinentry.is_configured() && slot.supports_protected_authentication_path() {
+        if slot.supports_protected_authentication_path(ctx.pinentry.as_ref()) {
             info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH as CK_FLAGS;
         }
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;

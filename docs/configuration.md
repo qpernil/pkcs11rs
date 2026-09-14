@@ -197,6 +197,10 @@ key objects share their managed name as `CKA_LABEL` for exact lookup.
 
 ## Environment mapping
 
+`pinentry` names an Assuan-compatible executable on desktop platforms. iOS
+rejects this process-based setting; protected login there requires the planned
+native application prompt provider.
+
 | JSON field | Environment fallback |
 | --- | --- |
 | `logging.level` | `PKCS11RS_LOG` |

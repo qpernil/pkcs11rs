@@ -764,7 +764,7 @@ projection. These forms carry no password.
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
 
-Enable protected password entry for YubiHSM and YubiHSM Auth login by naming a
+Enable protected password entry for PIN-requiring slot backends by naming a
 compatible pinentry executable:
 
 ```sh
@@ -779,8 +779,14 @@ process's controlling terminal at `/dev/tty`. No terminal name is sent on
 Windows. On macOS, `pinentry-mac` is recommended because Homebrew's plain
 `pinentry` is a curses frontend.
 
-Callers request the protected path with a null PIN pointer. Combined YubiHSM
-Auth `C_Login` selectors may omit their password separator instead. See
+Callers request the protected path from `C_Login` or `C_LoginUser` with a null
+PIN pointer and zero PIN length. Each backend decides whether that operation
+needs a secret and invokes the shared prompt helper when it does. A nonnull
+pointer with zero length is an explicitly empty PIN. Legacy YubiHSM `C_Login`
+has no separate selector parameter, so an exact packed selector without its
+password requests the same helper. Wildcard YubiHSM
+authentication selectors belong only in the separate `C_LoginUser` username;
+they are rejected in the packed `C_Login` PIN field. See
 [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md) for the exact forms.
 
 ## Token Storage

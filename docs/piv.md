@@ -14,6 +14,11 @@ PIN. PINs must contain six to eight bytes and are padded to the eight-byte PIV
 APDU field with `FF`. `C_Logout` reselects the application to clear card
 authentication state.
 
+When a prompt provider is configured, the token reports
+`CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for the
+PIV user PIN or the hexadecimal SO management key. A slot containing only keys
+whose PIN policy is `NEVER` can complete USER login without prompting.
+
 `CK_TOKEN_INFO` reports a slot-wide PIN envelope of 6 through 64 bytes. The
 lower end is the ordinary PIV PIN/PUK minimum. The upper end covers the
 hexadecimal representation of an AES-256 management key accepted by

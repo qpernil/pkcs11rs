@@ -948,8 +948,23 @@ impl Slot for Fido2Slot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
+    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
+        pinentry.is_configured()
+    }
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let prompted;
+        let pin = match pin {
+            Some(pin) => pin,
+            None => {
+                let title = self.label();
+                prompted = pinentry.request(pinentry::Prompt {
+                    title: &title,
+                    description: "Enter the authenticator PIN.",
+                    label: "Authenticator PIN:",
+                })?;
+                prompted.as_slice()
+            }
+        };
         self.authenticated.set(false);
         self.administration_authorization.take();
         self.credentials.get_mut().clear();

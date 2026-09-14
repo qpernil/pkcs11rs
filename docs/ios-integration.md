@@ -155,6 +155,24 @@ and remote connector discovery. See
 [Discovery lifecycle and stable slots](architecture.md#discovery-lifecycle-and-stable-slots)
 for what happens during the first listing and what later listings refresh.
 
+## Protected PIN entry
+
+The current iOS build does not include the desktop Assuan pinentry subprocess
+and rejects a configured `pinentry` executable. Applications must pass a PIN to
+`C_Login` or `C_LoginUser`; the PIN remains separate from the latter's username
+and wildcard selector.
+
+The native protected-path design registers an application callback as the iOS
+implementation of the shared prompt provider. A backend that receives a null
+PIN requests a title, description, and input label through that provider. The
+callback dispatches an alert to the main queue and blocks only the PKCS #11
+worker thread until the user returns a secret or cancels. Calling this path from
+the main thread must fail instead of deadlocking. Rust copies a successful
+result immediately into zeroizing storage and does not retain it beyond the
+backend's documented authorization lifetime. Once registered, the provider
+causes applicable tokens to report `CKF_PROTECTED_AUTHENTICATION_PATH`; without
+it, a null PIN continues to fail for PIN-requiring backends.
+
 ## Available iOS backends
 
 The XCFramework contains:
