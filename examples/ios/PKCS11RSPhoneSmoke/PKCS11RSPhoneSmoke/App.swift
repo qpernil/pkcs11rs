@@ -120,6 +120,14 @@ private func keyTypeName(_ keyType: CK_KEY_TYPE) -> String {
     return String(format: "Unknown key type 0x%08llX", UInt64(keyType))
 }
 
+private func returnValueDescription(_ value: CK_RV) -> String {
+    let code = String(format: "0x%llx", UInt64(value))
+    guard let name = PKCS11RS_GetReturnValueName(value) else {
+        return code
+    }
+    return "\(String(cString: name)) (\(code))"
+}
+
 private func availableLength(_ attribute: CK_ATTRIBUTE, capacity: Int) -> Int? {
     guard attribute.ulValueLen != CK_ULONG(CK_UNAVAILABLE_INFORMATION),
           attribute.ulValueLen <= CK_ULONG(capacity)
@@ -222,7 +230,7 @@ private func objectDescription(
        result != CKR_ATTRIBUTE_SENSITIVE,
        result != CKR_BUFFER_TOO_SMALL
     {
-        parts.append("attributes failed: \(result)")
+        parts.append("attributes failed: \(returnValueDescription(result))")
     }
     if attributes[4].ulValueLen == CK_ULONG(MemoryLayout<CK_ULONG>.size),
        attributes[5].ulValueLen == CK_ULONG(MemoryLayout<CK_BBOOL>.size)
@@ -266,7 +274,7 @@ private func objectInventory(
                 )
             }
             guard findResult == CKR_OK else {
-                failure = "C_FindObjects failed: \(findResult)"
+                failure = "C_FindObjects failed: \(returnValueDescription(findResult))"
                 break
             }
             guard Int(batchCount) <= batch.count else {
@@ -280,10 +288,10 @@ private func objectInventory(
         }
         let findFinalResult = C_FindObjectsFinal(session)
         if findFinalResult != CKR_OK, failure == nil {
-            failure = "C_FindObjectsFinal failed: \(findFinalResult)"
+            failure = "C_FindObjectsFinal failed: \(returnValueDescription(findFinalResult))"
         }
     } else {
-        failure = "C_FindObjectsInit failed: \(findInitResult)"
+        failure = "C_FindObjectsInit failed: \(returnValueDescription(findInitResult))"
     }
 
     let descriptions = objects.map { objectDescription(session: session, object: $0) }
@@ -1007,7 +1015,7 @@ private func softwareObjectInventory(
     if !tokenInitialized {
         let initialize = initializeSoftwareToken(slot: slot)
         guard initialize == CKR_OK else {
-            lines.append("  C_InitToken failed: \(initialize)")
+            lines.append("  C_InitToken failed: \(returnValueDescription(initialize))")
             return ObjectInventory(lines: lines)
         }
         lines.append("  initialized persistent token")
@@ -1022,7 +1030,7 @@ private func softwareObjectInventory(
         &session
     )
     guard open == CKR_OK else {
-        lines.append("  C_OpenSession failed: \(open)")
+        lines.append("  C_OpenSession failed: \(returnValueDescription(open))")
         return ObjectInventory(lines: lines)
     }
 
@@ -1034,17 +1042,17 @@ private func softwareObjectInventory(
             pin: softwareTokenPIN
         )
         if soLogin != CKR_OK {
-            failure = "C_Login(CKU_SO) failed: \(soLogin)"
+            failure = "C_Login(CKU_SO) failed: \(returnValueDescription(soLogin))"
         } else {
             let initializePIN = initializeSoftwareUserPIN(session: session)
             if initializePIN == CKR_OK {
                 lines.append("  initialized user PIN")
             } else {
-                failure = "C_InitPIN failed: \(initializePIN)"
+                failure = "C_InitPIN failed: \(returnValueDescription(initializePIN))"
             }
             let logout = C_Logout(session)
             if logout != CKR_OK, failure == nil {
-                failure = "C_Logout(CKU_SO) failed: \(logout)"
+                failure = "C_Logout(CKU_SO) failed: \(returnValueDescription(logout))"
             }
         }
     }
@@ -1059,7 +1067,7 @@ private func softwareObjectInventory(
         if userLogin == CKR_OK {
             userLoggedIn = true
         } else {
-            failure = "C_Login(CKU_USER) failed: \(userLogin)"
+            failure = "C_Login(CKU_USER) failed: \(returnValueDescription(userLogin))"
         }
     }
 
@@ -1079,9 +1087,9 @@ private func softwareObjectInventory(
         var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         if foundPublic.result != CKR_OK {
-            failure = "X25519 public-key search failed: \(foundPublic.result)"
+            failure = "X25519 public-key search failed: \(returnValueDescription(foundPublic.result))"
         } else if foundPrivate.result != CKR_OK {
-            failure = "X25519 private-key search failed: \(foundPrivate.result)"
+            failure = "X25519 private-key search failed: \(returnValueDescription(foundPrivate.result))"
         } else if foundPublic.object != nil, foundPrivate.object != nil {
             lines.append("  X25519 keypair already present")
         } else if foundPublic.object != nil || foundPrivate.object != nil {
@@ -1103,7 +1111,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "C_GenerateKeyPair(X25519) failed: \(generated.result)"
+                failure = "C_GenerateKeyPair(X25519) failed: \(returnValueDescription(generated.result))"
             }
         }
 
@@ -1121,7 +1129,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "\(exercised.operation)(X25519) failed: \(exercised.result)"
+                failure = "\(exercised.operation)(X25519) failed: \(returnValueDescription(exercised.result))"
             }
         }
     }
@@ -1142,9 +1150,9 @@ private func softwareObjectInventory(
         var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         if foundPublic.result != CKR_OK {
-            failure = "ML-DSA-87 public-key search failed: \(foundPublic.result)"
+            failure = "ML-DSA-87 public-key search failed: \(returnValueDescription(foundPublic.result))"
         } else if foundPrivate.result != CKR_OK {
-            failure = "ML-DSA-87 private-key search failed: \(foundPrivate.result)"
+            failure = "ML-DSA-87 private-key search failed: \(returnValueDescription(foundPrivate.result))"
         } else if foundPublic.object != nil, foundPrivate.object != nil {
             lines.append("  ML-DSA-87 keypair already present")
         } else if foundPublic.object != nil || foundPrivate.object != nil {
@@ -1174,7 +1182,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "C_GenerateKeyPair(ML-DSA-87) failed: \(generated.result)"
+                failure = "C_GenerateKeyPair(ML-DSA-87) failed: \(returnValueDescription(generated.result))"
             }
         }
 
@@ -1194,7 +1202,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "\(exercised.operation)(ML-DSA-87) failed: \(exercised.result)"
+                failure = "\(exercised.operation)(ML-DSA-87) failed: \(returnValueDescription(exercised.result))"
             }
         }
     }
@@ -1215,9 +1223,9 @@ private func softwareObjectInventory(
         var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         if foundPublic.result != CKR_OK {
-            failure = "ML-KEM-1024 public-key search failed: \(foundPublic.result)"
+            failure = "ML-KEM-1024 public-key search failed: \(returnValueDescription(foundPublic.result))"
         } else if foundPrivate.result != CKR_OK {
-            failure = "ML-KEM-1024 private-key search failed: \(foundPrivate.result)"
+            failure = "ML-KEM-1024 private-key search failed: \(returnValueDescription(foundPrivate.result))"
         } else if foundPublic.object != nil, foundPrivate.object != nil {
             lines.append("  ML-KEM-1024 keypair already present")
         } else if foundPublic.object != nil || foundPrivate.object != nil {
@@ -1247,7 +1255,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "C_GenerateKeyPair(ML-KEM-1024) failed: \(generated.result)"
+                failure = "C_GenerateKeyPair(ML-KEM-1024) failed: \(returnValueDescription(generated.result))"
             }
         }
 
@@ -1267,7 +1275,7 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "\(exercised.operation)(ML-KEM-1024) failed: \(exercised.result)"
+                failure = "\(exercised.operation)(ML-KEM-1024) failed: \(returnValueDescription(exercised.result))"
             }
         }
     }
@@ -1285,12 +1293,12 @@ private func softwareObjectInventory(
     if userLoggedIn {
         let logout = C_Logout(session)
         if logout != CKR_OK {
-            inventory.lines.append("  C_Logout failed: \(logout)")
+            inventory.lines.append("  C_Logout failed: \(returnValueDescription(logout))")
         }
     }
     let close = C_CloseSession(session)
     if close != CKR_OK {
-        inventory.lines.append("  C_CloseSession failed: \(close)")
+        inventory.lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
     }
     inventory.lines.insert(contentsOf: lines, at: 0)
     return inventory
@@ -1309,7 +1317,7 @@ private func publicObjectInventory(
     )
     guard openResult == CKR_OK else {
         return ObjectInventory(
-            lines: ["", "Objects: C_OpenSession failed: \(openResult)"]
+            lines: ["", "Objects: C_OpenSession failed: \(returnValueDescription(openResult))"]
         )
     }
 
@@ -1319,7 +1327,7 @@ private func publicObjectInventory(
     )
     let closeResult = C_CloseSession(session)
     if closeResult != CKR_OK {
-        inventory.lines.append("  C_CloseSession failed: \(closeResult)")
+        inventory.lines.append("  C_CloseSession failed: \(returnValueDescription(closeResult))")
     }
     return inventory
 }
@@ -1337,7 +1345,7 @@ private func authenticatedObjectInventory(
         &session
     )
     guard openResult == CKR_OK else {
-        return ["", "Authenticated objects: C_OpenSession failed: \(openResult)"]
+        return ["", "Authenticated objects: C_OpenSession failed: \(returnValueDescription(openResult))"]
     }
 
     var lines = [String]()
@@ -1364,17 +1372,17 @@ private func authenticatedObjectInventory(
         ).lines)
         let logoutResult = C_Logout(session)
         if logoutResult != CKR_OK {
-            lines.append("C_Logout failed: \(logoutResult)")
+            lines.append("C_Logout failed: \(returnValueDescription(logoutResult))")
         }
     } else if loginResult != CKR_FUNCTION_NOT_SUPPORTED {
         lines.append("")
         lines.append(
-            "Automatic credential login \(usernameValue) failed: \(loginResult)"
+            "Automatic credential login \(usernameValue) failed: \(returnValueDescription(loginResult))"
         )
     }
     let closeResult = C_CloseSession(session)
     if closeResult != CKR_OK {
-        lines.append("  C_CloseSession failed: \(closeResult)")
+        lines.append("  C_CloseSession failed: \(returnValueDescription(closeResult))")
     }
     return lines
 }
@@ -1523,13 +1531,13 @@ private final class ModuleInspector {
     ) -> (lines: [String]?, error: String?) {
         let initialize = initialize(configuration: configuration)
         guard initialize == CKR_OK else {
-            return (nil, "C_Initialize failed: \(initialize)")
+            return (nil, "C_Initialize failed: \(returnValueDescription(initialize))")
         }
 
         var info = CK_INFO()
         let getInfo = C_GetInfo(&info)
         guard getInfo == CKR_OK else {
-            return (nil, "C_GetInfo failed: \(getInfo)")
+            return (nil, "C_GetInfo failed: \(returnValueDescription(getInfo))")
         }
 
         return ([
@@ -1572,7 +1580,7 @@ private final class ModuleInspector {
             }
         }
         guard listResult == CKR_OK else {
-            return "C_GetSlotList failed: \(listResult)"
+            return "C_GetSlotList failed: \(returnValueDescription(listResult))"
         }
 
         var lines = information
@@ -1586,7 +1594,7 @@ private final class ModuleInspector {
             let slotResult = C_GetSlotInfo(slot, &slotInfo)
             let tokenResult = C_GetTokenInfo(slot, &tokenInfo)
             guard slotResult == CKR_OK, tokenResult == CKR_OK else {
-                lines.append("Slot \(slot) query failed: \(slotResult)/\(tokenResult)")
+                lines.append("Slot \(slot) query failed: \(returnValueDescription(slotResult))/\(returnValueDescription(tokenResult))")
                 continue
             }
             let description = paddedString(slotInfo.slotDescription)
@@ -1628,7 +1636,7 @@ private final class ModuleInspector {
     func provisionPhone(configuration: ConnectorConfiguration) -> String {
         let initialize = initialize(configuration: configuration)
         guard initialize == CKR_OK else {
-            return "C_Initialize failed: \(initialize)"
+            return "C_Initialize failed: \(returnValueDescription(initialize))"
         }
 
         let discovery = yubiHsmTargets()
@@ -1655,7 +1663,7 @@ private final class ModuleInspector {
     func unprovisionPhone(configuration: ConnectorConfiguration) -> String {
         let initialize = initialize(configuration: configuration)
         guard initialize == CKR_OK else {
-            return "C_Initialize failed: \(initialize)"
+            return "C_Initialize failed: \(returnValueDescription(initialize))"
         }
 
         let discovery = yubiHsmTargets()
@@ -1696,7 +1704,7 @@ private final class ModuleInspector {
             lines.append("Local platform credential deleted.")
         } else {
             lines.append("")
-            lines.append("Local credential deletion failed: \(deletion)")
+            lines.append("Local credential deletion failed: \(returnValueDescription(deletion))")
         }
         return lines.joined(separator: "\n")
     }
@@ -1724,14 +1732,14 @@ private final class ModuleInspector {
         var count = CK_ULONG()
         var result = C_GetSlotList(CK_BBOOL(CK_TRUE), nil, &count)
         guard result == CKR_OK else {
-            return ([], "C_GetSlotList(size) failed: \(result)")
+            return ([], "C_GetSlotList(size) failed: \(returnValueDescription(result))")
         }
         var slots = [CK_SLOT_ID](repeating: 0, count: Int(count))
         result = slots.withUnsafeMutableBufferPointer { buffer in
             C_GetSlotList(CK_BBOOL(CK_TRUE), buffer.baseAddress, &count)
         }
         guard result == CKR_OK else {
-            return ([], "C_GetSlotList failed: \(result)")
+            return ([], "C_GetSlotList failed: \(returnValueDescription(result))")
         }
 
         var targets = [(CK_SLOT_ID, String)]()
@@ -1757,7 +1765,7 @@ private final class ModuleInspector {
             &session
         )
         guard result == CKR_OK else {
-            return ["\(name): open failed: \(result)"]
+            return ["\(name): open failed: \(returnValueDescription(result))"]
         }
         defer { _ = C_CloseSession(session) }
 
@@ -1779,7 +1787,7 @@ private final class ModuleInspector {
             bytes.initializeMemory(as: UInt8.self, repeating: 0)
         }
         guard result == CKR_OK else {
-            return ["\(name): bootstrap login failed: \(result)"]
+            return ["\(name): bootstrap login failed: \(returnValueDescription(result))"]
         }
 
         var provisioningResult = CK_ULONG()
@@ -1809,7 +1817,7 @@ private final class ModuleInspector {
         }
         guard result == CKR_OK else {
             _ = C_Logout(session)
-            return ["\(name): provisioning failed: \(result)"]
+            return ["\(name): provisioning failed: \(returnValueDescription(result))"]
         }
         let action = switch provisioningResult {
         case CK_ULONG(PKCS11RS_PLATFORM_PROVISIONED): "provisioned"
@@ -1819,7 +1827,7 @@ private final class ModuleInspector {
         }
         let logout = C_Logout(session)
         guard logout == CKR_OK else {
-            return ["\(name): \(action), bootstrap logout failed: \(logout)"]
+            return ["\(name): \(action), bootstrap logout failed: \(returnValueDescription(logout))"]
         }
 
         var platformUsername = Array(
@@ -1837,13 +1845,13 @@ private final class ModuleInspector {
             )
         }
         guard result == CKR_OK else {
-            return ["\(name): \(action), platform login failed: \(result)"]
+            return ["\(name): \(action), platform login failed: \(returnValueDescription(result))"]
         }
         var random = UInt8()
         let verification = C_GenerateRandom(session, &random, 1)
         _ = C_Logout(session)
         guard verification == CKR_OK else {
-            return ["\(name): \(action), authenticated verification failed: \(verification)"]
+            return ["\(name): \(action), authenticated verification failed: \(returnValueDescription(verification))"]
         }
         return ["\(name): \(action), login verified"]
     }
@@ -1861,7 +1869,7 @@ private final class ModuleInspector {
             &session
         )
         guard result == CKR_OK else {
-            return ("\(name): open failed: \(result)", false)
+            return ("\(name): open failed: \(returnValueDescription(result))", false)
         }
         defer { _ = C_CloseSession(session) }
 
@@ -1883,7 +1891,7 @@ private final class ModuleInspector {
             bytes.initializeMemory(as: UInt8.self, repeating: 0)
         }
         guard result == CKR_OK else {
-            return ("\(name): bootstrap login failed: \(result)", false)
+            return ("\(name): bootstrap login failed: \(returnValueDescription(result))", false)
         }
 
         result = Array(platformCredentialName.utf8).withUnsafeBufferPointer { credential in
@@ -1896,10 +1904,10 @@ private final class ModuleInspector {
         }
         let logout = C_Logout(session)
         guard result == CKR_OK else {
-            return ("\(name): unprovisioning failed: \(result)", false)
+            return ("\(name): unprovisioning failed: \(returnValueDescription(result))", false)
         }
         guard logout == CKR_OK else {
-            return ("\(name): unprovisioned, logout failed: \(logout)", false)
+            return ("\(name): unprovisioned, logout failed: \(returnValueDescription(logout))", false)
         }
         return ("\(name): unprovisioned", true)
     }
@@ -1910,7 +1918,7 @@ private final class ModuleInspector {
             if result == CKR_OK {
                 initialized = false
             } else {
-                print("C_Finalize failed: \(result)")
+                print("C_Finalize failed: \(returnValueDescription(result))")
             }
         }
     }

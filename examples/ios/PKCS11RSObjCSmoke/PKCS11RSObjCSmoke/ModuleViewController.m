@@ -1482,9 +1482,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 
 - (NSString *)provisionPhoneReport {
     if (!_moduleInitialized) {
-        (void)[self inspectModuleIncludingSlots:NO];
+        NSString *initialization = [self inspectModuleIncludingSlots:NO];
         if (!_moduleInitialized) {
-            return @"C_Initialize failed before provisioning.";
+            return initialization;
         }
     }
 
@@ -1534,9 +1534,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 
 - (NSString *)unprovisionPhoneReport {
     if (!_moduleInitialized) {
-        (void)[self inspectModuleIncludingSlots:NO];
+        NSString *initialization = [self inspectModuleIncludingSlots:NO];
         if (!_moduleInitialized) {
-            return @"C_Initialize failed before unprovisioning.";
+            return initialization;
         }
     }
 
