@@ -120,7 +120,7 @@ remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
 rules in [SCP11 configuration](scp11.md).
 
 Experimental I2C YubiHSMs use the same `yubihsm.urls` configuration as USB devices hosted
-by a connector. Configure the bus, address, and optional READY GPIO on the
+by a connector. Configure the bus, address, and required READY GPIO on the
 Linux connector with `--i2c-yubihsm`; see
 [connector configuration](connector.md#experimental-i2c-yubihsms).
 

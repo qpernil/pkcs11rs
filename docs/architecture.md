@@ -473,7 +473,7 @@ USB and HTTP are connector implementations behind the same backend boundary.
 Experimental I2C device access belongs to the Linux connector daemon; the PKCS #11 module
 uses its existing HTTP discovery and command paths for these devices. The
 connector owns the blocking I2C implementation in `src/i2c/`, including
-whole-bus exchange locking and optional READY handling. Qualification tools
+whole-bus exchange locking and the required READY handshake. Qualification tools
 use the same HTTP command path. See
 [the exchange contract](i2c-stability.md#exchange-contract).
 
