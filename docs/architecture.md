@@ -45,6 +45,19 @@ backend capabilities. Software-token persistence uses
 `stores_software_token_keys`. Login always passes the supplied PIN through the
 common session path; each backend validates, uses, or ignores it according to
 that slot's authentication contract.
+
+`C_Login` and `C_LoginUser` preserve the distinction between a null PIN and an
+explicitly empty PIN. A null PIN reaches the backend as `None`. A backend that
+needs a secret calls the shared protected-prompt helper; a backend such as the
+Host slot can ignore it. Token flags report this backend capability when a
+prompt provider is installed and do not control the login path. Desktop builds
+implement the provider with an Assuan pinentry subprocess. The iOS provider is
+planned as an application callback with the same prompt metadata and
+secret/cancel result; the application presents its native dialog while the
+synchronous PKCS #11 call runs off the UI thread. The current iOS build does not
+advertise or accept a protected authentication path. Prompted secrets use
+zeroizing storage and are not retained beyond the backend's documented
+authorization lifetime.
 Native object import, token storage, and key generation dispatch through methods
 on the main `Slot` trait. `SlotContext` owns that backend alongside `SlotState`,
 which holds sessions, handles, and storage bookkeeping. The fields can be borrowed

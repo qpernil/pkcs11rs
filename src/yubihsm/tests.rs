@@ -2181,6 +2181,17 @@ fn yubihsm_login_splits_username_from_password() {
         crate::split_yubihsm_login(b":0001default:").unwrap(),
         (b":0001default".as_slice(), Some(b"".as_slice()))
     );
+    for packed_wildcard in [
+        b":*".as_slice(),
+        b":*reserve@host",
+        b":*reserve@host:password",
+    ] {
+        assert!(matches!(
+            crate::split_yubihsm_login(packed_wildcard),
+            Err(crate::Error::Generic(value))
+                if value == crate::CKR_ARGUMENTS_BAD as crate::CK_RV
+        ));
+    }
 }
 
 #[test]

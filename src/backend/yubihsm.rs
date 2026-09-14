@@ -4589,8 +4589,8 @@ impl Slot for YubiHsmSlot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
     }
-    fn supports_protected_authentication_path(&self) -> bool {
-        true
+    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
+        pinentry.is_configured()
     }
     fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
         self.yubihsm_read_object(id, YUBIHSM_OPAQUE)
@@ -4739,7 +4739,10 @@ pub(crate) fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), 
             .and_then(|value| value.iter().position(|byte| *byte == b':'))
         {
             Some(position) => position + 5,
-            None => return Ok((pin, None)),
+            None => {
+                reject_packed_login_wildcard(pin)?;
+                return Ok((pin, None));
+            }
         },
         _ => 4,
     };
@@ -4747,8 +4750,20 @@ pub(crate) fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), 
         return Err(CKR_PIN_INCORRECT.into());
     }
     let password_offset = username_length + usize::from(pin.first() == Some(&b':'));
+    let username = &pin[..username_length];
+    reject_packed_login_wildcard(username)?;
     let password = pin.get(password_offset..).ok_or(CKR_PIN_INCORRECT)?;
-    Ok((&pin[..username_length], Some(password)))
+    Ok((username, Some(password)))
+}
+
+fn reject_packed_login_wildcard(username: &[u8]) -> Result<(), Error> {
+    if matches!(
+        parse_yubihsm_login_username(username)?,
+        YubiHsmLoginUsername::UniversalWildcard | YubiHsmLoginUsername::HsmAuthWildcard(_)
+    ) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_hsmauth_selector_part(

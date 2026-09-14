@@ -95,6 +95,7 @@ pub(crate) use software_storage::SoftwareTokenStore;
 
 mod encrypted_private_key;
 mod pinentry;
+#[cfg(not(target_os = "ios"))]
 mod pinentry_client;
 mod private_key;
 

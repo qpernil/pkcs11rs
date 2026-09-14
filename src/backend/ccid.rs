@@ -367,8 +367,8 @@ impl Slot for HsmAuthSlot {
         Vec::new()
     }
 
-    fn supports_protected_authentication_path(&self) -> bool {
-        true
+    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
+        pinentry.is_configured()
     }
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let info = self.discovered_info()?;

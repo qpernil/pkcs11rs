@@ -110,6 +110,10 @@ Object (`F9`), the client derives PW1 and PW3 using their advertised salts
 before sending `VERIFY`. SHA-256 and SHA-512 KDF hashes are supported. The
 clear PIN is not sent to the applet when this KDF is active.
 
+When a prompt provider is configured, the token reports
+`CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for PW1
+or PW3 according to the requested role.
+
 No clear or derived PIN is cached. `CKU_CONTEXT_SPECIFIC` login supplies a PIN
 for an operation that needs a fresh PW1 verification. `C_Logout` clears the
 applet authentication state and applet-scoped secure-channel state.

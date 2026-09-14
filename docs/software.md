@@ -33,7 +33,9 @@ it also reports both `CKF_TOKEN_INITIALIZED` and `CKF_USER_PIN_INITIALIZED`
 because its ephemeral PIN gate is ready immediately. With storage, a fresh
 token reports neither flag: `C_InitToken` sets `CKF_TOKEN_INITIALIZED`, and the
 first `C_InitPIN` separately sets `CKF_USER_PIN_INITIALIZED`. Software tokens
-have no protected authentication path. PINs contain 8–1024 UTF-8 bytes.
+report `CKF_PROTECTED_AUTHENTICATION_PATH` when a prompt provider is configured.
+Passing a null PIN and zero length to USER or SO login obtains that role's PIN
+through the provider. PINs contain 8–1024 UTF-8 bytes.
 
 The slot advertises Baseline, Extended Provider, Authentication Token, and
 Public Certificates Token with the default software mechanisms. These are

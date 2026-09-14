@@ -508,8 +508,10 @@ impl Slot for PivSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
+    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
+        pinentry.is_configured()
+    }
+    fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.authenticated.set(false);
         self.management_authenticated.set(false);
         self.connector
@@ -522,6 +524,20 @@ impl Slot for PivSlot {
                     .keys
                     .iter()
                     .all(|key| !piv_policy_requires_login(key.slot, key.pin_policy));
+            let prompted;
+            let pin = match pin {
+                Some(pin) => pin,
+                None if only_never => &[][..],
+                None => {
+                    let title = self.label();
+                    prompted = pinentry.request(pinentry::Prompt {
+                        title: &title,
+                        description: "Enter the PIV user PIN.",
+                        label: "PIV PIN:",
+                    })?;
+                    prompted.as_slice()
+                }
+            };
             if pin.is_empty() && only_never {
                 self.authenticated.set(true);
             } else {
@@ -535,12 +551,20 @@ impl Slot for PivSlot {
         }
         result
     }
-    fn login_so(
-        &mut self,
-        pin: Option<&[u8]>,
-        _pinentry: &pinentry::Pinentry,
-    ) -> Result<(), Error> {
-        let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
+    fn login_so(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        let prompted;
+        let pin = match pin {
+            Some(pin) => pin,
+            None => {
+                let title = self.label();
+                prompted = pinentry.request(pinentry::Prompt {
+                    title: &title,
+                    description: "Enter the PIV management key as hexadecimal bytes.",
+                    label: "Management key:",
+                })?;
+                prompted.as_slice()
+            }
+        };
         self.authenticated.set(false);
         self.management_authenticated.set(false);
         let key_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
