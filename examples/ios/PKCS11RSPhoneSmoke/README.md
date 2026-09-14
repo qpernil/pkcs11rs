@@ -121,10 +121,10 @@ keypairs are persistent.
 
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials. For each YubiHSM slot it calls `C_LoginUser` with the
-provider-independent wildcard username `:*` and the prototype YubiHSM Auth
+provider-independent wildcard URI `pkcs11:` and the prototype YubiHSM Auth
 credential password `password`. pkcs11rs compares available credential public
 points with that slot's publicly discovered `CKO_PUBLIC_KEY` projections and
-uses the unique matching source. Native YubiHSM Auth consumes the supplied
+uses the first matching source in its protection order. Native YubiHSM Auth consumes the supplied
 credential password; a matching host credential ignores it.
 After a successful login, the app enumerates the objects again as an
 authenticated user, logs out, and closes the session. On iOS the module

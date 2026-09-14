@@ -1,5 +1,5 @@
 use super::*;
-use crate::SoftwarePrivateKeyMaterialExt;
+use crate::{CKA_PKCS11RS_URI, SoftwarePrivateKeyMaterialExt};
 
 #[test]
 fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
@@ -2319,6 +2319,33 @@ pub fn get_attribute_value_reports_sizes_and_values() {
         CKR_OK as CK_RV
     );
     assert_eq!(&label, b"Test RSA public key");
+
+    let mut uri_attr = CK_ATTRIBUTE {
+        type_: CKA_PKCS11RS_URI,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut uri_attr, 1),
+        CKR_OK as CK_RV
+    );
+    let mut uri = vec![0u8; uri_attr.ulValueLen as usize];
+    uri_attr.pValue = uri.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut uri_attr, 1),
+        CKR_OK as CK_RV
+    );
+    let parsed_uri = crate::pkcs11_uri::ClientAuthUri::parse(&uri).unwrap();
+    assert_eq!(
+        String::from_utf8(uri).unwrap(),
+        "pkcs11:token=Test%20Token%20%23TEST0001;object=Test%20RSA%20public%20key;id=%01;type=public"
+    );
+    assert_eq!(
+        parsed_uri.object.as_deref(),
+        Some(b"Test RSA public key".as_slice())
+    );
+    assert_eq!(parsed_uri.id.as_deref(), Some([1].as_slice()));
+    assert_eq!(parsed_uri.class, Some(CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
 
     let mut class = 0 as CK_OBJECT_CLASS;
     let mut sign = CK_TRUE as CK_BBOOL;

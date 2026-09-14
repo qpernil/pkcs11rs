@@ -49,7 +49,7 @@ that slot's authentication contract.
 `C_Login` and `C_LoginUser` preserve the distinction between a null PIN and an
 explicitly empty PIN. A null PIN reaches the backend as `None`. A backend that
 needs a secret calls the shared protected-prompt helper; a backend such as the
-Host slot can ignore it. Token flags report this backend capability when a
+platform slot can ignore it. Token flags report this backend capability when a
 prompt provider is installed and do not control the login path. Desktop builds
 implement the provider with an Assuan pinentry subprocess. The iOS provider is
 planned as an application callback with the same prompt metadata and
@@ -487,6 +487,17 @@ YubiHSM slot observes the combined epoch and clears device-bound object,
 metadata, attestation, inferred authentication-algorithm, and public-discovery
 state.
 
+A future applet cache-coherence extension should return a persistent,
+monotonic provisioning epoch in every successful `SELECT` response. Each
+applet would advance its own epoch when a persistent change affects its exposed
+token view, including object creation, import, deletion, certificate or
+metadata replacement, policy changes, and reset. Authentication attempts and
+session-only state would leave it unchanged. Since applet selection already
+occurs when a backend takes ownership of the card transaction, comparing this
+value with the cached epoch would detect provisioning performed by another
+process without an inventory probe. Virtual applets can implement the contract
+directly; physical applets require corresponding firmware support.
+
 YubiHSM slots find native HSM Auth and ordinary source credentials through a
 weak index of PKCS #11 slots. Selected bindings hold a provider session and
 object handle. Credential selectors identify the target YubiHSM authentication-key
@@ -508,15 +519,18 @@ session. See [YubiHSM authentication](yubihsm-auth.md).
 
 An asymmetric credential's public point may be persisted as an ordinary public
 object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
-The optional `C_LoginUser` wildcard selector compares those public projections
-with public P-256 credentials from ordinary source slots and native HSM Auth
-slots. The comparison uses the slot context's merged public token-object view,
-including generic persisted objects and backend-native objects. A unique source
-credential and target Authentication Key ID must be selected before submitting a
-source password. Multiple distinct matches return `CKR_TEMPLATE_INCONSISTENT`;
-no match returns `CKR_USER_TYPE_INVALID`. Authentication failure is returned
-without trying another credential. Public matching requires successful target
-public discovery; explicit selectors can instead name a source and target ID.
+An RFC 7512 URI passed to `C_LoginUser` compares those public projections with
+public P-256 credentials from ordinary source slots and native HSM Auth slots
+when `pkcs11rs-authkey` is omitted. The comparison uses the slot context's merged public token-object view,
+including generic persisted objects and backend-native objects. The first match
+in the backend-provided protection order is selected before a source password is
+submitted. Native HSM Auth is searched first, followed by token-native
+derivation, platform hardware, other hardware-held credentials, and software. No
+match returns `CKR_USER_TYPE_INVALID`. Authentication is attempted only for the
+selected match and never falls through to another credential. Public matching
+requires successful target public discovery; a URI with
+`pkcs11rs-authkey=AAAA` can instead name the target ID and select private or
+symmetric source objects directly.
 
 ## Companion multi-device connector
 

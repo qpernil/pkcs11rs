@@ -4,7 +4,27 @@ use crate::platform_crypto::{
 };
 use crate::*;
 
-pub(crate) const HOST_SERIAL: &str = "host";
+fn host_token_label() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "ios")) {
+        "Secure Enclave"
+    } else if cfg!(target_os = "windows") {
+        "Windows CNG"
+    } else {
+        "Host Keystore"
+    }
+}
+
+fn host_token_model() -> &'static str {
+    if cfg!(target_os = "ios") {
+        "iOS"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else {
+        "Host"
+    }
+}
 
 type NamedPlatformKey = (String, Arc<dyn EcdhCredential>);
 
@@ -76,6 +96,9 @@ impl Slot for HostSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Host
     }
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        ClientAuthSearchTier::HostHardware
+    }
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
         None
     }
@@ -86,10 +109,10 @@ impl Slot for HostSlot {
         "pkcs11rs"
     }
     fn product(&self) -> &str {
-        "Host Keystore"
+        host_token_label()
     }
     fn serial(&self) -> &str {
-        HOST_SERIAL
+        ""
     }
     fn major(&self) -> u8 {
         1
@@ -113,14 +136,10 @@ impl Slot for HostSlot {
         CKF_TOKEN_PRESENT as _
     }
     fn label(&self) -> String {
-        "Host Keystore".to_owned()
+        host_token_label().to_owned()
     }
     fn model(&self) -> &str {
-        if cfg!(any(target_os = "macos", target_os = "ios")) {
-            "Secure Enclave"
-        } else {
-            "Host Keystore"
-        }
+        host_token_model()
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
         true
@@ -213,8 +232,12 @@ impl Slot for HostSlot {
             else {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             };
-            let id = hash(MessageDigest::Sha256, &uncompressed)?;
-            let identity = id.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            let public_key_hash = hash(MessageDigest::Sha256, &uncompressed)?;
+            let identity = public_key_hash
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let id = name.as_bytes().to_vec();
             let public = PublicKeyMaterial::Ec {
                 parameters: ec_curve_parameters(EcCurve::P256).to_vec(),
                 public_key: uncompressed[1..].to_vec(),

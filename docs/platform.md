@@ -1,6 +1,6 @@
-# Host Keystore slot
+# Secure Enclave slot
 
-Enable the Host Keystore slot explicitly:
+Enable the Secure Enclave slot explicitly:
 
 ```json
 {"version": 1, "platform": {"enabled": true}}
@@ -11,23 +11,25 @@ false, and an explicit JSON value overrides the environment. This setting
 controls both PKCS #11 slot exposure and use of platform keys for YubiHSM
 authentication. There is no hidden platform-authentication provider when the
 slot is disabled. `hardware.discovery` does not control this explicitly enabled
-source. A `slots.serials` allowlist must include `host`; excluding
-the slot also excludes its keys from authentication lookup.
+source. The slot has no hardware serial, so `slots.serials` does not control it.
 
-The token label is `Host Keystore`, its serial is `host`, and its model names
-the backend (`Secure Enclave` on macOS and iOS). It is a non-removable OS token.
+The token label is `Secure Enclave`, its serial is empty, and its model is
+`iOS` or `macOS` according to the build target. It is a non-removable OS token.
 macOS and iOS implement it using managed Secure Enclave P-256 keys; enabling it on an unsupported platform
 returns `CKR_FUNCTION_NOT_SUPPORTED` during slot initialization.
+The platform slot abstraction is also intended for other operating-system key
+providers. Each implementation supplies its own visible token name; a future
+Windows CNG backend will therefore report `Windows CNG`, not `Secure Enclave`.
 
 ## Objects and operations
 
 Each managed key has a `CKO_PRIVATE_KEY` and a projected `CKO_PUBLIC_KEY`, both
-`CKK_EC`, with the exact managed name as `CKA_LABEL` and the SHA-256 digest of the
-uncompressed public point as `CKA_ID`. Public objects expose `CKA_EC_POINT` and
+`CKK_EC`, with the exact managed name as both `CKA_LABEL` and `CKA_ID`. Public objects expose `CKA_EC_POINT` and
 `CKA_PUBLIC_KEY_INFO`; private objects expose their public-key information and
 curve parameters without exposing their scalar. Private keys are sensitive,
 non-extractable, and non-copyable. Object identity includes the name and public
-key, so replacement under the same label does not rebind an old handle.
+key digest separately, so replacement under the same label does not rebind an
+old handle.
 
 Matching certificates in the application's accessible Apple data-protection
 Keychain are exposed as public `CKO_CERTIFICATE` token objects. Matching uses
@@ -52,9 +54,9 @@ API and tools; this slot does not implement token-key generation, import,
 deletion, or attribute updates through Cryptoki. It advertises write-protected
 token storage while allowing read-write sessions for session objects.
 
-The slot requires `CKU_USER` login with an empty password. `C_LoginUser` also
-requires an empty username. Nonempty passwords and usernames are rejected;
-there is no SO role. This login establishes PKCS #11 authorization state,
+The slot requires `CKU_USER` login. `C_LoginUser` also requires an empty
+username. The backend accepts an omitted or supplied PIN and ignores its value;
+nonempty usernames are rejected and there is no SO role. This login establishes PKCS #11 authorization state,
 without prompting for or retaining an OS password. `CKF_LOGIN_REQUIRED` and
 `CKF_USER_PIN_INITIALIZED` are set, with a zero-length PIN range. Private
 objects are hidden and unusable before login and after logout; public key
@@ -77,15 +79,18 @@ certificate being installed.
 
 ## Authentication consumer
 
-YubiHSM login resolves `:1003reserve@host` by exact `CKA_LABEL=reserve` on the
-enabled host slot. The target Authentication Key ID remains `1003`.
-Missing or duplicate private-key matches fail; lookup never chooses the first
-match. `:*reserve@host` and universal `:*` match source public keys against the
-YubiHSM's discovered public authentication-key projections. Only asymmetric
-matching is automatic.
+YubiHSM `C_LoginUser` resolves
+`pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003`
+by exact `CKA_LABEL=reserve` on the enabled platform slot. The target
+Authentication Key ID remains `1003`. A URI without `pkcs11rs-authkey`, such as
+`pkcs11:token=Secure%20Enclave;object=reserve;type=public`, matches source public
+keys against the YubiHSM's discovered public authentication-key projections.
+Universal `pkcs11:` considers all eligible public credentials. Multiple matches
+are ordered with the other source slots, and only the first receives the PIN.
+Only asymmetric matching is automatic.
 
 The authentication consumer performs USER login before resolving the private
-key. The Host backend accepts an omitted or supplied PIN and ignores its value,
+key. The Secure Enclave backend accepts an omitted or supplied PIN and ignores its value,
 and also accepts an already logged-in user session. The resolved token
 key is bound through `Pkcs11Auth`. Static and ephemeral ECDH
 outputs remain protected session objects throughout the common derivation

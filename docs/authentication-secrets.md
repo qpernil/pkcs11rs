@@ -62,7 +62,7 @@ finalization, or session replacement. An ordinary source credential retains
 bound token-key references and their PKCS #11 provider session through
 `ClientAuth`; the keys stay in the source slot. Its login PIN is not retained:
 source logout or loss of authorization requires fresh source authentication.
-Platform authentication requires the explicitly enabled host slot. See [YubiHSM authentication](yubihsm-auth.md)
+Platform authentication requires the explicitly enabled platform slot. See [YubiHSM authentication](yubihsm-auth.md)
 for recovery conditions and replay restrictions.
 
 ### Configured discovery credentials

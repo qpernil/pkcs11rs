@@ -176,6 +176,9 @@ impl Slot for OpenPgpSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::OpenPgp)
     }
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        ClientAuthSearchTier::HardwareCredential
+    }
     fn name(&self) -> String {
         format!("{} OpenPGP", self.connector.name())
     }

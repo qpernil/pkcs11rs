@@ -9,9 +9,10 @@ difference is the client language and its direct Objective-C representation of
 the same C structures, buffers, sessions, and lifecycle.
 
 The inventory also exercises automatic YubiHSM authentication. It calls
-`C_LoginUser` with the provider-independent wildcard selector `:*` and the
+`C_LoginUser` with the provider-independent wildcard URI `pkcs11:` and the
 prototype YubiHSM Auth credential password `password` for each YubiHSM.
-pkcs11rs uses public-key matching to select the unique credential source.
+pkcs11rs uses public-key matching to select the first credential source in its
+protection order.
 Native YubiHSM Auth consumes the supplied password; a matching host credential
 ignores it. A successful login produces a second authenticated object inventory
 before the app logs out.

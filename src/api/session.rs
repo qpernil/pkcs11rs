@@ -1,6 +1,47 @@
 use crate::*;
 
 ffi_entry_point! {
+    /// Return the UTF-8 PKCS #11 URI of the credential that established the
+    /// current token login. The byte count excludes a NUL terminator.
+    pub fn PKCS11RS_GetAuthenticatedCredential(
+        session_handle: CK_SESSION_HANDLE,
+        description: CK_UTF8CHAR_PTR,
+        description_len: CK_ULONG_PTR,
+    ) -> CK_RV {
+        map(get_authenticated_credential(
+            session_handle,
+            description,
+            description_len,
+        ))
+    }
+}
+
+fn get_authenticated_credential(
+    session_handle: CK_SESSION_HANDLE,
+    description: CK_UTF8CHAR_PTR,
+    description_len: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let description_len = unsafe { as_mut(description_len) }?;
+    let value = with_session_context(session_handle, |ctx| {
+        let (slot, _) = ctx._get_session(session_handle)?;
+        slot.authenticated_credential_description()
+    })?;
+    let required_len = CK_ULONG::try_from(value.len()).map_err(|_| CKR_DEVICE_ERROR)?;
+    if description.is_null() {
+        *description_len = required_len;
+        return Ok(());
+    }
+    if *description_len < required_len {
+        *description_len = required_len;
+        return Err(CKR_BUFFER_TOO_SMALL.into());
+    }
+    let output = unsafe { _from_raw_parts_mut(description, value.len()) }?;
+    output.copy_from_slice(value.as_bytes());
+    *description_len = required_len;
+    Ok(())
+}
+
+ffi_entry_point! {
     pub fn C_SessionCancel(
         session_handle: CK_SESSION_HANDLE,
         flags: CK_FLAGS,

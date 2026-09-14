@@ -23,8 +23,8 @@ hardware-discovery values are `0` and `1`.
 Each entry creates a separate slot context with separate object handles and
 sessions. The name is reported as `CK_TOKEN_INFO.label`; the slot description
 is `pkcs11rs software slot: <name>`. The token model is `Software token`, the
-manufacturer is `pkcs11rs`, and its deterministic serial is `SOFTWARE`
-followed by the zero-padded configuration-list ordinal.
+manufacturer is `pkcs11rs`, and its deterministic serial is the decimal
+configuration-list ordinal (`0`, `1`, and so on).
 `CK_SLOT_INFO.flags` contains only `CKF_TOKEN_PRESENT`; it never contains
 `CKF_HW_SLOT`. Mechanism flags never contain `CKF_HW`.
 

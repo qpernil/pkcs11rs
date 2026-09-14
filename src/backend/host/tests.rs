@@ -28,18 +28,21 @@ fn host_profiles_include_login_and_software_operations() {
     assert!(slot.supports_public_certificates_token_profile(1));
     let mut info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
     slot.get_token_info(&mut info).unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&info.serialNumber).trim_end(),
-        "host"
+    assert!(
+        String::from_utf8_lossy(&info.serialNumber)
+            .trim()
+            .is_empty()
     );
     assert_eq!(
         String::from_utf8_lossy(&info.label).trim_end(),
-        "Host Keystore"
+        slot.label()
     );
     assert_eq!(
         String::from_utf8_lossy(&info.model).trim_end(),
         slot.model()
     );
+    #[cfg(target_os = "macos")]
+    assert_eq!(slot.model(), "macOS");
     assert_ne!(info.flags & CKF_LOGIN_REQUIRED as CK_FLAGS, 0);
 }
 
@@ -236,6 +239,10 @@ fn host_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
     assert_eq!(private.len(), 1);
     assert_eq!(public.len(), 1);
     let private = private[0];
+    assert_eq!(
+        creator.attribute(private, CKA_ID).unwrap().as_slice(),
+        b"agreement"
+    );
     assert_eq!(
         creator.attribute(certificate_handle, CKA_ID).unwrap(),
         creator.attribute(private, CKA_ID).unwrap()

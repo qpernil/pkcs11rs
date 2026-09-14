@@ -1949,6 +1949,11 @@ fn object_attribute_value(
     object: &TokenObject,
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Result<Option<Vec<u8>>, Error> {
+    if attribute_type == CKA_PKCS11RS_URI {
+        return Ok(Some(
+            crate::pkcs11_uri::object_uri(ctx.slot.as_ref(), object).into_bytes(),
+        ));
+    }
     if attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE && object.is_key_object() {
         return Ok(Some(
             ctx.slot

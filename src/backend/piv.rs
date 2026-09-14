@@ -454,6 +454,9 @@ impl Slot for PivSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::Piv)
     }
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        ClientAuthSearchTier::HardwareCredential
+    }
     fn name(&self) -> String {
         self.slot_description
             .clone()

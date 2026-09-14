@@ -137,7 +137,8 @@ also runs locally; their derivation graphs use the same provider operations.
 ## 1. Configured provider selection and named lookup
 
 The YubiHSM client selects registered source slots through public credential
-metadata, then authorizes exactly one selected source. Native HSM Auth slots
+metadata. A wildcard searches the protection tiers and authorizes only the
+first public match. Native HSM Auth slots
 advertise `CKP_YUBICO_HSMAUTH`; ordinary slots provide P-256 token keys or named
 AES pairs. See [source selection](../yubihsm-auth.md#generic-source-selection-and-authorization)
 for selector syntax, supported sources, and login behavior.
@@ -155,8 +156,9 @@ restrictions. Incompatible policy fails without fallback. Intermediate objects
 are released after use; only final working keys leave the generic derivation
 path. Instrumented software-source tests cover both protocols, wrong PINs,
 authorization reuse, channel recreation, and source-object preservation.
-Platform and native-source tests cover public ambiguity before authorization;
-native tests count password-bearing requests to verify no candidate fallback.
+Platform and native-source tests cover deterministic first-match selection;
+native tests count password-bearing requests to verify that one login never
+tries more than one credential.
 
 Remaining qualification includes additional real hardware source-to-target combinations
 and provider dependency-cycle handling across retained bindings. Card protocol details and remaining virtual-token-native operations follow below.
@@ -308,7 +310,7 @@ for destructive/exhaustion tests and keep physical devices intact.
 Explore adapting a separately loaded PKCS #11 module as an authentication
 source. Represent each selected external slot as an external-backed `Slot` with
 the common pkcs11rs software overlay, so `Pkcs11Auth` can use the same operation
-graph as it does for built-in PIV, OpenPGP, host, software, and YubiHSM slots.
+graph as it does for built-in PIV, OpenPGP, platform, software, and YubiHSM slots.
 The external slot retains its token identity, login state, persistent objects,
 and native operations. Locally generated keys and explicitly readable derived
 results become ordinary pkcs11rs session objects. This is a tentative direction,
@@ -316,7 +318,7 @@ not an implemented loader or a prerequisite for the work above. Module
 configuration and identity/selector syntax remain design decisions.
 
 This adapter is a generalization of the existing native-backed slot pattern used
-by PIV, OpenPGP, host, and YubiHSM backends, rather than a separate authentication
+by PIV, OpenPGP, platform, and YubiHSM backends, rather than a separate authentication
 fallback. The built-in PIV slot is the clearest precedent: its resident private
 key performs native ECDH through the PIV backend, the readable agreement is
 published as a common software session object, and `Pkcs11Auth` performs the

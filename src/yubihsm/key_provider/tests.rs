@@ -143,7 +143,7 @@ fn symmetric_pair_derives_through_native_yubihsm_handles_without_export() {
         };
         let enc = insert(NIST_AES_KEY_ID, "enc");
         let mac = insert(RFC3610_AES_KEY_ID, "mac");
-        let pair = SymmetricCredential::find(owner.clone(), "native", true).unwrap();
+        let pair = SymmetricCredential::find(owner.clone(), "native.enc", true).unwrap();
         let start = commands.borrow().len();
         let context = [0x42; 16];
         let keys = SessionKeys::derive(&pair, &context).unwrap();

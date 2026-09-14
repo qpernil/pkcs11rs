@@ -51,7 +51,7 @@ a public key or CA certificate.
     "refresh_interval_ms": 500
   },
   "slots": {
-    "serials": ["1238075073", "2545354682", "37070618", "host"]
+    "serials": ["1238075073", "2545354682", "37070618"]
   },
   "storage": {
     "tokens": "/var/lib/pkcs11rs",
@@ -141,21 +141,23 @@ the resolved setting lasts until `C_Finalize`. Invalid values fail initializatio
 with `CKR_ARGUMENTS_BAD`.
 
 `slots.serials` is an optional allowlist of serial strings exposed through
-PKCS #11. Omitting it allows every slot; `[]` allows none. Its environment
+PKCS #11. Omitting it allows every serial-bearing slot; `[]` allows none of
+those slots. Its environment
 fallback, `PKCS11RS_SLOTS_SERIALS`, is comma-separated; an empty value allows
 none. Surrounding whitespace is trimmed and duplicates are ignored. Matching
 is otherwise exact and case-sensitive, preserving leading zeroes. Use strings
 in JSON, including for numeric serials. Empty entries are invalid.
 
 For a YubiKey, the filter uses its official whole-device serial from the
-Management applet, registered during discovery. Other devices use their
-registered device serial when available, otherwise the backend's full serial
+Management applet, registered during discovery. Other serial-bearing devices
+use their registered device serial when available, otherwise the backend's full serial
 string before PKCS #11 token-info padding or truncation.
 All applet slots sharing a device serial match together, even when an applet
 reports it differently; software tokens match by their generated serial.
 Hidden slots are omitted from
 both count and buffered `C_GetSlotList` calls, regardless of `tokenPresent`, and
-direct slot-ID calls return `CKR_SLOT_ID_INVALID` for them.
+direct slot-ID calls return `CKR_SLOT_ID_INVALID` for them. The explicitly
+enabled Secure Enclave token has no serial and is outside this filter.
 
 Source and applet controls determine where to look and which applets to probe;
 `slots.serials` narrows that selection. An excluded device stops at serial
@@ -163,8 +165,8 @@ identification: no further applet probes, HSM commands, object loading, or
 HSM Auth credential discovery are performed. Identified excluded CCID devices
 are remembered so repeated enumeration does not restart applet discovery;
 a reconnected transport still needs serial verification. Management information
-pages stop once an excluded serial is found. An empty allowlist skips discovery
-entirely. A filtered CCID reader without a discoverable Management serial is
+pages stop once an excluded serial is found. An empty allowlist skips
+serial-bearing discovery entirely. A filtered CCID reader without a discoverable Management serial is
 omitted rather than probing applets to guess an identity.
 
 For YubiHSM Auth login, include both the HSM serial and the helper YubiKey
@@ -187,13 +189,13 @@ blocks until the NFC request completes; applications must make that call away
 from their main UI thread. Later UI triggers are summarized in
 [When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears).
 
-## Host slot
+## Platform slot
 
 `platform.enabled` opts into the [generic platform ECDH slot](platform.md).
 It defaults to false and also gates platform credentials used for YubiHSM
-login. Native hardware discovery is independent. If `slots.serials` is set,
-include `host` to make this source available. Private and public
-key objects share their managed name as `CKA_LABEL` for exact lookup.
+login. Native hardware discovery and the serial allowlist are independent.
+Private and public key objects share their managed name as `CKA_LABEL` for exact
+lookup.
 
 ## Environment mapping
 

@@ -392,9 +392,10 @@ CMAC chains individual ECB calls. Both key paths, including CBC availability,
 are selected in advance and may differ. Operational errors are preserved,
 without retry. ECB results become zeroizing working bytes directly; this path
 does not require creating or reading derived objects in the source slot.
-Paired-key lookup resolves `<label>.enc` and `<label>.mac`
-through the prepared source session. Explicit selectors name the source token,
-credential prefix, and target Authentication Key ID; the two AES IDs need not match.
+Paired-key lookup receives `<label>.enc` as the credential identity and resolves
+its `<label>.mac` companion through the prepared source session. Explicit
+selectors name the source token, full ENC label, and target Authentication Key
+ID; the two AES IDs need not match.
 
 Its mechanism information reports the base-key range as
 128–256 **bits**, as required by the standard; object `CKA_VALUE_LEN` and KDF

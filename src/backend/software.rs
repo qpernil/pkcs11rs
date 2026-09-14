@@ -28,7 +28,7 @@ struct SoftwareSession {
 
 impl SoftwareSlot {
     pub(crate) fn serial_for_ordinal(ordinal: usize) -> String {
-        format!("SOFTWARE{ordinal:08}")
+        ordinal.to_string()
     }
 
     #[cfg(test)]
@@ -119,7 +119,9 @@ impl Slot for SoftwareSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Software
     }
-
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        ClientAuthSearchTier::Software
+    }
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
         None
     }
@@ -498,7 +500,7 @@ mod tests {
         );
         assert_eq!(&token_info.label[..b"signing".len()], b"signing");
         assert_eq!(&token_info.model, b"Software token  ");
-        assert_eq!(&token_info.serialNumber, b"SOFTWARE00000003");
+        assert_eq!(&token_info.serialNumber, b"3               ");
         assert_eq!(token_info.ulMinPinLen, 8);
         assert_eq!(token_info.ulMaxPinLen, 1024);
     }

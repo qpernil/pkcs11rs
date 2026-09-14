@@ -76,13 +76,24 @@ pub(crate) struct SymmetricCredential {
     pub(crate) mac: BoundKey,
 }
 impl SymmetricCredential {
+    fn labels_from_name(name: &str) -> (String, String) {
+        (format!("{name}.enc"), format!("{name}.mac"))
+    }
+
+    fn labels_from_identity(identity: &str) -> Result<(String, String), Error> {
+        let name = identity
+            .strip_suffix(".enc")
+            .ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+        Ok((identity.to_owned(), format!("{name}.mac")))
+    }
+
     pub(crate) fn find(
         session: Arc<ProviderSession>,
-        label: &str,
+        identity: &str,
         token: bool,
     ) -> Result<Self, Error> {
-        let find = |suffix: &str| {
-            let label = format!("{label}.{suffix}");
+        let (enc_label, mac_label) = Self::labels_from_identity(identity)?;
+        let find = |label: &str| {
             let class = (CKO_SECRET_KEY as CK_ULONG).to_ne_bytes();
             let key_type = (CKK_AES as CK_ULONG).to_ne_bytes();
             let keys = session.find(&[
@@ -97,7 +108,7 @@ impl SymmetricCredential {
                 _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
             }
         };
-        Self::new(find("enc")?, find("mac")?)
+        Self::new(find(&enc_label)?, find(&mac_label)?)
     }
 
     pub(crate) fn new(enc: BoundKey, mac: BoundKey) -> Result<Self, Error> {
@@ -127,25 +138,31 @@ pub(crate) struct PasswordCredentials {
     asymmetric: KeyHandle,
 }
 impl PasswordCredentials {
+    #[cfg(test)]
     pub(crate) fn new(password: &[u8]) -> Result<Self, Error> {
+        Self::new_named(password, "direct")
+    }
+
+    pub(crate) fn new_named(password: &[u8], label: &str) -> Result<Self, Error> {
         let mut scope = Pkcs11KeyScope::new()?;
         let value = crate::yubico_password_kdf(password)?;
+        let (enc_label, mac_label) = SymmetricCredential::labels_from_name(label);
         let enc = scope.import_secret(
             &value[..16],
             TokenObjectTemplate {
-                label: "direct.enc".to_owned(),
+                label: enc_label,
                 ..authentication_aes_template()
             },
         )?;
         let mac = scope.import_secret(
             &value[16..],
             TokenObjectTemplate {
-                label: "direct.mac".to_owned(),
+                label: mac_label,
                 ..authentication_aes_template()
             },
         )?;
         let key = crate::yubico_kdf::yubico_password_p256_key(password)?;
-        let asymmetric = scope.import_p256(key)?;
+        let asymmetric = scope.import_p256_named(key, label)?;
         Ok(Self {
             scope,
             enc,
@@ -309,6 +326,14 @@ impl Pkcs11KeyScope {
         Ok(self.created(handle))
     }
     pub(crate) fn import_p256(&mut self, key: SoftwareSigningKey) -> Result<KeyHandle, Error> {
+        self.import_p256_named(key, "")
+    }
+
+    pub(crate) fn import_p256_named(
+        &mut self,
+        key: SoftwareSigningKey,
+        label: &str,
+    ) -> Result<KeyHandle, Error> {
         if !matches!(
             key.public_key(),
             SoftwarePublicKey::Ec {
@@ -322,7 +347,10 @@ impl Pkcs11KeyScope {
             .serialized()
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let handle = self.session.create(
-            ec_template(),
+            TokenObjectTemplate {
+                label: label.to_owned(),
+                ..ec_template()
+            },
             &[(CKA_EC_PARAMS, P256_PARAMS), (CKA_VALUE, &value)],
         )?;
         Ok(self.created(handle))

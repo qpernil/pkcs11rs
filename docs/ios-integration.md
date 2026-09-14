@@ -159,8 +159,8 @@ for what happens during the first listing and what later listings refresh.
 
 The current iOS build does not include the desktop Assuan pinentry subprocess
 and rejects a configured `pinentry` executable. Applications must pass a PIN to
-`C_Login` or `C_LoginUser`; the PIN remains separate from the latter's username
-and wildcard selector.
+`C_Login` or `C_LoginUser`; the PIN remains separate from the latter's RFC 7512
+credential selector.
 
 The native protected-path design registers an application callback as the iOS
 implementation of the shared prompt provider. A backend that receives a null

@@ -357,7 +357,7 @@ fn assert_symmetric_source_path(session: CK_SESSION_HANDLE, label: &str, expecte
     })
     .unwrap();
     let owner = ProviderSession::open(Pkcs11Provider::from_slot(child).unwrap()).unwrap();
-    let pair = SymmetricCredential::find(owner, label, true).unwrap();
+    let pair = SymmetricCredential::find(owner, &format!("{label}.enc"), true).unwrap();
     let mut scope = Pkcs11KeyScope::for_key(&pair.enc).unwrap();
     for key in [&pair.enc, &pair.mac] {
         let base = scope.bind(key).unwrap();

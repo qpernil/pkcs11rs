@@ -244,7 +244,10 @@ impl NativeHsmAuth {
 }
 
 enum SelectedClientAuth {
-    Direct(u16),
+    Direct {
+        authkey_id: u16,
+        label: String,
+    },
     Native {
         provider: crate::auth_slots::HsmAuthCredentialBinding,
         authkey_id: u16,
@@ -253,16 +256,6 @@ enum SelectedClientAuth {
         credential: crate::auth_slots::OrdinaryCredential,
         authkey_id: u16,
     },
-}
-
-fn unique_auth_candidate(
-    mut candidates: Vec<SelectedClientAuth>,
-) -> Result<SelectedClientAuth, Error> {
-    match candidates.len() {
-        0 => Err(CKR_USER_TYPE_INVALID.into()),
-        1 => candidates.pop().ok_or(CKR_FUNCTION_FAILED.into()),
-        _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
-    }
 }
 
 type PublicCredentialMatch = (crate::auth_slots::OrdinaryCredential, u16);
@@ -307,6 +300,7 @@ pub(crate) enum YubiHsmSessionState {
         session: YubiHsmSecureSession,
         role: YubiHsmSessionRole,
         reauthentication: Option<Box<ClientAuth>>,
+        credential_description: Option<String>,
     },
 }
 
@@ -362,14 +356,25 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryConfig {
 }
 
 impl YubiHsmPublicDiscoveryConfig {
-    fn login(&self) -> YubiHsmLoginUsername<'_> {
+    fn login(&self) -> crate::pkcs11_uri::ClientAuthUri {
         match self.hsmauth_credential.as_ref() {
-            Some(credential) => YubiHsmLoginUsername::HsmAuth(HsmAuthLogin {
-                label: &credential.label,
-                source: credential.source.as_deref(),
-                authkey_id: self.authkey_id,
-            }),
-            None => YubiHsmLoginUsername::Direct(self.authkey_id),
+            Some(credential) => {
+                let serial = credential
+                    .source
+                    .as_ref()
+                    .map(|source| source.as_bytes().to_vec());
+                crate::pkcs11_uri::ClientAuthUri {
+                    serial,
+                    object: Some(credential.label.as_bytes().to_vec()),
+                    authkey_id: Some(self.authkey_id),
+                    ..Default::default()
+                }
+            }
+            None => crate::pkcs11_uri::ClientAuthUri {
+                authkey_id: Some(self.authkey_id),
+                direct: Some("direct".to_owned()),
+                ..Default::default()
+            },
         }
     }
 }
@@ -430,7 +435,7 @@ pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
     let credential = credential.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
     let (username, password) =
         split_yubihsm_login(credential.as_bytes()).map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let login = parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let login = parse_packed_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
     let (authkey_id, hsmauth_credential) = match &login {
         YubiHsmLoginUsername::Direct(authkey_id) => {
             if password
@@ -1279,13 +1284,15 @@ impl YubiHsmSlot {
         &self,
         authkey_id: u16,
         password: &[u8],
+        label: &str,
     ) -> Result<(YubiHsmSecureSession, ClientAuth), Error> {
         self.synchronize_caches()?;
         let cached_algorithm = self.cached_authentication_algorithm(authkey_id)?;
-        let (session, algorithm, material) = YubiHsmSecureSession::authenticate_direct(
+        let (session, algorithm, material) = YubiHsmSecureSession::authenticate_direct_named(
             self.connector.as_ref(),
             authkey_id,
             password,
+            label,
             self.trust_prefix.as_deref(),
             cached_algorithm,
         )?;
@@ -1372,8 +1379,15 @@ impl YubiHsmSlot {
         authkey_id: u16,
         credential: crate::auth_slots::OrdinaryCredential,
         password: Option<&[u8]>,
-    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth, String), Error> {
         let material = credential.authorize(password, self.trust_prefix.clone())?;
+        if matches!(
+            material,
+            YubiHsmPkcs11AuthenticationMaterial::HsmAuth { .. }
+        ) {
+            return Err(CKR_FUNCTION_FAILED.into());
+        }
+        let description = credential.description();
         let session = material.authenticate(self.connector.as_ref(), authkey_id)?;
         Ok((
             session,
@@ -1382,25 +1396,25 @@ impl YubiHsmSlot {
                 authkey_id,
                 material,
             },
+            description,
         ))
     }
 
-    fn ordinary_credentials(
+    fn find_ordinary_credential<R>(
         &self,
-        label: Option<&str>,
-        source: Option<&str>,
-        explicit: bool,
-    ) -> Result<Vec<crate::auth_slots::OrdinaryCredential>, Error> {
+        selector: &crate::pkcs11_uri::ClientAuthUri,
+        select: impl FnMut(crate::auth_slots::OrdinaryCredential) -> Result<Option<R>, Error>,
+    ) -> Result<Option<R>, Error> {
         self.auth_slots
-            .ordinary_credentials(label, source, &self.context_reference, explicit)
+            .find_ordinary_credential(selector, &self.context_reference, select)
     }
 
     pub(crate) fn resolve_hsmauth_wildcard(
         &self,
         slot_id: CK_SLOT_ID,
-        selector: &HsmAuthWildcardLogin<'_>,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
         token_objects: &[TokenObject],
-    ) -> Result<Vec<(crate::auth_slots::HsmAuthCredentialBinding, u16)>, Error> {
+    ) -> Result<(crate::auth_slots::HsmAuthCredentialBinding, u16), Error> {
         if !self.public_discovery_available(slot_id) {
             log!(
                 2,
@@ -1409,7 +1423,6 @@ impl YubiHsmSlot {
             );
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        let providers = self.auth_slots.asymmetric_hsmauth_credentials(selector)?;
         let projections = token_objects
             .iter()
             .filter_map(|object| {
@@ -1428,117 +1441,103 @@ impl YubiHsmSlot {
                 Some((public_key, id))
             })
             .collect::<Vec<_>>();
-        let mut matches = Vec::new();
-        for provider in providers {
-            let Some(public_key) = provider.credential.public_key.as_deref() else {
-                continue;
-            };
-            let Some(public_key) = public_key.strip_prefix(&[0x04]) else {
-                continue;
-            };
-            for (projection, authkey_id) in &projections {
-                if projection.as_slice() == public_key {
-                    matches.push((provider.clone(), *authkey_id));
+        let selected = self
+            .auth_slots
+            .find_hsmauth_credential(selector, true, |provider| {
+                let Some(public_key) = provider.credential.public_key.as_deref() else {
+                    return Ok(None);
+                };
+                let Some(public_key) = public_key.strip_prefix(&[0x04]) else {
+                    return Ok(None);
+                };
+                for (projection, authkey_id) in &projections {
+                    if projection.as_slice() == public_key {
+                        return Ok(Some((provider, *authkey_id)));
+                    }
                 }
-            }
-        }
-        if matches.is_empty() {
+                Ok(None)
+            })?;
+        let Some(selected) = selected else {
             log!(
                 2,
                 "YubiHSM Auth wildcard found no asymmetric credential matching a public projection on {}",
                 self.connector.name()
             );
             return Err(CKR_USER_TYPE_INVALID.into());
-        }
+        };
         log!(
             2,
-            "YubiHSM Auth wildcard found {} matching credential and public-projection pairs on {}",
-            matches.len(),
+            "YubiHSM Auth wildcard found a matching credential and public projection on {}",
             self.connector.name()
         );
-        Ok(matches)
+        Ok(selected)
     }
 
     fn resolve_ordinary_wildcard(
         &self,
         slot_id: CK_SLOT_ID,
-        label: Option<&str>,
-        source: Option<&str>,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
         token_objects: &[TokenObject],
-    ) -> Result<Vec<PublicCredentialMatch>, Error> {
+    ) -> Result<PublicCredentialMatch, Error> {
         if !self.public_discovery_available(slot_id) {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        let mut matches = Vec::new();
-        for credential in self.ordinary_credentials(label, source, false)? {
+        let selected = self.find_ordinary_credential(selector, |credential| {
             let Some(public) = credential.public_key.as_deref() else {
-                continue;
+                return Ok(None);
             };
-            let ids = token_objects
-                .iter()
-                .filter_map(|object| {
-                    if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                        || object.key_type != CKK_EC as CK_KEY_TYPE
-                        || object.id.len() != 2
-                    {
-                        return None;
-                    }
-                    let PublicKeyMaterial::Ec { public_key, .. } =
-                        object.projected_public_key().ok()?
-                    else {
-                        return None;
-                    };
-                    (public.get(1..) == Some(public_key.as_slice()))
-                        .then(|| u16::from_be_bytes([object.id[0], object.id[1]]))
-                })
-                .collect::<Vec<_>>();
-            // A single source key matching two target identities is ambiguous too.
-            if ids.len() > 1 {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            if let Some(id) = ids.first() {
-                matches.push((credential, *id));
-            }
-        }
-        Ok(matches)
+            let id = token_objects.iter().find_map(|object| {
+                if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    || object.key_type != CKK_EC as CK_KEY_TYPE
+                    || object.id.len() != 2
+                {
+                    return None;
+                }
+                let PublicKeyMaterial::Ec { public_key, .. } =
+                    object.projected_public_key().ok()?
+                else {
+                    return None;
+                };
+                (public.get(1..) == Some(public_key.as_slice()))
+                    .then(|| u16::from_be_bytes([object.id[0], object.id[1]]))
+            });
+            Ok(id.map(|id| (credential, id)))
+        })?;
+        selected.ok_or_else(|| CKR_USER_TYPE_INVALID.into())
     }
 
     fn select_explicit_login(
         &self,
-        login: YubiHsmLoginUsername<'_>,
+        login: crate::pkcs11_uri::ClientAuthUri,
     ) -> Result<SelectedClientAuth, Error> {
-        match login {
-            YubiHsmLoginUsername::HsmAuth(login) => {
-                let mut candidates = self
-                    .auth_slots
-                    .hsmauth_credentials(Some(login.label), login.source, false)?
-                    .into_iter()
-                    .map(|provider| SelectedClientAuth::Native {
-                        provider,
-                        authkey_id: login.authkey_id,
-                    })
-                    .collect::<Vec<_>>();
-                let ordinary = self.ordinary_credentials(Some(login.label), login.source, true)?;
-                let published_match = !candidates.is_empty()
-                    || ordinary
-                        .iter()
-                        .any(|credential| credential.public_key.is_some());
-                candidates.extend(
-                    ordinary
-                        .into_iter()
-                        .filter(|credential| !published_match || credential.public_key.is_some())
-                        .map(|credential| SelectedClientAuth::Ordinary {
-                            credential,
-                            authkey_id: login.authkey_id,
-                        }),
-                );
-                if candidates.is_empty() {
-                    return Err(CKR_PIN_INCORRECT.into());
+        match (login.direct.as_ref(), login.authkey_id) {
+            (None, Some(authkey_id)) => {
+                if let Some(selected) =
+                    self.auth_slots
+                        .find_hsmauth_credential(&login, false, |provider| {
+                            Ok(Some(SelectedClientAuth::Native {
+                                provider,
+                                authkey_id,
+                            }))
+                        })?
+                {
+                    return Ok(selected);
                 }
-                unique_auth_candidate(candidates)
+                if let Some(selected) = self.find_ordinary_credential(&login, |credential| {
+                    Ok(Some(SelectedClientAuth::Ordinary {
+                        credential,
+                        authkey_id,
+                    }))
+                })? {
+                    return Ok(selected);
+                }
+                Err(CKR_PIN_INCORRECT.into())
             }
 
-            YubiHsmLoginUsername::Direct(authkey_id) => Ok(SelectedClientAuth::Direct(authkey_id)),
+            (Some(label), Some(authkey_id)) => Ok(SelectedClientAuth::Direct {
+                authkey_id,
+                label: label.clone(),
+            }),
             _ => Err(CKR_ARGUMENTS_BAD.into()),
         }
     }
@@ -1547,15 +1546,20 @@ impl YubiHsmSlot {
         &self,
         selected: SelectedClientAuth,
         password: Option<&[u8]>,
-    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth, String), Error> {
         match selected {
-            SelectedClientAuth::Direct(authkey_id) => {
+            SelectedClientAuth::Direct { authkey_id, label } => {
                 let password = password.ok_or(CKR_ARGUMENTS_BAD)?;
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                let (session, material) = self.authenticate_direct(authkey_id, password)?;
-                Ok((session, authkey_id, material))
+                let (session, material) = self.authenticate_direct(authkey_id, password, &label)?;
+                Ok((
+                    session,
+                    authkey_id,
+                    material,
+                    crate::pkcs11_uri::direct_authentication_uri(&label, authkey_id),
+                ))
             }
             SelectedClientAuth::Native {
                 provider,
@@ -1565,7 +1569,10 @@ impl YubiHsmSlot {
                 if password.len() > 16 {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                self.authenticate_hsmauth_provider(&provider, authkey_id, password)
+                let description = crate::pkcs11_uri::authentication_uri(provider.uri(), authkey_id);
+                let (session, authkey_id, material) =
+                    self.authenticate_hsmauth_provider(&provider, authkey_id, password)?;
+                Ok((session, authkey_id, material, description))
             }
             SelectedClientAuth::Ordinary {
                 credential,
@@ -1580,7 +1587,7 @@ impl YubiHsmSlot {
         pinentry: &pinentry::Pinentry,
     ) -> Result<Zeroizing<Vec<u8>>, Error> {
         let (source, description) = match selected {
-            SelectedClientAuth::Direct(authkey_id) => (
+            SelectedClientAuth::Direct { authkey_id, .. } => (
                 self.label(),
                 format!("Enter the password for YubiHSM Authentication Key {authkey_id:04x}."),
             ),
@@ -1615,13 +1622,18 @@ impl YubiHsmSlot {
         selected: SelectedClientAuth,
     ) -> Result<(YubiHsmSecureSession, u16, ClientAuth), Error> {
         if let Some(password) = config.configured_password.as_ref() {
-            return self.authenticate_selected_login(selected, Some(password.as_slice()));
+            return self
+                .authenticate_selected_login(selected, Some(password.as_slice()))
+                .map(|(session, authkey_id, material, _)| (session, authkey_id, material));
         }
         if matches!(selected, SelectedClientAuth::Ordinary { .. }) {
-            return self.authenticate_selected_login(selected, None);
+            return self
+                .authenticate_selected_login(selected, None)
+                .map(|(session, authkey_id, material, _)| (session, authkey_id, material));
         }
         let password = self.selected_password(&selected, &self.pinentry)?;
         self.authenticate_selected_login(selected, Some(password.as_slice()))
+            .map(|(session, authkey_id, material, _)| (session, authkey_id, material))
     }
 
     fn select_login(
@@ -1631,94 +1643,28 @@ impl YubiHsmSlot {
         token_objects: &[TokenObject],
     ) -> Result<SelectedClientAuth, Error> {
         let login = parse_yubihsm_login_username(username)?;
-        let wildcard = match &login {
-            YubiHsmLoginUsername::UniversalWildcard => {
-                let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
-                if !self.public_discovery_available(slot_id) {
-                    return Err(CKR_USER_TYPE_INVALID.into());
-                }
-                let selector = HsmAuthWildcardLogin {
-                    label: None,
-                    source: None,
-                };
-                let hsmauth = match self.resolve_hsmauth_wildcard(slot_id, &selector, token_objects)
-                {
-                    Ok(candidates) => candidates,
-                    Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV => Vec::new(),
-                    Err(error) => return Err(error),
-                };
-                let mut candidates = hsmauth
-                    .into_iter()
-                    .map(|(provider, authkey_id)| SelectedClientAuth::Native {
-                        provider,
-                        authkey_id,
-                    })
-                    .collect::<Vec<_>>();
-                candidates.extend(
-                    self.resolve_ordinary_wildcard(slot_id, None, None, token_objects)?
-                        .into_iter()
-                        .map(|(credential, authkey_id)| SelectedClientAuth::Ordinary {
-                            credential,
-                            authkey_id,
-                        }),
-                );
-                if candidates.is_empty() {
-                    return Err(CKR_USER_TYPE_INVALID.into());
-                }
-                Some(candidates)
-            }
-            YubiHsmLoginUsername::HsmAuthWildcard(selector) => {
-                let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
-                let mut candidates =
-                    match self.resolve_hsmauth_wildcard(slot_id, selector, token_objects) {
-                        Ok(native) => native
-                            .into_iter()
-                            .map(|(provider, authkey_id)| SelectedClientAuth::Native {
-                                provider,
-                                authkey_id,
-                            })
-                            .collect::<Vec<_>>(),
-                        Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV => {
-                            Vec::new()
-                        }
-                        Err(error) => return Err(error),
-                    };
-                candidates.extend(
-                    self.resolve_ordinary_wildcard(
-                        slot_id,
-                        selector.label,
-                        selector.source,
-                        token_objects,
-                    )?
-                    .into_iter()
-                    .map(|(credential, authkey_id)| {
-                        SelectedClientAuth::Ordinary {
-                            credential,
-                            authkey_id,
-                        }
-                    }),
-                );
-                Some(candidates)
-            }
-
-            _ => None,
-        };
-        match wildcard {
-            Some(candidates) => unique_auth_candidate(candidates),
-            None => self.select_explicit_login(login),
+        if !login.is_wildcard_target() {
+            return self.select_explicit_login(login);
         }
-    }
-
-    fn login_user_for_slot(
-        &mut self,
-        slot_id: Option<CK_SLOT_ID>,
-        username: &[u8],
-        password: &[u8],
-        pinentry: &pinentry::Pinentry,
-        token_objects: &[TokenObject],
-    ) -> Result<(), Error> {
-        let selected = self.select_login(slot_id, username, token_objects)?;
-        self.login_selected(selected, Some(password), pinentry)
+        let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
+        if !self.public_discovery_available(slot_id) {
+            return Err(CKR_USER_TYPE_INVALID.into());
+        }
+        match self.resolve_hsmauth_wildcard(slot_id, &login, token_objects) {
+            Ok((provider, authkey_id)) => {
+                return Ok(SelectedClientAuth::Native {
+                    provider,
+                    authkey_id,
+                });
+            }
+            Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV => {}
+            Err(error) => return Err(error),
+        }
+        self.resolve_ordinary_wildcard(slot_id, &login, token_objects)
+            .map(|(credential, authkey_id)| SelectedClientAuth::Ordinary {
+                credential,
+                authkey_id,
+            })
     }
 
     fn login_selected(
@@ -1737,8 +1683,13 @@ impl YubiHsmSlot {
             } else {
                 password
             };
-        let (session, authkey_id, reauthentication) =
+        let (session, authkey_id, reauthentication, credential_description) =
             self.authenticate_selected_login(selected, password)?;
+        let credential_description = if credential_description.contains("pkcs11rs-authkey=") {
+            credential_description
+        } else {
+            crate::pkcs11_uri::authentication_uri(&credential_description, authkey_id)
+        };
         let session = RefCell::new(Some(session));
         let discovery_domains = {
             let state = self
@@ -1770,6 +1721,7 @@ impl YubiHsmSlot {
             session: session.into_inner().ok_or(CKR_DEVICE_ERROR)?,
             role: YubiHsmSessionRole::User,
             reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
+            credential_description: Some(credential_description),
         };
         for cache in self
             .attestation_cache
@@ -1890,6 +1842,7 @@ impl YubiHsmSlot {
             session,
             role: YubiHsmSessionRole::PublicDiscovery,
             reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
+            credential_description: None,
         };
         log!(
             2,
@@ -2362,6 +2315,7 @@ impl YubiHsmSlot {
                     session: retained_session,
                     role: YubiHsmSessionRole::PublicDiscovery,
                     reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
+                    credential_description: None,
                 };
                 log!(
                     2,
@@ -3318,22 +3272,25 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
         command: &YubiHsmCommand,
     ) -> Result<Vec<u8>, Error> {
         let mut state = self.try_borrow_mut()?;
-        let (mut session, role, reauthentication) = match std::mem::take(&mut *state) {
-            YubiHsmSessionState::Active {
-                session,
-                role,
-                reauthentication,
-            } => (session, role, reauthentication),
-            inactive => {
-                *state = inactive;
-                return Err(CKR_USER_NOT_LOGGED_IN.into());
-            }
-        };
+        let (mut session, role, reauthentication, credential_description) =
+            match std::mem::take(&mut *state) {
+                YubiHsmSessionState::Active {
+                    session,
+                    role,
+                    reauthentication,
+                    credential_description,
+                } => (session, role, reauthentication, credential_description),
+                inactive => {
+                    *state = inactive;
+                    return Err(CKR_USER_NOT_LOGGED_IN.into());
+                }
+            };
         if let Err(error) = YubiHsmSecureSession::validate_command(connector, command) {
             *state = YubiHsmSessionState::Active {
                 session,
                 role,
                 reauthentication,
+                credential_description,
             };
             return Err(error);
         }
@@ -3361,6 +3318,7 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
                 session,
                 role,
                 reauthentication,
+                credential_description,
             };
         } else {
             *state = match role {
@@ -4115,6 +4073,11 @@ fn yubihsm_object_class(info: &YubiHsmObjectInfo) -> CK_OBJECT_CLASS {
         YUBIHSM_PUBLIC_WRAP_KEY => CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         YUBIHSM_TEMPLATE => CKO_DATA as CK_OBJECT_CLASS,
         YUBIHSM_AUTHENTICATION_KEY
+            if info.algorithm == YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION =>
+        {
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        }
+        YUBIHSM_AUTHENTICATION_KEY
         | YUBIHSM_WRAP_KEY
         | YUBIHSM_HMAC_KEY
         | YUBIHSM_SYMMETRIC_KEY
@@ -4198,6 +4161,30 @@ impl Slot for YubiHsmSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::YubiHsm
     }
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        if self
+            .algorithms
+            .contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION)
+        {
+            ClientAuthSearchTier::TokenNativeDerivation
+        } else {
+            ClientAuthSearchTier::HardwareCredential
+        }
+    }
+    fn authenticated_credential_description(&self) -> Result<String, Error> {
+        match &*self
+            .session
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+        {
+            YubiHsmSessionState::Active {
+                role: YubiHsmSessionRole::User,
+                credential_description: Some(description),
+                ..
+            } => Ok(description.clone()),
+            _ => Err(CKR_USER_NOT_LOGGED_IN.into()),
+        }
+    }
     fn native_storage_provider(&self) -> Option<&dyn StorageProvider> {
         Some(self)
     }
@@ -4261,10 +4248,10 @@ impl Slot for YubiHsmSlot {
     fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         let pin = pin.ok_or(CKR_ARGUMENTS_BAD)?;
         let (username, password) = split_yubihsm_login(pin)?;
+        let selected = self.select_explicit_login(expand_packed_yubihsm_login(username)?)?;
         if let Some(password) = password {
-            return self.login_user_for_slot(None, username, password, pinentry, &[]);
+            return self.login_selected(selected, Some(password), pinentry);
         }
-        let selected = self.select_login(None, username, &[])?;
         self.login_selected(selected, None, pinentry)
     }
     fn login_user(
@@ -4279,10 +4266,7 @@ impl Slot for YubiHsmSlot {
         self.login_selected(selected, password, pinentry)
     }
     fn login_user_uses_token_objects(&self, username: &[u8]) -> bool {
-        matches!(
-            parse_yubihsm_login_username(username),
-            Ok(YubiHsmLoginUsername::UniversalWildcard | YubiHsmLoginUsername::HsmAuthWildcard(_))
-        )
+        parse_yubihsm_login_username(username).is_ok_and(|selector| selector.is_wildcard_target())
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
         self.public_discovery_config.is_some()
@@ -4700,7 +4684,7 @@ pub(crate) fn parse_hsmauth_username(username: &[u8]) -> Result<HsmAuthLogin<'_>
     })
 }
 
-pub(crate) fn parse_yubihsm_login_username(
+pub(crate) fn parse_packed_yubihsm_login_username(
     username: &[u8],
 ) -> Result<YubiHsmLoginUsername<'_>, Error> {
     if username == b":*" {
@@ -4727,6 +4711,48 @@ pub(crate) fn parse_yubihsm_login_username(
         Some(b':') => parse_hsmauth_username(username).map(YubiHsmLoginUsername::HsmAuth),
         _ => parse_yubihsm_authkey_id(username).map(YubiHsmLoginUsername::Direct),
     }
+}
+
+pub(crate) fn parse_yubihsm_login_username(
+    username: &[u8],
+) -> Result<crate::pkcs11_uri::ClientAuthUri, Error> {
+    if !username
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"pkcs11:"))
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    crate::pkcs11_uri::ClientAuthUri::parse(username)
+}
+
+fn packed_client_auth_uri(
+    login: YubiHsmLoginUsername<'_>,
+) -> Result<crate::pkcs11_uri::ClientAuthUri, Error> {
+    match login {
+        YubiHsmLoginUsername::Direct(authkey_id) => Ok(crate::pkcs11_uri::ClientAuthUri {
+            authkey_id: Some(authkey_id),
+            direct: Some("direct".to_owned()),
+            ..Default::default()
+        }),
+        YubiHsmLoginUsername::HsmAuth(login) => Ok(crate::pkcs11_uri::ClientAuthUri {
+            serial: login.source.map(|source| source.as_bytes().to_vec()),
+            object: Some(login.label.as_bytes().to_vec()),
+            authkey_id: Some(login.authkey_id),
+            ..Default::default()
+        }),
+        YubiHsmLoginUsername::UniversalWildcard => Ok(Default::default()),
+        YubiHsmLoginUsername::HsmAuthWildcard(login) => Ok(crate::pkcs11_uri::ClientAuthUri {
+            serial: login.source.map(|source| source.as_bytes().to_vec()),
+            object: login.label.map(|label| label.as_bytes().to_vec()),
+            ..Default::default()
+        }),
+    }
+}
+
+pub(crate) fn expand_packed_yubihsm_login(
+    username: &[u8],
+) -> Result<crate::pkcs11_uri::ClientAuthUri, Error> {
+    packed_client_auth_uri(parse_packed_yubihsm_login_username(username)?)
 }
 
 pub(crate) fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), Error> {
@@ -4758,7 +4784,7 @@ pub(crate) fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), 
 
 fn reject_packed_login_wildcard(username: &[u8]) -> Result<(), Error> {
     if matches!(
-        parse_yubihsm_login_username(username)?,
+        parse_packed_yubihsm_login_username(username)?,
         YubiHsmLoginUsername::UniversalWildcard | YubiHsmLoginUsername::HsmAuthWildcard(_)
     ) {
         return Err(CKR_ARGUMENTS_BAD.into());

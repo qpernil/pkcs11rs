@@ -8,38 +8,79 @@ final working AES keys are read once for local secure messaging. See
 [YubiHSM authentication](../yubihsm-auth.md) for selector syntax and the
 [SCP key-provider plan](README.md) for remaining card and virtual-device work.
 
-## One name identifies one credential
+## RFC 7512 credential selectors
 
-The explicit selector `:AAAA<label>@<source serial>` identifies a target
-Authentication Key ID, credential name, and source token. Asymmetric public
-matching also supports `:*` and narrower wildcard selectors. A platform key uses
-the same syntax: `:AAAA<label>@host`. Names are not
-globally unique; a serial collision or duplicate matching credential is an
-ambiguity, not permission to choose the first result.
+`C_LoginUser` uses an RFC 7512 PKCS #11 URI as its username. Standard path
+attributes select the source slot and object:
+
+| URI attribute | PKCS #11 value |
+| --- | --- |
+| `token` | `CK_TOKEN_INFO.label` |
+| `serial` | `CK_TOKEN_INFO.serialNumber` |
+| `manufacturer` | `CK_TOKEN_INFO.manufacturerID` |
+| `model` | `CK_TOKEN_INFO.model` |
+| `object` | `CKA_LABEL` |
+| `id` | `CKA_ID`; URI-safe ASCII remains readable and delimiters, controls, and non-ASCII bytes are percent-encoded |
+| `type` | `CKA_CLASS`: `public`, `private`, or `secret-key` for authentication keys |
+
+Omitted attributes are wildcards. The vendor query attribute
+`pkcs11rs-authkey=AAAA` explicitly selects the target YubiHSM Authentication
+Key ID. Without it, pkcs11rs compares eligible public source keys with public
+projections on the target and obtains the target ID from the matching
+projection. `object` always means `CKA_LABEL`; it is not a separate credential
+name namespace.
+
+Examples:
+
+```text
+pkcs11:
+pkcs11:token=PIV%20%2337070618;object=Authentication;id=%9A;type=private?pkcs11rs-authkey=1003
+pkcs11:token=Secure%20Enclave;object=reserve;type=public
+pkcs11:token=HSM%20Auth%20%2337987918;object=client;id=client;type=private?pkcs11rs-authkey=0001
+pkcs11:?pkcs11rs-direct=phone-client&pkcs11rs-authkey=0001
+```
+
+The direct form derives both symmetric and asymmetric credentials from the
+password and labels the temporary objects from `pkcs11rs-direct`. It is
+algorithm-neutral; the target Authentication Key determines which path is
+used. `pin-value` and `pin-source` are rejected because the PIN/password is the
+separate `C_LoginUser` argument.
+
+Existing objects expose a computed `CKA_PKCS11RS_URI` that can be used as an
+exact source selector. Its formatter includes `serial` only when the token
+label does not already contain that serial, and includes `id` whenever
+`CKA_ID` is nonempty. The URI excludes
+`pkcs11rs-authkey`, because that identifies a separate object on the target
+YubiHSM.
 
 | Credential | Source objects | Pairing |
 | --- | --- | --- |
-| Ordinary symmetric | Two token `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each | Exact labels `<name>.enc` and `<name>.mac`; `CKA_ID` is not compared |
+| Ordinary symmetric | Two token `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each | `<name>.enc` is the credential identity; its exact `<name>.mac` companion is required; `CKA_ID` is not compared |
 | Ordinary asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_EC`, P-256, with a public projection for automatic selection | Public and private keys must have both identical `CKA_LABEL` and identical `CKA_ID`, including empty IDs |
-| Native HSM Auth symmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_SYMMETRIC` | Exact credential label |
-| Native HSM Auth asymmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, plus P-256 public projection | Credential and projection share both `CKA_LABEL` and `CKA_ID` |
+| Native HSM Auth symmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_SYMMETRIC` | Exact credential label; `CKA_ID` uses the same stable label bytes |
+| Native HSM Auth asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, plus P-256 public projection | Credential and projection share both the label and label-derived `CKA_ID` |
 
 Target YubiHSM Authentication Key records share the vendor authentication key
-types, but their slots do not advertise `CKP_YUBICO_HSMAUTH`. They remain
+types and use the same symmetric-secret/asymmetric-private class distinction,
+but their slots do not advertise `CKP_YUBICO_HSMAUTH`. They remain
 non-operational metadata and are excluded from native source discovery.
 
 Every existing-source lookup requires `CKA_TOKEN=true` and the expected object
-class/type. Symmetric keys require explicit selection: each role must resolve
-to exactly one AES-128 key. Different native IDs are valid for the two roles.
+class/type. Symmetric keys require explicit selection with the ENC object's
+full `CKA_LABEL`, such as `object=client.enc;type=secret-key`. Pair resolution
+then requires exactly one AES-128 ENC object and its MAC companion. A base name
+or the `.mac` label does not identify the pair. Different native IDs are valid
+for the two roles.
 Each AES key must permit either counter-KDF derivation or AES-ECB encryption.
 CBC encryption permission is optional: when both the slot and key allow it,
 the ECB-based construction batches CMAC chaining into one zero-IV CBC call.
 The former is preferred; the latter constructs CMAC/counter KDF through source
 session encryption without exporting the long-term key. Explicit permission to
 encrypt is sufficient for this alternative; it does not enable `C_DeriveKey`.
-Missing keys return `CKR_KEY_HANDLE_INVALID`; duplicate matches return
-`CKR_TEMPLATE_INCONSISTENT`. A name matching both an ordinary asymmetric key and
-symmetric roles is ambiguous. No failure causes password-based protocol fallback.
+Missing keys return `CKR_KEY_HANDLE_INVALID`. A broad selector can match more
+than one credential; the first candidate in the global protection order is
+selected and is the only candidate that receives the supplied PIN. No failure
+causes password-based protocol fallback or a retry with another source.
 
 A directly supplied password prepares both credential types as protected
 session objects in a temporary software slot. Preparation retains the handles
@@ -54,18 +95,24 @@ the matching projection's two-byte ID supplies the target Authentication Key ID.
 ## Selection and authorization
 
 Enumeration uses public objects and never submits a password to discover which
-source is suitable. A unique source credential and target ID must be selected
-before authorization. Explicit source/name selection can defer private lookup
-until that source is authorized; hidden credentials cannot participate in public
-wildcard matching. Slots without matching token credentials contribute no
-candidate, regardless of their backend kind.
+source is suitable. Wildcard lookup searches native HSM Auth first, then
+ordinary slots ordered by their backend-provided protection tier: token-native
+derivation, platform hardware, other hardware-held credentials, and software. It
+opens source slots in that order and stops at the first public
+credential/target-ID match, without enumerating later sources. A selector containing
+`pkcs11rs-authkey` can defer private or symmetric lookup until that source is
+authorized; hidden credentials cannot participate in automatic public matching.
+Slots without matching token credentials contribute no candidate, regardless
+of their backend kind.
 
 An ordinary source session reuses existing USER authorization, otherwise uses
-the selected source's ordinary login when `CKF_LOGIN_REQUIRED` is set. Platform
-uses an empty PIN. No other source is tried after a failed login. Source PIN
-length and policy belong to the selected provider. Native HSM Auth credentials
-use their credential password in the native operation; their slot has no USER
-login. SO management authorization remains separate.
+the selected source's ordinary login when `CKF_LOGIN_REQUIRED` is set. The
+Secure Enclave accepts and ignores either an omitted or supplied PIN. Only the
+selected wildcard match receives a PIN and no other
+source is tried after a failed login. Source PIN length and policy belong to the
+selected provider. Native HSM Auth credentials use their credential password in
+the native operation; their slot has no USER login. SO management authorization
+remains separate.
 
 Native discovery uses the advertised profile followed by explicit searches for
 the two credential key types. Further native authentication protocols can define
@@ -116,7 +163,7 @@ YubiHSM advertising algorithm 61 can keep the supported derivation graph in
 protected volatile objects owned by its authenticated secure session.
 
 Regression tests cover exact names, independent symmetric IDs, asymmetric
-label-and-ID pairing, public ambiguity without login, selected-source failure
-without fallback, private and persistent software sources, recreation, and
-cleanup. Remaining work includes retained-binding dependency cycles and complete
-channel tests using a virtual YubiHSM as the derivation provider.
+label-and-ID pairing, deterministic first-match wildcard selection, one-attempt
+failure, private and persistent software sources, recreation, and cleanup.
+Remaining work includes retained-binding dependency cycles and complete channel
+tests using a virtual YubiHSM as the derivation provider.

@@ -1989,6 +1989,15 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
         "reserve".to_owned(),
         Arc::new(credential),
     )]);
+    let login_uri = crate::pkcs11_uri::authentication_uri(
+        &crate::pkcs11_uri::object_uri_parts(
+            &source,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            b"reserve",
+            b"",
+        ),
+        AUTHKEY_ID,
+    );
     let mut projection = source
         .token_objects(1)
         .unwrap()
@@ -2008,7 +2017,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&source_slot).unwrap();
     slot.recreate_sessions = true;
-    login_user_slot(&mut slot, 1, b":1003reserve@host", b"", &[]).unwrap();
+    login_user_slot(&mut slot, 1, login_uri.as_bytes(), b"", &[]).unwrap();
     peer.expire_next_session_message.set(true);
     assert!(
         !send_yubihsm_secure_command(
@@ -2027,9 +2036,8 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
         authkey_domains: u16::MAX,
     };
     // The total wildcard may resolve to either native YubiHSM Auth or an
-    // ordinary source. A no-PIN source must receive its declared empty PIN,
-    // even when the caller supplies a password usable by native HSM Auth.
-    login_user_slot(&mut slot, 1, b":*", PASSWORD, &[projection]).unwrap();
+    // ordinary source. The Host backend ignores a supplied credential password.
+    login_user_slot(&mut slot, 1, b"pkcs11:", PASSWORD, &[projection]).unwrap();
     assert_eq!(peer.create_session_count(), 3);
     Slot::logout(&mut slot).unwrap();
 }
@@ -2038,10 +2046,14 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
 fn platform_authentication_requires_an_enabled_source_slot() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
-    assert!(
-        matches!(login_user_slot(&mut slot, 1, b":1003reserve@host", b"", &[]),
-        Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
-    );
+    assert!(matches!(login_user_slot(
+            &mut slot,
+            1,
+            b"pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003",
+            b"",
+            &[]
+        ),
+        Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV));
     assert_eq!(peer.create_session_count(), 0);
 }
 
@@ -2079,7 +2091,7 @@ fn frame_parser_requires_exact_length() {
 }
 
 #[test]
-fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
+fn yubihsm_login_selectors_encode_the_authentication_key_and_provider() {
     let login = crate::parse_hsmauth_username(b":00fFdefault@12345678").unwrap();
     assert_eq!(login.label, "default");
     assert_eq!(login.source, Some("12345678"));
@@ -2093,66 +2105,36 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
     let login = crate::parse_hsmauth_username(b":0000default").unwrap();
     assert_eq!(login.authkey_id, 0);
 
-    assert!(matches!(
-        crate::parse_yubihsm_login_username(b"00fF").unwrap(),
-        crate::YubiHsmLoginUsername::Direct(0xff)
-    ));
-    assert!(matches!(
-        crate::parse_yubihsm_login_username(b"0000").unwrap(),
-        crate::YubiHsmLoginUsername::Direct(0)
-    ));
-    assert_eq!(
-        crate::parse_yubihsm_login_username(b":1003reserve@host").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuth(crate::HsmAuthLogin {
-            label: "reserve",
-            source: Some("host"),
-            authkey_id: 0x1003,
-        })
-    );
+    let direct = crate::parse_yubihsm_login_username(
+        b"pkcs11:?pkcs11rs-direct=direct&pkcs11rs-authkey=00ff",
+    )
+    .unwrap();
+    assert_eq!(direct.authkey_id, Some(0xff));
+    assert_eq!(direct.direct.as_deref(), Some("direct"));
+
+    let exact = crate::parse_yubihsm_login_username(
+        b"pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003",
+    )
+    .unwrap();
+    assert_eq!(exact.token.as_deref(), Some(b"Secure Enclave".as_slice()));
+    assert_eq!(exact.serial, None);
+    assert_eq!(exact.object.as_deref(), Some(b"reserve".as_slice()));
+    assert_eq!(exact.authkey_id, Some(0x1003));
 
     assert_eq!(
-        crate::parse_yubihsm_login_username(b":*").unwrap(),
-        crate::YubiHsmLoginUsername::UniversalWildcard
+        crate::parse_yubihsm_login_username(b"pkcs11:").unwrap(),
+        crate::pkcs11_uri::ClientAuthUri::default()
     );
-    assert_eq!(
-        crate::parse_yubihsm_login_username(b":*asymmetric@87654321").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
-            label: Some("asymmetric"),
-            source: Some("87654321"),
-        })
-    );
-    assert_eq!(
-        crate::parse_yubihsm_login_username(b":*@87654321").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
-            label: None,
-            source: Some("87654321"),
-        })
-    );
+    let wildcard =
+        crate::parse_yubihsm_login_username(b"pkcs11:serial=87654321;object=asymmetric").unwrap();
+    assert_eq!(wildcard.object.as_deref(), Some(b"asymmetric".as_slice()));
+    assert_eq!(wildcard.serial.as_deref(), Some(b"87654321".as_slice()));
     // Generic slot labels must retain the platform credential name capacity.
     let long_label = "a".repeat(80);
-    let named = format!(":1003{long_label}@host");
-    assert_eq!(
-        crate::parse_yubihsm_login_username(named.as_bytes()).unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuth(crate::HsmAuthLogin {
-            label: &long_label,
-            source: Some("host"),
-            authkey_id: 0x1003,
-        })
-    );
-    assert_eq!(
-        crate::parse_yubihsm_login_username(b":*@host").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
-            label: None,
-            source: Some("host"),
-        })
-    );
-    assert_eq!(
-        crate::parse_yubihsm_login_username(b":*reserve@host").unwrap(),
-        crate::YubiHsmLoginUsername::HsmAuthWildcard(crate::HsmAuthWildcardLogin {
-            label: Some("reserve"),
-            source: Some("host"),
-        })
-    );
+    let named = format!("pkcs11:serial=host;object={long_label}?pkcs11rs-authkey=1003");
+    let parsed = crate::parse_yubihsm_login_username(named.as_bytes()).unwrap();
+    assert_eq!(parsed.object.as_deref(), Some(long_label.as_bytes()));
+    assert_eq!(parsed.serial.as_deref(), Some(b"host".as_slice()));
 }
 
 #[test]
@@ -2174,8 +2156,8 @@ fn yubihsm_login_splits_username_from_password() {
         (b":0001default@12345678".as_slice(), None)
     );
     assert_eq!(
-        crate::split_yubihsm_login(b":1003reserve@host").unwrap(),
-        (b":1003reserve@host".as_slice(), None)
+        crate::split_yubihsm_login(b":1003reserve@12345678").unwrap(),
+        (b":1003reserve@12345678".as_slice(), None)
     );
     assert_eq!(
         crate::split_yubihsm_login(b":0001default:").unwrap(),
@@ -2183,8 +2165,8 @@ fn yubihsm_login_splits_username_from_password() {
     );
     for packed_wildcard in [
         b":*".as_slice(),
-        b":*reserve@host",
-        b":*reserve@host:password",
+        b":*reserve@12345678",
+        b":*reserve@12345678:password",
     ] {
         assert!(matches!(
             crate::split_yubihsm_login(packed_wildcard),
@@ -2198,20 +2180,14 @@ fn yubihsm_login_splits_username_from_password() {
 fn yubihsm_login_rejects_malformed_usernames() {
     for username in [
         b"default".as_slice(),
-        b":0001",
-        b":xyz1default",
-        b":0001default@",
-        b":0001default@source@extra",
-        b":0001default:source",
-        b":0001default\x01",
-        b":*@",
-        b":*label@source@extra",
-        b":*label:source",
-        b"@001",
-        b"@00ff",
-        b"@xyz1",
-        b":1003@12345678",
-        b":1003@reserve",
+        b":1003reserve@12345678",
+        b"pkcs11:token",
+        b"pkcs11:token=a;token=b",
+        b"pkcs11:unknown=value",
+        b"pkcs11:object=%GG",
+        b"pkcs11:?pkcs11rs-authkey=001",
+        b"pkcs11:?pkcs11rs-authkey=xyz1",
+        b"pkcs11:?pkcs11rs-direct=direct",
     ] {
         assert!(
             crate::parse_yubihsm_login_username(username).is_err(),
@@ -2375,6 +2351,30 @@ pub(crate) fn make_yubihsm_hsmauth_public_discovery_failure_test_slot(
         Some(credential),
     );
     (Box::new(slot), successful_username)
+}
+
+#[cfg(unix)]
+pub(crate) fn make_yubihsm_hsmauth_wildcard_pinentry_test_slot() -> Box<dyn crate::Slot> {
+    const SLOT_ID: crate::CK_SLOT_ID = 99;
+    const AUTHKEY_ID: u16 = 1;
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(AUTHKEY_ID);
+    let mut provider = asymmetric_hsmauth_provider(Rc::new(AsymmetricHsmAuthPeer::new()));
+    set_hsmauth_provider_static_public_key(&mut provider);
+    let providers = Arc::new(crate::auth_slots::AuthSlots::from_native_fixtures(vec![
+        provider.clone(),
+    ]));
+    let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        peer,
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers,
+        Some(public_discovery_credential("password")),
+    );
+    let projection =
+        install_hsmauth_public_projection(&mut slot, SLOT_ID, AUTHKEY_ID, &provider.credential);
+    slot.object_cache.get_mut().objects = vec![projection];
+    Box::new(slot)
 }
 
 fn asymmetric_hsmauth_provider(peer: Rc<AsymmetricHsmAuthPeer>) -> crate::NativeHsmAuth {
@@ -4507,7 +4507,14 @@ fn assert_failed_public_discovery_preserves_profile_after_user_login(
     );
     assert_eq!(slot.object_cache.borrow().discovery, expected);
 
-    login_user_slot(&mut slot, 7, b"0001", PASSWORD, &[]).unwrap();
+    login_user_slot(
+        &mut slot,
+        7,
+        b"pkcs11:?pkcs11rs-direct=direct&pkcs11rs-authkey=0001",
+        PASSWORD,
+        &[],
+    )
+    .unwrap();
     assert!(Slot::login_is_active(&slot));
     assert!(
         Slot::token_objects(&slot, 7)
@@ -5300,7 +5307,14 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     )
     .unwrap();
     #[cfg(not(unix))]
-    login_user_slot(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
+    login_user_slot(
+        &mut slot,
+        7,
+        b"pkcs11:serial=12345678;object=default%20key;type=secret-key?pkcs11rs-authkey=0001",
+        b"password",
+        &[],
+    )
+    .unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -5342,7 +5356,15 @@ fn named_direct_authentication_uses_the_callers_pinentry() {
         vec![crate::YUBIHSM_ALGO_RSA_2048],
     );
 
-    crate::Slot::login_user(&mut slot, 91, b"0001", None, &pinentry.pinentry(), &[]).unwrap();
+    crate::Slot::login_user(
+        &mut slot,
+        91,
+        b"pkcs11:?pkcs11rs-direct=prompted&pkcs11rs-authkey=0001",
+        None,
+        &pinentry.pinentry(),
+        &[],
+    )
+    .unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -5363,7 +5385,14 @@ fn hsmauth_provider_selection_ignores_an_absent_matching_transport() {
         ])),
     );
 
-    login_user_slot(&mut slot, 7, b":0001default key@12345678", b"password", &[]).unwrap();
+    login_user_slot(
+        &mut slot,
+        7,
+        b"pkcs11:serial=12345678;object=default%20key;type=secret-key?pkcs11rs-authkey=0001",
+        b"password",
+        &[],
+    )
+    .unwrap();
     assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
 }
 
@@ -5384,7 +5413,7 @@ fn hsmauth_provider_selection_rejects_an_absent_transport() {
         login_user_slot(
             &mut slot,
             7,
-            b":0001default key@12345678",
+            b"pkcs11:serial=12345678;object=default%20key;type=secret-key?pkcs11rs-authkey=0001",
             b"password",
             &[],
         ),
@@ -5422,17 +5451,13 @@ fn hsmauth_wildcard_ignores_symmetric_credentials_and_matches_the_public_project
     let resolved = slot
         .resolve_hsmauth_wildcard(
             SLOT_ID,
-            &crate::HsmAuthWildcardLogin {
-                label: None,
-                source: None,
-            },
+            &crate::pkcs11_uri::ClientAuthUri::default(),
             &projections,
         )
         .unwrap();
-    assert_eq!(resolved.len(), 1);
-    assert_eq!(resolved[0].1, AUTHKEY_ID);
+    assert_eq!(resolved.1, AUTHKEY_ID);
 
-    login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &projections).unwrap();
+    login_user_slot(&mut slot, SLOT_ID, b"pkcs11:", PASSWORD, &projections).unwrap();
 
     assert!(Slot::login_is_active(&slot));
     assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
@@ -5462,7 +5487,7 @@ fn hsmauth_wildcard_reports_an_unresolved_identity_separately_from_a_wrong_pin()
     };
 
     assert!(matches!(
-        login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &[]),
+        login_user_slot(&mut slot, SLOT_ID, b"pkcs11:", PASSWORD, &[]),
         Err(crate::Error::Generic(value))
             if value == crate::CKR_USER_TYPE_INVALID as crate::CK_RV
     ));
@@ -5470,7 +5495,7 @@ fn hsmauth_wildcard_reports_an_unresolved_identity_separately_from_a_wrong_pin()
 }
 
 #[test]
-fn hsmauth_wildcard_can_be_narrowed_by_source() {
+fn hsmauth_wildcard_honors_source_order_and_filter() {
     const SLOT_ID: crate::CK_SLOT_ID = 7;
     const AUTHKEY_ID: u16 = 1;
     let yubihsm = Rc::new(ProtocolPeer::new());
@@ -5500,33 +5525,30 @@ fn hsmauth_wildcard_can_be_narrowed_by_source() {
         &first.credential,
     )];
 
-    let all = slot
+    let first_match = slot
         .resolve_hsmauth_wildcard(
             SLOT_ID,
-            &crate::HsmAuthWildcardLogin {
-                label: None,
-                source: None,
-            },
+            &crate::pkcs11_uri::ClientAuthUri::default(),
             &projections,
         )
         .unwrap();
-    assert_eq!(all.len(), 2);
+    assert_eq!(first_match.0.source_identifier(), "87654321");
     let narrowed = slot
         .resolve_hsmauth_wildcard(
             SLOT_ID,
-            &crate::HsmAuthWildcardLogin {
-                label: Some("asymmetric"),
-                source: Some("87654321"),
+            &crate::pkcs11_uri::ClientAuthUri {
+                object: Some(b"asymmetric".to_vec()),
+                serial: Some(b"87654321".to_vec()),
+                ..Default::default()
             },
             &projections,
         )
         .unwrap();
-    assert_eq!(narrowed.len(), 1);
-    assert_eq!(narrowed[0].0.source_identifier(), "87654321");
+    assert_eq!(narrowed.0.source_identifier(), "87654321");
 }
 
 #[test]
-fn hsmauth_wildcard_rejects_duplicate_public_projections_before_authentication() {
+fn hsmauth_wildcard_selects_the_first_matching_projection() {
     const SLOT_ID: crate::CK_SLOT_ID = 7;
     const ASYMMETRIC_AUTHKEY_ID: u16 = 1;
     const SYMMETRIC_AUTHKEY_ID: u16 = 2;
@@ -5548,23 +5570,66 @@ fn hsmauth_wildcard_rejects_duplicate_public_projections_before_authentication()
         install_hsmauth_public_projection(
             &mut slot,
             SLOT_ID,
-            SYMMETRIC_AUTHKEY_ID,
+            ASYMMETRIC_AUTHKEY_ID,
             &provider.credential,
         ),
         install_hsmauth_public_projection(
             &mut slot,
             SLOT_ID,
-            ASYMMETRIC_AUTHKEY_ID,
+            SYMMETRIC_AUTHKEY_ID,
             &provider.credential,
         ),
     ];
 
-    assert!(
-        matches!(login_user_slot(&mut slot, SLOT_ID, b":*", PASSWORD, &projections),
-        Err(crate::Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as crate::CK_RV)
+    login_user_slot(&mut slot, SLOT_ID, b"pkcs11:", PASSWORD, &projections).unwrap();
+    assert!(Slot::login_is_active(&slot));
+    assert_eq!(
+        Slot::authenticated_credential_description(&slot).unwrap(),
+        "pkcs11:token=HSM%20Auth%20%230;serial=87654321;object=asymmetric;id=asymmetric;type=private?pkcs11rs-authkey=0001"
     );
-    assert!(!Slot::login_is_active(&slot));
-    assert!(create_session_payload_lengths(&yubihsm).is_empty());
+    assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
+}
+
+#[cfg(unix)]
+#[test]
+fn hsmauth_wildcard_with_null_pin_uses_the_callers_pinentry() {
+    const SLOT_ID: crate::CK_SLOT_ID = 7;
+    const AUTHKEY_ID: u16 = 1;
+    let _guard = crate::test::TEST_LOCK.lock().unwrap();
+    let pinentry = crate::test::TestPinentry::new("password");
+    let yubihsm = Rc::new(ProtocolPeer::new());
+    yubihsm.use_asymmetric_authentication(AUTHKEY_ID);
+    let mut provider = asymmetric_hsmauth_provider(Rc::new(AsymmetricHsmAuthPeer::new()));
+    set_hsmauth_provider_static_public_key(&mut provider);
+    let providers = Arc::new(crate::auth_slots::AuthSlots::from_native_fixtures(vec![
+        provider.clone(),
+    ]));
+    let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        yubihsm.clone(),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers,
+        Some(public_discovery_credential("password")),
+    );
+    let projections = vec![install_hsmauth_public_projection(
+        &mut slot,
+        SLOT_ID,
+        AUTHKEY_ID,
+        &provider.credential,
+    )];
+
+    Slot::login_user(
+        &mut slot,
+        SLOT_ID,
+        b"pkcs11:",
+        None,
+        &pinentry.pinentry(),
+        &projections,
+    )
+    .unwrap();
+
+    assert!(Slot::login_is_active(&slot));
+    assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
 }
 
 #[test]
@@ -6309,6 +6374,7 @@ fn cleared_local_keys_invalidate_channel_without_sending_or_recreating_keys() {
 struct InventoryHsmAuthPeer {
     label: RefCell<Option<String>>,
     public_key: RefCell<Option<Vec<u8>>>,
+    commands: RefCell<Vec<crate::CommandApdu>>,
     device: Arc<crate::device::DeviceContext>,
 }
 impl Connector for InventoryHsmAuthPeer {
@@ -6337,6 +6403,7 @@ impl Connector for InventoryHsmAuthPeer {
         4096
     }
     fn send_short_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        self.commands.borrow_mut().push(command.clone());
         let data = match command.ins {
             7 => vec![5, 7, 1],
             9 => vec![8],
@@ -6379,13 +6446,14 @@ impl Connector for InventoryHsmAuthPeer {
 }
 
 #[test]
-fn hsmauth_native_operation_uses_session_handles_and_revalidates_inventory() {
+fn hsmauth_native_operation_uses_session_handles_without_refreshing_inventory() {
     use crate::pkcs11_auth::Pkcs11Auth;
     use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
     use crate::*;
     let peer = Rc::new(InventoryHsmAuthPeer {
         label: RefCell::new(Some("first".into())),
         public_key: RefCell::new(None),
+        commands: RefCell::new(Vec::new()),
         device: Arc::new(crate::device::DeviceContext::test()),
     });
     let source = ModuleContext::private_slot(Box::new(crate::HsmAuthSlot::new_with_device(
@@ -6419,34 +6487,19 @@ fn hsmauth_native_operation_uses_session_handles_and_revalidates_inventory() {
         session.attribute(*handle, CKA_TOKEN).unwrap().as_slice(),
         &[1]
     );
+    peer.commands.borrow_mut().clear();
     let target = ProtocolPeer::new();
     session
         .hsmauth_authenticate(*handle, &target, 1, PASSWORD, None)
         .unwrap();
     assert_eq!(target.create_session_count(), 1);
-
-    // An externally removed credential must not remain usable through a retained handle.
-    *peer.label.borrow_mut() = Some("second".into());
-    assert!(
-        matches!(session.hsmauth_authenticate(*handle, &target, 1, PASSWORD, None),
-        Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as CK_RV)
-    );
-    assert_eq!(target.create_session_count(), 1);
-    assert!(find(b"first").is_empty());
-    assert_eq!(find(b"second").len(), 1);
-    let selected = source
-        .auth_slots
-        .hsmauth_credentials(Some("second"), None, false)
-        .unwrap();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].credential.label, "second");
-    drop(selected);
-    assert!(
-        source
-            .auth_slots
-            .hsmauth_credentials(Some("first"), None, false)
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        peer.commands
+            .borrow()
+            .iter()
+            .map(|command| command.ins)
+            .collect::<Vec<_>>(),
+        [0x04, 0x03]
     );
 
     let profile = session
@@ -6467,47 +6520,6 @@ fn hsmauth_native_operation_uses_session_handles_and_revalidates_inventory() {
 }
 
 #[test]
-fn hsmauth_asymmetric_replacement_does_not_rebind_an_old_credential() {
-    use crate::pkcs11_auth::Pkcs11Auth;
-    use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
-    use crate::*;
-    let first = p256_public_key(&test_private_key(&[1; 32]).unwrap())
-        .unwrap()
-        .to_vec();
-    let second = p256_public_key(&test_private_key(&[2; 32]).unwrap())
-        .unwrap()
-        .to_vec();
-    let peer = Rc::new(InventoryHsmAuthPeer {
-        label: RefCell::new(Some("same name".into())),
-        public_key: RefCell::new(Some(first)),
-        device: Arc::new(crate::device::DeviceContext::test()),
-    });
-    let provider = Pkcs11Provider::new(Box::new(crate::HsmAuthSlot::new_with_device(
-        peer.clone(),
-        crate::hsmauth::AID.to_vec(),
-        peer.device.clone(),
-    )))
-    .unwrap();
-    let session = ProviderSession::open(provider).unwrap();
-    let handles = session
-        .find(&[(CKA_CLASS, &(CKO_SECRET_KEY as CK_ULONG).to_ne_bytes())])
-        .unwrap();
-    let original = handles[0];
-    *peer.public_key.borrow_mut() = Some(second);
-    let target = ProtocolPeer::new();
-    assert!(
-        matches!(session.hsmauth_authenticate(original, &target, 1, PASSWORD, None),
-        Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as CK_RV)
-    );
-    assert_eq!(target.create_session_count(), 0);
-    let replacement = session
-        .find(&[(CKA_CLASS, &(CKO_SECRET_KEY as CK_ULONG).to_ne_bytes())])
-        .unwrap();
-    assert_eq!(replacement.len(), 1);
-    assert_ne!(replacement[0], original);
-}
-
-#[test]
 fn hsmauth_source_session_retention_requires_opt_in_and_logout_releases_it() {
     for recreate in [false, true] {
         let target = Rc::new(ProtocolPeer::new());
@@ -6521,7 +6533,14 @@ fn hsmauth_source_session_retention_requires_opt_in_and_logout_releases_it() {
             .unwrap();
         let mut slot = YubiHsmSlot::with_auth_slots(target, (2, 4, 1), vec![], sources);
         slot.recreate_sessions = recreate;
-        login_user_slot(&mut slot, 7, b":0001default key@12345678", PASSWORD, &[]).unwrap();
+        login_user_slot(
+            &mut slot,
+            7,
+            b"pkcs11:serial=12345678;object=default%20key;type=secret-key?pkcs11rs-authkey=0001",
+            PASSWORD,
+            &[],
+        )
+        .unwrap();
         assert_eq!(source.lock().unwrap().sessions.len(), usize::from(recreate));
         Slot::logout(&mut slot).unwrap();
         assert!(source.lock().unwrap().sessions.is_empty());
@@ -6539,7 +6558,7 @@ fn hsmauth_source_session_retention_requires_opt_in_and_logout_releases_it() {
 }
 
 #[test]
-fn native_auth_selection_does_not_try_other_credentials_or_repeat_a_wrong_password() {
+fn native_auth_wildcard_submits_a_wrong_password_only_once() {
     const SLOT_ID: crate::CK_SLOT_ID = 7;
     let first = Rc::new(AsymmetricHsmAuthPeer::new());
     let second = Rc::new(AsymmetricHsmAuthPeer::new());
@@ -6567,13 +6586,7 @@ fn native_auth_selection_does_not_try_other_credentials_or_repeat_a_wrong_passwo
         &first_provider.credential,
     )];
     assert!(
-        matches!(login_user_slot(&mut slot, SLOT_ID, b":*", b"wrong", &projections),
-        Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
-    );
-    assert_eq!(first.requests.get(), 0);
-    assert_eq!(second.requests.get(), 0);
-    assert!(
-        matches!(login_user_slot(&mut slot, SLOT_ID, b":*asymmetric@87654321", b"wrong", &projections),
+        matches!(login_user_slot(&mut slot, SLOT_ID, b"pkcs11:", b"wrong", &projections),
         Err(Error::Generic(rv)) if rv == crate::CKR_PIN_INCORRECT as CK_RV)
     );
     assert_eq!(first.requests.get(), 1);
@@ -6582,7 +6595,44 @@ fn native_auth_selection_does_not_try_other_credentials_or_repeat_a_wrong_passwo
 }
 
 #[test]
-fn ordinary_wildcard_selection_never_logs_in_to_resolve_public_ambiguity() {
+fn native_auth_wildcard_stops_before_a_later_busy_source() {
+    const SLOT_ID: crate::CK_SLOT_ID = 7;
+    let first_peer = Rc::new(AsymmetricHsmAuthPeer::new());
+    let mut first_provider = asymmetric_hsmauth_provider(first_peer);
+    set_hsmauth_provider_static_public_key(&mut first_provider);
+    let mut second_provider = asymmetric_hsmauth_provider(Rc::new(AsymmetricHsmAuthPeer::new()));
+    second_provider.source = "99999999".to_owned();
+    set_hsmauth_provider_static_public_key(&mut second_provider);
+
+    let sources = Arc::new(crate::auth_slots::AuthSlots::default());
+    let first = crate::auth_slots::AuthSlots::fixture_slot(first_provider.clone());
+    let second = crate::auth_slots::AuthSlots::fixture_slot(second_provider);
+    sources.register(&first).unwrap();
+    sources.register(&second).unwrap();
+
+    let target = Rc::new(ProtocolPeer::new());
+    target.use_asymmetric_authentication(1);
+    let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        target,
+        (2, 4, 1),
+        Vec::new(),
+        sources,
+        Some(public_discovery_credential("password")),
+    );
+    let projections = vec![install_hsmauth_public_projection(
+        &mut slot,
+        SLOT_ID,
+        1,
+        &first_provider.credential,
+    )];
+
+    let _busy = second.lock().unwrap();
+    login_user_slot(&mut slot, SLOT_ID, b"pkcs11:", PASSWORD, &projections).unwrap();
+    assert!(Slot::login_is_active(&slot));
+}
+
+#[test]
+fn ordinary_wildcard_selects_the_first_matching_public_credential() {
     const AUTHKEY_ID: u16 = 0x1003;
     let credential = Arc::new(SoftwarePlatformCredential(
         test_private_key(&[
@@ -6601,6 +6651,22 @@ fn ordinary_wildcard_selection_never_logs_in_to_resolve_public_ambiguity() {
         ("first".to_owned(), credential.clone()),
         ("second".to_owned(), credential),
     ]);
+    let first_uri = crate::pkcs11_uri::object_uri_parts(
+        &source,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        b"first",
+        b"first",
+    );
+    let first_login_uri = crate::pkcs11_uri::authentication_uri(&first_uri, AUTHKEY_ID);
+    let first_selector_uri = crate::pkcs11_uri::authentication_uri(
+        &crate::pkcs11_uri::object_uri_parts(
+            &source,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            b"first",
+            b"",
+        ),
+        AUTHKEY_ID,
+    );
     let mut projection = source
         .token_objects(1)
         .unwrap()
@@ -6623,15 +6689,76 @@ fn ordinary_wildcard_selection_never_logs_in_to_resolve_public_ambiguity() {
     slot.object_cache.get_mut().discovery = YubiHsmDiscoveryCache::Available {
         authkey_domains: u16::MAX,
     };
-    assert!(
-        matches!(login_user_slot(&mut slot, 7, b":*", b"", &[projection]),
-        Err(Error::Generic(rv)) if rv == crate::CKR_TEMPLATE_INCONSISTENT as CK_RV)
-    );
-    assert!(!child.lock().unwrap().slot.login_is_active());
-    assert_eq!(peer.create_session_count(), 0);
-    login_user_slot(&mut slot, 7, b":1003first@host", b"", &[]).unwrap();
+    login_user_slot(&mut slot, 7, b"pkcs11:", b"", &[projection]).unwrap();
     assert_eq!(peer.create_session_count(), 1);
+    let description = Slot::authenticated_credential_description(&slot).unwrap();
+    assert_eq!(description, first_login_uri);
     Slot::logout(&mut slot).unwrap();
+    login_user_slot(&mut slot, 7, first_selector_uri.as_bytes(), b"", &[]).unwrap();
+    assert_eq!(peer.create_session_count(), 2);
+    Slot::logout(&mut slot).unwrap();
+}
+
+#[test]
+fn ordinary_wildcard_stops_before_a_later_busy_source() {
+    const AUTHKEY_ID: u16 = 0x1003;
+    let credential = Arc::new(SoftwarePlatformCredential(
+        test_private_key(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 7,
+        ])
+        .unwrap(),
+    ));
+    let SoftwarePublicKey::Ec { uncompressed, .. } = credential.0.public_key() else {
+        panic!()
+    };
+    let first_source =
+        crate::backend::host::HostSlot::with_keys(vec![("first".to_owned(), credential.clone())]);
+    let mut projection = first_source
+        .token_objects(1)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    projection.id = AUTHKEY_ID.to_be_bytes().to_vec();
+    let first_context = crate::ModuleContext::private_slot(Box::new(first_source)).unwrap();
+    let first = first_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let second_context = crate::ModuleContext::private_slot(Box::new(
+        crate::backend::host::HostSlot::with_keys(vec![("second".to_owned(), credential)]),
+    ))
+    .unwrap();
+    let second = second_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+
+    let sources = Arc::new(crate::auth_slots::AuthSlots::default());
+    sources.register(&first).unwrap();
+    sources.register(&second).unwrap();
+    let target = Rc::new(ProtocolPeer::new());
+    target
+        .provision_asymmetric_authentication_public_key(AUTHKEY_ID, &uncompressed)
+        .unwrap();
+    let mut slot = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        target,
+        (2, 4, 1),
+        Vec::new(),
+        sources,
+        Some(public_discovery_credential("password")),
+    );
+
+    let _busy = second.lock().unwrap();
+    login_user_slot(&mut slot, 7, b"pkcs11:", b"", &[projection]).unwrap();
+    assert!(Slot::login_is_active(&slot));
 }
 
 #[test]
@@ -6670,14 +6797,20 @@ fn target_authentication_key_types_do_not_advertise_native_hsmauth() {
             .is_empty()
     );
     let target = ProtocolPeer::new();
-    for key_type in [
-        crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
-        crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+    for (class, key_type) in [
+        (
+            CKO_SECRET_KEY as CK_OBJECT_CLASS,
+            crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
+        ),
+        (
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+        ),
     ] {
         let keys = session
             .find(&[
                 (CKA_TOKEN, &[CK_TRUE as u8]),
-                (CKA_CLASS, &(CKO_SECRET_KEY as CK_ULONG).to_ne_bytes()),
+                (CKA_CLASS, &class.to_ne_bytes()),
                 (CKA_KEY_TYPE, &key_type.to_ne_bytes()),
             ])
             .unwrap();
@@ -6692,7 +6825,7 @@ fn target_authentication_key_types_do_not_advertise_native_hsmauth() {
     assert!(
         source
             .auth_slots
-            .hsmauth_credentials(None, None, false)
+            .hsmauth_credentials(&crate::pkcs11_uri::ClientAuthUri::default(), false)
             .unwrap()
             .is_empty()
     );
@@ -6819,10 +6952,13 @@ fn auth_source_exclusion_uses_reference_equality_not_serial() {
     let _target_lock = first.lock().unwrap();
     let candidates = sources
         .ordinary_credentials(
-            Some("credential"),
-            Some(&serial),
+            &crate::pkcs11_uri::ClientAuthUri {
+                object: Some(b"credential".to_vec()),
+                serial: Some(serial.as_bytes().to_vec()),
+                authkey_id: Some(1),
+                ..Default::default()
+            },
             &Arc::downgrade(&first),
-            true,
         )
         .unwrap();
     assert_eq!(candidates.len(), 1);

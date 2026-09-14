@@ -245,6 +245,14 @@ local or remote YubiHSM slot. They do not create additional PKCS #11 slots. See
 [`yubihsm-auth.md`](yubihsm-auth.md) for the resulting slot layout and login
 syntax.
 
+The applet credential inventory is cached for the lifetime of one physical
+connection. Repeated token-information and object-search calls reconcile from
+that cache without sending inventory APDUs. A new connection epoch or a
+successful credential-administration operation invalidates it. Before native
+YubiHSM authentication, the cached descriptor selects the applet credential by
+label. The applet operation and target secure-channel verification determine
+whether that credential remains usable, without a separate inventory scan.
+
 ## Issuer SD objects
 
 The Issuer SD slot reads the GlobalPlatform key-information template, card

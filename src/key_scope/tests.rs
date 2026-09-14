@@ -88,7 +88,7 @@ fn symmetric_pair_lookup_requires_exact_unique_aes_roles() {
             .create(template, &[(CKA_VALUE, &vec![0x42; size])])
             .unwrap()
     };
-    let find = || SymmetricCredential::find(scope.session.clone(), "auth", false);
+    let find = || SymmetricCredential::find(scope.session.clone(), "auth.enc", false);
     create("auth.enc", CKK_AES as _, 16);
     // Neither a prefix match nor an object with the wrong key type completes
     // the credential. A name without both exact roles cannot authenticate.
@@ -100,7 +100,7 @@ fn symmetric_pair_lookup_requires_exact_unique_aes_roles() {
     scope.session.destroy(mac).unwrap();
     create("auth.mac", CKK_AES as _, 16);
     assert!(find().is_ok());
-    assert!(SymmetricCredential::find(scope.session.clone(), "auth", true).is_err());
+    assert!(SymmetricCredential::find(scope.session.clone(), "auth.enc", true).is_err());
     create("auth.enc", CKK_AES as _, 16);
     assert!(matches!(find(), Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV));
 }

@@ -165,11 +165,12 @@ one YubiKey with all five default applets and one YubiHSM, the result is six
 slots.
 
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
-Every credential is represented by a `CKO_SECRET_KEY` with key type
-`CKK_YUBICO_HSMAUTH_SYMMETRIC` or `CKK_YUBICO_HSMAUTH_ASYMMETRIC`,
-no ordinary cryptographic capabilities, and no readable `CKA_VALUE`. An asymmetric credential also has a read-only `CKO_PUBLIC_KEY`
-object containing its P-256 public key. The source applet's token serial number
-identifies the YubiKey that owns these objects.
+Symmetric credentials use `CKO_SECRET_KEY` and
+`CKK_YUBICO_HSMAUTH_SYMMETRIC`; asymmetric credentials use `CKO_PRIVATE_KEY`
+and `CKK_YUBICO_HSMAUTH_ASYMMETRIC`. Neither has ordinary cryptographic
+capabilities or a readable `CKA_VALUE`. An asymmetric credential also has a
+read-only `CKO_PUBLIC_KEY` object containing its P-256 public key. The source
+applet's token serial number identifies the YubiKey that owns these objects.
 
 The following vendor attributes are available on credential objects:
 
@@ -181,15 +182,15 @@ The following vendor attributes are available on credential objects:
 ### Authentication-key public-material boundary
 
 Client credentials on a YubiKey and Authentication Keys on the target YubiHSM
-have different roles but share algorithm-specific PKCS #11 key types. All
-entries below use object class `CKO_SECRET_KEY`:
+have different roles but share algorithm-specific PKCS #11 key types and the
+same class distinction:
 
-| Location and role | `CKA_KEY_TYPE` |
-| --- | --- |
-| YubiKey HSM Auth slot: symmetric client credential | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
-| YubiKey HSM Auth slot: asymmetric client credential | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
-| Target YubiHSM slot: symmetric Authentication Key record | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
-| Target YubiHSM slot: asymmetric Authentication Key record | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
+| Location and role | `CKA_CLASS` | `CKA_KEY_TYPE` |
+| --- | --- | --- |
+| YubiKey HSM Auth slot: symmetric client credential | `CKO_SECRET_KEY` | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
+| YubiKey HSM Auth slot: asymmetric client credential | `CKO_PRIVATE_KEY` | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
+| Target YubiHSM slot: symmetric Authentication Key record | `CKO_SECRET_KEY` | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
+| Target YubiHSM slot: asymmetric Authentication Key record | `CKO_PRIVATE_KEY` | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
 
 The key type identifies the authentication algorithm, not the available
 operation. The target-side Authentication Key projection is non-operational
@@ -211,13 +212,15 @@ object ID. Generic YubiHSM object persistence stores that public object in an
 internal opaque record, and public discovery exposes it before user login.
 
 The ordinary PKCS #11 objects let clients compare the credential and
-YubiHSM-slot `CKA_EC_POINT` values themselves. Alternatively, the `C_LoginUser`
-wildcard selector `:*` performs that same comparison inside pkcs11rs for the
-target slot. It compares publicly discoverable P-256 credentials from ordinary
-source slots and native HSM Auth slots with two-byte `CKA_ID` target projections.
-Exactly one credential/projection pair must match. Multiple source credentials
-or target IDs are ambiguous (`CKR_TEMPLATE_INCONSISTENT`); no password is tried.
-An absent match returns `CKR_USER_TYPE_INVALID`. The stored object records the relationship established by provisioning;
+YubiHSM-slot `CKA_EC_POINT` values themselves. Alternatively, a broad RFC 7512
+URI such as `pkcs11:` passed to `C_LoginUser` performs that same comparison
+inside pkcs11rs for the target slot. It compares publicly discoverable P-256
+credentials from ordinary source slots and native HSM Auth slots with two-byte
+`CKA_ID` target projections.
+Wildcard lookup selects the first credential/projection pair in the protection
+search order and submits the password only to that source. An absent match
+returns `CKR_USER_TYPE_INVALID`; a failed authentication does not try another
+credential. The stored object records the relationship established by provisioning;
 the subsequent authenticated session is the final cryptographic verification.
 If a future YubiHSM firmware version makes the Authentication Key public half
 readable, a native public projection can replace the companion without changing
@@ -565,13 +568,12 @@ an explicit apply step; that tooling is outside the runtime compatibility path.
 
 ## YubiHSM login
 
-An ordinary YubiHSM slot supports three `C_Login` PIN forms:
+An ordinary YubiHSM slot supports two `C_Login` PIN forms:
 
 | Authentication | PIN form |
 | --- | --- |
 | Direct authentication key | `AAAApassword` |
 | Named native HSM Auth or ordinary token credential | `:AAAA<label>[@<source>]:<source-password>` |
-| Platform-protected asymmetric credential | `:AAAA<name>@host` |
 
 `AAAA` is the four-hex-digit ID of the authentication key on the target
 YubiHSM. Credential labels are printable UTF-8 strings. For example,
@@ -589,20 +591,14 @@ source YubiKey serial number:
 :0001default@12345678:credential-password
 ```
 
-The source identifier is the token serial exposed by its slot. `@` and `:` are
-reserved in the credential selector. The leading
+The source identifier is the token serial exposed by its slot. Serial-less
+slots, including the Secure Enclave, are selected through `C_LoginUser` instead.
+`@` and `:` are reserved in the credential selector. The leading
 colon identifies a provider-routed login, and the next four characters are
 always the target YubiHSM authentication-key ID. The following colon separates
 the source selector from its password, so the password itself may contain
 colons. The selected credential and target YubiHSM authentication key must form
 a compatible symmetric or asymmetric authentication pair.
-
-The host slot uses the same credential-label and source-serial selection.
-For example, `:1003reserve@host` selects `CKA_LABEL=reserve` on the
-enabled Secure Enclave slot and target Authentication Key `1003`. Its ordinary
-login requires an empty PIN. Packed discovery configuration supplies that PIN
-with a trailing colon: `:1003reserve@host:`. No platform-specific
-selector interpretation or password prompting rule is needed.
 
 Direct authentication prepares both password-derived credential types in one
 private software slot before opening the secure channel: two protected
@@ -648,42 +644,51 @@ four-character form is unambiguous.
 The form `:0001default@12345678:` still supplies an explicitly empty password
 and does not open pinentry.
 
-PKCS #11 3.x callers may instead pass the authentication selector and password
-separately with `C_LoginUser`:
+PKCS #11 3.x callers pass an RFC 7512 PKCS #11 URI and password separately with
+`C_LoginUser`:
 
-| Authentication | Username | PIN |
+| Authentication | Username URI | PIN |
 | --- | --- | --- |
-| Direct authentication key | `AAAA` | Password |
-| Named token credential | `:AAAA<label>[@<source>]` | Source token PIN or native credential password |
-| Any matching credential | `:*` | Selected source PIN or native credential password |
-| Matching named credential | `:*<label>[@<source>]` | Selected source PIN or native credential password |
-| Platform-protected credential | `:AAAA<name>@host` | Null pointer and zero length |
-| Matching platform credential projection | `:*<name>@host` | Null pointer and zero length |
+| Any matching public credential | `pkcs11:` | Selected source PIN or native credential password |
+| Matching named credential | `pkcs11:object=<label>` | Selected source PIN or native credential password |
+| Exact source object and target key | `pkcs11:token=<token>;object=<label>;id=<ID>;type=<type>?pkcs11rs-authkey=AAAA` | Source token PIN or native credential password |
+| Direct password credential | `pkcs11:?pkcs11rs-direct=<label>&pkcs11rs-authkey=AAAA` | Password |
 
-The wildcard form is available only through `C_LoginUser`, whose session
+The URI path accepts `token`, `manufacturer`, `serial`, `model`, `object`,
+`id`, and `type`. These map to the corresponding token fields and object
+attributes; specifically, `object` is `CKA_LABEL`, `id` is `CKA_ID`, and
+`type` selects `CKA_CLASS`. Omitted attributes are wildcards. `CKA_ID` bytes
+that are safe printable URI characters remain readable; delimiters, controls,
+and non-ASCII bytes are percent-encoded. Existing objects publish their source
+URI in `CKA_PKCS11RS_URI`.
+
+Automatic matching is available only through `C_LoginUser`, whose session
 identifies the target YubiHSM slot. It requires successful public discovery on
 that slot. pkcs11rs compares each eligible credential's long-term public point
 with the slot's persisted public projections; the matching projection's
-two-byte `CKA_ID` supplies the Authentication Key ID. Bare `:*` considers
-publicly matching native HSM Auth and ordinary P-256 credentials. Labels and
-source serials narrow the search, including `@host` for the platform
-slot. The result must be exactly one credential/target-ID pair.
-Zero matches returns `CKR_USER_TYPE_INVALID`; multiple matches return
-`CKR_TEMPLATE_INCONSISTENT` before any source authorization. The selected
-source's authorization error is returned directly, without trying another key.
+two-byte `CKA_ID` supplies the Authentication Key ID. Bare `pkcs11:` considers
+publicly matching native HSM Auth and ordinary P-256 credentials. Standard URI
+attributes narrow the search.
+Native HSM Auth matches are searched first, followed by ordinary slots in their
+backend-provided protection order: token-native derivation, platform hardware,
+other hardware-held credentials, and software. The first matching
+credential/target-ID pair is selected, and lower-priority source slots are not
+opened after that match. Zero matches returns
+`CKR_USER_TYPE_INVALID`. The selected source's authorization error is returned
+directly, without trying another key.
 Wildcards are not accepted as public discovery credentials because that would
 make discovery circular.
 
 Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
-password through pinentry while retaining the username as the authentication
+password through pinentry while retaining the URI as the authentication
 selector. A nonnull pointer with zero length remains an explicitly empty
-password. Wildcard selectors are never packed into the `C_Login` PIN field;
-`C_Login` rejects them because a wildcard applies to the username, not the
-password.
+password. Automatic selectors are never packed into the `C_Login` PIN field;
+`C_Login` rejects them because source selection belongs to the username, not
+the password.
 
 The YubiHSM token reports a stable 0-through-215-byte PIN envelope. The minimum
 comes from a separated `C_LoginUser` YubiHSM Auth credential password, which
-may be empty. The maximum covers the legacy packed `C_Login` form with its
+may be empty. The maximum covers the compact `C_Login` form with its
 largest authentication selector and credential password. Exact direct,
 YubiHSM Auth, split, and packed parsers remain authoritative within that broad
 envelope.
@@ -883,10 +888,10 @@ YubiHSM Auth credential.
 ## Platform-protected authentication credentials
 
 Platform keys are ordinary PKCS #11 token keys on the configurable
-[platform ECDH slot](platform.md). Enable `platform.enabled=true` or
-`PKCS11RS_PLATFORM_ENABLED=1`; a serial allowlist must also include
-`host`. Disabled or filtered slots cannot supply authentication
-credentials. The slot projects each managed key as private and public P-256
+[Secure Enclave ECDH slot](platform.md). Enable `platform.enabled=true` or
+`PKCS11RS_PLATFORM_ENABLED=1`. The serial-less slot is outside the device serial
+allowlist. A disabled slot cannot supply authentication credentials. The slot
+projects each managed key as private and public P-256
 objects with matching `CKA_LABEL` and `CKA_ID`.
 
 On macOS and iOS, the existing management API resolves permanent Secure Enclave
@@ -901,8 +906,9 @@ The slot advertises Baseline and `CKP_YUBICO_HSMAUTH`. The latter is a
 vendor-defined capability profile, independent of whether any credentials are
 provisioned. Its contract is:
 
-- Public, read-only `CKO_SECRET_KEY` credential metadata with key type
-  `CKK_YUBICO_HSMAUTH_SYMMETRIC` or `CKK_YUBICO_HSMAUTH_ASYMMETRIC`.
+- Public, read-only credential metadata: symmetric credentials use
+  `CKO_SECRET_KEY` / `CKK_YUBICO_HSMAUTH_SYMMETRIC`, while asymmetric
+  credentials use `CKO_PRIVATE_KEY` / `CKK_YUBICO_HSMAUTH_ASYMMETRIC`.
 - Asymmetric credentials expose a companion P-256 public key matched by both
   `CKA_LABEL` and `CKA_ID`.
 - The session-bound native authentication operation accepts the credential
@@ -940,29 +946,34 @@ for this operation.
 
 ### Generic source selection and authorization
 
-The named form `:<authkey-id><label>@<source-serial>` also selects ordinary
-PKCS #11 token credentials, including platform credentials selected with
-`:<authkey-id><label>@host`. A P-256 credential uses its exact label; a
-symmetric credential consists of AES-128 keys `<label>.enc` and `<label>.mac`.
+An RFC 7512 `C_LoginUser` URI selects ordinary PKCS #11 token credentials as
+well as native HSM Auth credentials. `object=<label>` selects `CKA_LABEL`;
+token fields and `id` can narrow the match without introducing a separate
+credential namespace. The compact `C_Login` form
+`:<authkey-id><label>@<source-serial>` reaches the same resolver. A P-256
+credential uses its exact label. A symmetric credential is selected by the
+AES-128 ENC object's full label `<name>.enc`; pair resolution requires its
+exact `<name>.mac` companion.
 Public/private asymmetric pairing requires both matching labels and matching
 `CKA_ID` values, including empty IDs. The AES roles are paired only by their
-exact names; their IDs may differ.
-Symmetric credentials require an explicit source serial and target key ID.
+exact names; their IDs may differ. A symmetric selector must name
+`<name>.enc`, never the base name or the MAC object, and must include the target
+key ID.
 Generic selectors accept credential labels up to 128 UTF-8 bytes; each backend
-still enforces its own provisioning limits. The source token's PIN belongs in
-the password field. For a YubiHSM source,
+still enforces its own provisioning limits. The source token's PIN is the
+separate `C_LoginUser` PIN argument. For a YubiHSM source,
 that PIN uses its own combined-login syntax, including its source authentication
 key ID, independently of the target ID in the outer selector.
 
 Selection uses public metadata before source authorization. Published matches
-take precedence over hypothetical hidden keys on other applets. With no public
-match, a hidden key or AES pair requires one explicitly selected source slot;
-a serial shared by several possible source applets is insufficient. Configure
-discovery/applet filters to limit candidates if necessary. No password is used
-to distinguish candidates. A prompt identifies the selected source first.
+take precedence over hypothetical hidden keys. A hidden key or AES pair is
+eligible only when `pkcs11rs-authkey` and `object` explicitly name the target
+and source object; other URI fields can narrow the candidate set. The password
+is submitted only after the first candidate has been selected. A prompt
+identifies that source.
 
 An ordinary source session reuses existing USER authorization, or calls the
-shared Rust `C_Login` handler when `CKF_LOGIN_REQUIRED` is set. Host login ignores
+shared Rust `C_Login` handler when `CKF_LOGIN_REQUIRED` is set. Secure Enclave login ignores
 the supplied or omitted PIN. Only after authorization are private keys resolved and checked
 for type, identity, and derivation permission. Native HSM Auth instead consumes
 its credential password in the native operation. A failed authorization ends the
@@ -972,7 +983,7 @@ request; there is no candidate fallback or automatic password retry.
 | --- | --- |
 | Temporary direct software slot | Password-derived protected session keys; private preparation establishes authorization |
 | Configured software slot | Persistent P-256 key or named AES pair; normal token USER PIN; public discovery needed for automatic matching |
-| Host | Public P-256 projection; PIN-independent USER login and OS key-use policy |
+| Secure Enclave | Public P-256 projection; PIN-independent USER login and OS key-use policy |
 | PIV / OpenPGP | P-256 key capable of ECDH; normal PIN and per-key policy, including any fresh-authentication requirement |
 | YubiHSM | P-256 key or AES pair; source HSM login and native key capabilities; public discovery for automatic matching |
 | HSM Auth profile | Dedicated symmetric/asymmetric credential types; native per-credential password |
@@ -994,12 +1005,12 @@ existing slots. Platform and direct-password credentials use the shared
 Cryptoki Rust handlers. YubiHSM Auth uses the session's native
 `hsmauth_authenticate` operation, which validates the selected credential handle
 and invokes the existing applet protocol. Internal calls do not enter the C FFI.
-The host slot knows only ECDH, object identity, and OS key access; it contains
+The platform slot knows only ECDH, object identity, and OS key access; it contains
 no SCP protocol logic.
 
 ```text
 YubiHSM login selector
-    -> enabled host slot: find label / match public-key projection
+    -> enabled platform slot: find label / match public-key projection
     -> bound P-256 token key
     -> Pkcs11Auth: ECDH, protected session objects, common KDF graph
     -> receipt verification and final working-key reads
@@ -1008,18 +1019,20 @@ YubiHSM login selector
 
 #### Login selection
 
-`:1003reserve@host` selects the target Authentication Key ID `1003` and exactly
-`CKA_LABEL=reserve` on the host slot. `C_LoginUser` supplies this username; the
-packed `C_Login` form is also supported. The selected host slot accepts an
-omitted or supplied PIN and ignores its value.
+`pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003`
+selects target Authentication Key `1003` and `CKA_LABEL=reserve` on the Secure
+Enclave token. The selected platform slot accepts an omitted or supplied PIN
+and ignores its value. Because the token has no serial, it is selected through
+`C_LoginUser`; the compact `C_Login` source syntax cannot name it.
 
-`:*reserve@host` matches that key's public point against the target HSM's discovered
-public authentication-key projections. Universal `:*` enumerates the enabled
-source slot's public-key objects and finds their matching private objects by
-both label and ID. Missing private-key matches return `CKR_KEY_HANDLE_INVALID`;
-duplicate matches return `CKR_TEMPLATE_INCONSISTENT`. No matching target projection returns
+`pkcs11:token=Secure%20Enclave;object=reserve;type=public` matches that key's
+public point against the target HSM's discovered public authentication-key
+projections. Universal `pkcs11:` enumerates enabled source-slot public keys and
+finds their matching private objects by both label and ID. Missing private-key
+matches return `CKR_KEY_HANDLE_INVALID`; no matching target projection returns
 `CKR_USER_TYPE_INVALID`. A disabled or unavailable source contributes no
-candidate. An explicit selector with no matching source returns
+candidate. Multiple matches are ordered globally and only the first receives
+the supplied PIN. An explicit selector with no matching source returns
 `CKR_PIN_INCORRECT` before attempting authentication, as for any source slot.
 
 The source label, source public key, target Authentication Key ID, and device
@@ -1041,7 +1054,7 @@ session object for ordinary ECDH; the private scalar remains
 in the Secure Enclave. The native key checks its managed identity before use,
 so deletion or replacement does not silently keep an obsolete binding usable.
 OS authorization governs the operation; PKCS #11 USER login gates access to
-the host slot's private objects without validating a PIN.
+the platform slot's private objects without validating a PIN.
 
 #### Asymmetric handshake
 
@@ -1169,7 +1182,7 @@ other.
 For an Authentication Key assigned ID `1004`, explicit login is:
 
 ```text
-username = ":1004iphone-qpernil@host"
+username = "pkcs11:token=Secure%20Enclave;object=iphone-qpernil;type=private?pkcs11rs-authkey=1004"
 PIN pointer = NULL
 PIN length = 0
 ```
@@ -1177,7 +1190,7 @@ PIN length = 0
 Once public discovery can read the projection, the equivalent resolved form is:
 
 ```text
-username = ":*iphone-qpernil@host"
+username = "pkcs11:token=Secure%20Enclave;object=iphone-qpernil;type=public"
 PIN pointer = NULL
 PIN length = 0
 ```
