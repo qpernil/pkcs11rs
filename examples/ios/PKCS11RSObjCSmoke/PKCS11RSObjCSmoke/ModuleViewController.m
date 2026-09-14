@@ -49,6 +49,25 @@ static NSString *PKCS11RSReturnValue(CK_RV value) {
     return [NSString stringWithFormat:@"0x%lx", (unsigned long)value];
 }
 
+static NSString *PKCS11RSAuthenticatedCredential(CK_SESSION_HANDLE session) {
+    CK_ULONG length = 0;
+    CK_RV result = PKCS11RS_GetAuthenticatedCredential(session, NULL_PTR, &length);
+    if (result != CKR_OK) {
+        return [NSString stringWithFormat:@"<credential query failed: %@>",
+                                          PKCS11RSReturnValue(result)];
+    }
+    NSMutableData *value = [[NSMutableData alloc] initWithLength:(NSUInteger)length];
+    result = PKCS11RS_GetAuthenticatedCredential(session, value.mutableBytes, &length);
+    if (result != CKR_OK) {
+        return [NSString stringWithFormat:@"<credential query failed: %@>",
+                                          PKCS11RSReturnValue(result)];
+    }
+    NSString *description = [[NSString alloc] initWithBytes:value.bytes
+                                                     length:(NSUInteger)length
+                                                   encoding:NSUTF8StringEncoding];
+    return description == nil ? @"<invalid UTF-8>" : description;
+}
+
 static NSString *PKCS11RSHex(NSData *value) {
     const unsigned char *bytes = value.bytes;
     NSMutableArray<NSString *> *parts = [[NSMutableArray alloc] initWithCapacity:value.length];
@@ -1258,7 +1277,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 }
 
 - (NSArray<NSString *> *)authenticatedInventoryForSlot:(CK_SLOT_ID)slot {
-    NSString *username = @":*";
+    NSString *username = @"pkcs11:";
 
     CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
     CK_RV result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
@@ -1282,9 +1301,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                          usernameData.length);
     [password resetBytesInRange:NSMakeRange(0, password.length)];
     if (result == CKR_OK) {
-        [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@",
+        [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@ using %@",
                                                     username,
-                                                    PKCS11RSReturnValue(result)]];
+                                                    PKCS11RSReturnValue(result),
+                                                    PKCS11RSAuthenticatedCredential(session)]];
         PKCS11RSObjectInventory *inventory = [self objectInventoryForSession:session
                                                                        title:@"Objects (authenticated session)"];
         [lines addObjectsFromArray:inventory.lines];
@@ -1320,7 +1340,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     NSMutableData *password =
         [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     NSMutableData *bootstrapUsername =
-        [[@":*" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [[@"pkcs11:" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     result = C_LoginUser(session,
                          CKU_USER,
                          password.mutableBytes,
@@ -1389,17 +1409,18 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                                           PKCS11RSReturnValue(logout)];
     }
 
-    NSString *selector = [NSString stringWithFormat:@":%04lX%@@host",
-                                                     (unsigned long)PKCS11RSPlatformAuthenticationKeyID,
-                                                     PKCS11RSPlatformCredentialName];
+    NSString *selector = @"pkcs11:";
     NSMutableData *platformUsername =
         [[selector dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSMutableData *verificationPassword =
+        [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     result = C_LoginUser(session,
                          CKU_USER,
-                         NULL_PTR,
-                         0,
+                         verificationPassword.mutableBytes,
+                         (CK_ULONG)verificationPassword.length,
                          platformUsername.mutableBytes,
                          (CK_ULONG)platformUsername.length);
+    [verificationPassword resetBytesInRange:NSMakeRange(0, verificationPassword.length)];
     if (result != CKR_OK) {
         C_CloseSession(session);
         return [NSString stringWithFormat:@"%@: %@, platform login failed: %@",
@@ -1439,7 +1460,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     NSMutableData *password =
         [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     NSMutableData *bootstrapUsername =
-        [[@":*" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [[@"pkcs11:" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     result = C_LoginUser(session,
                          CKU_USER,
                          password.mutableBytes,

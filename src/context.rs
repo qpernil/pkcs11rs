@@ -1,6 +1,6 @@
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
-#[cfg(test)]
+#[cfg(all(test, not(any(feature = "abi-tests", feature = "mock-yubikey"))))]
 use crate::SlotKind;
 #[cfg(not(feature = "abi-tests"))]
 use crate::configured_yubihsm_public_discovery_credential_with_pinentry;
@@ -2706,7 +2706,8 @@ impl ModuleContext {
         if !slot_contexts.begin_discovery() {
             return Ok(false);
         }
-        if self.slot_serials.as_ref().is_some_and(HashSet::is_empty) {
+        let serial_discovery_enabled = self.serial_discovery_is_enabled();
+        if !serial_discovery_enabled && !self.platform_enabled {
             return Ok(true);
         }
         if !self.software_slots.is_empty() {
@@ -2745,7 +2746,9 @@ impl ModuleContext {
                 )?;
             }
         }
-        if self.platform_enabled && self.serial_is_visible(crate::backend::host::HOST_SERIAL) {
+        // The Host token has no hardware serial. Its explicit platform.enabled
+        // setting is its visibility gate, independently of device serial filters.
+        if self.platform_enabled {
             let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
             let slot = Box::new(crate::backend::host::HostSlot::new()?);
             let objects = slot.token_objects(slot_id)?;
@@ -2757,6 +2760,9 @@ impl ModuleContext {
                 None,
                 None,
             )?;
+        }
+        if !serial_discovery_enabled {
+            return Ok(true);
         }
         #[cfg(feature = "abi-tests")]
         {
@@ -3495,7 +3501,7 @@ impl ModuleContext {
                 .as_ref()
                 .and_then(|device| device.registered_serial())
                 .unwrap_or_else(|| child.slot.serial());
-            serials.contains(serial)
+            serial.is_empty() || serials.contains(serial)
         })
     }
 
@@ -3503,6 +3509,10 @@ impl ModuleContext {
         self.slot_serials
             .as_ref()
             .is_none_or(|serials| serials.contains(serial))
+    }
+
+    fn serial_discovery_is_enabled(&self) -> bool {
+        !self.slot_serials.as_ref().is_some_and(HashSet::is_empty)
     }
 
     fn refresh_discovery_with_interval(
@@ -3886,21 +3896,14 @@ mod discovery_tests {
     }
 
     #[test]
-    fn platform_serial_filter_disables_source_without_os_discovery() {
+    fn platform_slot_is_independent_of_serial_filter() {
         let mut configuration = ModuleConfiguration::private_software().unwrap();
         configuration.software_slots.clear();
         configuration.platform_enabled = true;
         configuration.slot_serials = Some(HashSet::new());
         let context = ModuleContext::new_configured(configuration, false).unwrap();
-        context.init().unwrap();
-        assert!(
-            context
-                .auth_slots
-                .matching(SlotKind::Host)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(context.slot_contexts.read().unwrap().is_empty());
+        assert!(context.platform_enabled);
+        assert!(!context.serial_discovery_is_enabled());
     }
 
     #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]

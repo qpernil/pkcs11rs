@@ -6,7 +6,7 @@ use crate::piv;
 use crate::pkcs11::*;
 use crate::{
     CKA_PKCS11RS_FIDO_RP_ID, CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
-    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_RETRIES,
+    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_PKCS11RS_URI, CKA_YUBICO_HSMAUTH_RETRIES,
     CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
     PivClient, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand,
@@ -1253,6 +1253,9 @@ impl TokenObject {
     }
 
     fn supports_vendor_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if attribute_type == CKA_PKCS11RS_URI {
+            return true;
+        }
         if attribute_type == CKA_PKCS11RS_FIDO_RP_ID {
             return self.rp_id.is_some();
         }
@@ -1337,6 +1340,7 @@ impl TokenObject {
             CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
             CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
             CKA_PKCS11RS_FIDO_RP_ID,
+            CKA_PKCS11RS_URI,
         ] {
             if self.supports_attribute(attribute_type) {
                 types.push(attribute_type);

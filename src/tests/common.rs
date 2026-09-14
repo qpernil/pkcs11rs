@@ -189,22 +189,6 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("discovery-password"));
 
-    let credential =
-        crate::configured_yubihsm_public_discovery_credential(Some(":1003reserve@host:".into()))
-            .unwrap()
-            .unwrap();
-    assert_eq!(credential.authkey_id, 0x1003);
-    let selected = credential.hsmauth_credential.as_ref().unwrap();
-    assert_eq!(selected.label, "reserve");
-    assert_eq!(selected.source.as_deref(), Some("host"));
-    assert_eq!(
-        credential
-            .configured_password
-            .as_deref()
-            .map(|pin| pin.as_slice()),
-        Some(b"".as_slice())
-    );
-
     let credential = crate::configured_yubihsm_public_discovery_credential(Some(
         ":0001default key@12345678:password".into(),
     ))
@@ -975,16 +959,59 @@ impl YubiHsmLoginApi {
                     packed.len() as CK_ULONG,
                 )
             }
-            Self::LoginUser => crate::api::C_LoginUser(
-                session,
-                CKU_USER as CK_USER_TYPE,
-                password.as_ptr() as *mut CK_BYTE,
-                password.len() as CK_ULONG,
-                username.as_ptr() as *mut CK_BYTE,
-                username.len() as CK_ULONG,
-            ),
+            Self::LoginUser => {
+                let mut uri = crate::expand_packed_yubihsm_login(username)
+                    .unwrap()
+                    .format()
+                    .into_bytes();
+                crate::api::C_LoginUser(
+                    session,
+                    CKU_USER as CK_USER_TYPE,
+                    password.as_ptr() as *mut CK_BYTE,
+                    password.len() as CK_ULONG,
+                    uri.as_mut_ptr(),
+                    uri.len() as CK_ULONG,
+                )
+            }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn yubihsm_login_user_wildcard_uses_desktop_pinentry_for_a_null_pin() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let _pinentry = TestPinentry::new("password");
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    install_test_slot_with_backend(
+        SLOT_ID,
+        crate::yubihsm::tests::make_yubihsm_hsmauth_wildcard_pinentry_test_slot(),
+    );
+    with_test_slot_context(SLOT_ID, |ctx| {
+        ctx.refresh_slot_token_objects(SLOT_ID).unwrap()
+    });
+    let session = open_test_session(SLOT_ID);
+    let mut username = b"pkcs11:".to_vec();
+    assert_eq!(
+        crate::api::C_LoginUser(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            std::ptr::null_mut(),
+            0,
+            username.as_mut_ptr(),
+            username.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
 }
 
 const HSMAUTH_ADMIN_SLOT_ID: CK_SLOT_ID = 95;
@@ -999,6 +1026,7 @@ const HSMAUTH_TEST_PUBLIC_KEY: [u8; 65] = [
 #[derive(Debug, Default)]
 struct HsmAuthAdminConnector {
     commands: std::cell::RefCell<Vec<crate::CommandApdu>>,
+    connection_epoch: std::cell::Cell<u64>,
     secure_channel_starts: std::cell::Cell<usize>,
     secure_channel_clears: std::cell::Cell<usize>,
     reject_next_management_command: std::cell::Cell<bool>,
@@ -1019,6 +1047,9 @@ impl crate::Connector for HsmAuthAdminConnector {
     }
     fn minor(&self) -> u8 {
         7
+    }
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch.get()
     }
     fn is_present(&self) -> bool {
         true
@@ -1090,6 +1121,37 @@ fn install_hsmauth_admin_slot() -> (std::rc::Rc<HsmAuthAdminConnector>, CK_SESSI
         CKR_OK as CK_RV
     );
     (connector, session)
+}
+
+#[test]
+fn hsmauth_object_search_reuses_inventory_until_the_connection_changes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+
+    let find = || {
+        assert_eq!(
+            crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    };
+
+    find();
+    assert_eq!(connector.commands.borrow().len(), 3);
+    find();
+    assert_eq!(connector.commands.borrow().len(), 3);
+
+    connector.connection_epoch.set(1);
+    find();
+    assert_eq!(connector.commands.borrow().len(), 6);
+
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
 }
 
 #[cfg(unix)]
@@ -2489,6 +2551,28 @@ fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
         let session = open_test_session(SLOT_ID);
 
         assert_eq!(api.call(session, b"0001", b"password"), CKR_OK as CK_RV);
+        let mut description_len = 0;
+        assert_eq!(
+            crate::api::PKCS11RS_GetAuthenticatedCredential(
+                session,
+                std::ptr::null_mut(),
+                &mut description_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut description = vec![0; description_len as usize];
+        assert_eq!(
+            crate::api::PKCS11RS_GetAuthenticatedCredential(
+                session,
+                description.as_mut_ptr(),
+                &mut description_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            String::from_utf8(description).unwrap(),
+            "pkcs11:?pkcs11rs-direct=direct&pkcs11rs-authkey=0001"
+        );
         assert!(
             commands
                 .borrow()
@@ -2613,15 +2697,17 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
     let capabilities =
         crate::yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x10, 0x16, 0x32, 0x33, 0x34, 0x35]);
     let delegated_capabilities = crate::yubihsm_capabilities(&[0x04, 0x32]);
-    for (algorithm, length, key_type) in [
+    for (algorithm, length, class, key_type) in [
         (
             crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
             32,
+            CKO_SECRET_KEY as CK_OBJECT_CLASS,
             crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
         ),
         (
             crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
             64,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
             crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
         ),
     ] {
@@ -2642,7 +2728,7 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
         let objects = crate::yubihsm_token_objects(99, info, None).unwrap();
         assert_eq!(objects.len(), 1);
         let object = &objects[0];
-        assert_eq!(object.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+        assert_eq!(object.class, class);
         assert_eq!(object.key_type, key_type);
         assert_eq!(
             object.attribute_value(CKA_KEY_TYPE as _),
@@ -2653,10 +2739,12 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
         assert!(!object.sign);
         assert!(!object.verify);
         assert!(!object.derive);
-        assert_eq!(
-            object.attribute_value(CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE),
-            Some(crate::bool_attribute(false))
-        );
+        if class == CKO_SECRET_KEY as CK_OBJECT_CLASS {
+            assert_eq!(
+                object.attribute_value(CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE),
+                Some(crate::bool_attribute(false))
+            );
+        }
         assert_eq!(
             object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
             Some(crate::bool_attribute(true))
@@ -2667,7 +2755,8 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
         );
         assert_eq!(
             object.attribute_value(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE),
-            Some(crate::ulong_attribute(length as CK_ULONG))
+            (class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
+                .then(|| crate::ulong_attribute(length as CK_ULONG))
         );
         assert_eq!(
             object.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
@@ -8236,7 +8325,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
             crate::SlotKind::Software => String::from("Concurrent software token"),
-            crate::SlotKind::Host => String::from("Host Keystore"),
+            crate::SlotKind::Host => String::from("Secure Enclave"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
             crate::SlotKind::Fido2 => String::from("Concurrent FIDO2"),
             crate::SlotKind::Ccid(application) => {
@@ -8253,7 +8342,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => "Synthetic token",
             crate::SlotKind::Software => "Software token",
-            crate::SlotKind::Host => "Host Keystore",
+            crate::SlotKind::Host => "Secure Enclave",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",

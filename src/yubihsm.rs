@@ -454,6 +454,7 @@ impl SecureSession {
         Ok(response)
     }
 
+    #[cfg(test)]
     pub(crate) fn authenticate_direct(
         connector: &dyn Connector,
         authkey_id: u16,
@@ -468,7 +469,32 @@ impl SecureSession {
         ),
         Error,
     > {
-        let mut credentials = PasswordCredentials::new(password)?;
+        Self::authenticate_direct_named(
+            connector,
+            authkey_id,
+            password,
+            "direct",
+            trust_prefix,
+            cached_algorithm,
+        )
+    }
+
+    pub(crate) fn authenticate_direct_named(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+        label: &str,
+        trust_prefix: Option<&std::ffi::OsStr>,
+        cached_algorithm: Option<DirectAuthenticationAlgorithm>,
+    ) -> Result<
+        (
+            Self,
+            DirectAuthenticationAlgorithm,
+            Pkcs11AuthenticationMaterial,
+        ),
+        Error,
+    > {
+        let mut credentials = PasswordCredentials::new_named(password, label)?;
         let first = cached_algorithm.unwrap_or(DirectAuthenticationAlgorithm::Symmetric);
         let second = match first {
             DirectAuthenticationAlgorithm::Symmetric => DirectAuthenticationAlgorithm::Asymmetric,

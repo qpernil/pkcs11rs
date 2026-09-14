@@ -191,7 +191,7 @@ slot's combined native and software session capabilities:
 
 | Slot | Profiles with the default software mechanism set |
 | --- | --- |
-| Host Keystore | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| Secure Enclave | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | Software, including temporary direct-auth slots | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | PIV, OpenPGP | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | YubiHSM | Baseline, Extended Provider, Authentication Token; Public Certificates Token when public discovery is configured |
@@ -204,7 +204,7 @@ Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
 Eligibility uses the merged mechanism list, including the slot's filtered
 software mechanisms. HSM Auth exposes native authentication credentials and
 its vendor-defined `CKP_YUBICO_HSMAUTH` contract; it has no software key operations
-or USER login. Host login accepts either an omitted or supplied PIN and ignores
+or USER login. Secure Enclave login accepts either an omitted or supplied PIN and ignores
 its value; OS authorization still controls native key use.
 
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
@@ -722,9 +722,6 @@ export PKCS11RS_YUBIHSM_DISCOVERY='00a5service-owned-password'
 # Or a YubiHSM Auth credential used with target Authentication Key 00a5
 export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-password'
 
-# Or a named platform-protected P-256 credential (macOS/iOS Secure Enclave)
-export PKCS11RS_PLATFORM_ENABLED=1
-export PKCS11RS_YUBIHSM_DISCOVERY=':00a5reserve@host:'
 ```
 
 The credential is tried independently on every YubiHSM. The module retains all
@@ -748,18 +745,27 @@ providers, are discovered before this YubiHSM discovery pass.
 
 For an asymmetric YubiHSM Auth credential, a provisioner can also persist its
 public point as an ordinary `CKO_PUBLIC_KEY` on each matching YubiHSM, using
-the Authentication Key ID as `CKA_ID`. A `C_LoginUser` caller can use `:*` to
-ask pkcs11rs to match these public points against native HSM Auth and ordinary
-P-256 source credentials. Exactly one source credential and target Authentication
-Key ID must match before any source password is submitted. Optional label and
-source constraints use `:*<label>[@<source>]`. This form requires successful
-public discovery. Missing or ambiguous matches fail; an authentication failure
-is returned without trying another credential. The normal explicit
-`:AAAA<label>[@<source>]` form remains available.
+the Authentication Key ID as `CKA_ID`. A `C_LoginUser` caller supplies an RFC
+7512 PKCS #11 URI as its username. `pkcs11:` matches any eligible public
+credential to these target projections. Path attributes such as `token`,
+`serial`, `object` (`CKA_LABEL`), `id` (`CKA_ID`), and `type` narrow the source
+set. `pkcs11rs-authkey=AAAA` names a target Authentication Key explicitly.
+`pkcs11rs-direct=<label>` derives a temporary, algorithm-neutral credential
+from the supplied password and requires `pkcs11rs-authkey`.
+An ordinary symmetric credential is selected explicitly by its ENC object's
+full label `<name>.enc`; the credential layer requires the corresponding
+`<name>.mac` object.
 
-For a named platform credential, use `:AAAAreserve@host` explicitly or
-`:*reserve@host` to match its public point to a discovered Authentication Key
-projection. These forms carry no password.
+Wildcard matches are searched in a fixed protection order: native HSM Auth,
+token-native derivation, platform hardware, other hardware-held credentials, then
+software. The first public match is selected and receives the password;
+later source slots are not opened and authentication is attempted exactly once.
+Automatic matching requires
+successful public discovery. A missing match fails. For example, a platform
+credential can be selected explicitly with
+`pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003`,
+or matched automatically with
+`pkcs11:token=Secure%20Enclave;object=reserve;type=public`.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
@@ -782,7 +788,7 @@ Windows. On macOS, `pinentry-mac` is recommended because Homebrew's plain
 Callers request the protected path from `C_Login` or `C_LoginUser` with a null
 PIN pointer and zero PIN length. Each backend decides whether that operation
 needs a secret and invokes the shared prompt helper when it does. A nonnull
-pointer with zero length is an explicitly empty PIN. Legacy YubiHSM `C_Login`
+pointer with zero length is an explicitly empty PIN. Compact YubiHSM `C_Login`
 has no separate selector parameter, so an exact packed selector without its
 password requests the same helper. Wildcard YubiHSM
 authentication selectors belong only in the separate `C_LoginUser` username;

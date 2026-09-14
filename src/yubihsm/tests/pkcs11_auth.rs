@@ -138,7 +138,7 @@ impl Fixture {
                     keys.push(owner.create(template, &[(CKA_VALUE, value)]).unwrap());
                 }
                 let pair =
-                    SymmetricCredential::find(owner.clone(), "SCP credential", token).unwrap();
+                    SymmetricCredential::find(owner.clone(), "SCP credential.enc", token).unwrap();
                 (Credential::Symmetric(pair), keys)
             }
             Protocol::Asymmetric => {
@@ -385,7 +385,12 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
         slot.auth_slots.register(&child).unwrap();
         slot.recreate_sessions = true;
-        let selector = format!(":0001SCP credential@{serial}");
+        let object = if matches!(protocol, Protocol::Asymmetric) {
+            "SCP%20credential;type=private"
+        } else {
+            "SCP%20credential.enc;type=secret-key"
+        };
+        let selector = format!("pkcs11:serial={serial};object={object}?pkcs11rs-authkey=0001");
         assert_eq!(
             fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
             CKR_OK as CK_RV
@@ -405,6 +410,23 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         )
         .unwrap();
         assert_eq!(peer.create_session_count(), 1);
+        let selected = Slot::authenticated_credential_description(&slot).unwrap();
+        let selected = crate::pkcs11_uri::ClientAuthUri::parse(selected.as_bytes()).unwrap();
+        assert_eq!(selected.authkey_id, Some(1));
+        if matches!(protocol, Protocol::Asymmetric) {
+            assert_eq!(
+                selected.object.as_deref(),
+                Some(b"SCP credential".as_slice())
+            );
+            assert_eq!(selected.class, Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS));
+        } else {
+            assert_eq!(
+                selected.object.as_deref(),
+                Some(b"SCP credential.enc".as_slice())
+            );
+            assert_eq!(selected.class, Some(CKO_SECRET_KEY as CK_OBJECT_CLASS));
+            assert!(selected.id.is_none());
+        }
         peer.expire_next_session_message.set(true);
         assert!(
             !send_yubihsm_secure_command(
@@ -421,8 +443,13 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         // the supplied bytes as another token PIN.
         login_user_slot(&mut slot, 7, selector.as_bytes(), b"not resubmitted", &[]).unwrap();
         Slot::logout(&mut slot).unwrap();
+        let discovery_label = if matches!(protocol, Protocol::Asymmetric) {
+            "SCP credential"
+        } else {
+            "SCP credential.enc"
+        };
         slot.public_discovery_config = configured_yubihsm_public_discovery_credential(Some(
-            format!("{selector}:test source user pin").into(),
+            format!(":0001{discovery_label}@{serial}:test source user pin").into(),
         ))
         .unwrap();
         assert_eq!(
@@ -535,7 +562,14 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
             )
             .unwrap();
         let mut candidates = sources
-            .ordinary_credentials(Some(&label), None, &std::sync::Weak::new(), true)
+            .ordinary_credentials(
+                &crate::pkcs11_uri::ClientAuthUri {
+                    object: Some(label.as_bytes().to_vec()),
+                    authkey_id: Some(1),
+                    ..Default::default()
+                },
+                &std::sync::Weak::new(),
+            )
             .unwrap();
         assert_eq!(candidates.len(), 1);
         let result = candidates.pop().unwrap().authorize(Some(b""), None);
@@ -567,12 +601,85 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
                 );
             }
             let selected = sources
-                .ordinary_credentials(Some(&label), None, &std::sync::Weak::new(), true)
+                .ordinary_credentials(
+                    &crate::pkcs11_uri::ClientAuthUri {
+                        object: Some(label.as_bytes().to_vec()),
+                        authkey_id: Some(1),
+                        ..Default::default()
+                    },
+                    &std::sync::Weak::new(),
+                )
                 .unwrap()
                 .pop()
                 .unwrap();
             assert!(matches!(selected.authorize(Some(b""), None),
-                Err(Error::Generic(rv)) if rv == CKR_TEMPLATE_INCONSISTENT as CK_RV));
+                Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV));
+            let selected = sources
+                .ordinary_credentials(
+                    &crate::pkcs11_uri::ClientAuthUri {
+                        object: Some(label.as_bytes().to_vec()),
+                        class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+                        authkey_id: Some(1),
+                        ..Default::default()
+                    },
+                    &std::sync::Weak::new(),
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert!(matches!(selected.authorize(Some(b""), None),
+                Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV));
+            let base_secret = sources
+                .ordinary_credentials(
+                    &crate::pkcs11_uri::ClientAuthUri {
+                        object: Some(label.as_bytes().to_vec()),
+                        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+                        authkey_id: Some(1),
+                        ..Default::default()
+                    },
+                    &std::sync::Weak::new(),
+                )
+                .unwrap();
+            assert!(base_secret.is_empty());
+            let selected = sources
+                .ordinary_credentials(
+                    &crate::pkcs11_uri::ClientAuthUri {
+                        object: Some(format!("{label}.enc").into_bytes()),
+                        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+                        authkey_id: Some(1),
+                        ..Default::default()
+                    },
+                    &std::sync::Weak::new(),
+                )
+                .unwrap()
+                .pop()
+                .unwrap();
+            let selected_uri = selected.description();
+            let parsed = crate::pkcs11_uri::ClientAuthUri::parse(selected_uri.as_bytes()).unwrap();
+            assert_eq!(
+                parsed.object.as_deref(),
+                Some(format!("{label}.enc").as_bytes())
+            );
+            assert!(matches!(
+                selected.authorize(Some(b""), None),
+                Ok(YubiHsmPkcs11AuthenticationMaterial::Symmetric(_))
+            ));
+            for invalid_label in [label.clone(), format!("{label}.mac")] {
+                assert!(
+                    sources
+                        .ordinary_credentials(
+                            &crate::pkcs11_uri::ClientAuthUri {
+                                object: Some(invalid_label.into_bytes()),
+                                class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+                                authkey_id: Some(1),
+                                ..Default::default()
+                            },
+                            &std::sync::Weak::new(),
+                        )
+                        .unwrap()
+                        .is_empty()
+                );
+            }
             for handle in aes {
                 fixture.owner.destroy(handle).unwrap();
             }

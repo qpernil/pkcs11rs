@@ -76,6 +76,18 @@ pub(crate) enum SlotKind {
     Ccid(CcidApplication),
 }
 
+/// Preference for ordinary credentials used to authenticate a YubiHSM client.
+/// Lower values are searched first. Native HSM Auth credentials use their
+/// dedicated profile path before these ordinary-key tiers.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ClientAuthSearchTier {
+    TokenNativeDerivation,
+    HostHardware,
+    HardwareCredential,
+    Software,
+    Unsupported,
+}
+
 pub(crate) trait Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn device_context(&self) -> Option<Arc<crate::device::DeviceContext>> {
@@ -85,6 +97,14 @@ pub(crate) trait Slot {
         crate::device::DeviceOperationKind::Ccid
     }
     fn kind(&self) -> SlotKind;
+    fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
+        ClientAuthSearchTier::Unsupported
+    }
+    /// Describe the credential that authenticated the current token login.
+    /// The returned text is diagnostic metadata and must not contain secrets.
+    fn authenticated_credential_description(&self) -> Result<String, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
         crate::device::DeviceIdentity {
             manufacturer: self.manufacturer().to_owned(),

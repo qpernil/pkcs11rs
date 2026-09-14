@@ -44,10 +44,12 @@ pub(crate) use piv::{
     piv_sign_mechanism_supported, piv_slot_label,
 };
 pub(crate) use software::SoftwareSlot;
-pub(crate) use traits::{BackendSession, Slot, SlotKind, apply_device_versions, session_state};
+pub(crate) use traits::{
+    BackendSession, ClientAuthSearchTier, Slot, SlotKind, apply_device_versions, session_state,
+};
 pub(crate) use yubihsm::{
-    HsmAuthWildcardLogin, NativeHsmAuth, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState,
-    YubiHsmSlot, send_yubihsm_secure_command,
+    NativeHsmAuth, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
+    send_yubihsm_secure_command,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -75,10 +77,9 @@ pub(crate) use openpgp::{
 pub(crate) use traits::profile_token_objects;
 #[cfg(test)]
 pub(crate) use yubihsm::{
-    HsmAuthLogin, YubiHsmLoginUsername, YubiHsmPkcs11Metadata, YubiHsmSessionRole,
-    parse_hsmauth_username, parse_yubihsm_login_username, parse_yubihsm_pkcs11_metadata,
-    split_yubihsm_login, yubihsm_object_has_public_key, yubihsm_object_label,
-    yubihsm_token_objects_with_generation,
+    YubiHsmPkcs11Metadata, YubiHsmSessionRole, expand_packed_yubihsm_login, parse_hsmauth_username,
+    parse_yubihsm_login_username, parse_yubihsm_pkcs11_metadata, split_yubihsm_login,
+    yubihsm_object_has_public_key, yubihsm_object_label, yubihsm_token_objects_with_generation,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]

@@ -387,10 +387,6 @@ pub(crate) fn hsmauth_authenticate(
         {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        // Revalidate the handle against the current applet inventory, including
-        // when recreating a target channel through a retained source session.
-        ctx.get_slot(slot_id)?.refresh()?;
-        ctx.refresh_slot_token_objects(slot_id)?;
         let object = ctx
             .resolve_object(credential)?
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
@@ -400,6 +396,8 @@ pub(crate) fn hsmauth_authenticate(
         if !matches!(object.material, KeyMaterial::HsmAuthCredential { .. }) {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
+        // The backend performs native authentication using the credential
+        // descriptor represented by this connection-scoped token object.
         ctx.get_slot(slot_id)?.hsmauth_authenticate(
             &object,
             target,

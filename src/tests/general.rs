@@ -1730,6 +1730,7 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     let symmetric = &objects[0];
     assert_eq!(symmetric.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
     assert_eq!(symmetric.key_type, crate::CKK_YUBICO_HSMAUTH_SYMMETRIC);
+    assert_eq!(symmetric.id, b"symmetric".to_vec());
     assert_eq!(
         symmetric.attribute_value((CKA_VENDOR_DEFINED | 0x5901) as CK_ATTRIBUTE_TYPE),
         None
@@ -1751,7 +1752,9 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     );
 
     let asymmetric = &objects[1];
+    assert_eq!(asymmetric.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
     assert_eq!(asymmetric.key_type, crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC);
+    assert_eq!(asymmetric.id, b"asymmetric".to_vec());
     assert_eq!(
         asymmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED),
         Some(vec![CK_TRUE as CK_BBOOL])
@@ -1759,6 +1762,7 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     let public = &objects[2];
     assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
+    assert_eq!(public.id, b"asymmetric".to_vec());
     assert!(!public.verify);
     assert!(
         public
@@ -3498,12 +3502,13 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
     finalize_for_test();
     let software = crate::SoftwareSlot::new("serial-filter".into(), 0);
     let software_serial = crate::Slot::serial(&software).to_owned();
+    let physical_serial = "ALT0001";
     for serials in [
         None,
         Some(vec![]),
         Some(vec!["TEST0001"]),
         Some(vec!["missing"]),
-        Some(vec!["TEST0001", software_serial.as_str()]),
+        Some(vec!["TEST0001", software_serial.as_str(), physical_serial]),
     ] {
         let mut configuration = serde_json::json!({
             "version": 1, "hardware": {"discovery": false},
@@ -3538,7 +3543,7 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
                 crate::device::DeviceIdentity {
                     manufacturer: "Test".into(),
                     product: "Test device".into(),
-                    serial: software_serial.clone(),
+                    serial: physical_serial.into(),
                     hardware_version: None,
                     firmware_version: None,
                 },
@@ -3555,7 +3560,7 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
             (100, "TEST0001"),
             (101, "TEST0001"),
             (102, software_serial.as_str()),
-            (103, software_serial.as_str()),
+            (103, physical_serial),
         ] {
             let mut info = std::mem::MaybeUninit::<CK_SLOT_INFO>::uninit();
             assert_eq!(
@@ -3564,7 +3569,8 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
                     CKR_OK
                 } else {
                     CKR_SLOT_ID_INVALID
-                } as CK_RV
+                } as CK_RV,
+                "allowlist {serials:?}, slot {id}, serial {serial:?}"
             );
             if !allowed(serial) {
                 let mut session = 0;
@@ -3585,7 +3591,7 @@ fn slot_serial_allowlist_applies_to_enumeration_and_direct_access() {
                 (100, "TEST0001"),
                 (101, "TEST0001"),
                 (102, software_serial.as_str()),
-                (103, software_serial.as_str()),
+                (103, physical_serial),
             ]
             .into_iter()
             .filter(|(id, serial)| allowed(serial) && (present == CK_FALSE || *id != 101))

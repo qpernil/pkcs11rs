@@ -87,6 +87,7 @@ mod key_mechanisms;
 mod key_scope;
 mod pkcs11_auth;
 mod pkcs11_provider;
+mod pkcs11_uri;
 mod platform_crypto;
 mod secure_channel_crypto;
 mod software_key_ops;
@@ -332,6 +333,9 @@ pub const CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY: CK_ATTRIBUTE_TYPE =
 /// UTF-8 relying-party identifier required by CTAP GetAssertion.
 pub const CKA_PKCS11RS_FIDO_RP_ID: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0003;
+/// RFC 7512 URI computed for an existing object in its containing slot.
+pub const CKA_PKCS11RS_URI: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0004;
 
 fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(

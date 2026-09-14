@@ -99,7 +99,7 @@ pub(crate) struct HsmAuthSlot {
     authenticated: Cell<bool>,
     public_certificate_storage_enabled: bool,
     management_key: RefCell<Option<HsmAuthManagementKey>>,
-    info: RefCell<Option<HsmAuthInfo>>,
+    info: RefCell<Option<(u64, HsmAuthInfo)>>,
     #[cfg(test)]
     fixture_info: Option<HsmAuthInfo>,
 }
@@ -154,11 +154,20 @@ impl HsmAuthSlot {
         if let Some(info) = &self.fixture_info {
             return Ok(info.clone());
         }
+        let connection_epoch = self.connector.connection_epoch();
         let mut info = self.info.try_borrow_mut()?;
-        if info.is_none() {
-            *info = Some(HsmAuthClient.discover(self.connector.as_ref())?);
+        if info
+            .as_ref()
+            .is_none_or(|(cached_epoch, _)| *cached_epoch != connection_epoch)
+        {
+            *info = Some((
+                connection_epoch,
+                HsmAuthClient.discover(self.connector.as_ref())?,
+            ));
         }
-        info.clone().ok_or(CKR_DEVICE_ERROR.into())
+        info.as_ref()
+            .map(|(_, info)| info.clone())
+            .ok_or(CKR_DEVICE_ERROR.into())
     }
 
     #[cfg(test)]
@@ -264,7 +273,6 @@ impl Slot for HsmAuthSlot {
         self.connector.is_present()
     }
     fn refresh(&self) -> Result<(), Error> {
-        self.invalidate_token_objects();
         self.connector.refresh()
     }
     fn set_discovery_error(&self, error: &Error) {
@@ -507,15 +515,25 @@ fn hsmauth_credential_identity(credential: &HsmAuthCredential) -> String {
 pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenObject> {
     let mut objects = Vec::new();
     for credential in &info.credentials {
+        // HSM Auth identifies credentials by their unique labels and exposes no
+        // separate native object ID. Reuse those stable bytes as the PKCS #11
+        // pairing value for the credential and its public projection.
         let id = credential.label.as_bytes().to_vec();
+        let (class, key_type) = match credential.algorithm {
+            HsmAuthAlgorithm::Aes128YubicoAuthentication => (
+                CKO_SECRET_KEY as CK_OBJECT_CLASS,
+                CKK_YUBICO_HSMAUTH_SYMMETRIC,
+            ),
+            HsmAuthAlgorithm::EcP256YubicoAuthentication => (
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+            ),
+        };
         objects.push(TokenObject {
             slot_id: Some(slot_id),
             unique_id: hsmauth_credential_identity(credential),
-            class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
-            key_type: match credential.algorithm {
-                HsmAuthAlgorithm::Aes128YubicoAuthentication => CKK_YUBICO_HSMAUTH_SYMMETRIC,
-                HsmAuthAlgorithm::EcP256YubicoAuthentication => CKK_YUBICO_HSMAUTH_ASYMMETRIC,
-            },
+            class,
+            key_type,
             label: credential.label.clone(),
             id: id.clone(),
             token: true,

@@ -24,6 +24,29 @@ free nor modify it. Deprecated standard aliases resolve to their current
 canonical names. The iPhone smoke app demonstrates the object-class and
 key-type helpers while rendering its public and authenticated inventories.
 
+## Authenticated credential diagnostics
+
+`PKCS11RS_GetAuthenticatedCredential` returns the RFC 7512 PKCS #11 URI of the
+exact credential that established the current token login. It uses ordinary
+two-call buffer semantics, and its byte count excludes a NUL terminator. The
+vendor query attribute `pkcs11rs-authkey` records the target Authentication Key
+ID. Direct password authentication is reported as
+`pkcs11:?pkcs11rs-direct=<label>&pkcs11rs-authkey=AAAA`. The URI contains no
+PIN, password, private key, derived secret, or session key. A backend that does
+not expose this metadata returns
+`CKR_FUNCTION_NOT_SUPPORTED`; a supported backend without an active user login
+returns `CKR_USER_NOT_LOGGED_IN`.
+
+`CKA_PKCS11RS_URI` is a read-only UTF-8 RFC 7512 URI computed for every existing
+object. It contains the token label, the token serial when the label does not
+already contain it, `object` for `CKA_LABEL`, `id` for every nonempty `CKA_ID`,
+and the standard URI `type` for recognized object classes. URI-safe ASCII ID
+bytes remain readable; delimiters, controls, and non-ASCII bytes are
+percent-encoded. It describes the source object only; a target
+Authentication Key query is added only to successful YubiHSM authentication
+diagnostics. The attribute is included in `CKA_ATTR_TYPES` and uses ordinary
+two-call attribute-buffer semantics.
+
 ## Vendor mechanisms, key types, attributes, and profiles
 
 The header declares the pkcs11rs vendor range and the identifiers used by:
@@ -32,6 +55,9 @@ The header declares the pkcs11rs vendor range and the identifiers used by:
   `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`;
 - [FIDO2 one-shot assertions](fido2.md), through
   `CKM_PKCS11RS_FIDO_ASSERTION` and `CKA_PKCS11RS_FIDO_RP_ID`;
+- RFC 7512 object identification and YubiHSM client-authentication selection,
+  through `CKA_PKCS11RS_URI` and the URI contract documented in
+  [YubiHSM authentication](yubihsm-auth.md);
 - [protected prefixed ECDH derivation](prefixed-ecdh-derive.md), through
   `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE`;
 - [experimental previewSign](preview-sign.md), through its key-pair generation,

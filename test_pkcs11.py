@@ -218,6 +218,9 @@ ABI_TEST_SCP03_SLOT_ID = 79
 ABI_TEST_YUBIHSM_SLOT_ID = 80
 ABI_TEST_SCP11_SLOT_ID = 81
 ABI_TEST_SECOND_YUBIHSM_SLOT_ID = 82
+ABI_TEST_DIRECT_AUTH_URI = (
+    b"pkcs11:?pkcs11rs-direct=direct&pkcs11rs-authkey=0001"
+)
 CKP_BASELINE_PROVIDER = 1
 CKP_EXTENDED_PROVIDER = 2
 CKP_AUTHENTICATION_TOKEN = 3
@@ -6663,7 +6666,9 @@ class Pkcs11AbiTests(unittest.TestCase):
     def test_abi_yubihsm_fixture_supports_separate_login_username(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
-        username = (CK_BYTE * 4)(*b"0001")
+        username = (CK_BYTE * len(ABI_TEST_DIRECT_AUTH_URI))(
+            *ABI_TEST_DIRECT_AUTH_URI
+        )
         pin = (CK_BYTE * 8)(*b"password")
         self.assertEqual(
             self.lib.C_LoginUser(
@@ -6746,7 +6751,9 @@ fn main() {
                 )
 
                 session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
-                username = (CK_BYTE * 4)(*b"0001")
+                username = (CK_BYTE * len(ABI_TEST_DIRECT_AUTH_URI))(
+                    *ABI_TEST_DIRECT_AUTH_URI
+                )
                 self.assertEqual(
                     self.lib.C_LoginUser(
                         session,
@@ -7805,9 +7812,9 @@ fn main() {
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
 
-        for object_id, expected_length, expected_type in (
-            (4, 32, CKK_YUBICO_HSMAUTH_SYMMETRIC),
-            (7, 64, CKK_YUBICO_HSMAUTH_ASYMMETRIC),
+        for object_id, expected_class, expected_type, expected_length in (
+            (4, CKO_SECRET_KEY, CKK_YUBICO_HSMAUTH_SYMMETRIC, 32),
+            (7, CKO_PRIVATE_KEY, CKK_YUBICO_HSMAUTH_ASYMMETRIC, None),
         ):
             key_id = (CK_BYTE * 2)(0, object_id)
             template = (CK_ATTRIBUTE * 1)(
@@ -7846,15 +7853,10 @@ fn main() {
                     ctypes.sizeof(value),
                 )
 
-            attributes = (CK_ATTRIBUTE * 9)(
+            attributes = (CK_ATTRIBUTE * 4)(
                 attribute(CKA_CLASS, object_class),
                 attribute(CKA_KEY_TYPE, key_type),
-                attribute(CKA_VALUE_LEN, value_len),
                 attribute(CKA_KEY_GEN_MECHANISM, generation_mechanism),
-                attribute(CKA_ENCRYPT, encrypt),
-                attribute(CKA_DECRYPT, decrypt),
-                attribute(CKA_SIGN, sign),
-                attribute(CKA_VERIFY, verify),
                 attribute(CKA_DERIVE, derive),
             )
             self.assertEqual(
@@ -7863,16 +7865,55 @@ fn main() {
                 ),
                 CKR_OK,
             )
-            self.assertEqual(object_class.value, CKO_SECRET_KEY)
+            self.assertEqual(object_class.value, expected_class)
             self.assertEqual(key_type.value, expected_type)
-            self.assertEqual(value_len.value, expected_length)
             self.assertEqual(
                 generation_mechanism.value, CK_UNAVAILABLE_INFORMATION
             )
+            self.assertEqual(derive.value, 0)
+            if expected_class == CKO_SECRET_KEY:
+                operation_attributes = (CK_ATTRIBUTE * 4)(
+                    attribute(CKA_ENCRYPT, encrypt),
+                    attribute(CKA_DECRYPT, decrypt),
+                    attribute(CKA_SIGN, sign),
+                    attribute(CKA_VERIFY, verify),
+                )
+                expected_operations = (encrypt, decrypt, sign, verify)
+            else:
+                operation_attributes = (CK_ATTRIBUTE * 2)(
+                    attribute(CKA_DECRYPT, decrypt),
+                    attribute(CKA_SIGN, sign),
+                )
+                expected_operations = (decrypt, sign)
             self.assertEqual(
-                (encrypt.value, decrypt.value, sign.value, verify.value, derive.value),
-                (0, 0, 0, 0, 0),
+                self.lib.C_GetAttributeValue(
+                    session,
+                    handle.value,
+                    operation_attributes,
+                    len(operation_attributes),
+                ),
+                CKR_OK,
             )
+            self.assertTrue(all(value.value == 0 for value in expected_operations))
+            value_length = attribute(CKA_VALUE_LEN, value_len)
+            if expected_length is None:
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        session, handle.value, ctypes.byref(value_length), 1
+                    ),
+                    CKR_ATTRIBUTE_TYPE_INVALID,
+                )
+                self.assertEqual(
+                    value_length.ulValueLen, CK_UNAVAILABLE_INFORMATION
+                )
+            else:
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        session, handle.value, ctypes.byref(value_length), 1
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(value_len.value, expected_length)
 
     def test_abi_yubihsm_public_object_mutation_requires_login(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -9875,7 +9916,9 @@ fn main() {
                     ),
                     CKR_OK,
                 )
-            username = (CK_BYTE * 4)(*b"0001")
+            username = (CK_BYTE * len(ABI_TEST_DIRECT_AUTH_URI))(
+                *ABI_TEST_DIRECT_AUTH_URI
+            )
             password = (CK_BYTE * 8)(*b"password")
             for _, session in sessions[:2]:
                 self.assertEqual(

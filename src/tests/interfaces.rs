@@ -1783,7 +1783,10 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         CKR_OK as CK_RV
     );
-    let username = *b"0001";
+    let mut username = crate::expand_packed_yubihsm_login(b"0001")
+        .unwrap()
+        .format()
+        .into_bytes();
     let yubihsm_pin = *b"password";
     assert_eq!(
         crate::api::C_LoginUser(
@@ -1791,7 +1794,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
             CKU_USER as CK_USER_TYPE,
             yubihsm_pin.as_ptr() as *mut CK_BYTE,
             yubihsm_pin.len() as CK_ULONG,
-            username.as_ptr() as *mut CK_BYTE,
+            username.as_mut_ptr(),
             username.len() as CK_ULONG,
         ),
         CKR_OK as CK_RV
@@ -1803,7 +1806,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
             CKU_SO as CK_USER_TYPE,
             pin.as_ptr() as *mut CK_BYTE,
             pin.len() as CK_ULONG,
-            username.as_ptr() as *mut CK_BYTE,
+            username.as_mut_ptr(),
             username.len() as CK_ULONG,
         ),
         CKR_USER_TYPE_INVALID as CK_RV

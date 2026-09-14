@@ -12,7 +12,12 @@ struct RegisteredSlot {
     #[cfg(test)]
     kind: SlotKind,
     serial: String,
+    token: String,
+    manufacturer: String,
+    model: String,
+    uri_prefix: String,
     profiles: Vec<CK_PROFILE_ID>,
+    client_auth_search_tier: ClientAuthSearchTier,
     slot: std::sync::Weak<Mutex<SlotContext>>,
 }
 #[derive(Debug, Default)]
@@ -30,7 +35,15 @@ impl AuthSlots {
                 #[cfg(test)]
                 kind: ctx.slot.kind(),
                 serial: ctx.slot.serial().to_owned(),
+                token: ctx.slot.label(),
+                manufacturer: ctx.slot.manufacturer().to_owned(),
+                model: ctx.slot.model().to_owned(),
+                uri_prefix: crate::pkcs11_uri::slot_uri_prefix(
+                    &ctx.slot.label(),
+                    ctx.slot.serial(),
+                ),
                 profiles: ctx.slot.additional_profile_ids().to_vec(),
+                client_auth_search_tier: ctx.slot.client_auth_search_tier(),
                 slot: Arc::downgrade(slot),
             }
         };
@@ -86,26 +99,35 @@ impl AuthSlots {
             .clone()
     }
     /// Public-only enumeration. Skip the target itself: it cannot authorize
-    /// access to its own authentication source. A busy other source is an error,
-    /// since silently omitting it could turn ambiguity into a false unique match.
-    pub(crate) fn ordinary_credentials(
+    /// access to its own authentication source. A busy source reached before a
+    /// match is an error; sources after the first match remain untouched.
+    pub(crate) fn find_ordinary_credential<R>(
         &self,
-        label: Option<&str>,
-        source: Option<&str>,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
         target: &std::sync::Weak<Mutex<SlotContext>>,
-        explicit: bool,
-    ) -> Result<Vec<OrdinaryCredential>, Error> {
-        let entries = self
+        mut select: impl FnMut(OrdinaryCredential) -> Result<Option<R>, Error>,
+    ) -> Result<Option<R>, Error> {
+        let label = selector.object_label()?;
+        let explicit = selector.authkey_id.is_some();
+        let mut entries = self
             .slots
             .read()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?
             .iter()
             .filter_map(|entry| entry.slot.upgrade().map(|slot| (entry.clone(), slot)))
             .collect::<Vec<_>>();
-        let mut result = Vec::new();
+        // Stable sorting preserves module slot order within one protection tier.
+        entries.sort_by_key(|(entry, _)| entry.client_auth_search_tier);
+        let mut fallback = None;
         for (entry, slot) in entries {
-            let serial = entry.serial;
-            if entry.slot.ptr_eq(target) || source.is_some_and(|source| source != serial) {
+            if entry.slot.ptr_eq(target)
+                || !selector.matches_slot_fields(
+                    &entry.token,
+                    &entry.manufacturer,
+                    &entry.serial,
+                    &entry.model,
+                )
+            {
                 continue;
             }
             if entry.profiles.contains(&CKP_YUBICO_HSMAUTH) {
@@ -116,10 +138,6 @@ impl AuthSlots {
                     .try_lock()
                     .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
                 if !ctx.slot.is_present() {
-                    continue;
-                }
-                let serial = ctx.slot.serial().to_owned();
-                if source.is_some_and(|source| source != serial) {
                     continue;
                 }
             }
@@ -135,47 +153,84 @@ impl AuthSlots {
             if let Some(label) = label {
                 template.push((CKA_LABEL, label.as_bytes()));
             }
+            if let Some(id) = selector.id.as_deref() {
+                template.push((CKA_ID, id));
+            }
             let mut found = false;
-            for handle in session.find(&template)? {
+            let public_allowed = selector.class.is_none_or(|class| {
+                class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    || class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            });
+            for handle in if public_allowed {
+                session.find(&template)?
+            } else {
+                Vec::new()
+            } {
                 let point = session.attribute(handle, CKA_EC_POINT)?;
                 if point.len() != 67 || point[..3] != [4, 65, 4] {
                     return Err(CKR_PUBLIC_KEY_INVALID.into());
                 }
-                result.push(OrdinaryCredential {
-                    explicit,
+                let object_label =
+                    String::from_utf8(session.attribute(handle, CKA_LABEL)?.to_vec())
+                        .map_err(|_| CKR_DEVICE_ERROR)?;
+                let credential = OrdinaryCredential {
+                    symmetric: false,
                     session: session.clone(),
-                    label: String::from_utf8(session.attribute(handle, CKA_LABEL)?.to_vec())
-                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                    label: object_label.clone(),
                     id: Some(session.attribute(handle, CKA_ID)?.to_vec()),
                     public_key: Some(point[2..].to_vec()),
-                });
+                    uri_prefix: entry.uri_prefix.clone(),
+                };
                 found = true;
+                if let Some(selected) = select(credential)? {
+                    return Ok(Some(selected));
+                }
             }
             // Hidden keys and symmetric pairs require an explicitly selected
             // source and label. Resolve their type only after that source login.
             if !found
                 && explicit
-                && source.is_some()
                 && let Some(label) = label
             {
-                result.push(OrdinaryCredential {
-                    explicit,
+                let selected = match selector.class {
+                    Some(class) if class == CKO_SECRET_KEY as CK_OBJECT_CLASS => label
+                        .ends_with(".enc")
+                        .then_some((label, CKO_SECRET_KEY as CK_OBJECT_CLASS)),
+                    Some(class) if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
+                        Some((label, CKO_PRIVATE_KEY as CK_OBJECT_CLASS))
+                    }
+                    None if label.ends_with(".enc") => {
+                        Some((label, CKO_SECRET_KEY as CK_OBJECT_CLASS))
+                    }
+                    None => Some((label, CKO_PRIVATE_KEY as CK_OBJECT_CLASS)),
+                    _ => None,
+                };
+                let Some((label, requested_class)) = selected else {
+                    continue;
+                };
+                let credential = OrdinaryCredential {
+                    symmetric: requested_class == CKO_SECRET_KEY as CK_OBJECT_CLASS,
                     session,
                     label: label.to_owned(),
-                    id: None,
+                    id: selector.id.clone(),
                     public_key: None,
-                });
+                    uri_prefix: entry.uri_prefix,
+                };
+                if !public_allowed {
+                    return select(credential);
+                }
+                fallback.get_or_insert(credential);
             }
         }
-        Ok(result)
+        fallback.map(&mut select).transpose().map(Option::flatten)
     }
-    pub(crate) fn hsmauth_credentials(
+    pub(crate) fn find_hsmauth_credential<R>(
         &self,
-        label: Option<&str>,
-        source: Option<&str>,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
         asymmetric_only: bool,
-    ) -> Result<Vec<HsmAuthCredentialBinding>, Error> {
-        let mut result = Vec::new();
+        mut select: impl FnMut(HsmAuthCredentialBinding) -> Result<Option<R>, Error>,
+    ) -> Result<Option<R>, Error> {
+        let label = selector.object_label()?;
         let entries = self
             .slots
             .read()
@@ -183,16 +238,21 @@ impl AuthSlots {
             .iter()
             .filter(|entry| {
                 entry.profiles.contains(&CKP_YUBICO_HSMAUTH)
-                    && source.is_none_or(|source| source == entry.serial)
+                    && selector.matches_slot_fields(
+                        &entry.token,
+                        &entry.manufacturer,
+                        &entry.serial,
+                        &entry.model,
+                    )
             })
             .filter_map(|entry| {
                 entry
                     .slot
                     .upgrade()
-                    .map(|slot| (entry.serial.clone(), slot))
+                    .map(|slot| (entry.serial.clone(), entry.uri_prefix.clone(), slot))
             })
             .collect::<Vec<_>>();
-        for (serial, slot) in entries {
+        for (serial, uri_prefix, slot) in entries {
             if !slot
                 .try_lock()
                 .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?
@@ -209,28 +269,40 @@ impl AuthSlots {
             if profiles.is_empty() {
                 continue;
             }
-            for (key_type, algorithm) in [
+            for (key_type, class, algorithm) in [
                 (
                     CKK_YUBICO_HSMAUTH_SYMMETRIC,
+                    CKO_SECRET_KEY as CK_OBJECT_CLASS,
                     HsmAuthAlgorithm::Aes128YubicoAuthentication,
                 ),
                 (
                     CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+                    CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                     HsmAuthAlgorithm::EcP256YubicoAuthentication,
                 ),
             ] {
                 if asymmetric_only && key_type == CKK_YUBICO_HSMAUTH_SYMMETRIC {
                     continue;
                 }
+                if selector.class.is_some_and(|selected_class| {
+                    selected_class != class
+                        && !(algorithm == HsmAuthAlgorithm::EcP256YubicoAuthentication
+                            && selected_class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+                }) {
+                    continue;
+                }
                 let key_type = key_type.to_ne_bytes();
-                let class = (CKO_SECRET_KEY as CK_ULONG).to_ne_bytes();
+                let class_bytes = class.to_ne_bytes();
                 let mut template = vec![
                     (CKA_TOKEN, &[CK_TRUE as u8][..]),
-                    (CKA_CLASS, &class[..]),
+                    (CKA_CLASS, &class_bytes[..]),
                     (CKA_KEY_TYPE, &key_type[..]),
                 ];
                 if let Some(label) = label {
                     template.push((CKA_LABEL, label.as_bytes()));
+                }
+                if let Some(id) = selector.id.as_deref() {
+                    template.push((CKA_ID, id));
                 }
                 for handle in session.find(&template)? {
                     let label = session.attribute(handle, CKA_LABEL)?;
@@ -266,7 +338,13 @@ impl AuthSlots {
                     );
                     let touch =
                         session.attribute(handle, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED as u32)?;
-                    result.push(HsmAuthCredentialBinding {
+                    let uri = crate::pkcs11_uri::object_uri_from_prefix(
+                        &uri_prefix,
+                        class,
+                        label.as_bytes(),
+                        &id,
+                    );
+                    let binding = HsmAuthCredentialBinding {
                         key: crate::key_scope::BoundKey::from_session(session.clone(), handle)?,
                         credential: HsmAuthCredential {
                             label,
@@ -276,17 +354,43 @@ impl AuthSlots {
                             public_key,
                         },
                         source: serial.clone(),
-                    });
+                        uri,
+                    };
+                    if let Some(selected) = select(binding)? {
+                        return Ok(Some(selected));
+                    }
                 }
             }
         }
-        Ok(result)
+        Ok(None)
     }
-    pub(crate) fn asymmetric_hsmauth_credentials(
+
+    #[cfg(test)]
+    pub(crate) fn ordinary_credentials(
         &self,
-        selector: &HsmAuthWildcardLogin<'_>,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
+        target: &std::sync::Weak<Mutex<SlotContext>>,
+    ) -> Result<Vec<OrdinaryCredential>, Error> {
+        let mut credentials = Vec::new();
+        self.find_ordinary_credential(selector, target, |credential| {
+            credentials.push(credential);
+            Ok(None::<()>)
+        })?;
+        Ok(credentials)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hsmauth_credentials(
+        &self,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
+        asymmetric_only: bool,
     ) -> Result<Vec<HsmAuthCredentialBinding>, Error> {
-        self.hsmauth_credentials(selector.label, selector.source, true)
+        let mut credentials = Vec::new();
+        self.find_hsmauth_credential(selector, asymmetric_only, |credential| {
+            credentials.push(credential);
+            Ok(None::<()>)
+        })?;
+        Ok(credentials)
     }
 }
 #[derive(Clone)]
@@ -294,6 +398,7 @@ pub(crate) struct HsmAuthCredentialBinding {
     pub(crate) key: crate::key_scope::BoundKey,
     pub(crate) credential: HsmAuthCredential,
     source: String,
+    uri: String,
 }
 impl HsmAuthCredentialBinding {
     pub(crate) fn source_identifier(&self) -> &str {
@@ -301,6 +406,9 @@ impl HsmAuthCredentialBinding {
     }
     pub(crate) fn slot_label(&self) -> String {
         format!("HSM Auth #{}", self.source)
+    }
+    pub(crate) fn uri(&self) -> &str {
+        &self.uri
     }
     pub(crate) fn authenticate(
         &self,
@@ -315,21 +423,49 @@ impl HsmAuthCredentialBinding {
 }
 
 /// A public selection owns only a session and identifying metadata. It does not
-/// bind a private key or authorize the source until it has been selected uniquely.
+/// bind a private key or authorize the source until exact or ordered wildcard
+/// selection has chosen it.
 pub(crate) struct OrdinaryCredential {
-    explicit: bool,
+    symmetric: bool,
     pub(crate) session: Arc<ProviderSession>,
     pub(crate) label: String,
     id: Option<Vec<u8>>,
     pub(crate) public_key: Option<Vec<u8>>,
+    uri_prefix: String,
 }
 impl OrdinaryCredential {
+    pub(crate) fn description(&self) -> String {
+        let (class, label, id) = if self.symmetric {
+            (
+                CKO_SECRET_KEY as CK_OBJECT_CLASS,
+                self.label.clone(),
+                &[][..],
+            )
+        } else {
+            (
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                self.label.clone(),
+                self.id.as_deref().unwrap_or_default(),
+            )
+        };
+        crate::pkcs11_uri::object_uri_from_prefix(&self.uri_prefix, class, label.as_bytes(), id)
+    }
+
     pub(crate) fn authorize(
-        self,
+        &self,
         password: Option<&[u8]>,
         trust_prefix: Option<std::ffi::OsString>,
     ) -> Result<YubiHsmPkcs11AuthenticationMaterial, Error> {
         self.session.authorize_optional(password)?;
+        if self.symmetric {
+            return Ok(YubiHsmPkcs11AuthenticationMaterial::Symmetric(
+                crate::key_scope::SymmetricCredential::find(
+                    self.session.clone(),
+                    &self.label,
+                    true,
+                )?,
+            ));
+        }
         let class = (CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes();
         let key_type = (CKK_EC as CK_ULONG).to_ne_bytes();
         let mut template = vec![
@@ -343,31 +479,6 @@ impl OrdinaryCredential {
             template.push((CKA_ID, id));
         }
         let private = self.session.find(&template)?;
-        if self.explicit {
-            // Decide by object inventory, never by trying one protocol and then
-            // another. An asymmetric key and symmetric pair under one name are
-            // ambiguous even after a uniquely selected source was authorized.
-            let enc = format!("{}.enc", self.label);
-            let mac = format!("{}.mac", self.label);
-            let has_symmetric = [enc, mac].iter().try_fold(false, |found, label| {
-                self.session
-                    .find(&[
-                        (CKA_TOKEN, &[CK_TRUE as u8]),
-                        (CKA_CLASS, &(CKO_SECRET_KEY as CK_ULONG).to_ne_bytes()),
-                        (CKA_KEY_TYPE, &(CKK_AES as CK_ULONG).to_ne_bytes()),
-                        (CKA_LABEL, label.as_bytes()),
-                    ])
-                    .map(|keys| found || !keys.is_empty())
-            })?;
-            if has_symmetric {
-                if self.public_key.is_some() || !private.is_empty() {
-                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
-                }
-                return Ok(YubiHsmPkcs11AuthenticationMaterial::Symmetric(
-                    crate::key_scope::SymmetricCredential::find(self.session, &self.label, true)?,
-                ));
-            }
-        }
         let handle = match private.as_slice() {
             [handle] => *handle,
             [] => return Err(CKR_KEY_HANDLE_INVALID.into()),
@@ -376,11 +487,11 @@ impl OrdinaryCredential {
         if self.session.attribute(handle, CKA_DERIVE)?.as_slice() != [CK_TRUE as u8] {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let credential = crate::key_scope::BoundKey::from_session(self.session, handle)?;
-        if let Some(public_key) = self.public_key {
+        let credential = crate::key_scope::BoundKey::from_session(self.session.clone(), handle)?;
+        if let Some(public_key) = &self.public_key {
             let mut scope = crate::key_scope::Pkcs11KeyScope::for_key(&credential)?;
             let key = scope.bind(&credential)?;
-            if scope.p256_public(&key)? != public_key {
+            if scope.p256_public(&key)? != *public_key {
                 return Err(CKR_PUBLIC_KEY_INVALID.into());
             }
         }

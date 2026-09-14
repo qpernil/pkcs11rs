@@ -62,6 +62,18 @@ typedef struct PKCS11RS_BYTE_BUFFER {
   (CKA_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 2UL)
 #define CKA_PKCS11RS_FIDO_RP_ID \
   (CKA_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 3UL)
+#define CKA_PKCS11RS_URI \
+  (CKA_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 4UL)
+
+/*
+ * On a YubiHSM slot, C_LoginUser accepts an RFC 7512 PKCS #11 URI in
+ * pUsername to select the client-authentication credential. "pkcs11:" is the
+ * total wildcard. The standard URI path attributes select the source token
+ * and object; the vendor query attributes "pkcs11rs-authkey" and
+ * "pkcs11rs-direct" select a target Authentication Key or request a temporary
+ * direct-password credential. Supply the source PIN/password separately in
+ * pPin. Other slot types retain their documented C_LoginUser username rules.
+ */
 
 typedef struct CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
   CK_EC_KDF_TYPE kdf;
@@ -100,6 +112,19 @@ CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetAttributeTypeName)(
 );
 CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetProfileIdName)(
   CK_PROFILE_ID value
+);
+
+/*
+ * Return the UTF-8 PKCS #11 URI of the credential that established the current
+ * token login. The first call may pass NULL for pDescription to
+ * obtain the required byte count. The count excludes a NUL terminator.
+ * Backends that do not expose this metadata return CKR_FUNCTION_NOT_SUPPORTED;
+ * a supported backend without a user login returns CKR_USER_NOT_LOGGED_IN.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_GetAuthenticatedCredential)(
+  CK_SESSION_HANDLE hSession,
+  CK_UTF8CHAR_PTR pDescription,
+  CK_ULONG_PTR pulDescriptionLen
 );
 
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {

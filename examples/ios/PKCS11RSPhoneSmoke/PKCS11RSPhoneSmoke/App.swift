@@ -128,6 +128,22 @@ private func returnValueDescription(_ value: CK_RV) -> String {
     return "\(String(cString: name)) (\(code))"
 }
 
+private func authenticatedCredentialDescription(_ session: CK_SESSION_HANDLE) -> String {
+    var length = CK_ULONG()
+    var result = PKCS11RS_GetAuthenticatedCredential(session, nil, &length)
+    guard result == CKR_OK else {
+        return "<credential query failed: \(returnValueDescription(result))>"
+    }
+    var value = [UInt8](repeating: 0, count: Int(length))
+    result = value.withUnsafeMutableBufferPointer { buffer in
+        PKCS11RS_GetAuthenticatedCredential(session, buffer.baseAddress, &length)
+    }
+    guard result == CKR_OK else {
+        return "<credential query failed: \(returnValueDescription(result))>"
+    }
+    return String(bytes: value.prefix(Int(length)), encoding: .utf8) ?? "<invalid UTF-8>"
+}
+
 private func availableLength(_ attribute: CK_ATTRIBUTE, capacity: Int) -> Int? {
     guard attribute.ulValueLen != CK_ULONG(CK_UNAVAILABLE_INFORMATION),
           attribute.ulValueLen <= CK_ULONG(capacity)
@@ -1335,7 +1351,7 @@ private func publicObjectInventory(
 private func authenticatedObjectInventory(
     slot: CK_SLOT_ID
 ) -> [String] {
-    let usernameValue = ":*"
+    let usernameValue = "pkcs11:"
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
         slot,
@@ -1365,7 +1381,9 @@ private func authenticatedObjectInventory(
     }
     if loginResult == CKR_OK {
         lines.append("")
-        lines.append("Automatic credential login \(usernameValue): success")
+        lines.append(
+            "Automatic credential login \(usernameValue): \(returnValueDescription(loginResult)) using \(authenticatedCredentialDescription(session))"
+        )
         lines.append(contentsOf: objectInventory(
             session: session,
             title: "Objects (authenticated session)"
@@ -1769,7 +1787,7 @@ private final class ModuleInspector {
         }
         defer { _ = C_CloseSession(session) }
 
-        var bootstrapUsername = Array(":*".utf8)
+        var bootstrapUsername = Array("pkcs11:".utf8)
         var bootstrapPassword = Array(yubiHsmAuthPassword.utf8)
         result = bootstrapPassword.withUnsafeMutableBufferPointer { password in
             bootstrapUsername.withUnsafeMutableBufferPointer { username in
@@ -1830,19 +1848,22 @@ private final class ModuleInspector {
             return ["\(name): \(action), bootstrap logout failed: \(returnValueDescription(logout))"]
         }
 
-        var platformUsername = Array(
-            String(format: ":%04llX%@@host", UInt64(platformAuthenticationKeyID), platformCredentialName)
-                .utf8
-        )
-        result = platformUsername.withUnsafeMutableBufferPointer { username in
-            C_LoginUser(
-                session,
-                CK_USER_TYPE(CKU_USER),
-                nil,
-                0,
-                username.baseAddress,
-                CK_ULONG(username.count)
-            )
+        var platformUsername = Array("pkcs11:".utf8)
+        var verificationPassword = Array(yubiHsmAuthPassword.utf8)
+        result = verificationPassword.withUnsafeMutableBufferPointer { password in
+            platformUsername.withUnsafeMutableBufferPointer { username in
+                C_LoginUser(
+                    session,
+                    CK_USER_TYPE(CKU_USER),
+                    password.baseAddress,
+                    CK_ULONG(password.count),
+                    username.baseAddress,
+                    CK_ULONG(username.count)
+                )
+            }
+        }
+        _ = verificationPassword.withUnsafeMutableBytes { bytes in
+            bytes.initializeMemory(as: UInt8.self, repeating: 0)
         }
         guard result == CKR_OK else {
             return ["\(name): \(action), platform login failed: \(returnValueDescription(result))"]
@@ -1873,7 +1894,7 @@ private final class ModuleInspector {
         }
         defer { _ = C_CloseSession(session) }
 
-        var bootstrapUsername = Array(":*".utf8)
+        var bootstrapUsername = Array("pkcs11:".utf8)
         var bootstrapPassword = Array(yubiHsmAuthPassword.utf8)
         result = bootstrapPassword.withUnsafeMutableBufferPointer { password in
             bootstrapUsername.withUnsafeMutableBufferPointer { username in
