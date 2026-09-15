@@ -11,7 +11,10 @@ publish = false
 [features]
 default = []
 experimental-i2c = ["dep:libc", "dep:gpiocdev-uapi"]
-embedded-virtual-yubihsm = ["dep:usb-gadget-worker", "dep:virtual-yubihsm-core"]
+embedded-virtual-yubihsm = [
+    "dep:virtual-yubihsm-core",
+    "virtual-yubihsm-core/persistent-runtime",
+]
 
 [dependencies]
 axum = "0.8.9"
@@ -35,7 +38,6 @@ libc = { version = "0.2", optional = true }
 gpiocdev-uapi = { version = "0.7.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-usb-gadget-worker = { path = "../../../usb-gadget-supervisor/crates/usb-gadget-worker", optional = true }
 virtual-yubihsm-core = { path = "../../../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
 
 [dev-dependencies]

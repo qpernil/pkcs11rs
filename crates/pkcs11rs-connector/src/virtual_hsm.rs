@@ -4,19 +4,13 @@ use crate::{
 };
 use futures_util::future::BoxFuture;
 use std::{
-    collections::HashSet,
-    fs::{self, DirBuilder},
-    io,
-    os::unix::fs::DirBuilderExt,
-    path::Path,
-    thread,
+    collections::HashSet, fs::DirBuilder, io, os::unix::fs::DirBuilderExt, path::Path, thread,
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot};
-use usb_gadget_worker::{
-    PersistenceMode, StateLock, StatePersistence, StatePersistenceHandle, replace_file_atomically,
+use virtual_yubihsm_core::{
+    DeviceConfig, PersistenceMode, PersistentDevice, PersistentDeviceHandle,
 };
-use virtual_yubihsm_core::{Device, DeviceConfig};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -217,9 +211,9 @@ fn actor_main(
 ) -> io::Result<()> {
     let serial = spec.serial;
     match initialize(&spec, persistence_mode) {
-        Ok((persistence, state_lock, version)) => {
+        Ok((runtime, version)) => {
             let _ = ready.send(Ok(version));
-            run_actor(serial, persistence, state_lock, &mut requests)
+            run_actor(serial, runtime, &mut requests)
         }
         Err(error) => {
             let reported = io::Error::new(error.kind(), error.to_string());
@@ -232,39 +226,27 @@ fn actor_main(
 fn initialize(
     spec: &VirtualYubiHsmSpec,
     persistence_mode: PersistenceMode,
-) -> io::Result<(StatePersistence<Device>, StateLock, [u8; 3])> {
+) -> io::Result<(PersistentDevice, [u8; 3])> {
     create_state_directory(&spec.state_directory)?;
-    let state_path = spec
-        .state_directory
-        .join(format!("yubihsm-{}.cbor", spec.serial));
-    let state_lock = StateLock::acquire(
-        spec.state_directory
-            .join(format!("yubihsm-{}.lock", spec.serial)),
-    )?;
     let config = DeviceConfig {
         serial: spec.serial,
         ..DeviceConfig::default()
     };
-    let version = config.version;
-    let device = load_or_create_state(config, &state_path)?;
     let serial = spec.serial;
-    let persistence = StatePersistence::start(
-        device,
-        state_path,
-        persistence_mode,
-        encode_device_state,
-        move || tracing::error!(serial, "embedded YubiHSM persistence failed"),
-    )?;
-    Ok((persistence, state_lock, version))
+    let runtime =
+        PersistentDevice::open(config, &spec.state_directory, persistence_mode, move || {
+            tracing::error!(serial, "embedded YubiHSM persistence failed")
+        })?;
+    let version = runtime.version();
+    Ok((runtime, version))
 }
 
 fn run_actor(
     serial: u32,
-    persistence: StatePersistence<Device>,
-    _state_lock: StateLock,
+    runtime: PersistentDevice,
     requests: &mut mpsc::Receiver<ActorRequest>,
 ) -> io::Result<()> {
-    let handle = persistence.handle();
+    let handle = runtime.handle();
     while let Some(request) = requests.blocking_recv() {
         match request {
             ActorRequest::Command { bytes, reply } => {
@@ -272,58 +254,28 @@ fn run_actor(
                 let _ = reply.send(result);
             }
             ActorRequest::Shutdown => {
-                clear_sessions(&handle);
-                let result = persistence.shutdown();
+                let result = shutdown_runtime(&handle, runtime);
                 tracing::info!(serial, "embedded virtual YubiHSM stopped");
                 return result;
             }
         }
     }
-    clear_sessions(&handle);
-    persistence.shutdown()
+    shutdown_runtime(&handle, runtime)
 }
 
 fn execute_command(
-    handle: &StatePersistenceHandle<Device>,
+    handle: &PersistentDeviceHandle,
     request: &[u8],
 ) -> Result<Vec<u8>, TransportError> {
     handle
-        .check_health()
-        .map_err(|error| TransportError::device(error.to_string()))?;
-    let (response, mutation) = {
-        let mut device = handle
-            .state()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let response = device.handle_encoded(request);
-        let mutation = if device
-            .take_persistent_change()
-            .map_err(|error| TransportError::device(error.to_string()))?
-        {
-            Some(
-                handle
-                    .record_mutation()
-                    .map_err(|error| TransportError::device(error.to_string()))?,
-            )
-        } else {
-            None
-        };
-        (response, mutation)
-    };
-    if let Some(mutation) = mutation {
-        mutation
-            .wait()
-            .map_err(|error| TransportError::device(error.to_string()))?;
-    }
-    Ok(response)
+        .execute(request)
+        .map_err(|error| TransportError::device(error.to_string()))
 }
 
-fn clear_sessions(handle: &StatePersistenceHandle<Device>) {
-    handle
-        .state()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clear_sessions();
+fn shutdown_runtime(handle: &PersistentDeviceHandle, runtime: PersistentDevice) -> io::Result<()> {
+    let clear_result = handle.clear_sessions();
+    let shutdown_result = runtime.shutdown();
+    clear_result.and(shutdown_result)
 }
 
 fn create_state_directory(path: &Path) -> io::Result<()> {
@@ -332,29 +284,6 @@ fn create_state_directory(path: &Path) -> io::Result<()> {
         .mode(0o700)
         .create(path)
         .map_err(|error| with_path(error, "create embedded YubiHSM state directory", path))
-}
-
-fn load_or_create_state(config: DeviceConfig, path: &Path) -> io::Result<Device> {
-    match fs::read(path) {
-        Ok(encoded) => Device::from_persistent_state(config, &encoded).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("load persistent YubiHSM state {}: {error}", path.display()),
-            )
-        }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let device = Device::factory_default(config);
-            replace_file_atomically(path, &encode_device_state(&device)?)?;
-            Ok(device)
-        }
-        Err(error) => Err(with_path(error, "read persistent YubiHSM state", path)),
-    }
-}
-
-fn encode_device_state(device: &Device) -> io::Result<Vec<u8>> {
-    device
-        .persistent_state()
-        .map_err(|error| io::Error::other(format!("encode persistent YubiHSM state: {error}")))
 }
 
 fn with_path(error: io::Error, operation: &str, path: &Path) -> io::Error {
@@ -378,6 +307,7 @@ async fn join_actor(thread: thread::JoinHandle<io::Result<()>>) -> io::Result<()
 mod tests {
     use super::*;
     use std::{
+        fs,
         path::PathBuf,
         sync::{
             atomic::{AtomicU64, Ordering},
@@ -520,8 +450,18 @@ mod tests {
         assert!(directory.join("yubihsm-12345678.lock").exists());
 
         actors.shutdown().await.unwrap();
-        let lock = StateLock::acquire(directory.join("yubihsm-12345678.lock")).unwrap();
-        drop(lock);
+        PersistentDevice::open(
+            DeviceConfig {
+                serial: 12_345_678,
+                ..DeviceConfig::default()
+            },
+            &directory,
+            PersistenceMode::Immediate,
+            || {},
+        )
+        .unwrap()
+        .shutdown()
+        .unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

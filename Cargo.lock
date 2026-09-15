@@ -1745,7 +1745,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "usb-gadget-worker",
  "virtual-yubihsm-core",
 ]
 
@@ -2849,6 +2848,7 @@ dependencies = [
  "software-key-core",
  "spki 0.8.0",
  "subtle",
+ "usb-gadget-worker",
  "x509-cert",
  "zeroize",
 ]

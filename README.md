@@ -144,8 +144,10 @@ software mechanism list for session keys.
   HTTPS plus optional mutual TLS. See
   [Multi-device connector](docs/connector.md).
 - A connector build can host persisted `virtual-yubihsm-core` instances beside
-  physical USB devices, using independent actor threads, atomic state updates,
-  and ownership locks. See
+  physical USB devices. Independent actor threads adapt the core's shared
+  persistent runtime to the connector registry; USB, I2C, and embedded
+  frontends therefore share atomic state updates, mutation ordering, and
+  ownership locks. See
   [Embedded virtual YubiHSMs](docs/connector.md#embedded-virtual-yubihsms).
 
 ### Apple integration, tools, and validation
@@ -486,12 +488,13 @@ is documented in
 [Embedded virtual YubiHSMs](docs/connector.md#embedded-virtual-yubihsms).
 
 Each configured device runs on its own blocking actor thread, while HTTP tasks
-await bounded Tokio channels and remain asynchronous. The actor uses the same
-core, CBOR state format, persistence coordinator, atomic replacement, and
-sidecar lock as the USB-gadget frontend. Persistence batches changes for at
-most 500 ms by default. Use `--virtual-yubihsm-persistence immediate`, or
-change the shared batching limit with
-`--virtual-yubihsm-batch-delay-ms MILLISECONDS`.
+await bounded Tokio channels and remain asynchronous. The actor calls the
+optional `virtual-yubihsm-core/persistent-runtime` API also used by the USB and
+I2C frontends. That API owns the CBOR state format, persistence coordinator,
+atomic replacement, mutation accounting, and sidecar lock. Persistence batches
+changes for at most 500 ms by default. Use
+`--virtual-yubihsm-persistence immediate`, or change the shared batching limit
+with `--virtual-yubihsm-batch-delay-ms MILLISECONDS`.
 
 The state directories must be absolute and unique, and configured serials must
 be unique. A USB worker and connector cannot own the same persisted device at
