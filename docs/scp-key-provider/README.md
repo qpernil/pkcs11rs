@@ -240,6 +240,27 @@ the two phone platform-key projections. This qualifies projection-only skipping
 and token-native priority against real target firmware without modifying the
 provisioned inventory.
 
+The persisted fixture can also hold three P-256 credentials whose native
+capabilities and `CKA_ALLOWED_MECHANISMS` force every supported asymmetric
+derivation route:
+
+| Route | Provider selection | Static agreement and X9.63 KDF |
+| --- | --- | --- |
+| `native-device` | Combined prefixed ECDH | Virtual `DeriveEcdhKdf` command |
+| `module-prefixed` | Combined prefixed ECDH | Raw device ECDH followed by the module KDF |
+| `pkcs11-operation-graph` | Standard PKCS #11 graph | Separate ECDH, concatenation, SHA-256, and extraction operations |
+
+The ignored `qualifies_persisted_virtual_client_paths` test takes the source,
+targets, public-discovery credential, client credentials, and expected routes
+from environment variables. Target metadata is populated through that
+least-privilege discovery credential; the operational login is not used as a
+substitute inventory credential. A test-only observer records the selected
+route without enabling protocol-frame tracing; the test asserts the exact route
+and completes an authenticated target command. Desktop, Swift iOS, and
+Objective-C iOS clients have qualified all three routes from virtual YubiHSM
+26000001 against physical YubiHSMs 1238075073 and 2545354682. The iOS smoke apps
+remain independent of this fixture.
+
 ## 2. Card derivation
 
 Card SCP03 S8 and SCP11a/b/c use `Pkcs11Auth` through scoped provider objects.

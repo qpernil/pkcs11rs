@@ -6,6 +6,23 @@ use crate::{
     *,
 };
 
+#[cfg(test)]
+thread_local! {
+    static AUTHENTICATION_PATHS: std::cell::RefCell<Vec<&'static str>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn record_authentication_path(path: &'static str) {
+    AUTHENTICATION_PATHS.with(|paths| paths.borrow_mut().push(path));
+}
+
+#[cfg(all(test, not(feature = "abi-tests")))]
+pub(crate) fn take_authentication_paths() -> Vec<&'static str> {
+    AUTHENTICATION_PATHS.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KeyHandle {
     owner: Arc<()>,
@@ -446,6 +463,13 @@ impl Pkcs11KeyScope {
     ) -> Result<KeyHandle, Error> {
         let agreement = || generic_template(&[CKM_CONCATENATE_BASE_AND_KEY as _]);
         if self.can_derive(credential, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)? {
+            #[cfg(test)]
+            record_authentication_path("combined-prefixed-ecdh");
+            tracing::trace!(
+                target: "pkcs11rs::authentication",
+                path = "combined-prefixed-ecdh",
+                "selected asymmetric authentication derivation path"
+            );
             let shared = self.ecdh(
                 ephemeral,
                 ephemeral_peer,
@@ -462,6 +486,13 @@ impl Pkcs11KeyScope {
                 length,
             )
         } else {
+            #[cfg(test)]
+            record_authentication_path("pkcs11-operation-graph");
+            tracing::trace!(
+                target: "pkcs11rs::authentication",
+                path = "pkcs11-operation-graph",
+                "selected asymmetric authentication derivation path"
+            );
             let first = self.ecdh(ephemeral, ephemeral_peer, agreement())?;
             let second = self.ecdh(credential, credential_peer, agreement())?;
             let z = self.append_key(

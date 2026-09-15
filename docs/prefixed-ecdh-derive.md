@@ -131,6 +131,13 @@ command, and verifies that both establishments invoked native `DeriveEcdhKdf`
 without invoking raw `DeriveEcdh`. Logout releases the retained source session
 and its transient objects.
 
+An environment-driven persisted-device qualification complements that isolated
+regression. Separate P-256 credentials force native `DeriveEcdhKdf`, the
+module's combined prefixed mechanism over raw device ECDH, and the standard
+PKCS #11 operation graph. Its test-only route observer asserts which path ran
+without logging secure-channel frames. All three routes complete authenticated
+commands against physical YubiHSM firmware from desktop and iOS clients.
+
 The complete follow-on calculations use the receipt as the initial MAC
 chaining value `MCV`. Each command authenticates `MCV || command-frame` with
 AES-CMAC under `S-MAC`, transmits the first eight MAC bytes, and replaces `MCV`
