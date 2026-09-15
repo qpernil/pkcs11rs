@@ -1072,8 +1072,9 @@ private func softwareObjectInventory(
             userType: CK_USER_TYPE(CKU_SO),
             pin: softwareTokenPIN
         )
+        lines.append("  C_Login(CKU_SO) => \(returnValueDescription(soLogin))")
         if soLogin != CKR_OK {
-            failure = "C_Login(CKU_SO) failed: \(returnValueDescription(soLogin))"
+            failure = "software-token SO login failed"
         } else {
             let initializePIN = initializeSoftwareUserPIN(session: session)
             if initializePIN == CKR_OK {
@@ -1095,10 +1096,11 @@ private func softwareObjectInventory(
             userType: CK_USER_TYPE(CKU_USER),
             pin: softwareTokenPIN
         )
+        lines.append("  C_Login(CKU_USER) => \(returnValueDescription(userLogin))")
         if userLogin == CKR_OK {
             userLoggedIn = true
         } else {
-            failure = "C_Login(CKU_USER) failed: \(returnValueDescription(userLogin))"
+            failure = "software-token user login failed"
         }
     }
 
@@ -1411,15 +1413,15 @@ private func authenticatedObjectInventory(
     var lines = [""]
     if let session = login.session {
         lines.append(
-            "Automatic credential login \(usernameValue): \(returnValueDescription(login.result)) using \(login.credential ?? "<unknown>")"
+            "C_LoginUser(CKU_USER, \(usernameValue)) => \(returnValueDescription(login.result)) using \(login.credential ?? "<unknown>")"
         )
         lines.append(contentsOf: objectInventory(
             session: session,
             title: "Objects (authenticated session)"
         ).lines)
-    } else if login.result != CKR_FUNCTION_NOT_SUPPORTED {
+    } else {
         lines.append(
-            "Automatic credential login \(usernameValue) failed: \(returnValueDescription(login.result))"
+            "C_LoginUser(CKU_USER, \(usernameValue)) => \(returnValueDescription(login.result))"
         )
     }
     return lines
@@ -1697,20 +1699,13 @@ private final class ModuleInspector {
             ))
         }
 
-        slotInventories = slotInventories.filter { !$0.isYubiHsm }
-            + slotInventories.filter(\.isYubiHsm)
-
         var authorizedSessions = [AuthorizedSession]()
-        var sourceAuthorizationLines = [String]()
-        for inventory in slotInventories where inventory.tokenLabel == "Secure Enclave" {
-            let source = loginSourceSlot(inventory.slot)
-            if let authorization = source.authorization {
-                authorizedSessions.append(authorization)
-            } else {
-                sourceAuthorizationLines.append(
-                    "Secure Enclave source login failed: \(returnValueDescription(source.result))"
-                )
-            }
+        func appendSlot(_ inventory: SlotInventory) {
+            lines.append("")
+            lines.append("Slot \(inventory.slot): \(inventory.description)")
+            lines.append("Token: \(inventory.tokenLabel)")
+            lines.append("Serial: \(inventory.serial)")
+            lines.append(contentsOf: inventory.objects.lines)
         }
 
         let yubiHsmInventories = slotInventories.filter(\.isYubiHsm)
@@ -1722,39 +1717,32 @@ private final class ModuleInspector {
         } + yubiHsmInventories.filter {
             !nativeSessionKeyProviders.contains($0.slot)
         }
-        var yubiHsmLogins = [CK_SLOT_ID: YubiHsmLogin]()
+
+        // Render slots in the same dependency order in which they are used.
+        // Successful source sessions remain open for later YubiHSM logins.
+        for inventory in slotInventories where !inventory.isYubiHsm {
+            appendSlot(inventory)
+            if inventory.tokenLabel == "Secure Enclave" {
+                let source = loginSourceSlot(inventory.slot)
+                lines.append("")
+                lines.append("C_Login(CKU_USER) => \(returnValueDescription(source.result))")
+                if let authorization = source.authorization {
+                    authorizedSessions.append(authorization)
+                    lines.append(contentsOf: objectInventory(
+                        session: authorization.session,
+                        title: "Objects (authenticated session)"
+                    ).lines)
+                }
+            }
+        }
+
         for inventory in yubiHsmLoginOrder {
+            appendSlot(inventory)
             let login = yubiHsmLogin(slot: inventory.slot)
-            yubiHsmLogins[inventory.slot] = login
             if let session = login.session {
-                authorizedSessions.append(AuthorizedSession(
-                    session: session
-                ))
+                authorizedSessions.append(AuthorizedSession(session: session))
             }
-        }
-
-        for inventory in slotInventories {
-            lines.append("")
-            lines.append("Slot \(inventory.slot): \(inventory.description)")
-            lines.append("Token: \(inventory.tokenLabel)")
-            lines.append("Serial: \(inventory.serial)")
-            lines.append(contentsOf: inventory.objects.lines)
-            if inventory.isYubiHsm {
-                lines.append(contentsOf: authenticatedObjectInventory(
-                    login: yubiHsmLogins[inventory.slot]
-                        ?? YubiHsmLogin(
-                            session: nil,
-                            result: CKR_FUNCTION_FAILED,
-                            credential: nil
-                        )
-                ))
-            }
-        }
-
-        if !sourceAuthorizationLines.isEmpty {
-            lines.append("")
-            lines.append("Credential source authorization:")
-            lines.append(contentsOf: sourceAuthorizationLines.map { "  \($0)" })
+            lines.append(contentsOf: authenticatedObjectInventory(login: login))
         }
 
         var cleanupLines = [String]()
