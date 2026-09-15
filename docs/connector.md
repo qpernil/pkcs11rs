@@ -94,8 +94,8 @@ for profile setup, wiring, and the connector/qualification commands.
 ## Embedded virtual YubiHSMs
 
 On Unix, including Linux and macOS, the connector can compile
-`virtual-yubihsm-core` directly into the process. Build the release binary
-with:
+`virtual-yubihsm-core` and its optional `persistent-runtime` feature directly
+into the process. Build the release binary with:
 
 ```sh
 cargo build --release -p pkcs11rs-connector \
@@ -156,23 +156,23 @@ concurrently, while separate physical HSMs remain independent.
 
 An optional Unix-only `embedded-virtual-yubihsm` build feature adds headless
 virtual devices to the same registry. Each embedded device owns a dedicated OS
-thread running `virtual-yubihsm-core`. The asynchronous transport sends one
-request through a capacity-one Tokio MPSC channel and awaits its result through
-a one-shot channel. Synchronous cryptography, state locking, and file syncing
-therefore never block a Tokio runtime worker. A received mutation is completed
-and accounted for even if its HTTP requester is cancelled before receiving the
-reply.
+thread and one `virtual-yubihsm-core::PersistentDevice`. The asynchronous
+transport sends one request through a capacity-one Tokio MPSC channel and
+awaits its result through a one-shot channel. Synchronous cryptography and the
+shared runtime's state locking and file syncing therefore never block a Tokio
+runtime worker. A received mutation is completed and accounted for even if its
+HTTP requester is cancelled before receiving the reply.
 
 Configure an instance by repeating
 `--virtual-yubihsm SERIAL=STATE_DIRECTORY`. Embedded instances use distinct
 absolute state directories and serials. The common persistence policy is
 selected with `--virtual-yubihsm-persistence batched|immediate`; batching uses
 a 500 ms maximum delay unless changed with
-`--virtual-yubihsm-batch-delay-ms`. The actor acquires the same persistent
-sidecar lock as the USB worker before restoring state and releases it only
-after graceful persistence shutdown. This allows the same virtual device state
-to move between connector and USB frontends across separate runs, but forbids
-simultaneous ownership.
+`--virtual-yubihsm-batch-delay-ms`. The core runtime acquires the same
+persistent sidecar lock used by the USB and I2C frontends before restoring
+state and releases it only after graceful persistence shutdown. This allows the
+same virtual device state to move between frontends across separate runs, but
+forbids simultaneous ownership.
 
 All virtual-HSM command, crypto, and durable-state dependencies are optional.
 A connector compiled without the feature still parses these options, logs that
