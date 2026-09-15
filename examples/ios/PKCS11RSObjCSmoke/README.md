@@ -8,14 +8,20 @@ Its functional smoke coverage is synchronized with the Swift UIKit app; the
 difference is the client language and its direct Objective-C representation of
 the same C structures, buffers, sessions, and lifecycle.
 
-The inventory also exercises automatic YubiHSM authentication. It calls
-`C_LoginUser` with the provider-independent wildcard URI `pkcs11:` and the
-prototype YubiHSM Auth credential password `password` for each YubiHSM.
-pkcs11rs uses public-key matching to select the first credential source in its
-protection order.
-Native YubiHSM Auth consumes the supplied password; a matching host credential
-ignores it. A successful login produces a second authenticated object inventory
-before the app logs out.
+The inventory also exercises automatic YubiHSM authentication. It first logs
+in and retains a Secure Enclave source session. It then calls `C_LoginUser`
+with the provider-independent wildcard URI `pkcs11:` and the prototype
+YubiHSM Auth credential password `password` for each YubiHSM, processing
+hardware session-key providers first and retaining successful sessions. This
+lets an authorized virtual YubiHSM supply a credential to later targets.
+Native YubiHSM Auth slots need no preliminary login. Other ordinary slots are
+eligible only when the application has already logged them in, so wildcard
+resolution neither submits the target PIN nor performs key operations on
+unselected applets. Each successful login produces a second authenticated
+object inventory before the app closes all retained sessions in reverse
+dependency order. It does not call the token-wide `C_Logout`; closing the final
+session naturally ends authorization when no other application session retains
+it.
 
 The platform-credential button exercises the same idempotent high-level
 PKCS11RS lifecycle API as the Swift app. **Provision platform credential** uses

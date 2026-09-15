@@ -119,15 +119,26 @@ These are session objects: successful checks destroy them explicitly, and
 closing the session cleans them up on an earlier failure. Only the three
 keypairs are persistent.
 
-After every public object inventory is complete, the app lists all discovered
-YubiHSM Auth credentials. For each YubiHSM slot it calls `C_LoginUser` with the
-provider-independent wildcard URI `pkcs11:` and the prototype YubiHSM Auth
-credential password `password`. pkcs11rs compares available credential public
-points with that slot's publicly discovered `CKO_PUBLIC_KEY` projections and
-uses the first matching source in its protection order. Native YubiHSM Auth consumes the supplied
-credential password; a matching host credential ignores it.
-After a successful login, the app enumerates the objects again as an
-authenticated user, logs out, and closes the session. On iOS the module
+After every public object inventory is complete, the app prepares the explicit
+credential-source set for its wildcard logins. It opens and logs in a retained
+Secure Enclave session first. It then logs in YubiHSM slots with hardware
+session-key derivation before the remaining YubiHSMs and retains every
+successful session. Each login uses the provider-independent wildcard URI
+`pkcs11:` and the prototype YubiHSM Auth credential password `password`.
+Consequently, a virtual YubiHSM can become the preferred source for later
+physical-YubiHSM logins during the same refresh. Native YubiHSM Auth slots need
+no preliminary login and remain eligible through the same authorization test.
+
+pkcs11rs compares credentials from no-login-required or already-authorized
+source slots with the target's publicly discovered `CKO_PUBLIC_KEY`
+projections and uses the first matching source in its protection order. It
+does not submit the target password to an unauthorized ordinary source. This
+keeps unselected PIV, OpenPGP, and other ordinary applet slots out of wildcard
+authentication traffic. After all successful logins have produced their
+authenticated object inventories, the app closes the retained sessions in
+reverse dependency order. It does not call the token-wide `C_Logout`; closing
+the final session naturally ends authorization when no other application
+session retains it. On iOS the module
 reconciles ordinary CryptoTokenKit USB smart-card readers before requesting
 interactive NFC discovery. A USB view of an NFC-discovered serial therefore
 rebinds its existing slots before their refresh can request NFC reacquisition.
