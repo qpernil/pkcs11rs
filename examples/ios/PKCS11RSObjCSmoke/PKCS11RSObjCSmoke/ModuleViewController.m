@@ -117,6 +117,15 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 @end
 
 
+@interface PKCS11RSAuthorizedSession : NSObject
+@property(nonatomic) CK_SESSION_HANDLE session;
+@end
+
+
+@implementation PKCS11RSAuthorizedSession
+@end
+
+
 @interface PKCS11RSSlotInventory : NSObject
 @property(nonatomic) CK_SLOT_ID slot;
 @property(nonatomic, copy) NSString *slotDescription;
@@ -124,6 +133,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 @property(nonatomic, copy) NSString *serial;
 @property(nonatomic) BOOL yubiHsm;
 @property(nonatomic, strong) PKCS11RSObjectInventory *objects;
+@property(nonatomic, strong) PKCS11RSAuthorizedSession *authorization;
+@property(nonatomic) CK_RV authenticationResult;
+@property(nonatomic, copy) NSString *authenticatedCredential;
 @end
 
 
@@ -1276,20 +1288,48 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     return inventory;
 }
 
-- (NSArray<NSString *> *)authenticatedInventoryForSlot:(CK_SLOT_ID)slot {
+- (PKCS11RSAuthorizedSession *)loginSourceSlot:(CK_SLOT_ID)slot result:(CK_RV *)result {
+    CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
+    *result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
+    if (*result != CKR_OK) {
+        return nil;
+    }
+    NSMutableData *password =
+        [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    *result = C_Login(session,
+                      CKU_USER,
+                      password.mutableBytes,
+                      (CK_ULONG)password.length);
+    [password resetBytesInRange:NSMakeRange(0, password.length)];
+    if (*result != CKR_OK && *result != CKR_USER_ALREADY_LOGGED_IN) {
+        C_CloseSession(session);
+        return nil;
+    }
+    PKCS11RSAuthorizedSession *authorization = [[PKCS11RSAuthorizedSession alloc] init];
+    authorization.session = session;
+    return authorization;
+}
+
+- (BOOL)slotHasHardwareSessionKeyDerivation:(CK_SLOT_ID)slot {
+    CK_MECHANISM_INFO information = {0};
+    return C_GetMechanismInfo(slot, CKM_CONCATENATE_BASE_AND_KEY, &information) == CKR_OK &&
+           (information.flags & CKF_HW) != 0;
+}
+
+- (void)loginYubiHsmInventory:(PKCS11RSSlotInventory *)inventory {
     NSString *username = @"pkcs11:";
 
     CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
-    CK_RV result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
+    CK_RV result = C_OpenSession(inventory.slot,
+                                 CKF_SERIAL_SESSION,
+                                 NULL_PTR,
+                                 NULL_PTR,
+                                 &session);
     if (result != CKR_OK) {
-        return @[
-            @"",
-            [NSString stringWithFormat:@"Authenticated objects: C_OpenSession failed: %@",
-                                       PKCS11RSReturnValue(result)],
-        ];
+        inventory.authenticationResult = result;
+        return;
     }
 
-    NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] initWithObjects:@"", nil];
     NSMutableData *password = [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding]
         mutableCopy];
     NSMutableData *usernameData = [[username dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
@@ -1300,26 +1340,33 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                          usernameData.mutableBytes,
                          usernameData.length);
     [password resetBytesInRange:NSMakeRange(0, password.length)];
-    if (result == CKR_OK) {
+    if (result == CKR_OK || result == CKR_USER_ALREADY_LOGGED_IN) {
+        PKCS11RSAuthorizedSession *authorization = [[PKCS11RSAuthorizedSession alloc] init];
+        authorization.session = session;
+        inventory.authorization = authorization;
+        inventory.authenticatedCredential = PKCS11RSAuthenticatedCredential(session);
+    } else {
+        C_CloseSession(session);
+    }
+    inventory.authenticationResult = result;
+}
+
+- (NSArray<NSString *> *)authenticatedInventory:(PKCS11RSSlotInventory *)inventory {
+    NSString *username = @"pkcs11:";
+    NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] initWithObjects:@"", nil];
+    if (inventory.authorization != nil) {
         [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@ using %@",
                                                     username,
-                                                    PKCS11RSReturnValue(result),
-                                                    PKCS11RSAuthenticatedCredential(session)]];
-        PKCS11RSObjectInventory *inventory = [self objectInventoryForSession:session
-                                                                       title:@"Objects (authenticated session)"];
-        [lines addObjectsFromArray:inventory.lines];
-        CK_RV logout = C_Logout(session);
-        [lines addObject:[NSString stringWithFormat:@"C_Logout: %@",
-                                                    PKCS11RSReturnValue(logout)]];
-    } else {
+                                                    PKCS11RSReturnValue(inventory.authenticationResult),
+                                                    inventory.authenticatedCredential]];
+        PKCS11RSObjectInventory *objects =
+            [self objectInventoryForSession:inventory.authorization.session
+                                      title:@"Objects (authenticated session)"];
+        [lines addObjectsFromArray:objects.lines];
+    } else if (inventory.authenticationResult != CKR_FUNCTION_NOT_SUPPORTED) {
         [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@",
                                                     username,
-                                                    PKCS11RSReturnValue(result)]];
-    }
-    CK_RV close = C_CloseSession(session);
-    if (close != CKR_OK) {
-        [lines addObject:[NSString stringWithFormat:@"C_CloseSession: %@",
-                                                    PKCS11RSReturnValue(close)]];
+                                                    PKCS11RSReturnValue(inventory.authenticationResult)]];
     }
     return lines;
 }
@@ -1746,6 +1793,46 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     }
     slotInventories = orderedSlots;
 
+    NSMutableArray<PKCS11RSAuthorizedSession *> *authorizedSessions =
+        [[NSMutableArray alloc] init];
+    NSMutableArray<NSString *> *sourceAuthorizationFailures = [[NSMutableArray alloc] init];
+    for (PKCS11RSSlotInventory *inventory in slotInventories) {
+        if (![inventory.tokenLabel isEqualToString:@"Secure Enclave"]) {
+            continue;
+        }
+        CK_RV sourceResult = CKR_OK;
+        PKCS11RSAuthorizedSession *authorization =
+            [self loginSourceSlot:inventory.slot result:&sourceResult];
+        if (authorization != nil) {
+            [authorizedSessions addObject:authorization];
+        } else {
+            [sourceAuthorizationFailures addObject:
+                [NSString stringWithFormat:@"Secure Enclave source login failed: %@",
+                                           PKCS11RSReturnValue(sourceResult)]];
+        }
+    }
+
+    NSMutableArray<PKCS11RSSlotInventory *> *nativeSessionKeyProviders =
+        [[NSMutableArray alloc] init];
+    NSMutableArray<PKCS11RSSlotInventory *> *otherYubiHsms = [[NSMutableArray alloc] init];
+    for (PKCS11RSSlotInventory *inventory in slotInventories) {
+        if (!inventory.yubiHsm) {
+            continue;
+        }
+        if ([self slotHasHardwareSessionKeyDerivation:inventory.slot]) {
+            [nativeSessionKeyProviders addObject:inventory];
+        } else {
+            [otherYubiHsms addObject:inventory];
+        }
+    }
+    [nativeSessionKeyProviders addObjectsFromArray:otherYubiHsms];
+    for (PKCS11RSSlotInventory *inventory in nativeSessionKeyProviders) {
+        [self loginYubiHsmInventory:inventory];
+        if (inventory.authorization != nil) {
+            [authorizedSessions addObject:inventory.authorization];
+        }
+    }
+
     for (PKCS11RSSlotInventory *inventory in slotInventories) {
         [report appendFormat:@"\nSlot %lu: %@\n",
                              (unsigned long)inventory.slot,
@@ -1758,10 +1845,33 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
 
         if (inventory.yubiHsm) {
             NSArray<NSString *> *authenticated =
-                [self authenticatedInventoryForSlot:inventory.slot];
+                [self authenticatedInventory:inventory];
             for (NSString *line in authenticated) {
                 [report appendFormat:@"%@\n", line];
             }
+        }
+    }
+
+    if (sourceAuthorizationFailures.count != 0) {
+        [report appendString:@"\nCredential source authorization:\n"];
+        for (NSString *failure in sourceAuthorizationFailures) {
+            [report appendFormat:@"  %@\n", failure];
+        }
+    }
+
+    NSMutableArray<NSString *> *cleanupFailures = [[NSMutableArray alloc] init];
+    for (PKCS11RSAuthorizedSession *authorization in authorizedSessions.reverseObjectEnumerator) {
+        CK_RV close = C_CloseSession(authorization.session);
+        if (close != CKR_OK) {
+            [cleanupFailures addObject:
+                [NSString stringWithFormat:@"C_CloseSession failed: %@",
+                                           PKCS11RSReturnValue(close)]];
+        }
+    }
+    if (cleanupFailures.count != 0) {
+        [report appendString:@"\nCredential session cleanup:\n"];
+        for (NSString *failure in cleanupFailures) {
+            [report appendFormat:@"  %@\n", failure];
         }
     }
 

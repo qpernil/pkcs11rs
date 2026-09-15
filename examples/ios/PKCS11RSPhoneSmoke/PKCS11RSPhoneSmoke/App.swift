@@ -49,6 +49,21 @@ private struct SlotInventory {
     let objects: ObjectInventory
 }
 
+private struct AuthorizedSession {
+    let session: CK_SESSION_HANDLE
+}
+
+private struct SourceLogin {
+    let authorization: AuthorizedSession?
+    let result: CK_RV
+}
+
+private struct YubiHsmLogin {
+    let session: CK_SESSION_HANDLE?
+    let result: CK_RV
+    let credential: String?
+}
+
 private struct ConnectorConfiguration {
     let url: String
     let tokenStoragePath: String
@@ -1348,9 +1363,9 @@ private func publicObjectInventory(
     return inventory
 }
 
-private func authenticatedObjectInventory(
+private func yubiHsmLogin(
     slot: CK_SLOT_ID
-) -> [String] {
+) -> YubiHsmLogin {
     let usernameValue = "pkcs11:"
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
@@ -1361,10 +1376,9 @@ private func authenticatedObjectInventory(
         &session
     )
     guard openResult == CKR_OK else {
-        return ["", "Authenticated objects: C_OpenSession failed: \(returnValueDescription(openResult))"]
+        return YubiHsmLogin(session: nil, result: openResult, credential: nil)
     }
 
-    var lines = [String]()
     var username = Array(usernameValue.utf8)
     var password = Array(yubiHsmAuthPassword.utf8)
     let loginResult = password.withUnsafeMutableBufferPointer { passwordBuffer in
@@ -1379,30 +1393,79 @@ private func authenticatedObjectInventory(
             )
         }
     }
-    if loginResult == CKR_OK {
-        lines.append("")
+    guard loginResult == CKR_OK || loginResult == CKR_USER_ALREADY_LOGGED_IN else {
+        _ = C_CloseSession(session)
+        return YubiHsmLogin(session: nil, result: loginResult, credential: nil)
+    }
+    return YubiHsmLogin(
+        session: session,
+        result: loginResult,
+        credential: authenticatedCredentialDescription(session)
+    )
+}
+
+private func authenticatedObjectInventory(
+    login: YubiHsmLogin
+) -> [String] {
+    let usernameValue = "pkcs11:"
+    var lines = [""]
+    if let session = login.session {
         lines.append(
-            "Automatic credential login \(usernameValue): \(returnValueDescription(loginResult)) using \(authenticatedCredentialDescription(session))"
+            "Automatic credential login \(usernameValue): \(returnValueDescription(login.result)) using \(login.credential ?? "<unknown>")"
         )
         lines.append(contentsOf: objectInventory(
             session: session,
             title: "Objects (authenticated session)"
         ).lines)
-        let logoutResult = C_Logout(session)
-        if logoutResult != CKR_OK {
-            lines.append("C_Logout failed: \(returnValueDescription(logoutResult))")
-        }
-    } else if loginResult != CKR_FUNCTION_NOT_SUPPORTED {
-        lines.append("")
+    } else if login.result != CKR_FUNCTION_NOT_SUPPORTED {
         lines.append(
-            "Automatic credential login \(usernameValue) failed: \(returnValueDescription(loginResult))"
+            "Automatic credential login \(usernameValue) failed: \(returnValueDescription(login.result))"
         )
     }
-    let closeResult = C_CloseSession(session)
-    if closeResult != CKR_OK {
-        lines.append("  C_CloseSession failed: \(returnValueDescription(closeResult))")
-    }
     return lines
+}
+
+private func loginSourceSlot(_ slot: CK_SLOT_ID) -> SourceLogin {
+    var session = CK_SESSION_HANDLE()
+    let openResult = C_OpenSession(
+        slot,
+        CK_FLAGS(CKF_SERIAL_SESSION),
+        nil,
+        nil,
+        &session
+    )
+    guard openResult == CKR_OK else {
+        return SourceLogin(authorization: nil, result: openResult)
+    }
+
+    var password = Array(yubiHsmAuthPassword.utf8)
+    let loginResult = password.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            CK_USER_TYPE(CKU_USER),
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+    guard loginResult == CKR_OK || loginResult == CKR_USER_ALREADY_LOGGED_IN else {
+        _ = C_CloseSession(session)
+        return SourceLogin(authorization: nil, result: loginResult)
+    }
+    return SourceLogin(
+        authorization: AuthorizedSession(
+            session: session
+        ),
+        result: loginResult
+    )
+}
+
+private func hasHardwareSessionKeyDerivation(_ slot: CK_SLOT_ID) -> Bool {
+    var information = CK_MECHANISM_INFO()
+    return C_GetMechanismInfo(
+        slot,
+        CK_MECHANISM_TYPE(CKM_CONCATENATE_BASE_AND_KEY),
+        &information
+    ) == CKR_OK && information.flags & CK_FLAGS(CKF_HW) != 0
 }
 
 private final class InspectionViewController: UIViewController {
@@ -1637,6 +1700,39 @@ private final class ModuleInspector {
         slotInventories = slotInventories.filter { !$0.isYubiHsm }
             + slotInventories.filter(\.isYubiHsm)
 
+        var authorizedSessions = [AuthorizedSession]()
+        var sourceAuthorizationLines = [String]()
+        for inventory in slotInventories where inventory.tokenLabel == "Secure Enclave" {
+            let source = loginSourceSlot(inventory.slot)
+            if let authorization = source.authorization {
+                authorizedSessions.append(authorization)
+            } else {
+                sourceAuthorizationLines.append(
+                    "Secure Enclave source login failed: \(returnValueDescription(source.result))"
+                )
+            }
+        }
+
+        let yubiHsmInventories = slotInventories.filter(\.isYubiHsm)
+        let nativeSessionKeyProviders = Set(yubiHsmInventories.compactMap {
+            hasHardwareSessionKeyDerivation($0.slot) ? $0.slot : nil
+        })
+        let yubiHsmLoginOrder = yubiHsmInventories.filter {
+            nativeSessionKeyProviders.contains($0.slot)
+        } + yubiHsmInventories.filter {
+            !nativeSessionKeyProviders.contains($0.slot)
+        }
+        var yubiHsmLogins = [CK_SLOT_ID: YubiHsmLogin]()
+        for inventory in yubiHsmLoginOrder {
+            let login = yubiHsmLogin(slot: inventory.slot)
+            yubiHsmLogins[inventory.slot] = login
+            if let session = login.session {
+                authorizedSessions.append(AuthorizedSession(
+                    session: session
+                ))
+            }
+        }
+
         for inventory in slotInventories {
             lines.append("")
             lines.append("Slot \(inventory.slot): \(inventory.description)")
@@ -1644,8 +1740,34 @@ private final class ModuleInspector {
             lines.append("Serial: \(inventory.serial)")
             lines.append(contentsOf: inventory.objects.lines)
             if inventory.isYubiHsm {
-                lines.append(contentsOf: authenticatedObjectInventory(slot: inventory.slot))
+                lines.append(contentsOf: authenticatedObjectInventory(
+                    login: yubiHsmLogins[inventory.slot]
+                        ?? YubiHsmLogin(
+                            session: nil,
+                            result: CKR_FUNCTION_FAILED,
+                            credential: nil
+                        )
+                ))
             }
+        }
+
+        if !sourceAuthorizationLines.isEmpty {
+            lines.append("")
+            lines.append("Credential source authorization:")
+            lines.append(contentsOf: sourceAuthorizationLines.map { "  \($0)" })
+        }
+
+        var cleanupLines = [String]()
+        for authorization in authorizedSessions.reversed() {
+            let result = C_CloseSession(authorization.session)
+            if result != CKR_OK {
+                cleanupLines.append("C_CloseSession failed: \(returnValueDescription(result))")
+            }
+        }
+        if !cleanupLines.isEmpty {
+            lines.append("")
+            lines.append("Credential session cleanup:")
+            lines.append(contentsOf: cleanupLines.map { "  \($0)" })
         }
 
         return lines.joined(separator: "\n")
