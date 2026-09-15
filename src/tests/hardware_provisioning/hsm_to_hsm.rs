@@ -63,15 +63,57 @@ fn open(serial: &str) -> CK_SESSION_HANDLE {
 
 fn login(session: CK_SESSION_HANDLE, pin: &str) {
     let mut pin = crate::Zeroizing::new(pin.as_bytes().to_vec());
+    let result = if pin.starts_with(b"pkcs11:") {
+        crate::api::C_LoginUser(
+            session,
+            CKU_USER as _,
+            std::ptr::null_mut(),
+            0,
+            pin.as_mut_ptr(),
+            pin.len() as _,
+        )
+    } else {
+        crate::api::C_Login(session, CKU_USER as _, pin.as_mut_ptr(), pin.len() as _)
+    };
     assert_eq!(
-        crate::api::C_Login(session, CKU_USER as _, pin.as_mut_ptr(), pin.len() as _),
-        CKR_OK as CK_RV,
+        result, CKR_OK as CK_RV,
         "bootstrap source/target login failed"
     );
 }
 
-fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
-    let mut serials = vec![source.to_owned(), target.to_owned()];
+fn authenticated_credential(session: CK_SESSION_HANDLE) -> String {
+    let mut length = 0;
+    assert_eq!(
+        crate::api::PKCS11RS_GetAuthenticatedCredential(session, std::ptr::null_mut(), &mut length,),
+        CKR_OK as CK_RV
+    );
+    let mut value = vec![0; length as usize];
+    assert_eq!(
+        crate::api::PKCS11RS_GetAuthenticatedCredential(session, value.as_mut_ptr(), &mut length,),
+        CKR_OK as CK_RV
+    );
+    String::from_utf8(value).expect("authenticated credential URI is not UTF-8")
+}
+
+fn assert_user_login(session: CK_SESSION_HANDLE) {
+    let mut info = CK_SESSION_INFO {
+        slotID: 0,
+        state: 0,
+        flags: 0,
+        ulDeviceError: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_USER_FUNCTIONS as CK_STATE);
+}
+
+fn initialize_hsms(
+    mut serials: Vec<String>,
+    recreate_sessions: bool,
+    public_discovery: Option<&str>,
+) {
     if let Ok(helpers) = std::env::var("PKCS11RS_CROSS_HSM_HELPERS") {
         serials.extend(
             helpers
@@ -92,8 +134,8 @@ fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
         initialize_with_configuration(serde_json::json!({
             "version": 1, "hardware": {"discovery": true},
             "slots": {"serials": serials}, "ccid": {"applications": ["hsmauth"]},
-            "software": {"slots": []}, "platform": {"enabled": false},
-            "yubihsm": {"urls": urls, "public_discovery": null, "recreate_sessions": recreate_sessions}
+            "software": {"slots": []}, "platform": {"enabled": true},
+            "yubihsm": {"urls": urls, "public_discovery": public_discovery, "recreate_sessions": recreate_sessions}
         })),
         CKR_OK as CK_RV
     );
@@ -102,6 +144,324 @@ fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
         crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
+}
+
+fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
+    initialize_hsms(
+        vec![source.to_owned(), target.to_owned()],
+        recreate_sessions,
+        None,
+    );
+}
+
+fn p256_public_key(
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+) -> crate::SoftwarePublicKey {
+    let encoded = read_hardware_attribute(session, object, CKA_EC_POINT as _);
+    let point = crate::der_octet_string_value(&encoded).expect("P-256 point is not DER encoded");
+    assert_eq!(point.len(), 65, "P-256 point has the wrong length");
+    assert_eq!(point[0], 4, "P-256 point is not uncompressed");
+    let key = crate::SoftwarePublicKey::Ec {
+        curve: crate::EcCurve::P256,
+        uncompressed: point.to_vec(),
+    };
+    key.validate().expect("P-256 point is invalid");
+    key
+}
+
+fn find_named_key_pair(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+    label: &str,
+) -> Option<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE)> {
+    let id = id.to_be_bytes();
+    let public = find_hardware_object(session, CKO_PUBLIC_KEY as _, &id);
+    let private = find_hardware_object(session, CKO_PRIVATE_KEY as _, &id);
+    match (public, private) {
+        (None, None) => None,
+        (Some(public), Some(private)) => {
+            for object in [public, private] {
+                assert_eq!(
+                    read_hardware_attribute(session, object, CKA_LABEL as _),
+                    label.as_bytes(),
+                    "existing source object {id:02x?} has a different label"
+                );
+            }
+            Some((public, private))
+        }
+        _ => panic!("source key pair {id:02x?} is incomplete"),
+    }
+}
+
+fn generate_p256_client_key(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+    label: &str,
+) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    if let Some(pair) = find_named_key_pair(session, id, label) {
+        return pair;
+    }
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_EC_KEY_PAIR_GEN as _,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut yes = CK_TRUE as CK_BBOOL;
+    let mut no = CK_FALSE as CK_BBOOL;
+    let mut id = id.to_be_bytes();
+    let mut parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+    let mut public_label = label.as_bytes().to_vec();
+    let mut private_label = public_label.clone();
+    let mut public_template = [
+        scalar_attribute(CKA_TOKEN as _, &mut yes),
+        bytes_attribute(CKA_ID as _, &mut id),
+        bytes_attribute(CKA_LABEL as _, &mut public_label),
+        bytes_attribute(CKA_EC_PARAMS as _, &mut parameters),
+    ];
+    let mut private_template = [
+        scalar_attribute(CKA_TOKEN as _, &mut yes),
+        scalar_attribute(CKA_PRIVATE as _, &mut yes),
+        scalar_attribute(CKA_SENSITIVE as _, &mut yes),
+        scalar_attribute(CKA_EXTRACTABLE as _, &mut no),
+        scalar_attribute(CKA_DERIVE as _, &mut yes),
+        scalar_attribute(CKA_SIGN as _, &mut no),
+        bytes_attribute(CKA_ID as _, &mut id),
+        bytes_attribute(CKA_LABEL as _, &mut private_label),
+    ];
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as _,
+            private_template.as_mut_ptr(),
+            private_template.len() as _,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV,
+        "virtual client key generation failed"
+    );
+    (public, private)
+}
+
+fn provision_authentication_key(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+    label: &str,
+    domains: u16,
+    public_key: &crate::SoftwarePublicKey,
+) -> CK_ULONG {
+    let capabilities = crate::yubihsm_capabilities(&[0x13]); // get-pseudo-random
+    crate::api::platform_credential::provision_platform_credential(
+        session,
+        label,
+        id,
+        label,
+        domains,
+        capabilities,
+        [0; 8],
+        public_key,
+    )
+    .expect("Authentication Key provisioning failed")
+}
+
+#[test]
+#[ignore = "persistent additive provisioning for one virtual client and explicit physical targets"]
+fn provisions_virtual_yubihsm_client_for_targets() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = required("PKCS11RS_VIRTUAL_CLIENT_SOURCE");
+    let targets: Vec<_> = required("PKCS11RS_VIRTUAL_CLIENT_TARGETS")
+        .split(',')
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!targets.is_empty());
+    assert!(!targets.contains(&source));
+    let mut unique_targets = targets.clone();
+    unique_targets.sort();
+    unique_targets.dedup();
+    assert_eq!(targets.len(), unique_targets.len(), "duplicate targets");
+    let source_pin = crate::Zeroizing::new(required("PKCS11RS_VIRTUAL_CLIENT_SOURCE_PIN"));
+    let target_pin = crate::Zeroizing::new(required("PKCS11RS_VIRTUAL_CLIENT_TARGET_PIN"));
+    let label = required("PKCS11RS_VIRTUAL_CLIENT_LABEL");
+    assert!(!label.is_empty() && label.len() <= 40);
+    let id = hex_u16(
+        "PKCS11RS_VIRTUAL_CLIENT_ID",
+        &required("PKCS11RS_VIRTUAL_CLIENT_ID"),
+    );
+    let platform_ids: Vec<_> = required("PKCS11RS_VIRTUAL_CLIENT_PLATFORM_IDS")
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| hex_u16("PKCS11RS_VIRTUAL_CLIENT_PLATFORM_IDS", id))
+        .collect();
+    assert!(!platform_ids.contains(&id));
+
+    let mut serials = vec![source.clone()];
+    serials.extend(targets.iter().cloned());
+    initialize_hsms(serials, true, Some(target_pin.as_str()));
+    let source_session = open(&source);
+    login(source_session, &source_pin);
+    let target_sessions: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            let session = open(target);
+            login(session, &target_pin);
+            (target, session)
+        })
+        .collect();
+
+    let source_pair = find_named_key_pair(source_session, id, &label);
+    let source_domains = crate::YubiHsmObjectInfo::parse(
+        &command(
+            source_session,
+            &crate::YubiHsmCommand::get_object_info(1, crate::YUBIHSM_AUTHENTICATION_KEY),
+        )
+        .expect("source discovery Authentication Key is unreadable"),
+    )
+    .expect("source discovery Authentication Key info is invalid")
+    .domains;
+    let platform_credentials: Vec<_> = platform_ids
+        .iter()
+        .map(|platform_id| {
+            let object = find_hardware_object(
+                target_sessions[0].1,
+                CKO_PUBLIC_KEY as _,
+                &platform_id.to_be_bytes(),
+            )
+            .unwrap_or_else(|| panic!("target projection {platform_id:04x} is missing"));
+            let label = String::from_utf8(read_hardware_attribute(
+                target_sessions[0].1,
+                object,
+                CKA_LABEL as _,
+            ))
+            .expect("target projection label is not UTF-8");
+            (
+                *platform_id,
+                label,
+                p256_public_key(target_sessions[0].1, object),
+            )
+        })
+        .collect();
+    let target_domains: Vec<_> = target_sessions
+        .iter()
+        .map(|(target, session)| {
+            let domains = crate::YubiHsmObjectInfo::parse(
+                &command(
+                    *session,
+                    &crate::YubiHsmCommand::get_object_info(1, crate::YUBIHSM_AUTHENTICATION_KEY),
+                )
+                .unwrap_or_else(|_| panic!("{target}: discovery Authentication Key is unreadable")),
+            )
+            .unwrap_or_else(|_| panic!("{target}: discovery Authentication Key info is invalid"))
+            .domains;
+            (*target, domains)
+        })
+        .collect();
+    eprintln!(
+        "preflight: virtual source {source} domains {source_domains:04x}, client {id:04x} {label:?}, targets {:?}, platform keys {:?}",
+        target_domains
+            .iter()
+            .map(|(target, domains)| format!("{target} domains {domains:04x}"))
+            .collect::<Vec<_>>(),
+        platform_credentials
+            .iter()
+            .map(|(id, label, _)| format!("{id:04x} {label:?}"))
+            .collect::<Vec<_>>()
+    );
+    let apply = std::env::var("PKCS11RS_VIRTUAL_CLIENT_APPLY").as_deref() == Ok("1");
+    if !apply && source_pair.is_none() {
+        eprintln!(
+            "preflight complete; the virtual source key is absent and no objects were written"
+        );
+        finalize_for_test();
+        return;
+    }
+
+    let (public, private) =
+        source_pair.unwrap_or_else(|| generate_p256_client_key(source_session, id, &label));
+    let public_key = p256_public_key(source_session, public);
+    let source_uri = String::from_utf8(read_hardware_attribute(
+        source_session,
+        private,
+        crate::CKA_PKCS11RS_URI,
+    ))
+    .expect("source URI is not UTF-8");
+    if apply {
+        for ((target, session), (_, domains)) in target_sessions.iter().zip(&target_domains) {
+            let result = provision_authentication_key(*session, id, &label, *domains, &public_key);
+            eprintln!("{target}: client Authentication Key {id:04x} result {result}");
+        }
+        for (platform_id, platform_label, platform_key) in &platform_credentials {
+            let result = provision_authentication_key(
+                source_session,
+                *platform_id,
+                platform_label,
+                source_domains,
+                platform_key,
+            );
+            eprintln!(
+                "{source}: platform Authentication Key {platform_id:04x} {platform_label:?} result {result}"
+            );
+        }
+    } else {
+        eprintln!("qualification only; no objects written");
+    }
+
+    for (target, session) in &target_sessions {
+        assert_eq!(crate::api::C_Logout(*session), CKR_OK as CK_RV);
+        let mut wildcard = b"pkcs11:".to_vec();
+        assert_eq!(
+            crate::api::C_LoginUser(
+                *session,
+                CKU_USER as _,
+                std::ptr::null_mut(),
+                0,
+                wildcard.as_mut_ptr(),
+                wildcard.len() as _,
+            ),
+            CKR_OK as CK_RV,
+            "wildcard failed to select the virtual client for {target}"
+        );
+        let selected_uri = authenticated_credential(*session);
+        let selected = crate::pkcs11_uri::ClientAuthUri::parse(selected_uri.as_bytes())
+            .expect("selected credential description is not a PKCS #11 URI");
+        assert_eq!(
+            selected.token.as_deref(),
+            Some(format!("YubiHSM #{source}").as_bytes())
+        );
+        assert_eq!(selected.authkey_id, Some(id));
+        eprintln!(
+            "verified wildcard selected virtual source {source} => target {target}: {selected_uri}"
+        );
+        assert_eq!(crate::api::C_Logout(*session), CKR_OK as CK_RV);
+        assert_user_login(source_session);
+        let mut selector = crate::pkcs11_uri::authentication_uri(&source_uri, id).into_bytes();
+        assert_eq!(
+            crate::api::C_LoginUser(
+                *session,
+                CKU_USER as _,
+                std::ptr::null_mut(),
+                0,
+                selector.as_mut_ptr(),
+                selector.len() as _,
+            ),
+            CKR_OK as CK_RV,
+            "new virtual client failed to authenticate to {target}"
+        );
+        let mut random = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(*session, random.as_mut_ptr(), random.len() as _),
+            CKR_OK as CK_RV
+        );
+        eprintln!("verified virtual client {source_uri} => target {target}");
+    }
+    finalize_for_test();
 }
 
 fn verify_hardware_recreation(session: CK_SESSION_HANDLE, before: &[u8; 64]) {
@@ -218,6 +578,8 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
             source_id,
             read_hardware_attribute(source_session, public, CKA_ID as _)
         );
+        let source_uri = read_hardware_attribute(source_session, private, crate::CKA_PKCS11RS_URI);
+        let source_uri = std::str::from_utf8(&source_uri).expect("generated object URI is UTF-8");
         let allowed = read_hardware_attribute(source_session, private, CKA_ALLOWED_MECHANISMS as _);
         let allowed: Vec<_> = allowed
             .as_chunks::<{ std::mem::size_of::<CK_MECHANISM_TYPE>() }>()
@@ -252,7 +614,7 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
                 .any(|(old, kind, _)| *old == id && *kind == crate::YUBIHSM_AUTHENTICATION_KEY)
         );
         assert_eq!(crate::api::C_Logout(target_session), CKR_OK as CK_RV);
-        let mut selector = format!(":{id:04x}{label}@{source}").into_bytes();
+        let mut selector = crate::pkcs11_uri::authentication_uri(source_uri, id).into_bytes();
         // The source's existing USER session supplies authorization. No source
         // password or private scalar is passed to the target login.
         assert_eq!(

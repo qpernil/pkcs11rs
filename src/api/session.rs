@@ -543,6 +543,24 @@ pub(crate) fn open_session(
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
 ) -> Result<CK_SESSION_HANDLE, Error> {
+    open_session_inner(slot_id, flags, true)
+}
+
+/// Open a session on a slot that has already been selected from the live
+/// registry. Internal provider views must preserve that slot's authorization
+/// state and avoid transport I/O between credential selection and use.
+pub(crate) fn open_prepared_session(
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+) -> Result<CK_SESSION_HANDLE, Error> {
+    open_session_inner(slot_id, flags, false)
+}
+
+fn open_session_inner(
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+    refresh: bool,
+) -> Result<CK_SESSION_HANDLE, Error> {
     let module = lock_context_read()?;
     let context = module.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     let handle = with_slot_context_mut_in_context(context, slot_id, |ctx| {
@@ -557,7 +575,9 @@ pub(crate) fn open_session(
         {
             return Err(CKR_SESSION_READ_WRITE_SO_EXISTS.into());
         }
-        let _ = ctx.slot.refresh();
+        if refresh {
+            let _ = ctx.slot.refresh();
+        }
         if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS == 0 {
             return Err(CKR_TOKEN_NOT_PRESENT.into());
         }

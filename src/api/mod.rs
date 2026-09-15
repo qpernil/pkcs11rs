@@ -70,7 +70,9 @@ pub(crate) mod rust {
         copy_object, create_object, destroy_object, find_objects, find_objects_final,
         find_objects_init, get_attribute_value,
     };
-    pub(crate) use super::session::{close_session, get_session_info, login, open_session};
+    #[cfg(test)]
+    pub(crate) use super::session::open_session;
+    pub(crate) use super::session::{close_session, get_session_info, login};
 }
 
 /// Backend object implementations; entry points invoke the selected slot's

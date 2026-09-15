@@ -758,8 +758,12 @@ full label `<name>.enc`; the credential layer requires the corresponding
 
 Wildcard matches are searched in a fixed protection order: native HSM Auth,
 token-native derivation, platform hardware, other hardware-held credentials, then
-software. The first public match is selected and receives the password;
-later source slots are not opened and authentication is attempted exactly once.
+software. Current slot capabilities determine this order, including after a
+retained slot reconnects. Ordinary source slots participate only after the
+application has logged them in, and a match must resolve to the corresponding
+private key. A target-only public projection is skipped when no private key
+exists. The target login never forwards its PIN to an ordinary source; native
+HSM Auth and direct authentication consume it according to their own contracts.
 Automatic matching requires
 successful public discovery. A missing match fails. For example, a platform
 credential can be selected explicitly with
