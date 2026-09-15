@@ -73,11 +73,13 @@ through the host slot and the same combined-mechanism selection.
 Card structures retain local working keys after derivation through the same
 provider operations. Their static SCP03 DEK remains a protected provider binding.
 Physical YubiHSM firmware uses software session objects for ECDH outputs, while
-its native prefixed extension returns KDF bytes. A virtual YubiHSM advertising
-algorithm 61 retains supported intermediates through protected volatile device
-objects. The public PKCS #11 regression verifies that native graph and its
-lifetime, but complete SCP client integration against that provider remains to
-be qualified.
+its prefixed mechanism returns KDF bytes. A virtual YubiHSM advertising algorithm
+61 retains supported intermediates through protected volatile device objects.
+The public PKCS #11 regression verifies the native graph and its lifetime. The
+complete client regression selects a persistent virtual-YubiHSM credential with
+the total wildcard, authenticates an independent virtual target, forces target
+session recreation, and proves both derivations use the native command without
+falling back to raw ECDH.
 
 Notation: `||` concatenates bytes, `BE16/BE32/BE128` encode unsigned integers
 in big-endian order, and `[a:b]` selects byte offsets with an exclusive end.
@@ -526,3 +528,10 @@ references, established target channels still exchange messages using local
 working keys. The existing-slot case preserves its application session and
 source token credential until normal fixture teardown. No physical device is
 modified by these tests.
+
+The virtual-to-virtual client regression complements that matrix with a native
+provider. It generates the long-term key as a persistent token object, resolves
+it through the same registered-slot wildcard used in production, and validates
+an authenticated command before and after target-session recreation. Logout
+drops the retained provider session and all of its session objects; the token
+key remains available for later logins.

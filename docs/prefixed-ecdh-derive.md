@@ -123,10 +123,13 @@ AES-CMAC(receipt-key,
 
 After receipt verification, ordinary YubiHSM secure messaging uses `S-ENC`,
 `S-MAC`, and `S-RMAC`. The implementation test generates the protected static
-key through PKCS #11, provisions its public half as an asymmetric
-authentication key on a second virtual YubiHSM, derives the 64 bytes through
-`C_DeriveKey`, verifies the receipt, completes the secure channel, and sends an
-authenticated command.
+key through PKCS #11 and provisions its public half as an asymmetric
+Authentication Key on a second virtual YubiHSM. A total credential wildcard
+resolves that source through the ordinary `C_LoginUser` client path. The test
+sends an authenticated command, forces target-session recreation, sends another
+command, and verifies that both establishments invoked native `DeriveEcdhKdf`
+without invoking raw `DeriveEcdh`. Logout releases the retained source session
+and its transient objects.
 
 The complete follow-on calculations use the receipt as the initial MAC
 chaining value `MCV`. Each command authenticates `MCV || command-frame` with

@@ -520,14 +520,16 @@ session. See [YubiHSM authentication](yubihsm-auth.md).
 An asymmetric credential's public point may be persisted as an ordinary public
 object on each matching YubiHSM, with the Authentication Key ID in `CKA_ID`.
 An RFC 7512 URI passed to `C_LoginUser` compares those public projections with
-public P-256 credentials from ordinary source slots and native HSM Auth slots
+public P-256 credentials from already-authorized ordinary source slots and
+native HSM Auth slots
 when `pkcs11rs-authkey` is omitted. The comparison uses the slot context's merged public token-object view,
 including generic persisted objects and backend-native objects. The first match
-in the backend-provided protection order is selected before a source password is
-submitted. Native HSM Auth is searched first, followed by token-native
+in the backend-provided protection order is selected. Native HSM Auth is searched first, followed by token-native
 derivation, platform hardware, other hardware-held credentials, and software. No
-match returns `CKR_USER_TYPE_INVALID`. Authentication is attempted only for the
-selected match and never falls through to another credential. Public matching
+match returns `CKR_USER_TYPE_INVALID`. The target PIN is consumed only by native
+HSM Auth or direct authentication and is never submitted to an ordinary source.
+Authentication is attempted only for the selected match and never falls through
+to another credential. Public matching
 requires successful target public discovery; a URI with
 `pkcs11rs-authkey=AAAA` can instead name the target ID and select private or
 symmetric source objects directly.

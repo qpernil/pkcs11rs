@@ -217,11 +217,15 @@ URI such as `pkcs11:` passed to `C_LoginUser` performs that same comparison
 inside pkcs11rs for the target slot. It compares publicly discoverable P-256
 credentials from ordinary source slots and native HSM Auth slots with two-byte
 `CKA_ID` target projections.
-Wildcard lookup selects the first credential/projection pair in the protection
-search order and submits the password only to that source. An absent match
-returns `CKR_USER_TYPE_INVALID`; a failed authentication does not try another
-credential. The stored object records the relationship established by provisioning;
-the subsequent authenticated session is the final cryptographic verification.
+Wildcard lookup examines credential/projection pairs in the protection search
+order. Ordinary source slots participate only when the application has already
+authorized their USER role. A public object must resolve to a paired private key
+before it can establish the target session. This matters for YubiHSM slots,
+which can contain target-only public projections as well as usable source keys:
+a projection-only match is skipped when its private key is absent. An absent
+match returns `CKR_USER_TYPE_INVALID`.
+The stored object records the relationship established by provisioning; the
+subsequent authenticated session is the final cryptographic verification.
 If a future YubiHSM firmware version makes the Authentication Key public half
 readable, a native public projection can replace the companion without changing
 the matching model.
@@ -265,8 +269,9 @@ The value uses one of the same selectors as YubiHSM `C_Login`. Direct
 authentication is `AAAApassword`, where `AAAA` is exactly four hexadecimal
 digits and the password is 8 through 64 UTF-8 bytes. Named source authentication
 is `:AAAAlabel[@source]:password`. For native YubiHSM Auth, the credential
-password is at most 16 UTF-8 bytes; ordinary source slots enforce their own PIN
-policy. The optional source identifies the source token when labels are not
+password is at most 16 UTF-8 bytes. Ordinary sources must already be logged in
+separately, so a password parsed from this discovery selector is not forwarded
+to them. The optional source identifies the source token when labels are not
 unique. An explicit trailing colon supplies an empty password. See
 [generic source selection](#generic-source-selection-and-authorization).
 
@@ -649,9 +654,9 @@ PKCS #11 3.x callers pass an RFC 7512 PKCS #11 URI and password separately with
 
 | Authentication | Username URI | PIN |
 | --- | --- | --- |
-| Any matching public credential | `pkcs11:` | Selected source PIN or native credential password |
-| Matching named credential | `pkcs11:object=<label>` | Selected source PIN or native credential password |
-| Exact source object and target key | `pkcs11:token=<token>;object=<label>;id=<ID>;type=<type>?pkcs11rs-authkey=AAAA` | Source token PIN or native credential password |
+| Any matching public credential | `pkcs11:` | Null for ordinary credentials; native credential password for HSM Auth |
+| Matching named credential | `pkcs11:object=<label>` | Null for ordinary credentials; native credential password for HSM Auth |
+| Exact source object and target key | `pkcs11:token=<token>;object=<label>;id=<ID>;type=<type>?pkcs11rs-authkey=AAAA` | Null for an already-authorized ordinary source; native credential password for HSM Auth |
 | Direct password credential | `pkcs11:?pkcs11rs-direct=<label>&pkcs11rs-authkey=AAAA` | Password |
 
 The URI path accepts `token`, `manufacturer`, `serial`, `model`, `object`,
@@ -960,32 +965,31 @@ exact names; their IDs may differ. A symmetric selector must name
 `<name>.enc`, never the base name or the MAC object, and must include the target
 key ID.
 Generic selectors accept credential labels up to 128 UTF-8 bytes; each backend
-still enforces its own provisioning limits. The source token's PIN is the
-separate `C_LoginUser` PIN argument. For a YubiHSM source,
-that PIN uses its own combined-login syntax, including its source authentication
-key ID, independently of the target ID in the outer selector.
+still enforces its own provisioning limits. The application logs in to every
+ordinary source token separately before selecting its credential. This includes
+a YubiHSM used as a source: its own `C_Login` or `C_LoginUser` operation selects
+and authorizes its client credential independently of the outer target login.
 
-Selection uses public metadata before source authorization. Published matches
-take precedence over hypothetical hidden keys. A hidden key or AES pair is
-eligible only when `pkcs11rs-authkey` and `object` explicitly name the target
-and source object; other URI fields can narrow the candidate set. The password
-is submitted only after the first candidate has been selected. A prompt
-identifies that source.
+Selection uses public metadata from already-authorized ordinary sources.
+Published matches take precedence over explicitly named hidden keys. A hidden
+key or AES pair is eligible only when `pkcs11rs-authkey` and `object` explicitly
+name the target and source object; other URI fields can narrow the candidate
+set. Private keys are checked for type, identity, and derivation permission
+without another login operation.
 
-An ordinary source session reuses existing USER authorization, or calls the
-shared Rust `C_Login` handler when `CKF_LOGIN_REQUIRED` is set. Secure Enclave login ignores
-the supplied or omitted PIN. Only after authorization are private keys resolved and checked
-for type, identity, and derivation permission. Native HSM Auth instead consumes
-its credential password in the native operation. A failed authorization ends the
-request; there is no candidate fallback or automatic password retry.
+The target `C_LoginUser` PIN is not forwarded to an ordinary source and can be
+null for an ordinary EC or AES credential. Native HSM Auth consumes it as the
+selected credential's password, while direct authentication uses it to derive
+temporary credentials. This keeps independent token PINs independent and
+prevents a target login from consuming source-token retries.
 
 | Source slot | Applicable credential and authorization |
 | --- | --- |
 | Temporary direct software slot | Password-derived protected session keys; private preparation establishes authorization |
-| Configured software slot | Persistent P-256 key or named AES pair; normal token USER PIN; public discovery needed for automatic matching |
-| Secure Enclave | Public P-256 projection; PIN-independent USER login and OS key-use policy |
-| PIV / OpenPGP | P-256 key capable of ECDH; normal PIN and per-key policy, including any fresh-authentication requirement |
-| YubiHSM | P-256 key or AES pair; source HSM login and native key capabilities; public discovery for automatic matching |
+| Configured software slot | Persistent P-256 key or named AES pair; application-established USER login; public discovery needed for automatic matching |
+| Secure Enclave | Public P-256 projection; application-established PIN-independent USER login and OS key-use policy |
+| PIV / OpenPGP | P-256 key capable of ECDH; application-established USER login and per-key policy, including any fresh-authentication requirement |
+| YubiHSM | P-256 key or AES pair; application-established source HSM login and native key capabilities; public discovery for automatic matching |
 | HSM Auth profile | Dedicated symmetric/asymmetric credential types; native per-credential password |
 | FIDO2 / Issuer Security Domain | Searched normally; no special slot exclusion. Their usual objects do not supply a suitable token credential; any selected key must satisfy the same operation and permission checks. |
 
@@ -1027,12 +1031,13 @@ and ignores its value. Because the token has no serial, it is selected through
 
 `pkcs11:token=Secure%20Enclave;object=reserve;type=public` matches that key's
 public point against the target HSM's discovered public authentication-key
-projections. Universal `pkcs11:` enumerates enabled source-slot public keys and
+projections. Universal `pkcs11:` enumerates already-authorized source-slot public keys and
 finds their matching private objects by both label and ID. Missing private-key
 matches return `CKR_KEY_HANDLE_INVALID`; no matching target projection returns
 `CKR_USER_TYPE_INVALID`. A disabled or unavailable source contributes no
-candidate. Multiple matches are ordered globally and only the first receives
-the supplied PIN. An explicit selector with no matching source returns
+candidate. Multiple matches are ordered globally. The supplied PIN is consumed
+only by native HSM Auth or direct authentication; ordinary candidates never
+receive it. An explicit selector with no matching source returns
 `CKR_PIN_INCORRECT` before attempting authentication, as for any source slot.
 
 The source label, source public key, target Authentication Key ID, and device

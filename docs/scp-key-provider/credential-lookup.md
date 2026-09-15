@@ -79,8 +79,8 @@ session encryption without exporting the long-term key. Explicit permission to
 encrypt is sufficient for this alternative; it does not enable `C_DeriveKey`.
 Missing keys return `CKR_KEY_HANDLE_INVALID`. A broad selector can match more
 than one credential; the first candidate in the global protection order is
-selected and is the only candidate that receives the supplied PIN. No failure
-causes password-based protocol fallback or a retry with another source.
+selected. The target PIN is never sent to an ordinary source. No failure causes
+password-based protocol fallback or a retry with another source.
 
 A directly supplied password prepares both credential types as protected
 session objects in a temporary software slot. Preparation retains the handles
@@ -94,25 +94,27 @@ the matching projection's two-byte ID supplies the target Authentication Key ID.
 
 ## Selection and authorization
 
-Enumeration uses public objects and never submits a password to discover which
-source is suitable. Wildcard lookup searches native HSM Auth first, then
+Enumeration uses public objects to discover candidate sources. Wildcard lookup
+searches native HSM Auth first, then
 ordinary slots ordered by their backend-provided protection tier: token-native
 derivation, platform hardware, other hardware-held credentials, and software. It
-opens source slots in that order and stops at the first public
-credential/target-ID match, without enumerating later sources. A selector containing
-`pkcs11rs-authkey` can defer private or symmetric lookup until that source is
-authorized; hidden credentials cannot participate in automatic public matching.
+uses current slot capabilities for this order and opens sources lazily. Ordinary
+slots whose USER role is not already authorized are skipped. A public
+credential/target-ID match resolves the paired private key without changing the
+source login state. Target-only public projections are skipped when no private
+key exists. A selector containing `pkcs11rs-authkey` can resolve hidden private
+or symmetric objects only in an already-authorized source; hidden credentials
+cannot participate in automatic public matching.
 Slots without matching token credentials contribute no candidate, regardless
 of their backend kind.
 
-An ordinary source session reuses existing USER authorization, otherwise uses
-the selected source's ordinary login when `CKF_LOGIN_REQUIRED` is set. The
-Secure Enclave accepts and ignores either an omitted or supplied PIN. Only the
-selected wildcard match receives a PIN and no other
-source is tried after a failed login. Source PIN length and policy belong to the
-selected provider. Native HSM Auth credentials use their credential password in
-the native operation; their slot has no USER login. SO management authorization
-remains separate.
+An application authorizes each ordinary source with a separate `C_Login` or
+`C_LoginUser` operation and that source's own PIN policy. The PIN supplied to
+the target YubiHSM login is ignored for ordinary EC and AES credentials; it may
+therefore be null. Native HSM Auth credentials instead consume that PIN as the
+credential password in their native operation, and direct authentication uses
+it to derive the temporary credential. The HSM Auth slot has no USER login. SO
+management authorization remains separate.
 
 Native discovery uses the advertised profile followed by explicit searches for
 the two credential key types. Further native authentication protocols can define

@@ -86,13 +86,13 @@ Authentication Key ID remains `1003`. A URI without `pkcs11rs-authkey`, such as
 `pkcs11:token=Secure%20Enclave;object=reserve;type=public`, matches source public
 keys against the YubiHSM's discovered public authentication-key projections.
 Universal `pkcs11:` considers all eligible public credentials. Multiple matches
-are ordered with the other source slots, and only the first receives the PIN.
-Only asymmetric matching is automatic.
+are ordered with the other source slots. Only asymmetric matching is automatic.
 
-The authentication consumer performs USER login before resolving the private
-key. The Secure Enclave backend accepts an omitted or supplied PIN and ignores its value,
-and also accepts an already logged-in user session. The resolved token
-key is bound through `Pkcs11Auth`. Static and ephemeral ECDH
+The application first performs USER login on the platform slot. The Secure
+Enclave backend accepts an omitted or supplied PIN and ignores its value. A
+later YubiHSM target login can select the key only while that source login is
+active, and never forwards the target PIN to the platform slot. The resolved
+token key is bound through `Pkcs11Auth`. Static and ephemeral ECDH
 outputs remain protected session objects throughout the common derivation
 graph. Only the final working keys are read into the channel for local message
 crypto. `ClientAuth` retains the source binding only when session recreation is

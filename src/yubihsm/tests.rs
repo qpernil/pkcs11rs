@@ -152,6 +152,7 @@ pub(crate) struct ProtocolPeer {
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
     native_session_commands: Cell<bool>,
+    native_ecdh_commands: Cell<bool>,
     objects: RefCell<Vec<u16>>,
     metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
     authkey_domains: RefCell<HashMap<u16, u16>>,
@@ -169,6 +170,8 @@ pub(crate) struct ProtocolPeer {
     authenticate_payload: Vec<u8>,
     closed_sessions: Cell<usize>,
     connection_epoch: Cell<u64>,
+    pub(crate) refreshes: Cell<usize>,
+    pub(crate) refresh_changes_epoch: Cell<bool>,
     fail_next_put_opaque: Cell<bool>,
     supports_opaque_update: Cell<bool>,
     fail_delete_opaque: RefCell<HashSet<u16>>,
@@ -226,6 +229,7 @@ impl ProtocolPeer {
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             native_session_commands: Cell::new(false),
+            native_ecdh_commands: Cell::new(false),
             objects: RefCell::new(vec![1]),
             metadata_objects: RefCell::new(HashMap::new()),
             authkey_domains: RefCell::new(HashMap::from([(1, 0xffff), (2, 0xffff)])),
@@ -242,6 +246,8 @@ impl ProtocolPeer {
             authenticate_payload: Vec::new(),
             closed_sessions: Cell::new(0),
             connection_epoch: Cell::new(0),
+            refreshes: Cell::new(0),
+            refresh_changes_epoch: Cell::new(false),
             fail_next_put_opaque: Cell::new(false),
             supports_opaque_update: Cell::new(true),
             fail_delete_opaque: RefCell::new(HashSet::new()),
@@ -253,6 +259,10 @@ impl ProtocolPeer {
         };
         peer.provision_authentication_key(2, false).unwrap();
         peer
+    }
+
+    pub(crate) fn expire_next_session(&self) {
+        self.expire_next_session_message.set(true);
     }
 
     fn new_virtual_device() -> VirtualYubiHsm {
@@ -313,7 +323,7 @@ impl ProtocolPeer {
             .map_err(|_| CKR_DEVICE_ERROR.into())
     }
 
-    fn provision_asymmetric_authentication_public_key(
+    pub(crate) fn provision_asymmetric_authentication_public_key(
         &self,
         id: u16,
         public_key: &[u8],
@@ -683,6 +693,12 @@ impl ProtocolPeer {
                     .borrow_mut()
                     .push((inner.command, inner.data.clone()));
                 if inner.command == CommandCode::PutAuthenticationKey as u8 {
+                    return None;
+                }
+                if self.native_ecdh_commands.get()
+                    && [CommandCode::DeriveEcdh, CommandCode::DeriveEcdhKdf]
+                        .iter().any(|command| *command as u8 == inner.command)
+                {
                     return None;
                 }
                 if self.native_session_commands.get()
@@ -1733,6 +1749,14 @@ impl Connector for ProtocolPeer {
         receive_buffer[..response.len()].copy_from_slice(&response);
         Ok(&receive_buffer[..response.len()])
     }
+    fn refresh(&self) -> Result<(), Error> {
+        self.refreshes.set(self.refreshes.get() + 1);
+        if self.refresh_changes_epoch.get() {
+            self.connection_epoch
+                .set(self.connection_epoch.get().wrapping_add(1));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -2013,6 +2037,11 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
         .get(&1)
         .unwrap()
         .clone();
+    let source_owner = crate::pkcs11_provider::ProviderSession::open(
+        crate::pkcs11_provider::Pkcs11Provider::from_slot(source_slot.clone()).unwrap(),
+    )
+    .unwrap();
+    source_owner.login(b"ignored by Host").unwrap();
     let peer = Rc::new(peer);
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&source_slot).unwrap();
@@ -2036,7 +2065,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
         authkey_domains: u16::MAX,
     };
     // The total wildcard may resolve to either native YubiHSM Auth or an
-    // ordinary source. The Host backend ignores a supplied credential password.
+    // already-authorized ordinary source. Its target PIN is not forwarded.
     login_user_slot(&mut slot, 1, b"pkcs11:", PASSWORD, &[projection]).unwrap();
     assert_eq!(peer.create_session_count(), 3);
     Slot::logout(&mut slot).unwrap();
@@ -6632,6 +6661,47 @@ fn native_auth_wildcard_stops_before_a_later_busy_source() {
 }
 
 #[test]
+fn ordinary_auth_order_follows_current_slot_capabilities() {
+    let sources = crate::auth_slots::AuthSlots::default();
+    let yubihsm_context = crate::ModuleContext::private_slot(Box::new(YubiHsmSlot::new(
+        Rc::new(ProtocolPeer::new()),
+        (0, 0, 0),
+        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
+    )))
+    .unwrap();
+    let yubihsm = yubihsm_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let host_context = crate::ModuleContext::private_slot(Box::new(
+        crate::backend::host::HostSlot::with_keys(Vec::new()),
+    ))
+    .unwrap();
+    let host = host_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    sources.register(&yubihsm).unwrap();
+    sources.register(&host).unwrap();
+
+    assert_eq!(
+        sources.ordinary_kinds_in_search_order().unwrap(),
+        [crate::SlotKind::YubiHsm, crate::SlotKind::Host]
+    );
+    yubihsm.lock().unwrap().slot.init_slot().unwrap();
+    assert_eq!(
+        sources.ordinary_kinds_in_search_order().unwrap(),
+        [crate::SlotKind::Host, crate::SlotKind::YubiHsm]
+    );
+}
+
+#[test]
 fn ordinary_wildcard_selects_the_first_matching_public_credential() {
     const AUTHKEY_ID: u16 = 0x1003;
     let credential = Arc::new(SoftwarePlatformCredential(
@@ -6673,7 +6743,26 @@ fn ordinary_wildcard_selects_the_first_matching_public_credential() {
         .into_iter()
         .find(|o| o.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
         .unwrap();
+    let mut decoy_projection = projection.clone();
+    decoy_projection.label = "projection-only".to_owned();
+    decoy_projection.id = b"projection-only".to_vec();
     projection.id = AUTHKEY_ID.to_be_bytes().to_vec();
+    let decoy_context = crate::ModuleContext::private_slot(Box::new(
+        crate::backend::host::HostSlot::with_keys(Vec::new()),
+    ))
+    .unwrap();
+    let decoy = decoy_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    decoy
+        .lock()
+        .unwrap()
+        .insert_object(decoy_projection)
+        .unwrap();
     let context = crate::ModuleContext::private_slot(Box::new(source)).unwrap();
     let child = context
         .slot_contexts
@@ -6682,7 +6771,18 @@ fn ordinary_wildcard_selects_the_first_matching_public_credential() {
         .get(&1)
         .unwrap()
         .clone();
+    let decoy_owner = crate::pkcs11_provider::ProviderSession::open(
+        crate::pkcs11_provider::Pkcs11Provider::from_slot(decoy.clone()).unwrap(),
+    )
+    .unwrap();
+    decoy_owner.login(b"ignored by Host").unwrap();
+    let source_owner = crate::pkcs11_provider::ProviderSession::open(
+        crate::pkcs11_provider::Pkcs11Provider::from_slot(child.clone()).unwrap(),
+    )
+    .unwrap();
+    source_owner.login(b"ignored by Host").unwrap();
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
+    slot.auth_slots.register(&decoy).unwrap();
     slot.auth_slots.register(&child).unwrap();
     slot.public_discovery_config = Some(public_discovery_credential("password"));
     slot.object_cache.get_mut().connection_epoch = slot.connector.connection_epoch();
@@ -6740,6 +6840,11 @@ fn ordinary_wildcard_stops_before_a_later_busy_source() {
         .get(&1)
         .unwrap()
         .clone();
+    let first_owner = crate::pkcs11_provider::ProviderSession::open(
+        crate::pkcs11_provider::Pkcs11Provider::from_slot(first.clone()).unwrap(),
+    )
+    .unwrap();
+    first_owner.login(b"ignored by Host").unwrap();
 
     let sources = Arc::new(crate::auth_slots::AuthSlots::default());
     sources.register(&first).unwrap();
@@ -6944,6 +7049,11 @@ fn auth_source_exclusion_uses_reference_equality_not_serial() {
     };
     let first = make();
     let second = make();
+    let second_owner = crate::pkcs11_provider::ProviderSession::open(
+        crate::pkcs11_provider::Pkcs11Provider::from_slot(second.clone()).unwrap(),
+    )
+    .unwrap();
+    second_owner.login(b"ignored by Host").unwrap();
     sources.register(&first).unwrap();
     sources.register(&second).unwrap();
     let serial = second.lock().unwrap().slot.serial().to_owned();

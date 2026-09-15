@@ -258,7 +258,7 @@ enum SelectedClientAuth {
     },
 }
 
-type PublicCredentialMatch = (crate::auth_slots::OrdinaryCredential, u16);
+type AuthenticatedClientAuth = (YubiHsmSecureSession, u16, ClientAuth, String);
 
 #[derive(Debug)]
 pub(crate) struct YubiHsmSlot {
@@ -1378,9 +1378,8 @@ impl YubiHsmSlot {
         &self,
         authkey_id: u16,
         credential: crate::auth_slots::OrdinaryCredential,
-        password: Option<&[u8]>,
-    ) -> Result<(YubiHsmSecureSession, u16, ClientAuth, String), Error> {
-        let material = credential.authorize(password, self.trust_prefix.clone())?;
+    ) -> Result<AuthenticatedClientAuth, Error> {
+        let material = credential.authorize(self.trust_prefix.clone())?;
         if matches!(
             material,
             YubiHsmPkcs11AuthenticationMaterial::HsmAuth { .. }
@@ -1473,12 +1472,12 @@ impl YubiHsmSlot {
         Ok(selected)
     }
 
-    fn resolve_ordinary_wildcard(
+    fn authenticate_ordinary_wildcard(
         &self,
         slot_id: CK_SLOT_ID,
         selector: &crate::pkcs11_uri::ClientAuthUri,
         token_objects: &[TokenObject],
-    ) -> Result<PublicCredentialMatch, Error> {
+    ) -> Result<AuthenticatedClientAuth, Error> {
         if !self.public_discovery_available(slot_id) {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
@@ -1501,7 +1500,17 @@ impl YubiHsmSlot {
                 (public.get(1..) == Some(public_key.as_slice()))
                     .then(|| u16::from_be_bytes([object.id[0], object.id[1]]))
             });
-            Ok(id.map(|id| (credential, id)))
+            let Some(authkey_id) = id else {
+                return Ok(None);
+            };
+            match self.authenticate_ordinary_credential(authkey_id, credential) {
+                Ok(authenticated) => Ok(Some(authenticated)),
+                // Public Authentication Key projections intentionally have no
+                // corresponding private key in their source slot. Continue
+                // without changing any source login state.
+                Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV => Ok(None),
+                Err(error) => Err(error),
+            }
         })?;
         selected.ok_or_else(|| CKR_USER_TYPE_INVALID.into())
     }
@@ -1577,7 +1586,7 @@ impl YubiHsmSlot {
             SelectedClientAuth::Ordinary {
                 credential,
                 authkey_id,
-            } => self.authenticate_ordinary_credential(authkey_id, credential, password),
+            } => self.authenticate_ordinary_credential(authkey_id, credential),
         }
     }
 
@@ -1636,37 +1645,6 @@ impl YubiHsmSlot {
             .map(|(session, authkey_id, material, _)| (session, authkey_id, material))
     }
 
-    fn select_login(
-        &self,
-        slot_id: Option<CK_SLOT_ID>,
-        username: &[u8],
-        token_objects: &[TokenObject],
-    ) -> Result<SelectedClientAuth, Error> {
-        let login = parse_yubihsm_login_username(username)?;
-        if !login.is_wildcard_target() {
-            return self.select_explicit_login(login);
-        }
-        let slot_id = slot_id.ok_or(CKR_PIN_INCORRECT)?;
-        if !self.public_discovery_available(slot_id) {
-            return Err(CKR_USER_TYPE_INVALID.into());
-        }
-        match self.resolve_hsmauth_wildcard(slot_id, &login, token_objects) {
-            Ok((provider, authkey_id)) => {
-                return Ok(SelectedClientAuth::Native {
-                    provider,
-                    authkey_id,
-                });
-            }
-            Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV => {}
-            Err(error) => return Err(error),
-        }
-        self.resolve_ordinary_wildcard(slot_id, &login, token_objects)
-            .map(|(credential, authkey_id)| SelectedClientAuth::Ordinary {
-                credential,
-                authkey_id,
-            })
-    }
-
     fn login_selected(
         &mut self,
         selected: SelectedClientAuth,
@@ -1683,8 +1661,14 @@ impl YubiHsmSlot {
             } else {
                 password
             };
-        let (session, authkey_id, reauthentication, credential_description) =
-            self.authenticate_selected_login(selected, password)?;
+        let authenticated = self.authenticate_selected_login(selected, password)?;
+        self.install_authenticated_login(authenticated)
+    }
+
+    fn install_authenticated_login(
+        &mut self,
+        (session, authkey_id, reauthentication, credential_description): AuthenticatedClientAuth,
+    ) -> Result<(), Error> {
         let credential_description = if credential_description.contains("pkcs11rs-authkey=") {
             credential_description
         } else {
@@ -4262,8 +4246,32 @@ impl Slot for YubiHsmSlot {
         pinentry: &pinentry::Pinentry,
         token_objects: &[TokenObject],
     ) -> Result<(), Error> {
-        let selected = self.select_login(Some(slot_id), username, token_objects)?;
-        self.login_selected(selected, password, pinentry)
+        let login = parse_yubihsm_login_username(username)?;
+        if !login.is_wildcard_target() {
+            let selected = self.select_explicit_login(login)?;
+            return self.login_selected(selected, password, pinentry);
+        }
+        if !self.public_discovery_available(slot_id) {
+            return Err(CKR_USER_TYPE_INVALID.into());
+        }
+        match self.resolve_hsmauth_wildcard(slot_id, &login, token_objects) {
+            Ok((provider, authkey_id)) => {
+                return self.login_selected(
+                    SelectedClientAuth::Native {
+                        provider,
+                        authkey_id,
+                    },
+                    password,
+                    pinentry,
+                );
+            }
+            Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV => {}
+            Err(error) => return Err(error),
+        }
+        let _ = self.close_active_session("pre-login");
+        self.clear_cached_private_objects()?;
+        let authenticated = self.authenticate_ordinary_wildcard(slot_id, &login, token_objects)?;
+        self.install_authenticated_login(authenticated)
     }
     fn login_user_uses_token_objects(&self, username: &[u8]) -> bool {
         parse_yubihsm_login_username(username).is_ok_and(|selector| selector.is_wildcard_target())

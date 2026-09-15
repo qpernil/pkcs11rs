@@ -102,8 +102,9 @@ impl ProviderSession {
         let [slot] = slots.as_slice() else {
             return Err(CKR_DEVICE_ERROR.into());
         };
-        let handle = provider
-            .call(|| api::rust::open_session(*slot, (CKF_RW_SESSION | CKF_SERIAL_SESSION) as _))?;
+        let handle = provider.call(|| {
+            api::open_prepared_session(*slot, (CKF_RW_SESSION | CKF_SERIAL_SESSION) as _)
+        })?;
         let session = Arc::new(Self { provider, handle });
         if session.provider.automatic_software_login {
             // This ephemeral, nonpersistent token has no configured credential.
@@ -226,6 +227,28 @@ mod tests {
             assert!(Arc::ptr_eq(&selected_context().unwrap(), &first.context));
         });
         assert!(selected_context().is_none());
+    }
+
+    #[test]
+    fn existing_slot_provider_open_does_not_refresh_the_selected_backend() {
+        let peer = std::rc::Rc::new(crate::yubihsm::tests::ProtocolPeer::new());
+        let context = ModuleContext::private_slot(Box::new(crate::YubiHsmSlot::new(
+            peer.clone(),
+            (2, 5, 0),
+            Vec::new(),
+        )))
+        .unwrap();
+        let slot = context
+            .slot_contexts
+            .read()
+            .unwrap()
+            .get(&1)
+            .unwrap()
+            .clone();
+        let before = peer.refreshes.get();
+        let session = ProviderSession::open(Pkcs11Provider::from_slot(slot).unwrap()).unwrap();
+        assert_eq!(peer.refreshes.get(), before);
+        drop(session);
     }
 
     #[test]

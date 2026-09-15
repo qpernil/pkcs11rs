@@ -6096,6 +6096,7 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
 
     let mut ec_parameters: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
     let mut key_id = 40_u16.to_be_bytes();
+    let mut key_label = *b"virtual client";
     let mut token = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
     let mut allowed = [crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE];
@@ -6111,6 +6112,11 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
             ulValueLen: key_id.len() as CK_ULONG,
         },
         CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: key_label.as_mut_ptr().cast(),
+            ulValueLen: key_label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
             type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             pValue: (&mut token as *mut CK_BBOOL).cast(),
             ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
@@ -6121,6 +6127,11 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
             type_: CKA_ID as CK_ATTRIBUTE_TYPE,
             pValue: key_id.as_mut_ptr().cast(),
             ulValueLen: key_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: key_label.as_mut_ptr().cast(),
+            ulValueLen: key_label.len() as CK_ULONG,
         },
         CK_ATTRIBUTE {
             type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -6185,147 +6196,90 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
         CKR_OK as CK_RV
     );
     assert_eq!(&source_point[..3], &[0x04, 0x41, 0x04]);
-    let source_public_coordinates = &source_point[3..];
-    assert_eq!(source_public_coordinates.len(), 64);
 
     const TARGET_AUTHKEY_ID: u16 = 40;
     let target = std::rc::Rc::new(crate::yubihsm::tests::ProtocolPeer::new());
-    let (mut provisioning_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
-        target.as_ref(),
-        2,
-        b"password",
-        None,
-        None,
-    )
-    .unwrap();
-    let target_authkey_parameters = crate::yubihsm::DelegatedObjectParameters {
-        object: crate::YubiHsmObjectParameters {
-            id: TARGET_AUTHKEY_ID,
-            label: "PKCS11 protected ECDH",
-            domains: u16::MAX,
-            capabilities: crate::yubihsm_capabilities(&[0x13]),
-            algorithm: crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
-        },
-        delegated_capabilities: [0; 8],
-    };
-    let provision_authkey = crate::YubiHsmCommand::put_delegated_object(
-        crate::YubiHsmCommandCode::PutAuthenticationKey,
-        &target_authkey_parameters,
-        source_public_coordinates,
-    )
-    .unwrap();
-    assert_eq!(
-        crate::parse_yubihsm_object_id(
-            &provisioning_session
-                .send_command(target.as_ref(), &provision_authkey)
-                .unwrap(),
-        )
-        .unwrap(),
-        TARGET_AUTHKEY_ID
-    );
-    provisioning_session
-        .send_command(target.as_ref(), &crate::YubiHsmCommand::close_session())
+    target
+        .provision_asymmetric_authentication_public_key(TARGET_AUTHKEY_ID, &source_point[2..])
         .unwrap();
 
-    let host_ephemeral =
-        crate::SoftwareSigningKey::generate(crate::SignatureScheme::EcdsaP256Sha256).unwrap();
-    let crate::SoftwarePublicKey::Ec {
-        uncompressed: host_ephemeral_public,
-        ..
-    } = host_ephemeral.public_key()
-    else {
-        unreachable!()
-    };
-    let handshake = crate::YubiHsmSecureSession::begin_asymmetric(
-        target.as_ref(),
-        TARGET_AUTHKEY_ID,
-        &host_ephemeral_public,
+    let source_context = test_slot_context(SOURCE_SLOT_ID);
+    let mut target_projection = source_context
+        .lock()
+        .unwrap()
+        .resolve_object(source_public)
+        .unwrap()
+        .unwrap()
+        .clone();
+    target_projection.slot_id = Some(100);
+    target_projection.id = TARGET_AUTHKEY_ID.to_be_bytes().to_vec();
+    let auth_slots = std::sync::Arc::new(crate::auth_slots::AuthSlots::default());
+    auth_slots.register(&source_context).unwrap();
+    let mut target_slot = crate::YubiHsmSlot::with_auth_slots_and_public_discovery(
+        target.clone(),
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
+        auth_slots,
+        crate::configured_yubihsm_public_discovery_credential(Some("0001password".into())).unwrap(),
+    );
+    target_slot.recreate_sessions = true;
+    crate::Slot::login_user(
+        &mut target_slot,
+        100,
+        b"pkcs11:",
+        Some(b""),
+        &crate::pinentry::Pinentry::unconfigured(),
+        &[target_projection],
     )
     .unwrap();
-    let device_ephemeral_public = &handshake.context[65..];
-    let ephemeral_secret = software_key_core::software_key_agreement::derive_with_signing_key(
-        &host_ephemeral,
-        device_ephemeral_public,
-    )
-    .unwrap();
-    let mut target_device_public = target.device_public_key().unwrap();
-    let mut prefix = ephemeral_secret.to_vec();
-    let mut shared_data = [0x3c, 0x88, 0x10];
-    let mut parameters = crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
-        kdf: CKD_SHA256_KDF as CK_EC_KDF_TYPE,
-        ulSharedDataLen: shared_data.len() as CK_ULONG,
-        pSharedData: shared_data.as_mut_ptr(),
-        ulPublicDataLen: target_device_public.len() as CK_ULONG,
-        pPublicData: target_device_public.as_mut_ptr(),
-        ulPrefixDataLen: prefix.len() as CK_ULONG,
-        pPrefixData: prefix.as_mut_ptr(),
-    };
-    let mut mechanism = CK_MECHANISM {
-        mechanism: crate::CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
-        pParameter: (&mut parameters as *mut crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS).cast(),
-        ulParameterLen: std::mem::size_of::<crate::CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS>()
-            as CK_ULONG,
-    };
-    let mut output_length = 64 as CK_ULONG;
-    let mut derived_template = CK_ATTRIBUTE {
-        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
-        pValue: (&mut output_length as *mut CK_ULONG).cast(),
-        ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
-    };
-    let mut derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let selected = crate::Slot::authenticated_credential_description(&target_slot).unwrap();
+    let selected = crate::pkcs11_uri::ClientAuthUri::parse(selected.as_bytes()).unwrap();
+    assert_eq!(selected.object.as_deref(), Some(key_label.as_slice()));
+    assert_eq!(selected.class, Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS));
+    assert_eq!(selected.authkey_id, Some(TARGET_AUTHKEY_ID));
     assert_eq!(
-        crate::api::C_DeriveKey(
-            source_session,
-            &mut mechanism,
-            source_private,
-            &mut derived_template,
-            1,
-            &mut derived_key,
-        ),
-        CKR_OK as CK_RV
-    );
-    let mut session_keys = [0u8; 64];
-    let mut value = CK_ATTRIBUTE {
-        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
-        pValue: session_keys.as_mut_ptr().cast(),
-        ulValueLen: session_keys.len() as CK_ULONG,
-    };
-    assert_eq!(
-        crate::api::C_GetAttributeValue(source_session, derived_key, &mut value, 1),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(value.ulValueLen as usize, session_keys.len());
-
-    let mut receipt_input = device_ephemeral_public.to_vec();
-    receipt_input.extend_from_slice(&host_ephemeral_public);
-    assert_eq!(
-        crate::secure_channel_crypto::aes_cmac(&session_keys[..16], &receipt_input)
-            .unwrap()
-            .as_slice(),
-        handshake.receipt
-    );
-    let mut target_session = crate::YubiHsmSecureSession::complete_asymmetric_with_session_keys(
-        handshake,
-        zeroize::Zeroizing::new(session_keys[16..32].try_into().unwrap()),
-        zeroize::Zeroizing::new(session_keys[32..48].try_into().unwrap()),
-        zeroize::Zeroizing::new(session_keys[48..64].try_into().unwrap()),
-    )
-    .unwrap();
-    assert_eq!(
-        target_session
-            .send_command(
-                target.as_ref(),
-                &crate::YubiHsmCommand::get_pseudo_random(16)
-            )
-            .unwrap()
-            .len(),
+        crate::send_yubihsm_secure_command(
+            target.as_ref(),
+            target_slot.session.as_ref(),
+            &crate::YubiHsmCommand::get_pseudo_random(16),
+        )
+        .unwrap()
+        .len(),
         16
     );
-    assert!(
+    target.expire_next_session();
+    assert_eq!(
+        crate::send_yubihsm_secure_command(
+            target.as_ref(),
+            target_slot.session.as_ref(),
+            &crate::YubiHsmCommand::get_pseudo_random(16),
+        )
+        .unwrap()
+        .len(),
+        16
+    );
+    let source_commands = source_commands.borrow();
+    assert_eq!(
         source_commands
-            .borrow()
             .iter()
-            .any(|(command, _)| *command == crate::yubihsm::CommandCode::DeriveEcdhKdf as u8)
+            .filter(|(command, _)| { *command == crate::yubihsm::CommandCode::DeriveEcdhKdf as u8 })
+            .count(),
+        2
+    );
+    assert!(
+        !source_commands
+            .iter()
+            .any(|(command, _)| { *command == crate::yubihsm::CommandCode::DeriveEcdh as u8 })
+    );
+    drop(source_commands);
+    crate::Slot::logout(&mut target_slot).unwrap();
+    assert!(
+        source_context
+            .lock()
+            .unwrap()
+            .memory_objects
+            .values()
+            .all(|object| object.token)
     );
 
     finalize_for_test();

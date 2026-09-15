@@ -370,7 +370,7 @@ fn asymmetric_complete_channel_uses_private_and_existing_pkcs11_auth() {
 }
 
 #[test]
-fn registered_software_source_login_selects_before_authorization_for_both_protocols() {
+fn registered_software_source_requires_application_authorization_for_both_protocols() {
     let _serial = crate::test::TEST_LOCK.lock().unwrap();
     for protocol in [
         Protocol::Symmetric,
@@ -395,17 +395,18 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
             fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
             CKR_OK as CK_RV
         );
-        assert!(
-            matches!(login_user_slot(&mut slot, 7, selector.as_bytes(), b"wrong source pin", &[]),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
-        );
+        assert!(matches!(
+            login_user_slot(&mut slot, 7, selector.as_bytes(), b"not forwarded", &[]),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
+        ));
         assert_eq!(peer.create_session_count(), 0);
         assert!(!child.lock().unwrap().slot.login_is_active());
+        fixture.owner.login(b"test source user pin").unwrap();
         login_user_slot(
             &mut slot,
             7,
             selector.as_bytes(),
-            b"test source user pin",
+            b"unrelated target pin",
             &[],
         )
         .unwrap();
@@ -440,7 +441,7 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         assert_eq!(peer.create_session_count(), 2);
         Slot::logout(&mut slot).unwrap();
         // A source authorized by the application is reused without submitting
-        // the supplied bytes as another token PIN.
+        // the target PIN to that source token.
         login_user_slot(&mut slot, 7, selector.as_bytes(), b"not resubmitted", &[]).unwrap();
         Slot::logout(&mut slot).unwrap();
         let discovery_label = if matches!(protocol, Protocol::Asymmetric) {
@@ -456,6 +457,7 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
             fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
             CKR_OK as CK_RV
         );
+        fixture.owner.login(b"test source user pin").unwrap();
         assert!(!Slot::token_objects(&slot, 7).unwrap().is_empty());
         assert!(matches!(
             slot.object_cache.borrow().discovery,
@@ -496,6 +498,356 @@ fn registered_software_source_login_selects_before_authorization_for_both_protoc
         );
         fixture.release();
     }
+}
+
+#[test]
+fn authorized_yubihsm_source_authenticates_another_yubihsm() {
+    nested_yubihsm_authentication(true);
+}
+
+#[test]
+fn yubihsm_source_rejects_authentication_without_session_derivation_permission() {
+    nested_yubihsm_authentication(false);
+}
+
+fn nested_yubihsm_authentication(allow_session_derivation: bool) {
+    const SOURCE_AUTHKEY_ID: u16 = 0x1004;
+    const TARGET_AUTHKEY_ID: u16 = 0x1101;
+    const CLIENT_LABEL: &str = "nested YubiHSM client";
+
+    let _serial = crate::test::TEST_LOCK.lock().unwrap();
+    let host_credential = Arc::new(SoftwarePlatformCredential(
+        test_private_key(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 7,
+        ])
+        .unwrap(),
+    ));
+    let SoftwarePublicKey::Ec {
+        uncompressed: host_public,
+        ..
+    } = host_credential.0.public_key()
+    else {
+        panic!("host test credential must be P-256")
+    };
+
+    let host = crate::backend::host::HostSlot::with_keys(vec![(
+        "nested host".to_owned(),
+        host_credential,
+    )]);
+    let host_login = crate::pkcs11_uri::authentication_uri(
+        &crate::pkcs11_uri::object_uri_parts(
+            &host,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            b"nested host",
+            b"",
+        ),
+        SOURCE_AUTHKEY_ID,
+    );
+    let host_context = ModuleContext::private_slot(Box::new(host)).unwrap();
+    let host_slot = host_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let host_owner =
+        ProviderSession::open(Pkcs11Provider::from_slot(host_slot.clone()).unwrap()).unwrap();
+    host_owner.login(b"ignored by Host").unwrap();
+
+    let source_peer = Rc::new(ProtocolPeer::new());
+    source_peer.native_session_commands.set(true);
+    source_peer.native_ecdh_commands.set(true);
+    source_peer
+        .provision_asymmetric_authentication_public_key(SOURCE_AUTHKEY_ID, &host_public)
+        .unwrap();
+    let capabilities = virtual_yubihsm_core::CapabilitySet::from_capabilities(
+        [
+            virtual_yubihsm_core::Capability::GetPseudoRandom,
+            virtual_yubihsm_core::Capability::DeriveEcdh,
+            virtual_yubihsm_core::Capability::DeriveSessionKey,
+        ]
+        .into_iter()
+        .filter(|capability| {
+            allow_session_derivation
+                || *capability == virtual_yubihsm_core::Capability::GetPseudoRandom
+        }),
+    );
+    let mut authkey = source_peer
+        .device
+        .borrow()
+        .objects()
+        .find(|object| object.info.id == SOURCE_AUTHKEY_ID)
+        .unwrap()
+        .clone();
+    authkey.info.capabilities = capabilities;
+    authkey.info.delegated_capabilities = VirtualCapabilitySet::NONE;
+    source_peer
+        .device
+        .borrow_mut()
+        .provision_object(authkey)
+        .unwrap();
+    source_peer
+        .visible_authkey_info
+        .borrow_mut()
+        .get_mut(&SOURCE_AUTHKEY_ID)
+        .unwrap()
+        .capabilities = capabilities.to_bytes();
+    let client_private = crate::yubico_kdf::yubico_password_p256_key(PASSWORD).unwrap();
+    let SoftwarePublicKey::Ec {
+        uncompressed: client_public,
+        ..
+    } = client_private.public_key()
+    else {
+        panic!("client test credential must be P-256")
+    };
+    source_peer
+        .device
+        .borrow_mut()
+        .provision_object(VirtualObjectRecord {
+            info: VirtualObjectInfo {
+                capabilities: VirtualCapabilitySet::from_capabilities([
+                    virtual_yubihsm_core::Capability::DeriveEcdh,
+                ]),
+                id: TARGET_AUTHKEY_ID,
+                length: 96,
+                domains: u16::MAX,
+                object_type: VirtualObjectType::AsymmetricKey,
+                algorithm: YUBIHSM_ALGO_EC_P256,
+                sequence: 1,
+                origin: 2,
+                label: CLIENT_LABEL.as_bytes().to_vec(),
+                delegated_capabilities: VirtualCapabilitySet::NONE,
+            },
+            material: VirtualObjectMaterial::SigningKey(client_private),
+        })
+        .unwrap();
+    source_peer.metadata_objects.borrow_mut().insert(
+        TARGET_AUTHKEY_ID,
+        (
+            ObjectInfo {
+                capabilities: [0, 0, 0, 0, 0, 0, 8, 0],
+                id: TARGET_AUTHKEY_ID,
+                length: 96,
+                domains: u16::MAX,
+                object_type: YUBIHSM_ASYMMETRIC_KEY,
+                algorithm: YUBIHSM_ALGO_EC_P256,
+                sequence: 1,
+                origin: 2,
+                label: CLIENT_LABEL.to_owned(),
+                delegated_capabilities: [0; 8],
+            },
+            Vec::new(),
+        ),
+    );
+    let source_auth_slots = Arc::new(crate::auth_slots::AuthSlots::default());
+    source_auth_slots.register(&host_slot).unwrap();
+    let source_backend = YubiHsmSlot::with_auth_slots_and_public_discovery(
+        source_peer.clone(),
+        (2, 5, 0),
+        vec![
+            YUBIHSM_ALGO_EC_P256,
+            crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION,
+        ],
+        source_auth_slots,
+        None,
+    );
+    let source_context = ModuleContext::private_slot(Box::new(source_backend)).unwrap();
+    let source_slot = source_context
+        .slot_contexts
+        .read()
+        .unwrap()
+        .get(&1)
+        .unwrap()
+        .clone();
+    let source_owner =
+        ProviderSession::open(Pkcs11Provider::from_slot(source_slot.clone()).unwrap()).unwrap();
+    let mut host_login = host_login.into_bytes();
+    assert_eq!(
+        source_owner.call(|| api::C_LoginUser(
+            source_owner.handle,
+            CKU_USER as _,
+            std::ptr::null_mut(),
+            0,
+            host_login.as_mut_ptr(),
+            host_login.len() as _,
+        )),
+        CKR_OK as CK_RV
+    );
+    assert!(!source_owner.authorization_required().unwrap());
+    source_slot
+        .lock()
+        .unwrap()
+        .refresh_slot_token_objects(1)
+        .unwrap();
+    let private = source_owner
+        .find(&[
+            (CKA_TOKEN, &[CK_TRUE as u8]),
+            (CKA_CLASS, &(CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes()),
+            (CKA_KEY_TYPE, &(CKK_EC as CK_ULONG).to_ne_bytes()),
+            (CKA_LABEL, CLIENT_LABEL.as_bytes()),
+            (CKA_ID, &TARGET_AUTHKEY_ID.to_be_bytes()),
+        ])
+        .unwrap();
+    let [private] = private.as_slice() else {
+        panic!("provisioned YubiHSM private key must be visible after login")
+    };
+    let mut public_projection = source_slot
+        .lock()
+        .unwrap()
+        .resolve_object(*private)
+        .unwrap()
+        .unwrap()
+        .clone();
+    public_projection.unique_id.push_str("-public-test");
+    public_projection.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    public_projection.private = false;
+    public_projection.sign = false;
+    public_projection.derive = false;
+    public_projection.sensitive = false;
+    public_projection.extractable = true;
+    public_projection.always_sensitive = false;
+    public_projection.never_extractable = false;
+    public_projection.material = KeyMaterial::Public(PublicKeyMaterial::Ec {
+        parameters: P256_PARAMS.to_vec(),
+        public_key: client_public[1..].to_vec(),
+    });
+    source_slot
+        .lock()
+        .unwrap()
+        .insert_object(public_projection)
+        .unwrap();
+    let public = source_owner
+        .find(&[
+            (CKA_TOKEN, &[CK_TRUE as u8]),
+            (CKA_CLASS, &(CKO_PUBLIC_KEY as CK_ULONG).to_ne_bytes()),
+            (CKA_KEY_TYPE, &(CKK_EC as CK_ULONG).to_ne_bytes()),
+            (CKA_LABEL, CLIENT_LABEL.as_bytes()),
+            (CKA_ID, &TARGET_AUTHKEY_ID.to_be_bytes()),
+        ])
+        .unwrap();
+    let [public] = public.as_slice() else {
+        panic!("provisioned YubiHSM private key must have one public projection")
+    };
+    let point = source_owner.attribute(*public, CKA_EC_POINT).unwrap();
+    assert_eq!(&point[..3], &[4, 65, 4]);
+    let source_uri = String::from_utf8(
+        source_owner
+            .attribute(*private, CKA_PKCS11RS_URI as u32)
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let target_peer = Rc::new(ProtocolPeer::new());
+    target_peer
+        .provision_asymmetric_authentication_public_key(TARGET_AUTHKEY_ID, &point[2..])
+        .unwrap();
+    let mut target = YubiHsmSlot::new(target_peer.clone(), (2, 5, 0), Vec::new());
+    target.auth_slots.register(&source_slot).unwrap();
+    source_peer.refresh_changes_epoch.set(true);
+    let target_login = crate::pkcs11_uri::authentication_uri(&source_uri, TARGET_AUTHKEY_ID);
+    let result = login_user_slot(&mut target, 7, target_login.as_bytes(), b"", &[]);
+    if !allow_session_derivation {
+        assert!(matches!(result, Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as CK_RV));
+        assert_eq!(target_peer.create_session_count(), 0);
+        assert!(Slot::login_is_active(&*source_slot.lock().unwrap().slot));
+        return;
+    }
+    result.unwrap();
+    assert_eq!(target_peer.create_session_count(), 1);
+    assert!(Slot::login_is_active(&target));
+    Slot::logout(&mut target).unwrap();
+    assert!(Slot::login_is_active(&*source_slot.lock().unwrap().slot));
+    drop(source_owner);
+    drop(host_owner);
+}
+
+#[test]
+fn source_eligibility_skips_unauthorized_slots_and_accepts_no_login_slots() {
+    let _serial = crate::test::TEST_LOCK.lock().unwrap();
+    let mut fixture = Fixture::new(Preparation::Existing, Protocol::Asymmetric);
+    let child = fixture.existing.as_ref().unwrap().0.clone();
+    let Credential::Asymmetric(private) = &fixture.credential else {
+        unreachable!()
+    };
+    let mut scope = crate::key_scope::Pkcs11KeyScope::for_key(private).unwrap();
+    let private = scope.bind(private).unwrap();
+    let mut encoded = vec![4, 65];
+    encoded.extend_from_slice(&scope.p256_public(&private).unwrap());
+    fixture
+        .owner
+        .create(
+            TokenObjectTemplate {
+                class: Some(CKO_PUBLIC_KEY as _),
+                key_type: Some(CKK_EC as _),
+                token: true,
+                label: "SCP credential".to_owned(),
+                ..Default::default()
+            },
+            &[(CKA_EC_PARAMS, P256_PARAMS), (CKA_EC_POINT, &encoded)],
+        )
+        .unwrap();
+    drop(scope);
+    let sources = crate::auth_slots::AuthSlots::default();
+    sources.register(&child).unwrap();
+    let selector =
+        crate::pkcs11_uri::ClientAuthUri::parse(b"pkcs11:object=SCP%20credential;type=private")
+            .unwrap();
+    let target = std::sync::Weak::<std::sync::Mutex<SlotContext>>::new();
+
+    assert_eq!(
+        fixture.owner.call(|| api::C_Logout(fixture.owner.handle)),
+        CKR_OK as CK_RV
+    );
+    let attempts = std::cell::Cell::new(0);
+    assert!(
+        sources
+            .find_ordinary_credential(&selector, &target, |_| {
+                attempts.set(attempts.get() + 1);
+                Ok(Some(()))
+            })
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(attempts.get(), 0);
+
+    fixture.owner.login(b"test source user pin").unwrap();
+    assert!(
+        sources
+            .find_ordinary_credential(&selector, &target, |_| {
+                attempts.set(attempts.get() + 1);
+                Ok(Some(()))
+            })
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(attempts.get(), 1);
+    fixture.keys = fixture
+        .owner
+        .find(&[
+            (CKA_TOKEN, &[CK_TRUE as u8]),
+            (CKA_CLASS, &(CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes()),
+        ])
+        .unwrap();
+    fixture.release();
+
+    let native =
+        crate::auth_slots::AuthSlots::from_native_fixtures(vec![symmetric_hsmauth_provider(
+            "12345678",
+        )]);
+    let wildcard = crate::pkcs11_uri::ClientAuthUri::parse(b"pkcs11:").unwrap();
+    let native_attempts = std::cell::Cell::new(0);
+    assert!(
+        native
+            .find_hsmauth_credential(&wildcard, false, |_| {
+                native_attempts.set(native_attempts.get() + 1);
+                Ok(Some(()))
+            })
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(native_attempts.get(), 1);
 }
 
 #[test]
@@ -572,7 +924,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
             )
             .unwrap();
         assert_eq!(candidates.len(), 1);
-        let result = candidates.pop().unwrap().authorize(Some(b""), None);
+        let result = candidates.pop().unwrap().authorize(None);
         if matches {
             assert!(result.is_ok());
         } else {
@@ -612,7 +964,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
                 .unwrap()
                 .pop()
                 .unwrap();
-            assert!(matches!(selected.authorize(Some(b""), None),
+            assert!(matches!(selected.authorize(None),
                 Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV));
             let selected = sources
                 .ordinary_credentials(
@@ -627,7 +979,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
                 .unwrap()
                 .pop()
                 .unwrap();
-            assert!(matches!(selected.authorize(Some(b""), None),
+            assert!(matches!(selected.authorize(None),
                 Err(Error::Generic(rv)) if rv == CKR_KEY_HANDLE_INVALID as CK_RV));
             let base_secret = sources
                 .ordinary_credentials(
@@ -661,7 +1013,7 @@ fn ordinary_asymmetric_pair_requires_both_label_and_id() {
                 Some(format!("{label}.enc").as_bytes())
             );
             assert!(matches!(
-                selected.authorize(Some(b""), None),
+                selected.authorize(None),
                 Ok(YubiHsmPkcs11AuthenticationMaterial::Symmetric(_))
             ));
             for invalid_label in [label.clone(), format!("{label}.mac")] {

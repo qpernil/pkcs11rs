@@ -20,6 +20,11 @@ struct RegisteredSlot {
     client_auth_search_tier: ClientAuthSearchTier,
     slot: std::sync::Weak<Mutex<SlotContext>>,
 }
+type OrdinarySearchEntry = (
+    RegisteredSlot,
+    Arc<Mutex<SlotContext>>,
+    ClientAuthSearchTier,
+);
 #[derive(Debug, Default)]
 pub(crate) struct AuthSlots {
     slots: RwLock<Vec<RegisteredSlot>>,
@@ -27,6 +32,33 @@ pub(crate) struct AuthSlots {
     fixture_owners: Vec<Arc<Mutex<SlotContext>>>,
 }
 impl AuthSlots {
+    fn ordinary_entries(&self) -> Result<Vec<OrdinarySearchEntry>, Error> {
+        let entries = self
+            .slots
+            .read()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .iter()
+            .filter_map(|entry| entry.slot.upgrade().map(|slot| (entry.clone(), slot)))
+            .collect::<Vec<_>>();
+        let mut entries = entries
+            .into_iter()
+            .map(|(entry, slot)| {
+                // Slot capabilities can change after registration, for example
+                // when a retained remote slot reconnects to upgraded virtual
+                // hardware. A busy slot keeps its last known tier so a later
+                // source cannot block selection before it is reached.
+                let tier = slot
+                    .try_lock()
+                    .map(|ctx| ctx.slot.client_auth_search_tier())
+                    .unwrap_or(entry.client_auth_search_tier);
+                (entry, slot, tier)
+            })
+            .collect::<Vec<_>>();
+        // Stable sorting preserves module slot order within one protection tier.
+        entries.sort_by_key(|(_, _, tier)| *tier);
+        Ok(entries)
+    }
+
     pub(crate) fn register(&self, slot: &Arc<Mutex<SlotContext>>) -> Result<(), Error> {
         let entry = {
             let mut ctx = slot.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
@@ -109,17 +141,8 @@ impl AuthSlots {
     ) -> Result<Option<R>, Error> {
         let label = selector.object_label()?;
         let explicit = selector.authkey_id.is_some();
-        let mut entries = self
-            .slots
-            .read()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .iter()
-            .filter_map(|entry| entry.slot.upgrade().map(|slot| (entry.clone(), slot)))
-            .collect::<Vec<_>>();
-        // Stable sorting preserves module slot order within one protection tier.
-        entries.sort_by_key(|(entry, _)| entry.client_auth_search_tier);
         let mut fallback = None;
-        for (entry, slot) in entries {
+        for (entry, slot, _) in self.ordinary_entries()? {
             if entry.slot.ptr_eq(target)
                 || !selector.matches_slot_fields(
                     &entry.token,
@@ -142,6 +165,13 @@ impl AuthSlots {
                 }
             }
             let session = ProviderSession::open(Pkcs11Provider::from_slot(slot)?)?;
+            // Ordinary PKCS #11 credentials participate only after the
+            // application has authorized their source token explicitly. A
+            // target login must not log in an unrelated source as a side
+            // effect or submit the target password to it.
+            if session.authorization_required()? {
+                continue;
+            }
             let mut template = vec![(CKA_TOKEN, &[CK_TRUE as u8][..])];
             let class = (CKO_PUBLIC_KEY as CK_ULONG).to_ne_bytes();
             let key_type = (CKK_EC as CK_ULONG).to_ne_bytes();
@@ -186,8 +216,8 @@ impl AuthSlots {
                     return Ok(Some(selected));
                 }
             }
-            // Hidden keys and symmetric pairs require an explicitly selected
-            // source and label. Resolve their type only after that source login.
+            // Hidden keys and symmetric pairs require an explicitly selected,
+            // already-authorized source and label.
             if !found
                 && explicit
                 && let Some(label) = label
@@ -392,6 +422,16 @@ impl AuthSlots {
         })?;
         Ok(credentials)
     }
+
+    #[cfg(test)]
+    pub(crate) fn ordinary_kinds_in_search_order(&self) -> Result<Vec<SlotKind>, Error> {
+        self.ordinary_entries().map(|entries| {
+            entries
+                .into_iter()
+                .map(|(entry, _, _)| entry.kind)
+                .collect()
+        })
+    }
 }
 #[derive(Clone)]
 pub(crate) struct HsmAuthCredentialBinding {
@@ -422,9 +462,9 @@ impl HsmAuthCredentialBinding {
     }
 }
 
-/// A public selection owns only a session and identifying metadata. It does not
-/// bind a private key or authorize the source until exact or ordered wildcard
-/// selection has chosen it.
+/// A public selection owns only a session and identifying metadata. The source
+/// was already authorized by the application; selection never changes its
+/// login state.
 pub(crate) struct OrdinaryCredential {
     symmetric: bool,
     pub(crate) session: Arc<ProviderSession>,
@@ -453,10 +493,13 @@ impl OrdinaryCredential {
 
     pub(crate) fn authorize(
         &self,
-        password: Option<&[u8]>,
         trust_prefix: Option<std::ffi::OsString>,
     ) -> Result<YubiHsmPkcs11AuthenticationMaterial, Error> {
-        self.session.authorize_optional(password)?;
+        // Recheck the shared login state after selection. Another application
+        // session can log the token out between public enumeration and use.
+        if self.session.authorization_required()? {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         if self.symmetric {
             return Ok(YubiHsmPkcs11AuthenticationMaterial::Symmetric(
                 crate::key_scope::SymmetricCredential::find(

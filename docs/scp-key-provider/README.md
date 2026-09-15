@@ -137,8 +137,11 @@ also runs locally; their derivation graphs use the same provider operations.
 ## 1. Configured provider selection and named lookup
 
 The YubiHSM client selects registered source slots through public credential
-metadata. A wildcard searches the protection tiers and authorizes only the
-first public match. Native HSM Auth slots
+metadata. A wildcard searches current protection tiers and uses ordinary
+credentials only from source slots the application has already authorized. A
+target login never submits its PIN to another ordinary token. A target-only
+projection is skipped when its source contains no corresponding private key.
+Native HSM Auth slots
 advertise `CKP_YUBICO_HSMAUTH`; ordinary slots provide P-256 token keys or named
 AES pairs. See [source selection](../yubihsm-auth.md#generic-source-selection-and-authorization)
 for selector syntax, supported sources, and login behavior.
@@ -146,9 +149,10 @@ for selector syntax, supported sources, and login behavior.
 `Pkcs11Provider::from_slot` shares the source backend, authorization and object
 handles. The prepared view avoids recursive public-module locking and suppresses
 internal tracing. Preparation fails if the source slot mutex is already held;
-a target cannot bootstrap its source through itself. Ordinary source PINs are
-not retained. Existing authorization and key bindings remain subject to source
-logout, replacement and session loss.
+a target cannot bootstrap its source through itself. The retained provider
+session observes existing token-wide login state without owning or retaining
+the source PIN. Existing authorization and key bindings remain subject to
+source logout, replacement and session loss.
 
 Derivation templates permit the intended final value reads from creation,
 using `CKA_SENSITIVE=false` and `CKA_EXTRACTABLE=true` while honoring source
@@ -158,10 +162,10 @@ path. Instrumented software-source tests cover both protocols, wrong PINs,
 authorization reuse, channel recreation, and source-object preservation.
 Platform and native-source tests cover deterministic first-match selection;
 native tests count password-bearing requests to verify that one login never
-tries more than one credential.
-
-Remaining qualification includes additional real hardware source-to-target combinations
-and provider dependency-cycle handling across retained bindings. Card protocol details and remaining virtual-token-native operations follow below.
+tries more than one credential. Because ordinary source authorization is an
+application operation, provider lookup does not form recursive login
+dependencies. Card protocol details and remaining virtual-token-native
+operations follow below.
 
 ### Physical YubiHSM-to-YubiHSM regression
 
@@ -178,7 +182,11 @@ connector slots participate in the same test; the source and target serials
 still select the exact devices.
 The bootstrap credentials need permission to generate/delete the temporary
 source key (or import/delete AES keys for the symmetric cases) and
-create/delete the target authentication key.
+create/delete the target authentication key. Each PIN variable accepts either
+the compact `C_Login` form or a complete `pkcs11:` credential URI. The URI form
+is passed to `C_LoginUser` with a null PIN. A host credential such as Secure
+Enclave can therefore authorize the test when the test process has the same
+platform-key access group as that credential.
 
 ```sh
 cargo test --lib yubihsm_to_yubihsm -- --ignored --nocapture --test-threads=1
@@ -224,6 +232,13 @@ with source 2545354682 on local USB and target 1238075073 reached through
 authentication and recovery after 35 seconds idle in this topology. Symmetric
 selection was driven by the persisted usage flags and allowed-mechanism list.
 Both inventories returned to their original 12 objects after each case.
+
+A persistent virtual source, YubiHSM 26000001, also passed wildcard and exact
+URI authentication to both physical targets. The wildcard resolved
+`iphone-virtual-client` from the virtual source even though that slot also held
+the two phone platform-key projections. This qualifies projection-only skipping
+and token-native priority against real target firmware without modifying the
+provisioned inventory.
 
 ## 2. Card derivation
 
@@ -275,6 +290,15 @@ policy-controlled reads, and deletion. pkcs11rs maps the standard PKCS #11
 operation graph to those commands and marks the covered mechanisms with
 `CKF_HW`.
 
+Using a virtual YubiHSM as an authentication source requires its active
+Authentication Key to grant `derive-session-key`, in addition to the ECDH
+permission used by the persistent client key (`derive-ecdh`, or
+`derive-ecdh-kdf` for native prefixed derivation). A login that grants only
+`get-pseudo-random` cannot create the ephemeral P-256 session key: the device
+returns invalid permissions before the target handshake starts. These are
+permissions of the source login, separate from the client key's own capabilities
+and from the permissions granted by the target Authentication Key.
+
 Long-term credentials remain ordinary persistent P-256 or AES objects. The
 bounded intermediate/output store contains at most 64 objects per authenticated
 secure session, uses random nonzero 64-bit handles, and performs no NVM writes.
@@ -285,25 +309,20 @@ outputs created with readable policy can be exported.
 
 The public PKCS #11 regression builds the complete native graph, verifies
 protected values and cross-session use, forces secure-session recreation, and
-checks stale handles and creator-session cleanup. A readable native result that
-requests a software-only operation is read once and materialized as a common
-software session object. Protected outputs are never downgraded. The provider
-needs no per-message AES/CMAC traffic for this client workflow.
+checks stale handles and creator-session cleanup. The complete client regression
+then provisions a persistent P-256 credential in one virtual YubiHSM and its
+public half as an Authentication Key in an independent virtual target. A total
+credential wildcard selects the source through the normal `Pkcs11Auth` lookup,
+opens the protected target channel, repeats native derivation after forced target
+session expiry, and tears it down. The source command log proves that both
+establishments use `DeriveEcdhKdf` and never the raw-ECDH fallback; closing the
+target login releases the source session and its transient objects while leaving
+the persistent credential intact.
 
-## Remaining end-to-end qualification
-
-Use a virtual YubiHSM as the client's derivation provider and a compatible peer
-as the target. After provisioning, long-term credentials and ECDH secrets stay
-behind the provider interface; only final working keys are read into the client.
-Exercise establishment, multiple locally protected exchanges, and teardown for
-the supported YubiHSM and card profiles.
-
-Completion requires identical protocol results with software and native
-providers; explicit policy and authorization failures; no leaked transient
-objects or usable stale handles; no provider/device message-crypto calls; and
-passing PKCS #11/client regressions. Reconcile commands, object policy, and
-lifetime documentation in both repositories. Use disposable virtual fixtures
-for destructive/exhaustion tests and keep physical devices intact.
+A readable native result that requests a software-only operation is read once
+and materialized as a common software session object. Protected outputs are
+never downgraded. Only final working keys are read into the client, and the
+provider needs no per-message AES/CMAC traffic for this client workflow.
 
 ## Future direction: external PKCS #11 sources
 
