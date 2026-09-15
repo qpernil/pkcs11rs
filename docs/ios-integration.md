@@ -131,11 +131,13 @@ and remote connector requests can take noticeable time. Run calls on a serial
 background queue or another executor that keeps blocking work away from the
 main UI thread.
 
-With allocation enabled, ML-DSA lattice vectors and matrices are constructed
-directly in heap storage. Private-key generation and import and public-key
-construction for verification therefore run on the caller's thread without a
-large temporary stack or a construction worker. Signing and verification also
-run on the caller's thread; public-key metadata encoding avoids matrix expansion.
+With allocation enabled, ML-DSA lattice vectors use `MaybeBox`, and matrices
+are assembled from heap-backed rows. Construction uses row-sized stack
+temporaries instead of a full inline matrix. Private-key generation and import
+and public-key construction for verification run directly on the caller's
+thread; native tests cover ML-DSA-87 construction on a 128 KiB stack. Signing and
+verification also run on the caller's thread; public-key metadata encoding avoids
+matrix expansion.
 Cloned RSA, ML-DSA, and ML-KEM object handles share immutable key material without
 copying matrices. The last owner releases and zeroizes it.
 The Swift smoke flow is verified with unoptimized Rust and Xcode Debug builds,
