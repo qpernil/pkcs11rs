@@ -980,9 +980,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         CK_RV soLogin = [self loginSession:session
                                   userType:CKU_SO
                                        pin:PKCS11RSSoftwareTokenPIN];
+        [prefix addObject:[NSString stringWithFormat:@"  C_Login(CKU_SO) => %@",
+                                                     PKCS11RSReturnValue(soLogin)]];
         if (soLogin != CKR_OK) {
-            failure = [NSString stringWithFormat:@"C_Login(CKU_SO) failed: %@",
-                                                      PKCS11RSReturnValue(soLogin)];
+            failure = @"software-token SO login failed";
         } else {
             CK_RV initializePIN = [self initializeSoftwareUserPIN:session];
             if (initializePIN == CKR_OK) {
@@ -1004,11 +1005,12 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         CK_RV userLogin = [self loginSession:session
                                     userType:CKU_USER
                                          pin:PKCS11RSSoftwareTokenPIN];
+        [prefix addObject:[NSString stringWithFormat:@"  C_Login(CKU_USER) => %@",
+                                                     PKCS11RSReturnValue(userLogin)]];
         if (userLogin == CKR_OK) {
             userLoggedIn = YES;
         } else {
-            failure = [NSString stringWithFormat:@"C_Login(CKU_USER) failed: %@",
-                                                      PKCS11RSReturnValue(userLogin)];
+            failure = @"software-token user login failed";
         }
     }
 
@@ -1355,7 +1357,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     NSString *username = @"pkcs11:";
     NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] initWithObjects:@"", nil];
     if (inventory.authorization != nil) {
-        [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@ using %@",
+        [lines addObject:[NSString stringWithFormat:@"C_LoginUser(CKU_USER, %@) => %@ using %@",
                                                     username,
                                                     PKCS11RSReturnValue(inventory.authenticationResult),
                                                     inventory.authenticatedCredential]];
@@ -1363,8 +1365,8 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             [self objectInventoryForSession:inventory.authorization.session
                                       title:@"Objects (authenticated session)"];
         [lines addObjectsFromArray:objects.lines];
-    } else if (inventory.authenticationResult != CKR_FUNCTION_NOT_SUPPORTED) {
-        [lines addObject:[NSString stringWithFormat:@"Automatic credential login %@: %@",
+    } else {
+        [lines addObject:[NSString stringWithFormat:@"C_LoginUser(CKU_USER, %@) => %@",
                                                     username,
                                                     PKCS11RSReturnValue(inventory.authenticationResult)]];
     }
@@ -1780,35 +1782,38 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         [slotInventories addObject:inventory];
     }
 
-    NSMutableArray<PKCS11RSSlotInventory *> *orderedSlots = [[NSMutableArray alloc] init];
-    for (PKCS11RSSlotInventory *inventory in slotInventories) {
-        if (!inventory.yubiHsm) {
-            [orderedSlots addObject:inventory];
-        }
-    }
-    for (PKCS11RSSlotInventory *inventory in slotInventories) {
-        if (inventory.yubiHsm) {
-            [orderedSlots addObject:inventory];
-        }
-    }
-    slotInventories = orderedSlots;
-
     NSMutableArray<PKCS11RSAuthorizedSession *> *authorizedSessions =
         [[NSMutableArray alloc] init];
-    NSMutableArray<NSString *> *sourceAuthorizationFailures = [[NSMutableArray alloc] init];
+
+    // Report slots in the same dependency order in which they are used. A
+    // successful source session remains open for later YubiHSM logins.
     for (PKCS11RSSlotInventory *inventory in slotInventories) {
-        if (![inventory.tokenLabel isEqualToString:@"Secure Enclave"]) {
+        if (inventory.yubiHsm) {
             continue;
         }
-        CK_RV sourceResult = CKR_OK;
-        PKCS11RSAuthorizedSession *authorization =
-            [self loginSourceSlot:inventory.slot result:&sourceResult];
-        if (authorization != nil) {
-            [authorizedSessions addObject:authorization];
-        } else {
-            [sourceAuthorizationFailures addObject:
-                [NSString stringWithFormat:@"Secure Enclave source login failed: %@",
-                                           PKCS11RSReturnValue(sourceResult)]];
+        [report appendFormat:@"\nSlot %lu: %@\n",
+                             (unsigned long)inventory.slot,
+                             inventory.slotDescription];
+        [report appendFormat:@"  Token: %@\n", inventory.tokenLabel];
+        [report appendFormat:@"  Serial: %@\n", inventory.serial];
+        for (NSString *line in inventory.objects.lines) {
+            [report appendFormat:@"%@\n", line];
+        }
+        if ([inventory.tokenLabel isEqualToString:@"Secure Enclave"]) {
+            CK_RV sourceResult = CKR_OK;
+            PKCS11RSAuthorizedSession *authorization =
+                [self loginSourceSlot:inventory.slot result:&sourceResult];
+            [report appendFormat:@"\nC_Login(CKU_USER) => %@\n",
+                                 PKCS11RSReturnValue(sourceResult)];
+            if (authorization != nil) {
+                [authorizedSessions addObject:authorization];
+                PKCS11RSObjectInventory *authenticated =
+                    [self objectInventoryForSession:authorization.session
+                                              title:@"Objects (authenticated session)"];
+                for (NSString *line in authenticated.lines) {
+                    [report appendFormat:@"%@\n", line];
+                }
+            }
         }
     }
 
@@ -1831,9 +1836,6 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         if (inventory.authorization != nil) {
             [authorizedSessions addObject:inventory.authorization];
         }
-    }
-
-    for (PKCS11RSSlotInventory *inventory in slotInventories) {
         [report appendFormat:@"\nSlot %lu: %@\n",
                              (unsigned long)inventory.slot,
                              inventory.slotDescription];
@@ -1843,19 +1845,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             [report appendFormat:@"%@\n", line];
         }
 
-        if (inventory.yubiHsm) {
-            NSArray<NSString *> *authenticated =
-                [self authenticatedInventory:inventory];
-            for (NSString *line in authenticated) {
-                [report appendFormat:@"%@\n", line];
-            }
-        }
-    }
-
-    if (sourceAuthorizationFailures.count != 0) {
-        [report appendString:@"\nCredential source authorization:\n"];
-        for (NSString *failure in sourceAuthorizationFailures) {
-            [report appendFormat:@"  %@\n", failure];
+        NSArray<NSString *> *authenticated = [self authenticatedInventory:inventory];
+        for (NSString *line in authenticated) {
+            [report appendFormat:@"%@\n", line];
         }
     }
 

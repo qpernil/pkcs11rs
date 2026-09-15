@@ -35,6 +35,14 @@ integration model, start with the
 smoke app exercises the same functional flow through the C ABI; this document
 describes the shared behavior from the Swift client's perspective.
 
+The inventory report follows authentication dependency order. It shows ordinary
+source slots first, including the Secure Enclave login and its authenticated
+objects, followed by YubiHSM slots with native session-key support and then the
+remaining YubiHSM targets. Each YubiHSM login and authenticated object listing
+appears inside that slot's section as soon as the login is attempted. Every
+login performed during Refresh has a terse line containing the PKCS #11 entry
+point, user type, selector when applicable, and named return value.
+
 The initialization JSON enables NFC discovery. At launch, the app calls
 `C_Initialize` and `C_GetInfo` on its background inspection queue, but does not
 enumerate slots. The first tap on **Refresh** calls `C_GetSlotList` and presents

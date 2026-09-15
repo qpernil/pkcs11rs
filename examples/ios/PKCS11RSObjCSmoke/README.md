@@ -22,7 +22,11 @@ Native YubiHSM Auth slots need no preliminary login. Other ordinary slots are
 eligible only when the application has already logged them in, so wildcard
 resolution neither submits the target PIN nor performs key operations on
 unselected applets. Each successful login produces a second authenticated
-object inventory before the app closes all retained sessions in reverse
+object inventory in that slot's report section. The report follows execution
+order: ordinary source slots, native session-key-provider YubiHSMs, and then
+remaining YubiHSM targets. Every login has a terse line containing the PKCS #11
+entry point, user type, selector when applicable, and named return value. The
+app closes all retained sessions in reverse
 dependency order. It does not call the token-wide `C_Logout`; closing the final
 session naturally ends authorization when no other application session retains
 it.
