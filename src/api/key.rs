@@ -2044,6 +2044,39 @@ pub(crate) fn derive_key(
         } else {
             None
         };
+        if prefixed {
+            match &source {
+                DeriveSource::YubiHsm { id, .. } if native_kdf => {
+                    #[cfg(test)]
+                    crate::key_scope::record_authentication_path("native-device");
+                    tracing::trace!(
+                        target: "pkcs11rs::authentication",
+                        path = "native-device",
+                        key_id = format_args!("{id:04x}"),
+                        "executing prefixed ECDH derivation"
+                    );
+                }
+                DeriveSource::YubiHsm { id, .. } => {
+                    #[cfg(test)]
+                    crate::key_scope::record_authentication_path("module-prefixed");
+                    tracing::trace!(
+                        target: "pkcs11rs::authentication",
+                        path = "module-prefixed",
+                        key_id = format_args!("{id:04x}"),
+                        "executing prefixed ECDH derivation"
+                    );
+                }
+                _ => {
+                    #[cfg(test)]
+                    crate::key_scope::record_authentication_path("module-prefixed");
+                    tracing::trace!(
+                        target: "pkcs11rs::authentication",
+                        path = "module-prefixed",
+                        "executing prefixed ECDH derivation"
+                    );
+                }
+            }
+        }
         if matches!(kdf, EcdhKdf::Null)
             && !derived_object.token
             && native_session_objects_enabled(ctx, session_handle)?
