@@ -14,6 +14,10 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+The app uses UIKit's scene lifecycle, with a single `UIWindowScene` and a
+`UIWindow` attached to that scene. This is required when building with the
+iOS 27 SDK. PKCS #11 inspection runs on its background queue.
+
 The platform-credential button reflects the named Secure Enclave credential's
 current local state. **Provision platform credential** uses the existing
 YubiHSM Auth administrator credential as bootstrap authority for every present

@@ -8,6 +8,10 @@ Its functional smoke coverage is synchronized with the Swift UIKit app; the
 difference is the client language and its direct Objective-C representation of
 the same C structures, buffers, sessions, and lifecycle.
 
+The app uses UIKit's scene lifecycle, with a single `UIWindowScene` and a
+`UIWindow` attached to that scene. This is required when building with the
+iOS 27 SDK. PKCS #11 inspection runs on its background queue.
+
 The inventory also exercises automatic YubiHSM authentication. It first logs
 in and retains a Secure Enclave source session. It then calls `C_LoginUser`
 with the provider-independent wildcard URI `pkcs11:` and the prototype

@@ -2069,7 +2069,6 @@ private final class ModuleInspector {
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
-    var window: UIWindow?
     private let controller = InspectionViewController()
     private let inspectionQueue = DispatchQueue(
         label: "com.qpernil.PKCS11RSSmoke.inspection",
@@ -2081,19 +2080,21 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        let window = UIWindow(frame: UIScreen.main.bounds)
-        window.rootViewController = controller
-        window.makeKeyAndVisible()
-        self.window = window
         controller.onRefresh = { [weak self] in
             self?.refresh()
         }
         controller.onProvision = { [weak self] provisioned in
             self?.setPlatformCredentialProvisioned(!provisioned)
         }
-        initializeModule()
-
         return true
+    }
+
+    func connectWindow(to scene: UIWindowScene) -> UIWindow {
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        initializeModule()
+        return window
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
@@ -2144,5 +2145,19 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 self.controller.setPlatformCredentialProvisioned(provisioned)
             }
         }
+    }
+}
+
+final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        guard let windowScene = scene as? UIWindowScene,
+              let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
+        window = appDelegate.connectWindow(to: windowScene)
     }
 }
