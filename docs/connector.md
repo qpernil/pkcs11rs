@@ -86,8 +86,8 @@ non-Linux build is rejected at startup. The controller implementation and its
 HTTP adapter live together in the connector's `src/i2c/` directory. Linux GPIO
 access uses `gpiocdev-uapi`; the shared USB hardware crate has no I2C API.
 
-For a foreground test, the native `target-driver --profile` command manages
-the target's driver and unprivileged HSM lifetime. Follow the
+For a foreground test, `usb-gadget-supervisor` directly manages the
+profile-declared BSC driver resource and unprivileged HSM lifetime. Follow the
 [manual bench test](https://github.com/qpernil/virtual-yubihsm/blob/main/docs/i2c.md#manual-bench-test)
 for profile setup, wiring, and the connector/qualification commands.
 
