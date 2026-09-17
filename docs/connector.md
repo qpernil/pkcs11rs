@@ -102,8 +102,16 @@ into the process. Build the release binary with:
 
 ```sh
 cargo build --release -p pkcs11rs-connector \
-  --features embedded-virtual-yubihsm
+  --features firmware-full
 ```
+
+For a deployment build, select one firmware feature. `firmware-yubihsm2`
+provides the physical-compatible baseline, `firmware-secure-channel` adds
+prefixed ECDH and native protected session objects, and `firmware-full`
+additionally enables extended curves, post-quantum algorithms, and direct RSA
+wrapping. Each feature also enables the embedded persistent runtime. Cargo
+feature-union builds, including `--all-features`, resolve to the most capable
+selected profile.
 
 Each `--virtual-yubihsm SERIAL=STATE_DIRECTORY` argument adds one independent
 device. For example, this starts two virtual devices and deliberately disables
@@ -162,9 +170,9 @@ command's reply. The connector also requires each USB read to contain exactly
 one complete YubiHSM frame; a short or concatenated response invalidates the
 uncertain transport and causes the next request to reopen and flush it.
 
-An optional Unix-only `embedded-virtual-yubihsm` build feature adds headless
-virtual devices to the same registry. Each embedded device owns a dedicated OS
-thread and one `virtual-yubihsm-core::PersistentDevice`. The asynchronous
+The Unix-only firmware features add headless virtual devices to the same
+registry and select their compiled command surface. Each embedded device owns
+a dedicated OS thread and one `virtual-yubihsm-core::PersistentDevice`. The asynchronous
 transport sends one request through a capacity-one Tokio MPSC channel and
 awaits its result through a one-shot channel. Synchronous cryptography and the
 shared runtime's state locking and file syncing therefore never block a Tokio

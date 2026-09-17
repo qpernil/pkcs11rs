@@ -51,7 +51,7 @@ pub enum DeviceStatus {
 #[serde(rename_all = "snake_case")]
 pub enum DeviceTransportKind {
     Usb,
-    #[cfg(any(test, all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[cfg(any(test, all(embedded_virtual_yubihsm, unix)))]
     Embedded,
     #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
     I2c,
@@ -477,7 +477,7 @@ impl DeviceRegistry {
     #[cfg(any(
         test,
         all(feature = "experimental-i2c", target_os = "linux"),
-        all(feature = "embedded-virtual-yubihsm", unix)
+        all(embedded_virtual_yubihsm, unix)
     ))]
     pub(crate) async fn register_filtered(
         &self,
@@ -616,7 +616,7 @@ impl DeviceRegistry {
 
     #[cfg(any(
         all(feature = "experimental-i2c", target_os = "linux"),
-        all(feature = "embedded-virtual-yubihsm", unix)
+        all(embedded_virtual_yubihsm, unix)
     ))]
     pub(crate) async fn register_configured(
         &self,

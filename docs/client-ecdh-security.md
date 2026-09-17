@@ -71,9 +71,9 @@ these conditions hold before the first derivation operation:
   `CKA_DERIVE` and `CKA_ALLOWED_MECHANISMS` policy.
 
 On virtual YubiHSM this native support is selected from capability bit `0x39`
-(`session-objects`) on the active Authentication Key. A persona that does not
-compile the envelope masks that capability from `GetObjectInfo`, including for
-a factory key whose stored bitmap is otherwise all ones.
+(`session-objects`) on the active Authentication Key. A firmware profile that
+does not compile the envelope masks that capability from `GetObjectInfo`,
+including for a factory key whose stored bitmap is otherwise all ones.
 A persistent P-256 source additionally needs ordinary `derive-ecdh` capability
 bit `0x0b`. The graph maps
 `CKM_EC_KEY_PAIR_GEN`, `CKM_ECDH1_DERIVE`,

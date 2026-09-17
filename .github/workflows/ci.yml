@@ -5,6 +5,41 @@ on:
   pull_request:
 
 jobs:
+  virtual-yubihsm-firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: yubihsm2
+            features: firmware-yubihsm2
+          - name: test-prefixed-ecdh
+            features: test-firmware-prefixed-ecdh
+          - name: test-session-objects
+            features: test-firmware-session-objects
+          - name: secure-channel
+            features: firmware-secure-channel
+          - name: full
+            features: firmware-full
+
+    name: embedded firmware (${{ matrix.name }})
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+
+      - name: Test embedded firmware forwarding
+        run: >-
+          cargo test --locked -p pkcs11rs-connector --no-default-features
+          --features "${{ matrix.features }}"
+          embedded_firmware_profile_is_forwarded_to_the_core
+
   test:
     runs-on: ubuntu-latest
 

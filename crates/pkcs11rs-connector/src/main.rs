@@ -3,7 +3,7 @@ mod http_timeout;
 mod i2c;
 mod registry;
 mod tls;
-#[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+#[cfg(all(embedded_virtual_yubihsm, unix))]
 mod virtual_hsm;
 
 use api::{AppState, router};
@@ -63,15 +63,15 @@ enum VirtualPersistence {
 }
 
 enum VirtualHsmRuntime {
-    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    #[cfg(all(embedded_virtual_yubihsm, unix))]
     Enabled(virtual_hsm::VirtualHsmActors),
-    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
     Disabled,
 }
 
 impl VirtualHsmRuntime {
     async fn start(args: &Args, registry: &DeviceRegistry) -> Result<Self, BoxError> {
-        #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+        #[cfg(all(embedded_virtual_yubihsm, unix))]
         {
             let actors = virtual_hsm::VirtualHsmActors::start(
                 registry,
@@ -83,7 +83,7 @@ impl VirtualHsmRuntime {
             Ok(Self::Enabled(actors))
         }
 
-        #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+        #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
         {
             let _ = registry;
             if !args.virtual_yubihsms.is_empty() {
@@ -98,9 +98,9 @@ impl VirtualHsmRuntime {
 
     async fn shutdown(self) -> io::Result<()> {
         match self {
-            #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+            #[cfg(all(embedded_virtual_yubihsm, unix))]
             Self::Enabled(actors) => actors.shutdown().await,
-            #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+            #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
             Self::Disabled => Ok(()),
         }
     }
@@ -264,12 +264,12 @@ async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
 }
 
 fn hardware_discovery_enabled(args: &Args) -> bool {
-    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    #[cfg(all(embedded_virtual_yubihsm, unix))]
     {
         args.hardware_discovery
     }
 
-    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
     {
         if !args.hardware_discovery && args.i2c_yubihsms.is_empty() {
             tracing::warn!(
@@ -690,7 +690,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "embedded-virtual-yubihsm", unix))]
+    #[cfg(all(embedded_virtual_yubihsm, unix))]
     #[test]
     fn embedded_connector_can_disable_local_hardware_discovery() {
         let args = Args::try_parse_from([
@@ -706,7 +706,7 @@ mod tests {
         assert_eq!(args.virtual_yubihsms.len(), 1);
     }
 
-    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
     #[test]
     fn physical_only_connector_ignores_disabled_hardware_discovery() {
         let args =
@@ -746,7 +746,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(feature = "embedded-virtual-yubihsm", unix)))]
+    #[cfg(not(all(embedded_virtual_yubihsm, unix)))]
     #[tokio::test]
     async fn connector_without_embedded_support_ignores_virtual_configuration() {
         let args = Args::try_parse_from([

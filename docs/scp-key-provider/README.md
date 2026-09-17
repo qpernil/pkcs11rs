@@ -321,9 +321,9 @@ extract (`0x05`), SHA-256 (`0x06`), and counter KDF (`0x07`). Those nested
 values are not separate commands in the device command registry.
 
 The client selects this path only when the active Authentication Key returned
-by `GetObjectInfo` grants `session-objects` (`0x39`). A compiled persona that
-does not implement `SessionObject` (`0x0b`) masks this bit. Without the signal
-the client does not issue the envelope; it
+by `GetObjectInfo` grants `session-objects` (`0x39`). A compiled firmware
+profile that does not implement `SessionObject` (`0x0b`) masks this bit. Without
+the signal the client does not issue the envelope; it
 can use a less-protected derivation path when the persistent client key permits
 the required operation. Sources whose policy requires the native volatile-object
 graph reject authentication. The session capability is separate from the
