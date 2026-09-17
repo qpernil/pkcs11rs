@@ -6,6 +6,9 @@ PKCS #11 `C_DeriveKey` operation. Its parameters contain one peer public key
 and prefix bytes; no second key handle is needed. A supporting virtual YubiHSM
 executes the `DeriveEcdhKdf` extension without exposing its raw ECDH result.
 Other supported ECDH sources use the module's common KDF implementation.
+This mechanism is the middle of the three ordinary credential-placement paths;
+see [client ECDH placement and security](client-ecdh-security.md) for their
+selection order and protocol-specific security properties.
 
 ## Parameters and operation
 
@@ -96,12 +99,14 @@ Hash = SHA-256
 L    = 64
 ```
 
-Existing-slot authentication prefers this mechanism when both slot advertisement
-and the key's computed `CKA_ALLOWED_MECHANISMS` permit it. The client derives
-and reads only the ephemeral agreement `P`, then supplies it as prefix bytes
-for static ECDH plus KDF. A missing or excluded mechanism selects the standard
-protected-object ECDH/concatenation/SHA-256 sequence. Operational failures are
-returned without retrying through the fallback. Direct password authentication and recreation use the same capability selection.
+Existing-slot authentication first selects the native protected session-object
+graph when the source can retain both agreements. Otherwise, it selects this
+mechanism when the credential's computed `CKA_ALLOWED_MECHANISMS` permits it.
+The client then derives and reads the ephemeral agreement `P` and supplies it as
+prefix bytes for static ECDH plus KDF. If neither protected graph nor this
+mechanism is available, ordinary ECDH supplies the compatibility path.
+Operational failures are returned without retrying a weaker path. Direct
+password authentication and recreation use the same capability selection.
 Recreation retains a protected private-key credential and recomputes ECDH;
 static agreements are scoped to the handshake.
 
@@ -122,14 +127,13 @@ AES-CMAC(receipt-key,
 ```
 
 After receipt verification, ordinary YubiHSM secure messaging uses `S-ENC`,
-`S-MAC`, and `S-RMAC`. The implementation test generates the protected static
+`S-MAC`, and `S-RMAC`. The complete client test generates the protected static
 key through PKCS #11 and provisions its public half as an asymmetric
 Authentication Key on a second virtual YubiHSM. A total credential wildcard
-resolves that source through the ordinary `C_LoginUser` client path. The test
-sends an authenticated command, forces target-session recreation, sends another
-command, and verifies that both establishments invoked native `DeriveEcdhKdf`
-without invoking raw `DeriveEcdh`. Logout releases the retained source session
-and its transient objects.
+resolves that source through the ordinary `C_LoginUser` client path. When both
+protected session objects and literal prefix derivation are permitted, the test
+verifies that the protected graph wins. Logout releases the retained source
+session and its transient objects.
 
 An environment-driven persisted-device qualification complements that isolated
 regression. Separate P-256 credentials force native `DeriveEcdhKdf`, the
@@ -150,16 +154,17 @@ advances.
 
 ## Security boundary
 
-When the native extension is used, the source HSM performs static ECDH and the complete X9.63 KDF. Its reusable
-static ECDH result never crosses the device boundary. The caller-visible
-ephemeral agreement, transcript, and final keys are specific to the target's
-fresh ephemeral key and therefore to that target session.
+When the literal-prefix extension is used, the source HSM performs static ECDH
+and the complete X9.63 KDF. Its reusable static ECDH result never crosses the
+device boundary. The ephemeral agreement, transcript, and final keys remain
+visible to the client process. The stronger protected session-object path also
+keeps the ephemeral agreement inside the source device.
 
-Retaining every externally visible input, the client ephemeral private key,
-and all four output keys compromises the corresponding live session. It does
-not enable calculation of keys for a later target session without invoking the
-source HSM again. A later session changes the prefix before the unknown static
-secret; SHA-256 length extension cannot replace that prefix.
+Retaining every externally visible input and all output keys compromises the
+corresponding live session. A saved literal prefix does not establish a later
+target session without the source HSM, but it can reconstruct the old session
+if the client static private key is compromised later. The protected graph
+prevents that staged reconstruction by never exporting the ephemeral agreement.
 
 This mechanism does **not** claim that the final session keys remain inside the
 source HSM.

@@ -456,8 +456,9 @@ impl Pkcs11KeyScope {
             length,
         )
     }
-    /// Two P-256 agreements, with only the ephemeral prefix readable on the
-    /// combined path. Mechanism selection precedes execution and is not retried.
+    /// Two P-256 agreements. Prefer a native protected-object graph, then a
+    /// combined derivation with a readable ephemeral prefix. Mechanism selection
+    /// precedes execution and is not retried.
     pub(crate) fn dual_ecdh_x963(
         &mut self,
         ephemeral: &KeyHandle,
@@ -468,12 +469,32 @@ impl Pkcs11KeyScope {
         length: usize,
     ) -> Result<KeyHandle, Error> {
         let agreement = || generic_template(&[CKM_CONCATENATE_BASE_AND_KEY as _]);
-        if self.can_derive(credential, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)? {
+        let protected_graph = self.session.supports_native_session_derivation()?
+            && self.can_derive(ephemeral, CKM_ECDH1_DERIVE as _)?
+            && self.can_derive(credential, CKM_ECDH1_DERIVE as _)?;
+        if protected_graph {
             #[cfg(test)]
-            record_authentication_path("combined-prefixed-ecdh");
+            record_authentication_path("native-protected-graph");
             tracing::trace!(
                 target: "pkcs11rs::authentication",
-                path = "combined-prefixed-ecdh",
+                path = "native-protected-graph",
+                "selected asymmetric authentication derivation path"
+            );
+            let first = self.ecdh(ephemeral, ephemeral_peer, agreement())?;
+            let second = self.ecdh(credential, credential_peer, agreement())?;
+            let z = self.append_key(
+                &first,
+                &second,
+                generic_template(&[CKM_CONCATENATE_BASE_AND_DATA as _]),
+                64,
+            )?;
+            self.x963_sha256(&z, 64, shared_info, length)
+        } else if self.can_derive(credential, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)? {
+            #[cfg(test)]
+            record_authentication_path("literal-prefix-derive");
+            tracing::trace!(
+                target: "pkcs11rs::authentication",
+                path = "literal-prefix-derive",
                 "selected asymmetric authentication derivation path"
             );
             let shared = self.ecdh(
@@ -493,10 +514,10 @@ impl Pkcs11KeyScope {
             )
         } else {
             #[cfg(test)]
-            record_authentication_path("pkcs11-operation-graph");
+            record_authentication_path("basic-ecdh");
             tracing::trace!(
                 target: "pkcs11rs::authentication",
-                path = "pkcs11-operation-graph",
+                path = "basic-ecdh",
                 "selected asymmetric authentication derivation path"
             );
             let first = self.ecdh(ephemeral, ephemeral_peer, agreement())?;

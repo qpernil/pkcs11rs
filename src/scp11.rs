@@ -263,8 +263,12 @@ impl Scp11KeySet {
         let response = connector
             .send_apdu(&authenticate)?
             .require_success(&authenticate)?;
-        let authentication = parse_authentication_response(&response.data)?;
-        let card_ephemeral_key = parse_public_point(authentication.card_ephemeral_point)?;
+        let authentication =
+            parse_authentication_response(&response.data, self.variant != Scp11Variant::C)?;
+        let first_peer = match authentication.card_ephemeral_point {
+            Some(point) => parse_public_point(point)?,
+            None => card_public_key.to_vec(),
+        };
 
         let credential = match &self.host {
             Some(host) => scope.bind(&host.private_key)?,
@@ -272,7 +276,7 @@ impl Scp11KeySet {
         };
         let material = scope.dual_ecdh_x963(
             &ephemeral,
-            &card_ephemeral_key,
+            &first_peer,
             &credential,
             card_public_key,
             &[KEY_USAGE, KEY_TYPE_AES, KEY_LENGTH_AES_128],
@@ -290,7 +294,9 @@ impl Scp11KeySet {
             16,
         )?;
         let mut receipt_input = request_data;
-        receipt_input.extend_from_slice(authentication.card_ephemeral_tlv);
+        if let Some(card_ephemeral_tlv) = authentication.card_ephemeral_tlv {
+            receipt_input.extend_from_slice(card_ephemeral_tlv);
+        }
         scope
             .verify_cmac(&receipt_key, &receipt_input, authentication.receipt)
             .map_err(|error| match error {
@@ -451,18 +457,26 @@ fn derive_key_material(key_agreement: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8
 }
 
 struct AuthenticationResponse<'a> {
-    card_ephemeral_tlv: &'a [u8],
-    card_ephemeral_point: &'a [u8],
+    card_ephemeral_tlv: Option<&'a [u8]>,
+    card_ephemeral_point: Option<&'a [u8]>,
     receipt: &'a [u8],
 }
 
-fn parse_authentication_response(data: &[u8]) -> Result<AuthenticationResponse<'_>, Error> {
+fn parse_authentication_response(
+    data: &[u8],
+    card_ephemeral: bool,
+) -> Result<AuthenticationResponse<'_>, Error> {
     let mut remaining = data;
-    let (card_ephemeral_tlv, card_ephemeral_point) = take_tlv(&mut remaining, &[0x5f, 0x49])?;
+    let (card_ephemeral_tlv, card_ephemeral_point) = if card_ephemeral {
+        let (encoded, point) = take_tlv(&mut remaining, &[0x5f, 0x49])?;
+        (Some(encoded), Some(point))
+    } else {
+        (None, None)
+    };
     let (_, receipt) = take_tlv(&mut remaining, &[0x86])?;
     if !remaining.is_empty()
-        || card_ephemeral_point.len() != 65
-        || card_ephemeral_point.first() != Some(&0x04)
+        || card_ephemeral_point
+            .is_some_and(|point| point.len() != 65 || point.first() != Some(&0x04))
         || receipt.len() != SESSION_KEY_LENGTH
     {
         return Err(CKR_DEVICE_ERROR.into());

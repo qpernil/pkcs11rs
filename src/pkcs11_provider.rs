@@ -164,6 +164,14 @@ impl ProviderSession {
             })
         })
     }
+    pub(crate) fn supports_native_session_derivation(&self) -> Result<bool, Error> {
+        self.call(|| {
+            with_session_context(self.handle, |ctx| {
+                let (_, backend) = ctx._get_session(self.handle)?;
+                Ok(backend.supports_native_session_objects())
+            })
+        })
+    }
     pub(crate) fn call<T>(&self, operation: impl FnOnce() -> T) -> T {
         self.provider.call(operation)
     }
