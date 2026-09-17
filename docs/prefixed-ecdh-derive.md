@@ -50,9 +50,10 @@ X25519, and 56 raw bytes for X448.
 
 The common software mechanism set includes this operation. Software, host,
 PIV/OpenPGP, and physical YubiHSM ECDH keys can use it when their per-key
-permissions allow ECDH. A YubiHSM slot also advertises native hardware support
-when its algorithm list contains the virtual `ECDH KDF` identifier `57` and
-it supports an eligible curve. The supported curves are P-224, P-256, P-384, P-521,
+permissions allow ECDH. A YubiHSM slot lists the mechanism when it supports an
+eligible curve. Whether a particular YubiHSM key uses the native command or
+provider-side composition is determined by its capability bits, not by an
+algorithm marker. The supported curves are P-224, P-256, P-384, P-521,
 secp256k1, Brainpool P-256, P-384, P-512, X25519, and X448.
 
 The HSM command requires the separate `derive-ecdh-kdf` capability bit `0x38`

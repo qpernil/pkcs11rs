@@ -93,6 +93,16 @@ whether that mechanism is usable for a particular object. Firmware discovery
 uses device algorithms and object capability bits; it does not use invented
 algorithm markers or speculative command probes.
 
+The virtual protocol keeps direct operations and volatile-object operations
+separate. ML-DSA, ML-KEM, and one-shot prefixed ECDH have direct top-level
+commands. Protected intermediate values use the `SessionObject` namespace,
+whose first payload byte selects a typed nested operation. Ordinary command
+numbers are reused there only for the same conceptual action: asymmetric-key
+generation, ECDH, and deletion. The nested payload remains session-specific so
+it can carry volatile handles and output policy. This lets future operations
+create session results without defining a new top-level command for every
+variant.
+
 For HSM-backed SCP11 client authentication, the provider chooses one path
 before deriving either agreement:
 
