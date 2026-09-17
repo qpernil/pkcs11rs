@@ -57,8 +57,8 @@ values.
 
 Native YubiHSM Auth is selected by credential type rather than an ordinary
 cryptographic mechanism. A matching HSM Auth slot object has
-`CKO_PRIVATE_KEY` / `CKK_YUBICO_HSMAUTH_ASYMMETRIC`; the slot intentionally
-advertises no general ECDH mechanism. The client invokes the slot's native
+`CKO_PRIVATE_KEY` / `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC`; the
+slot intentionally advertises no general ECDH mechanism. The client invokes the slot's native
 `hsmauth_authenticate` operation. Public matching searches native HSM Auth
 credentials before ordinary PKCS #11 source slots.
 

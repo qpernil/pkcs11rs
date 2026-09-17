@@ -141,9 +141,8 @@ metadata. A wildcard searches current protection tiers and uses ordinary
 credentials only from source slots the application has already authorized. A
 target login never submits its PIN to another ordinary token. A target-only
 projection is skipped when its source contains no corresponding private key.
-Native HSM Auth slots
-advertise `CKP_YUBICO_HSMAUTH`; ordinary slots provide P-256 token keys or named
-AES pairs. See [source selection](../yubihsm-auth.md#generic-source-selection-and-authorization)
+Native HSM Auth slots expose dedicated credential key types; ordinary slots
+provide P-256 token keys or named AES pairs. See [source selection](../yubihsm-auth.md#generic-source-selection-and-authorization)
 for selector syntax, supported sources, and login behavior.
 
 `Pkcs11Provider::from_slot` shares the source backend, authorization and object

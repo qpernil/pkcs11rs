@@ -201,16 +201,16 @@ slot's combined native and software session capabilities:
 | PIV, OpenPGP | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | YubiHSM | Baseline, Extended Provider, Authentication Token; Public Certificates Token when public discovery is configured |
 | FIDO2, Issuer Security Domain | Baseline, Extended Provider, Authentication Token; Public Certificates Token when token backing storage is enabled |
-| YubiKey HSM Auth | Baseline, Yubico HSM Auth; Public Certificates Token when token backing storage is enabled |
+| YubiKey HSM Auth | Baseline; Public Certificates Token when token backing storage is enabled |
 
 Extended Provider requires login support, including `C_LoginUser`, and the
 SHA-512/RSA operations required by its mandatory OASIS test. Authentication
 Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
 Eligibility uses the merged mechanism list, including the slot's filtered
-software mechanisms. HSM Auth exposes native authentication credentials and
-its vendor-defined `CKP_YUBICO_HSMAUTH` contract; it has no software key operations
-or USER login. Secure Enclave login accepts either an omitted or supplied PIN and ignores
-its value; OS authorization still controls native key use.
+software mechanisms. HSM Auth exposes native authentication credentials
+through dedicated credential key types; it has no software key operations or
+USER login. Secure Enclave login accepts either an omitted or supplied PIN and
+ignores its value; OS authorization still controls native key use.
 
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
 HSM Auth, Issuer Security Domain, and Platform) accept an empty username in

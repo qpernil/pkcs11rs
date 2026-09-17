@@ -16,7 +16,7 @@ struct RegisteredSlot {
     manufacturer: String,
     model: String,
     uri_prefix: String,
-    profiles: Vec<CK_PROFILE_ID>,
+    native_hsmauth: bool,
     client_auth_search_tier: ClientAuthSearchTier,
     slot: std::sync::Weak<Mutex<SlotContext>>,
 }
@@ -74,7 +74,7 @@ impl AuthSlots {
                     &ctx.slot.label(),
                     ctx.slot.serial(),
                 ),
-                profiles: ctx.slot.additional_profile_ids().to_vec(),
+                native_hsmauth: ctx.slot.supports_native_hsmauth(),
                 client_auth_search_tier: ctx.slot.client_auth_search_tier(),
                 slot: Arc::downgrade(slot),
             }
@@ -153,7 +153,7 @@ impl AuthSlots {
             {
                 continue;
             }
-            if entry.profiles.contains(&CKP_YUBICO_HSMAUTH) {
+            if entry.native_hsmauth {
                 continue;
             }
             {
@@ -267,7 +267,7 @@ impl AuthSlots {
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?
             .iter()
             .filter(|entry| {
-                entry.profiles.contains(&CKP_YUBICO_HSMAUTH)
+                entry.native_hsmauth
                     && selector.matches_slot_fields(
                         &entry.token,
                         &entry.manufacturer,
@@ -292,26 +292,19 @@ impl AuthSlots {
                 continue;
             }
             let session = ProviderSession::open(Pkcs11Provider::from_slot(slot)?)?;
-            let profiles = session.find(&[
-                (CKA_CLASS, &(CKO_PROFILE as CK_ULONG).to_ne_bytes()),
-                (CKA_PROFILE_ID, &CKP_YUBICO_HSMAUTH.to_ne_bytes()),
-            ])?;
-            if profiles.is_empty() {
-                continue;
-            }
             for (key_type, class, algorithm) in [
                 (
-                    CKK_YUBICO_HSMAUTH_SYMMETRIC,
+                    CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC,
                     CKO_SECRET_KEY as CK_OBJECT_CLASS,
                     HsmAuthAlgorithm::Aes128YubicoAuthentication,
                 ),
                 (
-                    CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+                    CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC,
                     CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                     HsmAuthAlgorithm::EcP256YubicoAuthentication,
                 ),
             ] {
-                if asymmetric_only && key_type == CKK_YUBICO_HSMAUTH_SYMMETRIC {
+                if asymmetric_only && key_type == CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC {
                     continue;
                 }
                 if selector.class.is_some_and(|selected_class| {

@@ -2702,13 +2702,13 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
             crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
             32,
             CKO_SECRET_KEY as CK_OBJECT_CLASS,
-            crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
+            crate::CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC,
         ),
         (
             crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
             64,
             CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-            crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+            crate::CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC,
         ),
     ] {
         let label = "session-auth".to_owned();

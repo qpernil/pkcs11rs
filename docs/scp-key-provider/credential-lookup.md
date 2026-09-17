@@ -2,10 +2,10 @@
 
 YubiHSM authentication selects credentials from enabled PKCS #11 source slots.
 Ordinary source keys feed the shared `Pkcs11Auth` Rust session API. Native HSM
-Auth slots advertise `CKP_YUBICO_HSMAUTH` and use their session-bound native
-operation. Both paths keep long-term values out of the client's message code;
-final working AES keys are read once for local secure messaging. See
-[YubiHSM authentication](../yubihsm-auth.md) for selector syntax and the
+Auth slots expose dedicated credential key types and use their session-bound
+native operation. Both paths keep long-term values out of the client's
+message code; final working AES keys are read once for local secure messaging.
+See [YubiHSM authentication](../yubihsm-auth.md) for selector syntax and the
 [SCP key-provider plan](README.md) for remaining card and virtual-device work.
 
 ## RFC 7512 credential selectors
@@ -57,13 +57,14 @@ YubiHSM.
 | --- | --- | --- |
 | Ordinary symmetric | Two token `CKO_SECRET_KEY`, `CKK_AES`, 16 bytes each | `<name>.enc` is the credential identity; its exact `<name>.mac` companion is required; `CKA_ID` is not compared |
 | Ordinary asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_EC`, P-256, with a public projection for automatic selection | Public and private keys must have both identical `CKA_LABEL` and identical `CKA_ID`, including empty IDs |
-| Native HSM Auth symmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_SYMMETRIC` | Exact credential label; `CKA_ID` uses the same stable label bytes |
-| Native HSM Auth asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, plus P-256 public projection | Credential and projection share both the label and label-derived `CKA_ID` |
+| Native HSM Auth symmetric | Token `CKO_SECRET_KEY`, `CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC` | Exact credential label; `CKA_ID` uses the same stable label bytes |
+| Native HSM Auth asymmetric | Token `CKO_PRIVATE_KEY`, `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC`, plus P-256 public projection | Credential and projection share both the label and label-derived `CKA_ID` |
 
-Target YubiHSM Authentication Key records share the vendor authentication key
-types and use the same symmetric-secret/asymmetric-private class distinction,
-but their slots do not advertise `CKP_YUBICO_HSMAUTH`. They remain
-non-operational metadata and are excluded from native source discovery.
+Target YubiHSM Authentication Key records use
+`CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC` and
+`CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC`. These distinct target-only
+types make the records non-operational metadata and exclude them from native
+credential discovery.
 
 Every existing-source lookup requires `CKA_TOKEN=true` and the expected object
 class/type. Symmetric keys require explicit selection with the ENC object's

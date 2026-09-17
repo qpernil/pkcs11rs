@@ -171,9 +171,10 @@ slots.
 
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
 Symmetric credentials use `CKO_SECRET_KEY` and
-`CKK_YUBICO_HSMAUTH_SYMMETRIC`; asymmetric credentials use `CKO_PRIVATE_KEY`
-and `CKK_YUBICO_HSMAUTH_ASYMMETRIC`. Neither has ordinary cryptographic
-capabilities or a readable `CKA_VALUE`. An asymmetric credential also has a
+`CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC`; asymmetric credentials use
+`CKO_PRIVATE_KEY` and `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC`. Neither has
+ordinary cryptographic capabilities or a readable `CKA_VALUE`. An asymmetric
+credential also has a
 read-only `CKO_PUBLIC_KEY` object containing its P-256 public key. The source
 applet's token serial number identifies the YubiKey that owns these objects.
 
@@ -187,21 +188,21 @@ The following vendor attributes are available on credential objects:
 ### Authentication-key public-material boundary
 
 Client credentials on a YubiKey and Authentication Keys on the target YubiHSM
-have different roles but share algorithm-specific PKCS #11 key types and the
-same class distinction:
+have different roles and therefore use distinct PKCS #11 key types. They retain
+the same class distinction:
 
 | Location and role | `CKA_CLASS` | `CKA_KEY_TYPE` |
 | --- | --- | --- |
-| YubiKey HSM Auth slot: symmetric client credential | `CKO_SECRET_KEY` | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
-| YubiKey HSM Auth slot: asymmetric client credential | `CKO_PRIVATE_KEY` | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
-| Target YubiHSM slot: symmetric Authentication Key record | `CKO_SECRET_KEY` | `CKK_YUBICO_HSMAUTH_SYMMETRIC` |
-| Target YubiHSM slot: asymmetric Authentication Key record | `CKO_PRIVATE_KEY` | `CKK_YUBICO_HSMAUTH_ASYMMETRIC` |
+| YubiKey HSM Auth slot: symmetric client credential | `CKO_SECRET_KEY` | `CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC` |
+| YubiKey HSM Auth slot: asymmetric client credential | `CKO_PRIVATE_KEY` | `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC` |
+| Target YubiHSM slot: symmetric Authentication Key record | `CKO_SECRET_KEY` | `CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC` |
+| Target YubiHSM slot: asymmetric Authentication Key record | `CKO_PRIVATE_KEY` | `CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC` |
 
-The key type identifies the authentication algorithm, not the available
-operation. The target-side Authentication Key projection is non-operational
-metadata; its slot does not advertise `CKP_YUBICO_HSMAUTH`. Native client
-discovery and authentication require that profile, so matching key types on a
-target HSM do not make it a native credential source.
+The credential types identify objects that can perform the session-bound native
+client operation. The target Authentication Key types identify non-operational
+metadata. Discovery can therefore distinguish the two roles directly from
+`CKA_KEY_TYPE` without a custom PKCS #11 profile.
+
 The YubiHSM command interface does not provide the target Authentication Key's
 public half:
 [`GET PUBLIC KEY`](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-cmd-reference.html#get-public-key-command)
@@ -912,13 +913,13 @@ use the existing names and storage without migration.
 
 ### HSM Auth slot discovery and execution
 
-The slot advertises Baseline and `CKP_YUBICO_HSMAUTH`. The latter is a
-vendor-defined capability profile, independent of whether any credentials are
-provisioned. Its contract is:
+The slot advertises the Baseline profile. Native HSM Auth behavior is identified
+by the slot backend and the dedicated credential key types. Its contract is:
 
 - Public, read-only credential metadata: symmetric credentials use
-  `CKO_SECRET_KEY` / `CKK_YUBICO_HSMAUTH_SYMMETRIC`, while asymmetric
-  credentials use `CKO_PRIVATE_KEY` / `CKK_YUBICO_HSMAUTH_ASYMMETRIC`.
+  `CKO_SECRET_KEY` / `CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC`; asymmetric
+  credentials use `CKO_PRIVATE_KEY` /
+  `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC`.
 - Asymmetric credentials expose a companion P-256 public key matched by both
   `CKA_LABEL` and `CKA_ID`.
 - The session-bound native authentication operation accepts the credential
@@ -927,9 +928,12 @@ provisioned. Its contract is:
 - Login requirements remain described by the ordinary token flags. This
   implementation has no USER login; SO management authorization is separate.
 
-Profile and key-type constants are published in `pkcs11rs.h`. Discovery selects
-supporting slots by profile, then searches explicitly for the two key types;
-it does not infer the native protocol from device names or backend kinds.
+The key-type constants are published in `pkcs11rs.h`. The module records native
+HSM Auth support when it registers the applet slot, then searches that slot for
+the two credential types. This avoids searches on unrelated slots and removes
+the former profile-object lookup. Public discovery does not infer support from
+device names.
+
 The slot also claims Public Certificates when token backing storage is enabled.
 This storage can hold public certificates and matching public keys; the claim
 does not require them to be provisioned already.

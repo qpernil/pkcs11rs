@@ -6,7 +6,6 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         CKP_EXTENDED_PROVIDER => "PKCS #11 Extended Provider",
         CKP_AUTHENTICATION_TOKEN => "PKCS #11 Authentication Token",
         CKP_PUBLIC_CERTIFICATES_TOKEN => "PKCS #11 Public Certificates Token",
-        x if x as CK_PROFILE_ID == CKP_YUBICO_HSMAUTH => "Yubico HSM Auth",
         _ => "PKCS #11 Profile",
     };
     TokenObject {
@@ -393,22 +392,16 @@ pub(crate) trait Slot {
     fn supports_protected_authentication_path(&self, _pinentry: &pinentry::Pinentry) -> bool {
         false
     }
-    fn additional_profile_ids(&self) -> &[CK_PROFILE_ID] {
-        &[]
+    fn supports_native_hsmauth(&self) -> bool {
+        false
     }
     fn profile_objects(&self, slot_id: CK_SLOT_ID) -> Vec<TokenObject> {
-        let mut objects = profile_token_objects(
+        profile_token_objects(
             slot_id,
             self.supports_extended_provider_profile(),
             self.supports_authentication_token_profile(),
             self.supports_public_certificates_token_profile(slot_id),
-        );
-        objects.extend(
-            self.additional_profile_ids()
-                .iter()
-                .map(|profile| profile_token_object(slot_id, *profile)),
-        );
-        objects
+        )
     }
     fn backend_token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())

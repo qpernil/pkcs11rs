@@ -6891,24 +6891,15 @@ fn target_authentication_key_types_do_not_advertise_native_hsmauth() {
     source.auth_slots.register(&child).unwrap();
     let session = ProviderSession::open(Pkcs11Provider::from_slot(child).unwrap()).unwrap();
     session.login(b"0001password").unwrap();
-    assert!(
-        session
-            .find(&[
-                (CKA_CLASS, &(CKO_PROFILE as CK_ULONG).to_ne_bytes()),
-                (CKA_PROFILE_ID, &crate::CKP_YUBICO_HSMAUTH.to_ne_bytes()),
-            ])
-            .unwrap()
-            .is_empty()
-    );
     let target = ProtocolPeer::new();
     for (class, key_type) in [
         (
             CKO_SECRET_KEY as CK_OBJECT_CLASS,
-            crate::CKK_YUBICO_HSMAUTH_SYMMETRIC,
+            crate::CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC,
         ),
         (
             CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-            crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+            crate::CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC,
         ),
     ] {
         let keys = session

@@ -63,14 +63,18 @@ The header declares the pkcs11rs vendor range and the identifiers used by:
 - [experimental previewSign](preview-sign.md), through its key-pair generation,
   derivation, signing, registration-key type, and metadata attributes;
 - Yubico AES-CCM and RSA wrapping adaptations used by
-  [YubiHSM slots](yubihsm-auth.md); and
+  [YubiHSM slots](yubihsm-auth.md);
 - [native HSM Auth credential discovery](yubihsm-auth.md#hsm-auth-slot-discovery-and-execution),
-  through `CKP_YUBICO_HSMAUTH`, `CKK_YUBICO_HSMAUTH_SYMMETRIC`,
-  `CKK_YUBICO_HSMAUTH_ASYMMETRIC`, and the retry-count and touch-required attributes.
+  through `CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC`,
+  `CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC`, and the retry-count and
+  touch-required attributes; and
+- target YubiHSM Authentication Key metadata, through
+  `CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC` and
+  `CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC`.
 
-The HSM Auth key types describe algorithms on both YubiKey client credentials
-and target YubiHSM Authentication Key records. `CKP_YUBICO_HSMAUTH` advertises
-the native client operation; target HSM slots do not claim that profile.
+The separate client and target key types expose each object's role directly.
+Native HSM Auth slot support is an internal backend property rather than a
+vendor-defined PKCS #11 profile.
 
 Mechanism presence and flags must still be discovered per slot with
 `C_GetMechanismList` and `C_GetMechanismInfo`; inclusion in the header does not
