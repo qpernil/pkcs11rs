@@ -305,21 +305,30 @@ without exporting the native host private scalar. See the
 
 ## Native virtual-YubiHSM derivation
 
-Capability `derive-session-key` enables the generic protected-object commands
+Capability `session-objects` enables the generic protected-object envelope
 implemented with software-key-core: volatile P-256 generation and ECDH,
 composition, extraction, SHA-256, SP 800-108 counter KDF, AES-CMAC verification,
 policy-controlled reads, and deletion. pkcs11rs maps the standard PKCS #11
 operation graph to those commands and marks the covered mechanisms with
 `CKF_HW`.
 
-The client selects these commands only when the active Authentication Key grants
-`derive-session-key`. Without that capability it does not issue commands
-`0x79`–`0x7c`; it can use the ordinary protected-key graph when the persistent
-client key allows the required ECDH operations. Sources whose policy requires
-the native volatile-object graph reject authentication. The session capability
-is separate from the persistent client key's `derive-ecdh` or
-`derive-ecdh-kdf` capability and from the permissions granted by the target
-Authentication Key.
+The top-level envelope is command `0x0b`. Its first payload byte is a nested
+operation. Generation, ECDH, and deletion reuse the ordinary
+`GenerateAsymmetricKey` (`0x46`), `DeriveEcdh` (`0x57`), and `DeleteObject`
+(`0x58`) command codes. Nested session-only operations are read (`0x01`),
+AES-CMAC verify (`0x02`), concatenate key (`0x03`), concatenate data (`0x04`),
+extract (`0x05`), SHA-256 (`0x06`), and counter KDF (`0x07`). Those nested
+values are not separate commands in the device command registry.
+
+The client selects this path only when the active Authentication Key returned
+by `GetObjectInfo` grants `session-objects` (`0x39`). A compiled persona that
+does not implement `SessionObject` (`0x0b`) masks this bit. Without the signal
+the client does not issue the envelope; it
+can use a less-protected derivation path when the persistent client key permits
+the required operation. Sources whose policy requires the native volatile-object
+graph reject authentication. The session capability is separate from the
+persistent client key's `derive-ecdh` or `derive-ecdh-kdf` capability and from
+the permissions granted by the target Authentication Key.
 
 Long-term credentials remain ordinary persistent P-256 or AES objects. The
 bounded intermediate/output store contains at most 64 objects per authenticated
@@ -337,7 +346,8 @@ public half as an Authentication Key in an independent virtual target. A total
 credential wildcard selects the source through the normal `Pkcs11Auth` lookup,
 opens the protected target channel, repeats native derivation after forced target
 session expiry, and tears it down. The source command log proves that both
-establishments use `DeriveEcdhKdf` and never the raw-ECDH fallback; closing the
+establishments use the `SessionObject` envelope and never the readable
+raw-ECDH fallback; closing the
 target login releases the source session and its transient objects while leaving
 the persistent credential intact.
 

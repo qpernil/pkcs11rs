@@ -990,9 +990,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_montgomery,
                 x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_edwards,
                 x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => has_ec || has_montgomery,
-                x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => {
-                    has_virtual_extensions && (has_ec || has_montgomery)
-                }
+                x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => has_ec || has_montgomery,
                 x if x == CKM_EDDSA as CK_MECHANISM_TYPE => has_edwards,
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => any(&[
                     YUBIHSM_ALGO_AES128,
@@ -1367,12 +1365,16 @@ mod name_tests {
     }
 
     #[test]
-    fn protected_ecdh_requires_a_virtual_key_algorithm_and_includes_montgomery_curves() {
-        assert!(
-            yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256])
-                .iter()
-                .all(|details| details.type_ != CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
-        );
+    fn prefixed_ecdh_advertises_for_standard_and_virtual_ecdh_keys() {
+        let mechanisms = yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256]);
+        let details = mechanisms
+            .iter()
+            .find(|details| details.type_ == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
+            .unwrap();
+        assert_eq!(details.min_key_size, 256);
+        assert_eq!(details.max_key_size, 256);
+        assert_eq!(details.flags, (CKF_HW | CKF_DERIVE) as CK_FLAGS);
+
         let mechanisms =
             yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_X25519, YUBIHSM_ALGO_X448]);
         let details = mechanisms

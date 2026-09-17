@@ -18,7 +18,7 @@ pub(crate) fn record_authentication_path(path: &'static str) {
     AUTHENTICATION_PATHS.with(|paths| paths.borrow_mut().push(path));
 }
 
-#[cfg(all(test, not(feature = "abi-tests")))]
+#[cfg(test)]
 pub(crate) fn take_authentication_paths() -> Vec<&'static str> {
     AUTHENTICATION_PATHS.with(|paths| std::mem::take(&mut *paths.borrow_mut()))
 }

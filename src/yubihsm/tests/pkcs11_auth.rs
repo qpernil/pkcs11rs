@@ -502,15 +502,33 @@ fn registered_software_source_requires_application_authorization_for_both_protoc
 
 #[test]
 fn authorized_yubihsm_source_authenticates_another_yubihsm() {
-    nested_yubihsm_authentication(true);
+    nested_yubihsm_authentication(DerivationPersona::SessionObjects);
 }
 
 #[test]
-fn yubihsm_source_rejects_authentication_without_session_derivation_permission() {
-    nested_yubihsm_authentication(false);
+fn yubihsm_source_uses_prefixed_ecdh_persona() {
+    nested_yubihsm_authentication(DerivationPersona::PrefixedEcdh);
 }
 
-fn nested_yubihsm_authentication(allow_session_derivation: bool) {
+#[test]
+fn yubihsm_source_uses_basic_ecdh_persona() {
+    nested_yubihsm_authentication(DerivationPersona::BasicEcdh);
+}
+
+#[test]
+fn yubihsm_source_rejects_authentication_without_derivation_permission() {
+    nested_yubihsm_authentication(DerivationPersona::Unavailable);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DerivationPersona {
+    SessionObjects,
+    PrefixedEcdh,
+    BasicEcdh,
+    Unavailable,
+}
+
+fn nested_yubihsm_authentication(persona: DerivationPersona) {
     const SOURCE_AUTHKEY_ID: u16 = 0x1004;
     const TARGET_AUTHKEY_ID: u16 = 0x1101;
     const CLIENT_LABEL: &str = "nested YubiHSM client";
@@ -557,22 +575,29 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     host_owner.login(b"ignored by Host").unwrap();
 
     let source_peer = Rc::new(ProtocolPeer::new());
-    source_peer.native_session_commands.set(true);
+    source_peer
+        .native_session_commands
+        .set(persona == DerivationPersona::SessionObjects);
     source_peer.native_ecdh_commands.set(true);
     source_peer
         .provision_asymmetric_authentication_public_key(SOURCE_AUTHKEY_ID, &host_public)
         .unwrap();
     let capabilities = virtual_yubihsm_core::CapabilitySet::from_capabilities(
-        [
-            virtual_yubihsm_core::Capability::GetPseudoRandom,
-            virtual_yubihsm_core::Capability::DeriveEcdh,
-            virtual_yubihsm_core::Capability::DeriveSessionKey,
-        ]
-        .into_iter()
-        .filter(|capability| {
-            allow_session_derivation
-                || *capability == virtual_yubihsm_core::Capability::GetPseudoRandom
-        }),
+        [virtual_yubihsm_core::Capability::GetPseudoRandom]
+            .into_iter()
+            .chain(match persona {
+                DerivationPersona::SessionObjects => vec![
+                    virtual_yubihsm_core::Capability::SessionObjects,
+                    virtual_yubihsm_core::Capability::DeriveEcdh,
+                ],
+                DerivationPersona::PrefixedEcdh => {
+                    vec![virtual_yubihsm_core::Capability::DeriveEcdhKdf]
+                }
+                DerivationPersona::BasicEcdh => {
+                    vec![virtual_yubihsm_core::Capability::DeriveEcdh]
+                }
+                DerivationPersona::Unavailable => Vec::new(),
+            }),
     );
     let mut authkey = source_peer
         .device
@@ -602,10 +627,16 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     else {
         panic!("client test credential must be P-256")
     };
-    let client_capabilities = VirtualCapabilitySet::from_capabilities([
-        virtual_yubihsm_core::Capability::DeriveEcdh,
-        virtual_yubihsm_core::Capability::DeriveEcdhKdf,
-    ]);
+    let client_capabilities = VirtualCapabilitySet::from_capabilities(match persona {
+        DerivationPersona::PrefixedEcdh => {
+            vec![virtual_yubihsm_core::Capability::DeriveEcdhKdf]
+        }
+        DerivationPersona::SessionObjects
+        | DerivationPersona::BasicEcdh
+        | DerivationPersona::Unavailable => {
+            vec![virtual_yubihsm_core::Capability::DeriveEcdh]
+        }
+    });
     source_peer
         .device
         .borrow_mut()
@@ -648,7 +679,7 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     let source_backend = YubiHsmSlot::with_auth_slots_and_public_discovery(
         source_peer.clone(),
         (2, 5, 0),
-        vec![YUBIHSM_ALGO_EC_P256, crate::YUBIHSM_ALGO_X25519],
+        vec![YUBIHSM_ALGO_EC_P256],
         source_auth_slots,
         None,
     );
@@ -675,6 +706,12 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
         CKR_OK as CK_RV
     );
     assert!(!source_owner.authorization_required().unwrap());
+    assert_eq!(
+        source_owner.supports_native_session_derivation().unwrap(),
+        persona == DerivationPersona::SessionObjects,
+        "source commands: {:?}",
+        source_peer.inner_commands.borrow()
+    );
     source_slot
         .lock()
         .unwrap()
@@ -748,22 +785,16 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     let target_login = crate::pkcs11_uri::authentication_uri(&source_uri, TARGET_AUTHKEY_ID);
     crate::key_scope::take_authentication_paths();
     let result = login_user_slot(&mut target, 7, target_login.as_bytes(), b"", &[]);
-    if !allow_session_derivation {
-        assert!(
-            matches!(result, Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as CK_RV),
-            "unexpected result: {result:?}"
-        );
-        // The source login does not authorize native volatile-session commands,
-        // so the provider follows the ordinary protected-key path. That path
-        // can begin the target handshake before the source key policy rejects
-        // the remaining derivation graph.
-        assert_eq!(target_peer.create_session_count(), 1);
+    if persona == DerivationPersona::Unavailable {
+        assert!(result.is_err(), "unexpected result: {result:?}");
+        // The source login does not authorize any usable derivation path.
+        assert!(!Slot::login_is_active(&target));
         assert_eq!(
             source_peer
                 .inner_commands
                 .borrow()
                 .iter()
-                .filter(|(command, _)| { *command == CommandCode::DeriveSessionObject as u8 })
+                .filter(|(command, _)| { *command == CommandCode::SessionObject as u8 })
                 .count(),
             0
         );
@@ -772,12 +803,17 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     }
     result.unwrap();
     let paths = crate::key_scope::take_authentication_paths();
-    assert!(
-        paths.contains(&"native-protected-graph"),
-        "observed {paths:?}"
+    let expected_path = match persona {
+        DerivationPersona::SessionObjects => "native-protected-graph",
+        DerivationPersona::PrefixedEcdh => "literal-prefix-derive",
+        DerivationPersona::BasicEcdh => "basic-ecdh",
+        DerivationPersona::Unavailable => unreachable!(),
+    };
+    assert!(paths.contains(&expected_path), "observed {paths:?}");
+    assert_eq!(
+        paths.iter().filter(|path| **path == expected_path).count(),
+        1
     );
-    assert!(!paths.contains(&"literal-prefix-derive"));
-    assert!(!paths.contains(&"native-prefix-derive"));
     assert_eq!(target_peer.create_session_count(), 1);
     assert!(Slot::login_is_active(&target));
     Slot::logout(&mut target).unwrap();

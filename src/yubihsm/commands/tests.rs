@@ -83,9 +83,6 @@ fn all_sample_commands() -> Vec<Command> {
         Command::key_data(CommandCode::DeriveEcdh, 1, &[0; 65]).unwrap(),
         Command::derive_ecdh_kdf(1, 3, 64, &[0; 65], &[0; 32], &[0x3c, 0x88, 0x10]).unwrap(),
         Command::generate_session_p256(super::session_object::FLAG_DERIVE).unwrap(),
-        Command::read_session_object(1),
-        Command::verify_session_object(1, &[0; 16], b"data").unwrap(),
-        Command::delete_session_object(1),
         Command::delete_object(1, 2),
         Command::decrypt_oaep(1, 32, &[0; 256], &[0; 32]).unwrap(),
         Command::generate_object(CommandCode::GenerateHmacKey, &object("hmac-gen")).unwrap(),
@@ -170,7 +167,8 @@ fn all_sample_commands() -> Vec<Command> {
             b"message",
         )
         .unwrap(),
-        Command::ml_kem(true, 1, &[0; 768]).unwrap(),
+        Command::encapsulate_ml_kem(1),
+        Command::decapsulate_ml_kem(1, &[0; 768]).unwrap(),
     ];
     commands.sort_by_key(|command| command.code() as u8);
     commands
@@ -183,9 +181,9 @@ fn device_info_page_zero_uses_the_legacy_empty_request() {
 }
 
 #[test]
-fn every_official_command_code_has_a_sample_request() {
+fn every_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
-    assert_eq!(commands.len(), 70);
+    assert_eq!(commands.len(), 68);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
     assert_eq!(
         commands
@@ -203,8 +201,53 @@ fn every_official_command_code_has_a_sample_request() {
             .filter(|command| (**command as u8) >= 0x40)
             .map(|command| *command as u8)
             .collect::<Vec<_>>(),
-        (0x40..=0x7e).collect::<Vec<_>>()
+        (0x40..=0x77).collect::<Vec<_>>()
     );
+    assert_eq!(
+        ALL_COMMAND_CODES
+            .iter()
+            .filter(|command| (0x0b..=0x0f).contains(&(**command as u8)))
+            .map(|command| *command as u8)
+            .collect::<Vec<_>>(),
+        (0x0b..=0x0f).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn session_object_envelope_reuses_matching_command_codes() {
+    let generate = Command::generate_session_p256(super::session_object::FLAG_DERIVE).unwrap();
+    assert_eq!(generate.code(), CommandCode::SessionObject);
+    assert_eq!(
+        generate.data(),
+        [
+            CommandCode::GenerateAsymmetricKey as u8,
+            super::session_object::FLAG_DERIVE,
+            12,
+        ]
+    );
+
+    let derive = Command::derive_session_ecdh(
+        super::session_object::FLAG_DERIVE,
+        SessionObjectKind::GenericSecret,
+        16,
+        SessionObjectSource::Volatile(0x0102_0304_0506_0708),
+        &[4, 5, 6],
+    )
+    .unwrap();
+    assert_eq!(derive.code(), CommandCode::SessionObject);
+    assert_eq!(derive.data()[0], CommandCode::DeriveEcdh as u8);
+
+    let read = Command::read_session_object(0x0102_0304_0506_0708);
+    assert_eq!(read.code(), CommandCode::SessionObject);
+    assert_eq!(read.data()[0], 0x01);
+
+    let verify = Command::verify_session_object(1, &[0xaa; 8], b"message").unwrap();
+    assert_eq!(verify.code(), CommandCode::SessionObject);
+    assert_eq!(verify.data()[0], 0x02);
+
+    let delete = Command::delete_session_object(0x0102_0304_0506_0708);
+    assert_eq!(delete.code(), CommandCode::SessionObject);
+    assert_eq!(delete.data()[0], CommandCode::DeleteObject as u8);
 }
 
 #[test]
@@ -258,12 +301,12 @@ fn crypto_commands_match_wire_vectors() {
     .unwrap();
     assert_eq!(ml_dsa.code(), CommandCode::SignMlDsa);
     assert_eq!(ml_dsa.data(), [0x12, 0x34, 1, 2, 0xaa, 0xbb, 0xcc, 0xdd]);
-    let encapsulate = Command::ml_kem(false, 0x1234, &[]).unwrap();
-    assert_eq!(encapsulate.code(), CommandCode::MlKem);
-    assert_eq!(encapsulate.data(), [0x12, 0x34, 0]);
-    let decapsulate = Command::ml_kem(true, 0x1234, &[0xaa, 0xbb]).unwrap();
-    assert_eq!(decapsulate.data(), [0x12, 0x34, 1, 0xaa, 0xbb]);
-    assert!(Command::ml_kem(false, 0x1234, &[0xaa]).is_err());
+    let encapsulate = Command::encapsulate_ml_kem(0x1234);
+    assert_eq!(encapsulate.code(), CommandCode::EncapsulateMlKem);
+    assert_eq!(encapsulate.data(), [0x12, 0x34]);
+    let decapsulate = Command::decapsulate_ml_kem(0x1234, &[0xaa, 0xbb]).unwrap();
+    assert_eq!(decapsulate.code(), CommandCode::DecapsulateMlKem);
+    assert_eq!(decapsulate.data(), [0x12, 0x34, 0xaa, 0xbb]);
 
     assert_eq!(
         Command::key_data(CommandCode::SignPkcs1, 0x1234, &[0xaa, 0xbb])

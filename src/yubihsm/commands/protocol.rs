@@ -22,6 +22,11 @@ pub(crate) enum CommandCode {
     GetDeviceInfo = 0x06,
     ResetDevice = 0x08,
     GetDevicePublicKey = 0x0a,
+    SessionObject = 0x0b,
+    DeriveEcdhKdf = 0x0c,
+    SignMlDsa = 0x0d,
+    EncapsulateMlKem = 0x0e,
+    DecapsulateMlKem = 0x0f,
     CloseSession = 0x40,
     GetStorageInfo = 0x41,
     PutOpaque = 0x42,
@@ -78,13 +83,6 @@ pub(crate) enum CommandCode {
     PutRsaWrappedKey = 0x75,
     ExportRsaWrapped = 0x76,
     ImportRsaWrapped = 0x77,
-    DeriveEcdhKdf = 0x78,
-    DeriveSessionObject = 0x79,
-    ReadSessionObject = 0x7a,
-    VerifySessionObject = 0x7b,
-    DeleteSessionObject = 0x7c,
-    SignMlDsa = 0x7d,
-    MlKem = 0x7e,
 }
 
 pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
@@ -95,6 +93,11 @@ pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::GetDeviceInfo,
     CommandCode::ResetDevice,
     CommandCode::GetDevicePublicKey,
+    CommandCode::SessionObject,
+    CommandCode::DeriveEcdhKdf,
+    CommandCode::SignMlDsa,
+    CommandCode::EncapsulateMlKem,
+    CommandCode::DecapsulateMlKem,
     CommandCode::CloseSession,
     CommandCode::GetStorageInfo,
     CommandCode::PutOpaque,
@@ -151,13 +154,6 @@ pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::PutRsaWrappedKey,
     CommandCode::ExportRsaWrapped,
     CommandCode::ImportRsaWrapped,
-    CommandCode::DeriveEcdhKdf,
-    CommandCode::DeriveSessionObject,
-    CommandCode::ReadSessionObject,
-    CommandCode::VerifySessionObject,
-    CommandCode::DeleteSessionObject,
-    CommandCode::SignMlDsa,
-    CommandCode::MlKem,
 ];
 
 impl TryFrom<u8> for CommandCode {

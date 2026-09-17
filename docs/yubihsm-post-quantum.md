@@ -25,11 +25,12 @@ path without a separate command filter.
 
 Key-pair generation uses the existing `GenerateAsymmetricKey` command. Private
 seed imports use `PutAsymmetricKey`, and public projection uses `GetPublicKey`.
-ML-DSA signing uses virtual command `0x7d`, preserving PKCS #11 deterministic,
+ML-DSA signing uses virtual command `0x0d`, preserving PKCS #11 deterministic,
 required-randomization, preferred-randomization, and context semantics. ML-KEM
-encapsulation and decapsulation use virtual command `0x7e`. The shared secret is
-published as the requested PKCS #11 session secret object; the ML-KEM private
-key never leaves the HSM.
+encapsulation uses command `0x0e`, whose fixed request is the key ID;
+decapsulation uses command `0x0f`, whose request is the key ID followed by the
+ciphertext. The shared secret is published as the requested PKCS #11 session
+secret object; the ML-KEM private key never leaves the HSM.
 
 The virtual commands use capability bits `0x3a` for ML-DSA signing, `0x3b` for
 ML-KEM encapsulation, and `0x3c` for ML-KEM decapsulation. Key creation derives

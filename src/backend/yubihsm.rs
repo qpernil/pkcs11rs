@@ -1685,22 +1685,15 @@ impl YubiHsmSlot {
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.discovery.authkey_domains()
         };
-        let user_info =
-            if discovery_domains.is_some() || yubihsm_has_virtual_extensions(&self.algorithms) {
-                match self.authentication_key_info(&session, authkey_id) {
-                    Ok(info) => Some(info),
-                    Err(error) => {
-                        let _ = self.close_session_cell(&session, "rejected user");
-                        return Err(error);
-                    }
-                }
-            } else {
-                None
-            };
+        let user_info = match self.authentication_key_info(&session, authkey_id) {
+            Ok(info) => info,
+            Err(error) => {
+                let _ = self.close_session_cell(&session, "rejected user");
+                return Err(error);
+            }
+        };
         if let Some(discovery_domains) = discovery_domains
-            && user_info
-                .as_ref()
-                .is_none_or(|info| info.domains != discovery_domains)
+            && user_info.domains != discovery_domains
         {
             log!(
                 2,
@@ -1713,8 +1706,7 @@ impl YubiHsmSlot {
         *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
             session: session.into_inner().ok_or(CKR_DEVICE_ERROR)?,
             role: YubiHsmSessionRole::User,
-            native_session_objects: user_info
-                .is_some_and(|info| yubihsm_capability(&info.capabilities, 0x39)),
+            native_session_objects: yubihsm_capability(&user_info.capabilities, 0x39),
             reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
             credential_description: Some(credential_description),
         };
