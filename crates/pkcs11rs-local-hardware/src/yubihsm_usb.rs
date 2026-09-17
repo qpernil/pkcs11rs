@@ -378,9 +378,9 @@ impl YubiHsmUsbDevice {
         receive_buffer: &'a mut [u8],
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let completion =
+        let response =
             self.transfer_blocking(send_buffer, receive_buffer.len(), response_timeout)?;
-        copy_received(completion, receive_buffer)
+        copy_received(&response, receive_buffer)
     }
 
     #[cfg(feature = "blocking")]
@@ -417,7 +417,7 @@ impl YubiHsmUsbDevice {
             nusb::transfer::Buffer::from(response),
             response_timeout,
         );
-        received_vec(completion, YUBIHSM_MAX_MESSAGE_SIZE)
+        receive_response_blocking(&mut bulk_in, completion, receive_len, response_timeout)
     }
 
     #[cfg(feature = "blocking")]
@@ -426,7 +426,7 @@ impl YubiHsmUsbDevice {
         send_buffer: &[u8],
         receive_len: usize,
         response_timeout: Duration,
-    ) -> Result<nusb::transfer::Completion, Error> {
+    ) -> Result<Vec<u8>, Error> {
         let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(send_buffer, receive_len)?;
         let completion = nusb_transfer_blocking(
             &mut bulk_out,
@@ -442,11 +442,12 @@ impl YubiHsmUsbDevice {
             completion.status?;
         }
 
-        Ok(nusb_transfer_blocking(
+        let completion = nusb_transfer_blocking(
             &mut bulk_in,
             nusb::transfer::Buffer::new(receive_len),
             response_timeout,
-        ))
+        );
+        receive_response_blocking(&mut bulk_in, completion, receive_len, response_timeout)
     }
 
     #[cfg(feature = "async-tokio")]
@@ -456,10 +457,10 @@ impl YubiHsmUsbDevice {
         receive_buffer: &'a mut [u8],
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let completion = self
+        let response = self
             .transfer(send_buffer, receive_buffer.len(), response_timeout)
             .await?;
-        copy_received(completion, receive_buffer)
+        copy_received(&response, receive_buffer)
     }
 
     #[cfg(feature = "async-tokio")]
@@ -499,7 +500,7 @@ impl YubiHsmUsbDevice {
             response_timeout,
         )
         .await;
-        received_vec(completion, YUBIHSM_MAX_MESSAGE_SIZE)
+        receive_response(&mut bulk_in, completion, receive_len, response_timeout).await
     }
 
     #[cfg(feature = "async-tokio")]
@@ -508,7 +509,7 @@ impl YubiHsmUsbDevice {
         send_buffer: &[u8],
         receive_len: usize,
         response_timeout: Duration,
-    ) -> Result<nusb::transfer::Completion, Error> {
+    ) -> Result<Vec<u8>, Error> {
         let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(send_buffer, receive_len)?;
         let completion = nusb_transfer(
             &mut bulk_out,
@@ -526,12 +527,13 @@ impl YubiHsmUsbDevice {
             completion.status?;
         }
 
-        Ok(nusb_transfer(
+        let completion = nusb_transfer(
             &mut bulk_in,
             nusb::transfer::Buffer::new(receive_len),
             response_timeout,
         )
-        .await)
+        .await;
+        receive_response(&mut bulk_in, completion, receive_len, response_timeout).await
     }
 
     fn transfer_endpoints(
@@ -614,22 +616,105 @@ fn ensure_yubihsm_message_size(version: (u8, u8), actual: usize) -> Result<(), E
 type BulkOutEndpoint = nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::Out>;
 type BulkInEndpoint = nusb::Endpoint<nusb::transfer::Bulk, nusb::transfer::In>;
 
-fn copy_received(
-    completion: nusb::transfer::Completion,
-    receive_buffer: &mut [u8],
-) -> Result<&[u8], Error> {
-    let received = completion.actual_len;
-    completion.status?;
-    ensure_receive_size(received, YUBIHSM_MAX_MESSAGE_SIZE)?;
-    receive_buffer[..received].copy_from_slice(&completion.buffer[..received]);
-    Ok(&receive_buffer[..received])
+fn copy_received<'a>(response: &[u8], receive_buffer: &'a mut [u8]) -> Result<&'a [u8], Error> {
+    if response.len() > receive_buffer.len() {
+        return Err(Error::ReceiveBufferTooLarge);
+    }
+    receive_buffer[..response.len()].copy_from_slice(response);
+    Ok(&receive_buffer[..response.len()])
 }
 
-fn received_vec(completion: nusb::transfer::Completion, maximum: usize) -> Result<Vec<u8>, Error> {
+fn received_chunk(
+    completion: nusb::transfer::Completion,
+    maximum: usize,
+) -> Result<Vec<u8>, Error> {
     let received = completion.actual_len;
     completion.status?;
     ensure_receive_size(received, maximum)?;
-    Ok(completion.buffer.into_vec())
+    let mut chunk = completion.buffer.into_vec();
+    chunk.truncate(received);
+    Ok(chunk)
+}
+
+fn response_is_complete(response: &[u8], capacity: usize) -> Result<bool, Error> {
+    if response.len() < YUBIHSM_MESSAGE_HEADER_SIZE {
+        return Ok(false);
+    }
+    let payload_length = usize::from(u16::from_be_bytes([response[1], response[2]]));
+    let expected = YUBIHSM_MESSAGE_HEADER_SIZE + payload_length;
+    ensure_receive_size(expected, YUBIHSM_MAX_MESSAGE_SIZE)?;
+    if expected > capacity {
+        return Err(Error::ReceiveBufferTooLarge);
+    }
+    if response.len() > expected {
+        return Err(Error::InvalidMessageLength {
+            actual: response.len(),
+            expected: Some(expected),
+        });
+    }
+    Ok(response.len() == expected)
+}
+
+fn incomplete_response(response: &[u8]) -> Error {
+    let expected = response.get(1..3).map(|length| {
+        YUBIHSM_MESSAGE_HEADER_SIZE + usize::from(u16::from_be_bytes([length[0], length[1]]))
+    });
+    Error::InvalidMessageLength {
+        actual: response.len(),
+        expected,
+    }
+}
+
+#[cfg(feature = "blocking")]
+fn receive_response_blocking(
+    endpoint: &mut BulkInEndpoint,
+    completion: nusb::transfer::Completion,
+    capacity: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, Error> {
+    let mut response = received_chunk(completion, capacity)?;
+    loop {
+        if response_is_complete(&response, capacity)? {
+            return Ok(response);
+        }
+        let remaining = capacity
+            .checked_sub(response.len())
+            .filter(|remaining| *remaining != 0)
+            .ok_or(Error::ReceiveBufferTooLarge)?;
+        let completion =
+            nusb_transfer_blocking(endpoint, nusb::transfer::Buffer::new(remaining), timeout);
+        let chunk = received_chunk(completion, remaining)?;
+        if chunk.is_empty() {
+            return Err(incomplete_response(&response));
+        }
+        response.extend_from_slice(&chunk);
+    }
+}
+
+#[cfg(feature = "async-tokio")]
+async fn receive_response(
+    endpoint: &mut BulkInEndpoint,
+    completion: nusb::transfer::Completion,
+    capacity: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, Error> {
+    let mut response = received_chunk(completion, capacity)?;
+    loop {
+        if response_is_complete(&response, capacity)? {
+            return Ok(response);
+        }
+        let remaining = capacity
+            .checked_sub(response.len())
+            .filter(|remaining| *remaining != 0)
+            .ok_or(Error::ReceiveBufferTooLarge)?;
+        let completion =
+            nusb_transfer(endpoint, nusb::transfer::Buffer::new(remaining), timeout).await;
+        let chunk = received_chunk(completion, remaining)?;
+        if chunk.is_empty() {
+            return Err(incomplete_response(&response));
+        }
+        response.extend_from_slice(&chunk);
+    }
 }
 
 fn ensure_receive_size(actual: usize, maximum: usize) -> Result<(), Error> {
@@ -828,6 +913,33 @@ mod tests {
             Err(Error::ReceiveMessageTooLarge {
                 actual: 8193,
                 maximum: 8192
+            })
+        ));
+    }
+
+    #[test]
+    fn response_framing_waits_for_the_declared_length() {
+        let mut response = vec![0x84, 0x12, 0x29];
+        response.resize(3_200, 0);
+        assert!(!response_is_complete(&response, 8_256).unwrap());
+        response.resize(4_652, 0);
+        assert!(response_is_complete(&response, 8_256).unwrap());
+    }
+
+    #[test]
+    fn response_framing_rejects_oversized_and_trailing_data() {
+        assert!(matches!(
+            response_is_complete(&[0x84, 0x1f, 0xfe], 8_256),
+            Err(Error::ReceiveMessageTooLarge {
+                actual: 8_193,
+                maximum: 8_192
+            })
+        ));
+        assert!(matches!(
+            response_is_complete(&[0x84, 0x00, 0x00, 0xff], 8_256),
+            Err(Error::InvalidMessageLength {
+                actual: 4,
+                expected: Some(3)
             })
         ));
     }
