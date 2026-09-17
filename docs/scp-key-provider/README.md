@@ -96,18 +96,18 @@ completion. Host/card cryptograms use local S-MAC. The native counter-KDF and
 authentication fallback share the same CMAC/counter implementation.
 
 Asymmetric authentication binds a protected P-256 private credential and generates
-an ephemeral private key. Existing-slot credentials prefer
-`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when advertised and permitted by the key.
-The ephemeral agreement is explicitly readable and supplied as prefix bytes;
-static ECDH and X9.63 remain one operation. The static agreement is never read
-by the authentication client. A supporting native HSM keeps it device-side;
-physical YubiHSM and host keys use zeroizing module memory for the KDF.
+an ephemeral private key. An existing-slot credential first uses the native
+protected session-object graph when the provider can retain volatile keys and
+both private keys permit `CKM_ECDH1_DERIVE`. Both agreements, concatenation,
+X9.63, extraction, and receipt verification then remain in the source device.
 
-If the combined mechanism is unavailable or excluded by key policy, both
-agreements use protected generic-secret objects. Concatenation and public
-counter/shared-info inputs remain protected; SHA-256 derivation creates readable
-KDF blocks, which concatenate into readable material. No existing object's
-protection is weakened, and a failed combined operation does not trigger fallback.
+When that graph is unavailable, the client selects
+`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` if the static credential permits it. The
+ephemeral agreement is explicitly readable and supplied as prefix bytes; static
+ECDH and X9.63 remain one operation. If neither path is available, ordinary
+ECDH returns the static agreement and the common module performs the remaining
+composition and KDF in zeroizing memory. Path selection finishes before any
+derivation, and an operational failure does not trigger a weaker retry.
 Direct password authentication uses the same mechanism selection. When recreation
 is enabled, it retains the protected private-key credential and repeats ECDH
 for each handshake; no static agreement is retained between handshakes.
@@ -240,15 +240,16 @@ the two phone platform-key projections. This qualifies projection-only skipping
 and token-native priority against real target firmware without modifying the
 provisioned inventory.
 
-The persisted fixture can also hold three P-256 credentials whose native
-capabilities and `CKA_ALLOWED_MECHANISMS` force every supported asymmetric
-derivation route:
+The persisted fixture can hold P-256 credentials whose native capabilities and
+`CKA_ALLOWED_MECHANISMS` force a specific asymmetric derivation placement. Its
+route names describe the current security boundary:
 
 | Route | Provider selection | Static agreement and X9.63 KDF |
 | --- | --- | --- |
-| `native-device` | Combined prefixed ECDH | Virtual `DeriveEcdhKdf` command |
-| `module-prefixed` | Combined prefixed ECDH | Raw device ECDH followed by the module KDF |
-| `pkcs11-operation-graph` | Standard PKCS #11 graph | Separate ECDH, concatenation, SHA-256, and extraction operations |
+| `native-protected-graph` | Native session-object graph | Ephemeral key, both agreements, KDF, extraction, and receipt verification stay in the source device |
+| `native-prefix-derive` | Literal prefix derive | Virtual `DeriveEcdhKdf` performs static ECDH and X9.63 in the source device |
+| `module-prefix-derive` | Literal prefix derive | Raw static ECDH and X9.63 execute in zeroizing module memory |
+| `basic-ecdh` | Ordinary ECDH | Raw static ECDH, composition, and X9.63 execute in zeroizing module memory |
 
 The ignored `qualifies_persisted_virtual_client_paths` test takes the source,
 targets, public-discovery credential, client credentials, and expected routes
@@ -291,7 +292,7 @@ slot/label is future work. Existing authorized sources are covered at the
 provider layer without copying or reading their credential values.
 
 Validation includes fixed card vectors, AES-192/256, batch diversification,
-both ECDH paths, failed receipts and source policies, source logout, cross-thread
+all ECDH placement paths, failed receipts and source policies, source logout, cross-thread
 DEK use and cleanup, plus virtual-YubiKey provisioning and transaction-lifetime
 regressions. Caller-supplied new-key material and KCV calculation remain an
 explicit administration input workflow. SCP03 S16 is outside this plan.
@@ -377,9 +378,10 @@ already exposes the slots of multiple configured modules through one PKCS #11
 interface.
 
 Choose derivation paths from the source's mechanisms and key permissions,
-without relying on backend kind. Prefer prefixed ECDH+KDF when available. An
-external module with ordinary ECDH and protected composition/KDF operations can
-retain all intermediate objects in that module. A limited source such as a PIV
+without relying on backend kind. Prefer a native protected session-object graph,
+then prefixed ECDH+KDF, then readable raw ECDH. An external module with ordinary
+ECDH and protected composition/KDF operations can retain all intermediate
+objects in that module. A limited source such as a PIV
 module may instead produce an explicitly readable raw ECDH result; the adapter
 materializes it as a local, protected software session object and completes
 concatenation, X9.63 SHA-256, extraction, and receipt verification through the

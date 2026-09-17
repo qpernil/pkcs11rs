@@ -602,14 +602,16 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     else {
         panic!("client test credential must be P-256")
     };
+    let client_capabilities = VirtualCapabilitySet::from_capabilities([
+        virtual_yubihsm_core::Capability::DeriveEcdh,
+        virtual_yubihsm_core::Capability::DeriveEcdhKdf,
+    ]);
     source_peer
         .device
         .borrow_mut()
         .provision_object(VirtualObjectRecord {
             info: VirtualObjectInfo {
-                capabilities: VirtualCapabilitySet::from_capabilities([
-                    virtual_yubihsm_core::Capability::DeriveEcdh,
-                ]),
+                capabilities: client_capabilities,
                 id: TARGET_AUTHKEY_ID,
                 length: 96,
                 domains: u16::MAX,
@@ -627,7 +629,7 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
         TARGET_AUTHKEY_ID,
         (
             ObjectInfo {
-                capabilities: [0, 0, 0, 0, 0, 0, 8, 0],
+                capabilities: client_capabilities.to_bytes(),
                 id: TARGET_AUTHKEY_ID,
                 length: 96,
                 domains: u16::MAX,
@@ -744,6 +746,7 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     target.auth_slots.register(&source_slot).unwrap();
     source_peer.refresh_changes_epoch.set(true);
     let target_login = crate::pkcs11_uri::authentication_uri(&source_uri, TARGET_AUTHKEY_ID);
+    crate::key_scope::take_authentication_paths();
     let result = login_user_slot(&mut target, 7, target_login.as_bytes(), b"", &[]);
     if !allow_session_derivation {
         assert!(
@@ -768,6 +771,13 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
         return;
     }
     result.unwrap();
+    let paths = crate::key_scope::take_authentication_paths();
+    assert!(
+        paths.contains(&"native-protected-graph"),
+        "observed {paths:?}"
+    );
+    assert!(!paths.contains(&"literal-prefix-derive"));
+    assert!(!paths.contains(&"native-prefix-derive"));
     assert_eq!(target_peer.create_session_count(), 1);
     assert!(Slot::login_is_active(&target));
     Slot::logout(&mut target).unwrap();

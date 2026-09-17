@@ -138,14 +138,13 @@ S-ENC = M[16:32]; S-MAC = M[32:48]; S-RMAC = M[48:64]
 receipt = CMAC(Kreceipt, target ephemeral public || client ephemeral public)
 ```
 
-The client prefers `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when
-advertised and permitted for the static key. It derives `Ze` as an explicitly
-readable ephemeral object and passes its bytes as the prefix for static ECDH
-and X9.63. `Zs` is never read by the client. A missing or excluded mechanism
-selects protected `CKD_NULL` ECDH objects followed by concatenation and SHA-256.
-Operational errors do not cause fallback. Direct authentication and recreation
-use the same selection from a protected private-key credential, recomputing
-the static agreement for each handshake.
+The client first uses the native protected session-object graph when the source
+session and both private keys permit it. Otherwise it selects
+`CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when the static key permits that mechanism.
+The final path uses ordinary `CKD_NULL` ECDH and performs composition and
+SHA-256 through the common module mechanisms. Operational errors do not cause
+fallback. Direct authentication and recreation make the same selection and
+recompute both agreements for every handshake.
 
 The receipt input is two uncompressed P-256 public points (65 bytes each),
 without the GlobalPlatform authentication TLVs. Verify all 16 receipt bytes,
@@ -238,7 +237,7 @@ static OCE private key and send its public certificate chain.
 | --- | --- | --- | --- |
 | SCP11a | `01 / 11 / 82` | Client ephemeral × card ephemeral | Client static × card static |
 | SCP11b | `00 / 13 / 88` | Client ephemeral × card ephemeral | Client ephemeral × card static |
-| SCP11c | `03 / 15 / 82` | Client ephemeral × card ephemeral | Client static × card static |
+| SCP11c | `03 / 15 / 82` | Client ephemeral × card static | Client static × card static |
 
 Each agreement uses `CKM_ECDH1_DERIVE` with `CKD_NULL`, producing a protected
 32-byte generic secret. Preserve leading zero bytes. Certificate validation
@@ -269,10 +268,11 @@ This is a generic-mechanism construction, not a requirement to add an
 SCP-specific derivation command. A later generic protected X9.63 operation can
 optimize the number of calls without changing the profile.
 
-Verify the full 16-byte CMAC under Kreceipt of
-`request_data || card_ephemeral_TLV`. `request_data` contains the encoded A6
-parameters and client 5F49 public-point TLV; the response contributes its
-original validated 5F49 TLV. Preserve the encoded bytes, not just the EC points.
+Verify the full 16-byte CMAC under Kreceipt. For SCP11a/b the input is
+`request_data || card_ephemeral_TLV`; for SCP11c it is only `request_data`
+because the card has no ephemeral key. `request_data` contains the encoded A6
+parameters and client 5F49 public-point TLV. Preserve the encoded bytes, not
+just the EC points.
 The verified receipt initializes the secure-message chain. Release Kreceipt,
 agreements, ephemeral private key, and composition intermediates after their
 last use. Keep S-ENC, S-MAC, S-RMAC, and DEK for the channel lifetime.

@@ -86,12 +86,14 @@ certificate matching. No file-unlock password is retained. The provider session
 owns the imported OCE credential; separate handshake sessions own ephemeral
 keys and intermediate objects.
 
-The preferred prefixed-ECDH mechanism combines the static agreement and KDF,
-using an explicitly readable ephemeral agreement as prefix. When key policy
-or advertised mechanisms exclude it, ordinary ECDH and protected composition
-perform the same KDF. A failure executing the selected path is returned without
-retrying another path. The protected receipt key verifies the complete encoded
-request and card ephemeral TLV before the four final AES values are read.
+The client prefers a native protected session-object graph, then combined
+derivation with a host-readable agreement prefix, then basic ECDH with the KDF
+in zeroizing process memory. A failure executing the selected path is returned
+without retrying a weaker path. The protected receipt key verifies the complete
+encoded transcript before the four final AES values are read. See
+[client ECDH placement and security](client-ecdh-security.md) for the exact
+selection rules, host-visible material, SCP11a/b/c differences, and comparison
+with native YubiHSM Auth.
 S-ENC, S-MAC, S-RMAC, and the derived DEK use zeroizing local storage; temporary
 provider objects are released on both success and failure. Existing provider
 sessions use the same operations, but card configuration does not yet select

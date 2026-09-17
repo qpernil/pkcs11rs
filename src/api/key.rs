@@ -2078,30 +2078,30 @@ pub(crate) fn derive_key(
             match &source {
                 DeriveSource::YubiHsm { id, .. } if native_kdf => {
                     #[cfg(test)]
-                    crate::key_scope::record_authentication_path("native-device");
+                    crate::key_scope::record_authentication_path("native-prefix-derive");
                     tracing::trace!(
                         target: "pkcs11rs::authentication",
-                        path = "native-device",
+                        path = "native-prefix-derive",
                         key_id = format_args!("{id:04x}"),
                         "executing prefixed ECDH derivation"
                     );
                 }
                 DeriveSource::YubiHsm { id, .. } => {
                     #[cfg(test)]
-                    crate::key_scope::record_authentication_path("module-prefixed");
+                    crate::key_scope::record_authentication_path("module-prefix-derive");
                     tracing::trace!(
                         target: "pkcs11rs::authentication",
-                        path = "module-prefixed",
+                        path = "module-prefix-derive",
                         key_id = format_args!("{id:04x}"),
                         "executing prefixed ECDH derivation"
                     );
                 }
                 _ => {
                     #[cfg(test)]
-                    crate::key_scope::record_authentication_path("module-prefixed");
+                    crate::key_scope::record_authentication_path("module-prefix-derive");
                     tracing::trace!(
                         target: "pkcs11rs::authentication",
-                        path = "module-prefixed",
+                        path = "module-prefix-derive",
                         "executing prefixed ECDH derivation"
                     );
                 }

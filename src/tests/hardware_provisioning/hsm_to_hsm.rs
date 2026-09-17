@@ -849,7 +849,10 @@ fn qualifies_persisted_virtual_client_paths() {
             let label = fields.next().expect("each key must be ID=PATH=LABEL");
             assert!(matches!(
                 path,
-                "native-device" | "module-prefixed" | "pkcs11-operation-graph"
+                "native-protected-graph"
+                    | "native-prefix-derive"
+                    | "module-prefix-derive"
+                    | "basic-ecdh"
             ));
             let label = label.trim().to_owned();
             assert!(!label.is_empty() && label.len() <= 40);
@@ -915,20 +918,24 @@ fn qualifies_persisted_virtual_client_paths() {
                 "{label:?} did not exercise {expected_path}; observed {paths:?}"
             );
             match expected_path.as_str() {
-                "native-device" => {
-                    assert!(paths.contains(&"combined-prefixed-ecdh"));
-                    assert!(!paths.contains(&"module-prefixed"));
-                    assert!(!paths.contains(&"pkcs11-operation-graph"));
+                "native-protected-graph" => {
+                    assert!(!paths.contains(&"literal-prefix-derive"));
+                    assert!(!paths.contains(&"basic-ecdh"));
                 }
-                "module-prefixed" => {
-                    assert!(paths.contains(&"combined-prefixed-ecdh"));
-                    assert!(!paths.contains(&"native-device"));
-                    assert!(!paths.contains(&"pkcs11-operation-graph"));
+                "native-prefix-derive" => {
+                    assert!(paths.contains(&"literal-prefix-derive"));
+                    assert!(!paths.contains(&"module-prefix-derive"));
+                    assert!(!paths.contains(&"basic-ecdh"));
                 }
-                "pkcs11-operation-graph" => {
-                    assert!(!paths.contains(&"combined-prefixed-ecdh"));
-                    assert!(!paths.contains(&"native-device"));
-                    assert!(!paths.contains(&"module-prefixed"));
+                "module-prefix-derive" => {
+                    assert!(paths.contains(&"literal-prefix-derive"));
+                    assert!(!paths.contains(&"native-prefix-derive"));
+                    assert!(!paths.contains(&"basic-ecdh"));
+                }
+                "basic-ecdh" => {
+                    assert!(!paths.contains(&"literal-prefix-derive"));
+                    assert!(!paths.contains(&"native-prefix-derive"));
+                    assert!(!paths.contains(&"module-prefix-derive"));
                 }
                 _ => unreachable!(),
             }

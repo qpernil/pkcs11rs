@@ -38,8 +38,13 @@ the alternative mechanism.
 The counter-KDF path creates explicitly readable working objects; the ECB path
 produces the working bytes directly without creating output objects in the
 source token. The source AES values are neither read nor split. Direct
-asymmetric authentication uses the same capability-based prefixed ECDH/KDF or
-protected standard composition path as an existing source credential.
+asymmetric authentication uses the ordered ordinary-source paths: native
+protected session graph, literal-prefix derivation, then basic ECDH with module
+composition. Native YubiHSM Auth is selected ahead of those paths and executes
+the complete asymmetric calculation in its applet. See
+[client ECDH placement and security](client-ecdh-security.md) for the exact
+PKCS #11 mechanisms, virtual algorithms and capabilities, physical-YubiHSM
+fallback, and protocol security properties.
 The receipt key remains protected and verifies the receipt before the working
 keys are read. All derivation objects are destroyed on completion or failure.
 Long-term credential and raw agreement values are never read into message code.
@@ -1063,13 +1068,13 @@ the platform slot's private objects without validating a PIN.
 
 #### Asymmetric handshake
 
-The source slot generates a fresh software ephemeral P-256 session key and
-performs derivation through `Pkcs11Auth`. It prefers the combined prefixed-ECDH
-mechanism when advertised and permitted by the selected key, passing the
-readable ephemeral agreement as prefix bytes. The static agreement remains
-inside the combined operation. Otherwise, protected agreement objects,
-concatenation, and SHA-256 implement the same X9.63 graph. An operational failure
-does not select a different path:
+The source slot generates a fresh P-256 session key and performs derivation
+through `Pkcs11Auth`. A provider with native volatile session objects keeps the
+ephemeral private key and both agreements in its protected graph. Otherwise,
+the client prefers the combined prefixed-ECDH mechanism when advertised and
+permitted by the selected key, passing the readable ephemeral agreement as
+prefix bytes. Basic ECDH followed by module composition is the final path. An
+operational failure does not select a weaker path:
 
 ```text
 SHA-256(Z_ephemeral || Z_static || counter || shared_info)

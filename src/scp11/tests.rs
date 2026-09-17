@@ -354,16 +354,20 @@ fn rejects_noncanonical_or_trailing_response_tlvs() {
         encode_tlv(&[0x86], &[0; 16]).unwrap(),
     ]
     .concat();
-    assert!(parse_authentication_response(&valid).is_ok());
+    assert!(parse_authentication_response(&valid, true).is_ok());
+    let static_response = encode_tlv(&[0x86], &[0; 16]).unwrap();
+    assert!(parse_authentication_response(&static_response, false).is_ok());
+    assert!(parse_authentication_response(&static_response, true).is_err());
+    assert!(parse_authentication_response(&valid, false).is_err());
 
     let mut trailing = valid.clone();
     trailing.push(0);
-    assert!(parse_authentication_response(&trailing).is_err());
+    assert!(parse_authentication_response(&trailing, true).is_err());
 
     let mut noncanonical = vec![0x5f, 0x49, 0x81, 65];
     noncanonical.extend_from_slice(&point);
     noncanonical.extend_from_slice(&encode_tlv(&[0x86], &[0; 16]).unwrap());
-    assert!(parse_authentication_response(&noncanonical).is_err());
+    assert!(parse_authentication_response(&noncanonical, true).is_err());
 }
 
 #[cfg(feature = "mock-yubikey")]
