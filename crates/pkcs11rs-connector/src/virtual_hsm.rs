@@ -317,6 +317,54 @@ mod tests {
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
+    #[test]
+    fn embedded_firmware_profile_is_forwarded_to_the_core() {
+        use virtual_yubihsm_core::{Algorithm, Capability, CommandCode, FirmwareProfile};
+
+        let expected = if cfg!(feature = "firmware-full") {
+            FirmwareProfile::Full
+        } else if cfg!(feature = "firmware-secure-channel") {
+            FirmwareProfile::SecureChannel
+        } else if cfg!(feature = "test-firmware-prefixed-ecdh") {
+            FirmwareProfile::TestPrefixedEcdh
+        } else if cfg!(feature = "test-firmware-session-objects") {
+            FirmwareProfile::TestSessionObjects
+        } else {
+            FirmwareProfile::YubiHsm2
+        };
+        let firmware = FirmwareProfile::compiled();
+        assert_eq!(firmware, expected);
+
+        for (algorithm, enabled) in [
+            (Algorithm::X25519, firmware.extended_curves()),
+            (Algorithm::MlDsa44, firmware.post_quantum()),
+        ] {
+            assert_eq!(algorithm.supported_by_firmware(), enabled);
+            assert_eq!(
+                DeviceConfig::default()
+                    .algorithms
+                    .contains(&(algorithm as u8)),
+                enabled
+            );
+        }
+
+        for (command, enabled) in [
+            (CommandCode::DeriveEcdhKdf, firmware.prefixed_ecdh()),
+            (CommandCode::SessionObject, firmware.session_objects()),
+            (CommandCode::SignMlDsa, firmware.post_quantum()),
+        ] {
+            assert_eq!(command.supported_by_firmware(), enabled);
+        }
+
+        for (capability, enabled) in [
+            (Capability::DeriveEcdhKdf, firmware.prefixed_ecdh()),
+            (Capability::SessionObjects, firmware.session_objects()),
+            (Capability::SignMlDsa, firmware.post_quantum()),
+        ] {
+            assert_eq!(capability.supported_by_firmware(), enabled);
+        }
+    }
+
     fn temporary_directory() -> PathBuf {
         std::env::temp_dir().join(format!(
             "pkcs11rs-connector-virtual-hsm-{}-{}",

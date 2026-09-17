@@ -11,9 +11,30 @@ publish = false
 [features]
 default = []
 experimental-i2c = ["dep:libc", "dep:gpiocdev-uapi"]
-embedded-virtual-yubihsm = [
+firmware-yubihsm2 = [
     "dep:virtual-yubihsm-core",
     "virtual-yubihsm-core/persistent-runtime",
+    "virtual-yubihsm-core/firmware-yubihsm2",
+]
+firmware-secure-channel = [
+    "dep:virtual-yubihsm-core",
+    "virtual-yubihsm-core/persistent-runtime",
+    "virtual-yubihsm-core/firmware-secure-channel",
+]
+firmware-full = [
+    "dep:virtual-yubihsm-core",
+    "virtual-yubihsm-core/persistent-runtime",
+    "virtual-yubihsm-core/firmware-full",
+]
+test-firmware-prefixed-ecdh = [
+    "dep:virtual-yubihsm-core",
+    "virtual-yubihsm-core/persistent-runtime",
+    "virtual-yubihsm-core/test-firmware-prefixed-ecdh",
+]
+test-firmware-session-objects = [
+    "dep:virtual-yubihsm-core",
+    "virtual-yubihsm-core/persistent-runtime",
+    "virtual-yubihsm-core/test-firmware-session-objects",
 ]
 
 [dependencies]
@@ -38,7 +59,7 @@ libc = { version = "0.2", optional = true }
 gpiocdev-uapi = { version = "0.7.0", optional = true }
 
 [target.'cfg(unix)'.dependencies]
-virtual-yubihsm-core = { path = "../../../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
+virtual-yubihsm-core = { path = "../../../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true, default-features = false }
 
 [dev-dependencies]
 hyper = { version = "1.11.0", features = ["client", "http2"] }

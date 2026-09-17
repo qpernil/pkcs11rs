@@ -474,21 +474,26 @@ An optional `experimental-i2c` feature supports niche Linux I2C experiments.
 Setup and limitations are described under
 [experimental I2C endpoints](docs/connector.md#experimental-i2c-yubihsms).
 
-On Unix hosts, including Linux and macOS, the optional
-`embedded-virtual-yubihsm` feature lets the same connector serve one or more
-headless `virtual-yubihsm-core` devices alongside physical USB devices:
+On Unix hosts, including Linux and macOS, a firmware-profile feature lets the
+same connector serve one or more headless `virtual-yubihsm-core` devices
+alongside physical USB devices. This example selects the full virtual firmware:
 
 ```sh
 cargo run -p pkcs11rs-connector \
-  --features embedded-virtual-yubihsm -- \
+  --features firmware-full -- \
   --virtual-yubihsm 12345678=/var/lib/pkcs11rs/virtual-yubihsm-12345678 \
   --virtual-yubihsm 87654321=/var/lib/pkcs11rs/virtual-yubihsm-87654321
 ```
 
-For deployment, build the connector with `--release` and the same feature.
+For deployment, build the connector with `--release` and the same firmware
+feature. `firmware-yubihsm2`, `firmware-secure-channel`, and `firmware-full`
+select the same profiles as the standalone USB and I2C frontends.
 The complete configuration, persistence, locking, and recompilation behavior
 is documented in
 [Embedded virtual YubiHSMs](docs/connector.md#embedded-virtual-yubihsms).
+The distinction between firmware commands, provider-side session objects, and
+PKCS #11 mechanisms is documented in
+[YubiHSM firmware and provider capabilities](docs/yubihsm-capability-layers.md).
 
 Each configured device runs on its own blocking actor thread, while HTTP tasks
 await bounded Tokio channels and remain asynchronous. The actor calls the
