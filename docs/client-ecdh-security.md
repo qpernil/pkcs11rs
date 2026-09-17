@@ -70,10 +70,12 @@ these conditions hold before the first derivation operation:
 - the selected static credential permits `CKM_ECDH1_DERIVE`, including its
   `CKA_DERIVE` and `CKA_ALLOWED_MECHANISMS` policy.
 
-On virtual YubiHSM this native support is discovered through algorithm 61
-(`session-key-derivation`) and capability bit `0x39` (`derive-session-key`) on
-the active Authentication Key. A persistent P-256 source additionally needs
-ordinary `derive-ecdh` capability bit `0x0b`. The graph maps
+On virtual YubiHSM this native support is selected from capability bit `0x39`
+(`session-objects`) on the active Authentication Key. A persona that does not
+compile the envelope masks that capability from `GetObjectInfo`, including for
+a factory key whose stored bitmap is otherwise all ones.
+A persistent P-256 source additionally needs ordinary `derive-ecdh` capability
+bit `0x0b`. The graph maps
 `CKM_EC_KEY_PAIR_GEN`, `CKM_ECDH1_DERIVE`,
 `CKM_CONCATENATE_BASE_AND_KEY`, `CKM_CONCATENATE_BASE_AND_DATA`,
 `CKM_SHA256_KEY_DERIVATION`, `CKM_EXTRACT_KEY_FROM_KEY`, and
@@ -82,10 +84,10 @@ ordinary `derive-ecdh` capability bit `0x0b`. The graph maps
 If that graph is unavailable, the literal-prefix path is selected when
 `can_derive` succeeds for `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` on the static
 credential. That check includes slot mechanism advertisement, `CKA_DERIVE`,
-and `CKA_ALLOWED_MECHANISMS`. A virtual YubiHSM executes it through algorithm
-57 (`ecdh-kdf`), command `DeriveEcdhKdf` (`0x78`), and capability bit `0x38`
-(`derive-ecdh-kdf`) on both the authenticated session and persistent source
-key.
+and `CKA_ALLOWED_MECHANISMS`; the latter is derived from capability bit `0x38`
+(`derive-ecdh-kdf`) on the persistent source key. A virtual YubiHSM executes
+it through command `DeriveEcdhKdf` (`0x0c`) and also requires bit `0x38` on the
+active Authentication Key.
 
 The final path requires `CKM_ECDH1_DERIVE` on the long-term credential. The
 provider requests a readable raw agreement, immediately materializes it as a
@@ -102,8 +104,8 @@ merged slot mechanism can contain both hardware and software operations.
 
 A physical YubiHSM exposes its standard P-256 `DeriveEcdh` operation through
 `CKM_ECDH1_DERIVE` and capability bit `0x0b`. It does not implement the virtual
-algorithm 61 session-object command family or its volatile handles. It also
-does not implement virtual command `0x78`.
+`SessionObject` command or its volatile handles. It also does not implement
+`DeriveEcdhKdf`.
 
 For such a device, pkcs11rs generates the ephemeral P-256 key in its common
 software session layer, asks the YubiHSM to perform ECDH with the protected

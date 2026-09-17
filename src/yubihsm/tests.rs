@@ -702,14 +702,7 @@ impl ProtocolPeer {
                     return None;
                 }
                 if self.native_session_commands.get()
-                    && [
-                    CommandCode::DeriveSessionObject,
-                    CommandCode::ReadSessionObject,
-                    CommandCode::VerifySessionObject,
-                    CommandCode::DeleteSessionObject,
-                ]
-                .iter()
-                .any(|command| *command as u8 == inner.command)
+                    && inner.command == CommandCode::SessionObject as u8
                 {
                     return None;
                 }
@@ -3500,7 +3493,7 @@ fn logged_in_discovery_reads_each_native_property_only_once() {
     let second = Slot::token_objects(&slot, 7).unwrap();
     assert_eq!(peer.inner_commands.borrow().len(), command_count + 1);
     assert_eq!(inner_command_count(&peer, CommandCode::ListObjects), 2);
-    assert_eq!(inner_command_count(&peer, CommandCode::GetObjectInfo), 5);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetObjectInfo), 6);
     assert_eq!(inner_command_count(&peer, CommandCode::GetPublicKey), 1);
     assert_eq!(inner_command_count(&peer, CommandCode::GetOpaque), 2);
 
@@ -5344,7 +5337,13 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     assert!(session.get_session_info().is_ok());
     assert_eq!(
         yubihsm.inner_commands.borrow().as_slice(),
-        [(CommandCode::GetStorageInfo as u8, Vec::new())]
+        [
+            (
+                CommandCode::GetObjectInfo as u8,
+                vec![0, 1, YUBIHSM_AUTHENTICATION_KEY]
+            ),
+            (CommandCode::GetStorageInfo as u8, Vec::new())
+        ]
     );
     assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
 }
@@ -5724,7 +5723,13 @@ fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
     assert!(session.get_session_info().is_ok());
     assert_eq!(
         yubihsm.inner_commands.borrow().as_slice(),
-        [(CommandCode::GetStorageInfo as u8, Vec::new())]
+        [
+            (
+                CommandCode::GetObjectInfo as u8,
+                vec![0, 1, YUBIHSM_AUTHENTICATION_KEY]
+            ),
+            (CommandCode::GetStorageInfo as u8, Vec::new())
+        ]
     );
     assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
 }
@@ -5977,12 +5982,9 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
             .native_objects
             .get(&YubiHsmObjectKey::new(YUBIHSM_AUTHENTICATION_KEY, 1))
             .unwrap();
-        assert_eq!(authentication_key.sequence, None);
-        assert!(authentication_key.info.is_none());
-        assert_eq!(
-            authentication_key.inferred_authentication_algorithm,
-            Some(DirectAuthenticationAlgorithm::Asymmetric)
-        );
+        assert_eq!(authentication_key.sequence, Some(1));
+        assert!(authentication_key.info.is_some());
+        assert_eq!(authentication_key.inferred_authentication_algorithm, None);
     }
 
     peer.commands.borrow_mut().clear();

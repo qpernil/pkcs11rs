@@ -3,13 +3,14 @@ use crate::{CKR_DATA_LEN_RANGE, CKR_MECHANISM_PARAM_INVALID, Error};
 use software_key_core::counter_kdf::{CounterKdfField, LengthMethod};
 use zeroize::Zeroizing;
 
-const GENERATE_P256: u8 = 1;
-const ECDH: u8 = 2;
-const APPEND_KEY: u8 = 3;
-const APPEND_DATA: u8 = 4;
-const EXTRACT: u8 = 5;
-const SHA256: u8 = 6;
-const COUNTER: u8 = 7;
+const READ: u8 = 0x01;
+const VERIFY_CMAC: u8 = 0x02;
+const CONCATENATE_KEY: u8 = 0x03;
+const CONCATENATE_DATA: u8 = 0x04;
+const EXTRACT: u8 = 0x05;
+const SHA256: u8 = 0x06;
+const COUNTER_KDF: u8 = 0x07;
+const ALGORITHM_EC_P256: u8 = 12;
 
 pub(crate) const FLAG_READABLE: u8 = 1 << 0;
 pub(crate) const FLAG_DERIVE: u8 = 1 << 1;
@@ -64,7 +65,14 @@ fn source(data: &mut Vec<u8>, value: SessionObjectSource) {
 
 impl Command {
     pub(crate) fn generate_session_p256(flags: u8) -> Result<Self, Error> {
-        Self::from_vec(CommandCode::DeriveSessionObject, vec![GENERATE_P256, flags])
+        Self::from_vec(
+            CommandCode::SessionObject,
+            vec![
+                CommandCode::GenerateAsymmetricKey as u8,
+                flags,
+                ALGORITHM_EC_P256,
+            ],
+        )
     }
 
     pub(crate) fn derive_session_ecdh(
@@ -75,11 +83,11 @@ impl Command {
         peer: &[u8],
     ) -> Result<Self, Error> {
         let peer_length = u16::try_from(peer.len()).map_err(|_| CKR_DATA_LEN_RANGE)?;
-        let mut data = header(ECDH, flags, kind, length)?;
+        let mut data = header(CommandCode::DeriveEcdh as u8, flags, kind, length)?;
         source(&mut data, base);
         data.extend_from_slice(&peer_length.to_be_bytes());
         data.extend_from_slice(peer);
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn derive_session_append_key(
@@ -89,10 +97,10 @@ impl Command {
         left: u64,
         right: u64,
     ) -> Result<Self, Error> {
-        let mut data = header(APPEND_KEY, flags, kind, length)?;
+        let mut data = header(CONCATENATE_KEY, flags, kind, length)?;
         data.extend_from_slice(&left.to_be_bytes());
         data.extend_from_slice(&right.to_be_bytes());
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn derive_session_append_data(
@@ -102,10 +110,10 @@ impl Command {
         base: u64,
         suffix: &[u8],
     ) -> Result<Self, Error> {
-        let mut data = header(APPEND_DATA, flags, kind, length)?;
+        let mut data = header(CONCATENATE_DATA, flags, kind, length)?;
         data.extend_from_slice(&base.to_be_bytes());
         data.extend_from_slice(suffix);
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn derive_session_extract(
@@ -119,7 +127,7 @@ impl Command {
         let mut data = header(EXTRACT, flags, kind, length)?;
         data.extend_from_slice(&base.to_be_bytes());
         data.extend_from_slice(&offset.to_be_bytes());
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn derive_session_sha256(
@@ -130,7 +138,7 @@ impl Command {
     ) -> Result<Self, Error> {
         let mut data = header(SHA256, flags, kind, length)?;
         data.extend_from_slice(&base.to_be_bytes());
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn derive_session_counter(
@@ -144,7 +152,7 @@ impl Command {
         if count == 0 {
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
-        let mut data = header(COUNTER, flags, kind, length)?;
+        let mut data = header(COUNTER_KDF, flags, kind, length)?;
         source(&mut data, base);
         data.push(count);
         for field in fields {
@@ -172,13 +180,15 @@ impl Command {
                 }
             }
         }
-        Self::from_vec(CommandCode::DeriveSessionObject, data)
+        Self::from_vec(CommandCode::SessionObject, data)
     }
 
     pub(crate) fn read_session_object(handle: u64) -> Self {
+        let mut data = vec![READ];
+        data.extend_from_slice(&handle.to_be_bytes());
         Self {
-            code: CommandCode::ReadSessionObject,
-            data: Zeroizing::new(handle.to_be_bytes().to_vec()),
+            code: CommandCode::SessionObject,
+            data: Zeroizing::new(data),
         }
     }
 
@@ -191,18 +201,21 @@ impl Command {
         if !(1..=16).contains(&signature_length) {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let mut input = Vec::with_capacity(9 + signature.len() + data.len());
+        let mut input = Vec::with_capacity(10 + signature.len() + data.len());
+        input.push(VERIFY_CMAC);
         input.extend_from_slice(&handle.to_be_bytes());
         input.push(signature_length);
         input.extend_from_slice(signature);
         input.extend_from_slice(data);
-        Self::from_vec(CommandCode::VerifySessionObject, input)
+        Self::from_vec(CommandCode::SessionObject, input)
     }
 
     pub(crate) fn delete_session_object(handle: u64) -> Self {
+        let mut data = vec![CommandCode::DeleteObject as u8];
+        data.extend_from_slice(&handle.to_be_bytes());
         Self {
-            code: CommandCode::DeleteSessionObject,
-            data: Zeroizing::new(handle.to_be_bytes().to_vec()),
+            code: CommandCode::SessionObject,
+            data: Zeroizing::new(data),
         }
     }
 }

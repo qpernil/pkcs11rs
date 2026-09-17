@@ -83,7 +83,7 @@ fn encapsulate_key(
             let response = Zeroizing::new(
                 ctx._get_session(session_handle)?
                     .1
-                    .yubihsm_command(&YubiHsmCommand::ml_kem(false, *id, &[])?)?,
+                    .yubihsm_command(&YubiHsmCommand::encapsulate_ml_kem(*id))?,
             );
             if response.len() != required + ML_KEM_SHARED_SECRET_LENGTH {
                 return Err(CKR_DEVICE_ERROR.into());
@@ -176,7 +176,7 @@ fn decapsulate_key(
                 let shared = Zeroizing::new(
                     ctx._get_session(session_handle)?
                         .1
-                        .yubihsm_command(&YubiHsmCommand::ml_kem(true, *id, ciphertext)?)?,
+                        .yubihsm_command(&YubiHsmCommand::decapsulate_ml_kem(*id, ciphertext)?)?,
                 );
                 if shared.len() != ML_KEM_SHARED_SECRET_LENGTH {
                     return Err(CKR_DEVICE_ERROR.into());

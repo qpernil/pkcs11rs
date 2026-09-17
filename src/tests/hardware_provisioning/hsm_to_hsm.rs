@@ -115,7 +115,7 @@ fn configure_persisted_virtual_client_path_capabilities() {
                 Capability::GetPseudoRandom,
                 Capability::DeriveEcdh,
                 Capability::DeriveEcdhKdf,
-                Capability::DeriveSessionKey,
+                Capability::SessionObjects,
             ] {
                 object.info.capabilities.insert(capability);
             }
@@ -186,7 +186,7 @@ fn configure_persisted_virtual_client_path_capabilities() {
             Capability::GetPseudoRandom,
             Capability::DeriveEcdh,
             Capability::DeriveEcdhKdf,
-            Capability::DeriveSessionKey,
+            Capability::SessionObjects,
         ] {
             assert!(authorization.info.capabilities.contains(capability));
         }
