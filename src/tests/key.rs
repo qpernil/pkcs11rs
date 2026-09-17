@@ -115,7 +115,7 @@ fn generate_software_key_pair(
 }
 
 #[test]
-fn hsmauth_profiles_and_sessions_expose_only_native_authentication() {
+fn hsmauth_sessions_expose_only_native_authentication() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -133,13 +133,7 @@ fn hsmauth_profiles_and_sessions_expose_only_native_authentication() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        ids,
-        [
-            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            crate::CKP_YUBICO_HSMAUTH
-        ]
-    );
+    assert_eq!(ids, [CKP_BASELINE_PROVIDER as CK_PROFILE_ID]);
     with_test_slot_context(HSMAUTH_ADMIN_SLOT_ID, |ctx| {
         ctx.set_token_storage_provider(Box::new(crate::storage::MemoryStorageProvider::new()))
             .unwrap();

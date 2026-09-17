@@ -839,7 +839,6 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
         ];
         if slot.kind() == crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) {
             expected.truncate(1);
-            expected.push(crate::CKP_YUBICO_HSMAUTH);
         }
         if certificates {
             expected.push(CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID);
@@ -1729,7 +1728,10 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
 
     let symmetric = &objects[0];
     assert_eq!(symmetric.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
-    assert_eq!(symmetric.key_type, crate::CKK_YUBICO_HSMAUTH_SYMMETRIC);
+    assert_eq!(
+        symmetric.key_type,
+        crate::CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC
+    );
     assert_eq!(symmetric.id, b"symmetric".to_vec());
     assert_eq!(
         symmetric.attribute_value((CKA_VENDOR_DEFINED | 0x5901) as CK_ATTRIBUTE_TYPE),
@@ -1744,7 +1746,11 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     );
     assert_eq!(
         symmetric.attribute_value(CKA_KEY_TYPE as _),
-        Some(crate::CKK_YUBICO_HSMAUTH_SYMMETRIC.to_ne_bytes().to_vec())
+        Some(
+            crate::CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC
+                .to_ne_bytes()
+                .to_vec()
+        )
     );
     assert_eq!(
         symmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_RETRIES),
@@ -1753,7 +1759,10 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
 
     let asymmetric = &objects[1];
     assert_eq!(asymmetric.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
-    assert_eq!(asymmetric.key_type, crate::CKK_YUBICO_HSMAUTH_ASYMMETRIC);
+    assert_eq!(
+        asymmetric.key_type,
+        crate::CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC
+    );
     assert_eq!(asymmetric.id, b"asymmetric".to_vec());
     assert_eq!(
         asymmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED),

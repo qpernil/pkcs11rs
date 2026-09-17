@@ -505,11 +505,11 @@ mod tests {
         assert!(allowed.contains(&(CKM_CONCATENATE_BASE_AND_KEY as _)));
         for (kind, algorithm) in [
             (
-                CKK_YUBICO_HSMAUTH_SYMMETRIC,
+                CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC,
                 YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
             ),
             (
-                CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+                CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC,
                 YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
             ),
         ] {

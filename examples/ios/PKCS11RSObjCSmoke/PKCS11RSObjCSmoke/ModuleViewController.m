@@ -99,9 +99,11 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
 
 static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     switch (keyType) {
-        case CKK_YUBICO_HSMAUTH_SYMMETRIC:
+        case CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC:
+        case CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC:
             return @"symmetric AES-128";
-        case CKK_YUBICO_HSMAUTH_ASYMMETRIC:
+        case CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC:
+        case CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC:
             return @"asymmetric P-256";
         default:
             return nil;

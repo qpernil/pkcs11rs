@@ -228,8 +228,8 @@ impl Slot for HsmAuthSlot {
         }
         .authenticate(target, authkey_id, password)
     }
-    fn additional_profile_ids(&self) -> &[CK_PROFILE_ID] {
-        &[CKP_YUBICO_HSMAUTH]
+    fn supports_native_hsmauth(&self) -> bool {
+        true
     }
     fn supports_software_keys(&self) -> bool {
         false
@@ -522,11 +522,11 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
         let (class, key_type) = match credential.algorithm {
             HsmAuthAlgorithm::Aes128YubicoAuthentication => (
                 CKO_SECRET_KEY as CK_OBJECT_CLASS,
-                CKK_YUBICO_HSMAUTH_SYMMETRIC,
+                CKK_YUBICO_HSMAUTH_CREDENTIAL_SYMMETRIC,
             ),
             HsmAuthAlgorithm::EcP256YubicoAuthentication => (
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-                CKK_YUBICO_HSMAUTH_ASYMMETRIC,
+                CKK_YUBICO_HSMAUTH_CREDENTIAL_ASYMMETRIC,
             ),
         };
         objects.push(TokenObject {
