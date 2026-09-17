@@ -299,6 +299,7 @@ pub(crate) enum YubiHsmSessionState {
     Active {
         session: YubiHsmSecureSession,
         role: YubiHsmSessionRole,
+        native_session_objects: bool,
         reauthentication: Option<Box<ClientAuth>>,
         credential_description: Option<String>,
     },
@@ -790,6 +791,8 @@ fn primary_metadata_identity(
                     CKA_DERIVE,
                     CKA_WRAP,
                     CKA_UNWRAP,
+                    CKA_ENCAPSULATE,
+                    CKA_DECAPSULATE,
                 ]
                 .iter()
                 .any(|kind| attribute == u64::from(*kind)) => {}
@@ -1682,28 +1685,36 @@ impl YubiHsmSlot {
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.discovery.authkey_domains()
         };
-        if let Some(discovery_domains) = discovery_domains {
-            let user_info = self.authentication_key_info(&session, authkey_id);
-            match user_info {
-                Ok(info) if info.domains == discovery_domains => {}
-                Ok(_) => {
-                    log!(
-                        2,
-                        "YubiHSM user Authentication Key domains do not match the public discovery Authentication Key domains on {}",
-                        self.connector.name()
-                    );
-                    let _ = self.close_session_cell(&session, "rejected user");
-                    return Err(CKR_FUNCTION_REJECTED.into());
+        let user_info =
+            if discovery_domains.is_some() || yubihsm_has_virtual_extensions(&self.algorithms) {
+                match self.authentication_key_info(&session, authkey_id) {
+                    Ok(info) => Some(info),
+                    Err(error) => {
+                        let _ = self.close_session_cell(&session, "rejected user");
+                        return Err(error);
+                    }
                 }
-                Err(error) => {
-                    let _ = self.close_session_cell(&session, "rejected user");
-                    return Err(error);
-                }
-            }
+            } else {
+                None
+            };
+        if let Some(discovery_domains) = discovery_domains
+            && user_info
+                .as_ref()
+                .is_none_or(|info| info.domains != discovery_domains)
+        {
+            log!(
+                2,
+                "YubiHSM user Authentication Key domains do not match the public discovery Authentication Key domains on {}",
+                self.connector.name()
+            );
+            let _ = self.close_session_cell(&session, "rejected user");
+            return Err(CKR_FUNCTION_REJECTED.into());
         }
         *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
             session: session.into_inner().ok_or(CKR_DEVICE_ERROR)?,
             role: YubiHsmSessionRole::User,
+            native_session_objects: user_info
+                .is_some_and(|info| yubihsm_capability(&info.capabilities, 0x39)),
             reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
             credential_description: Some(credential_description),
         };
@@ -1825,6 +1836,7 @@ impl YubiHsmSlot {
         *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
             session,
             role: YubiHsmSessionRole::PublicDiscovery,
+            native_session_objects: false,
             reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
             credential_description: None,
         };
@@ -2298,6 +2310,7 @@ impl YubiHsmSlot {
                 *active = YubiHsmSessionState::Active {
                     session: retained_session,
                     role: YubiHsmSessionRole::PublicDiscovery,
+                    native_session_objects: false,
                     reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
                     credential_description: None,
                 };
@@ -3256,14 +3269,21 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
         command: &YubiHsmCommand,
     ) -> Result<Vec<u8>, Error> {
         let mut state = self.try_borrow_mut()?;
-        let (mut session, role, reauthentication, credential_description) =
+        let (mut session, role, native_session_objects, reauthentication, credential_description) =
             match std::mem::take(&mut *state) {
                 YubiHsmSessionState::Active {
                     session,
                     role,
+                    native_session_objects,
                     reauthentication,
                     credential_description,
-                } => (session, role, reauthentication, credential_description),
+                } => (
+                    session,
+                    role,
+                    native_session_objects,
+                    reauthentication,
+                    credential_description,
+                ),
                 inactive => {
                     *state = inactive;
                     return Err(CKR_USER_NOT_LOGGED_IN.into());
@@ -3273,6 +3293,7 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
             *state = YubiHsmSessionState::Active {
                 session,
                 role,
+                native_session_objects,
                 reauthentication,
                 credential_description,
             };
@@ -3301,6 +3322,7 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
             *state = YubiHsmSessionState::Active {
                 session,
                 role,
+                native_session_objects,
                 reauthentication,
                 credential_description,
             };
@@ -3350,6 +3372,8 @@ pub(crate) fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
         YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION => CKK_YUBICO_HSMAUTH_SYMMETRIC,
         YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION => CKK_YUBICO_HSMAUTH_ASYMMETRIC,
         YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256 => CKK_AES as CK_KEY_TYPE,
+        algorithm if yubihsm_ml_dsa(algorithm).is_some() => CKK_ML_DSA as CK_KEY_TYPE,
+        algorithm if yubihsm_ml_kem(algorithm).is_some() => CKK_ML_KEM as CK_KEY_TYPE,
         algorithm if is_yubihsm_edwards(algorithm) => CKK_EC_EDWARDS as CK_KEY_TYPE,
         algorithm if is_yubihsm_montgomery(algorithm) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
         algorithm if is_yubihsm_rsa(algorithm) => CKK_RSA as CK_KEY_TYPE,
@@ -3368,7 +3392,11 @@ pub(crate) fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
 }
 
 pub(crate) fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
-    if is_yubihsm_rsa(algorithm) {
+    if yubihsm_ml_dsa(algorithm).is_some() {
+        Some(CKM_ML_DSA_KEY_PAIR_GEN as _)
+    } else if yubihsm_ml_kem(algorithm).is_some() {
+        Some(CKM_ML_KEM_KEY_PAIR_GEN as _)
+    } else if is_yubihsm_rsa(algorithm) {
         Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
     } else if is_yubihsm_montgomery(algorithm) {
         Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
@@ -3688,8 +3716,8 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         derive,
         wrap: operational_algorithm_supported && attributes.wrap,
         unwrap: operational_algorithm_supported && attributes.unwrap,
-        encapsulate: false,
-        decapsulate: false,
+        encapsulate: attributes.encapsulate,
+        decapsulate: attributes.decapsulate,
         sensitive: private,
         extractable: attributes.extractable,
         always_sensitive: private,
@@ -3758,7 +3786,7 @@ pub(crate) fn yubihsm_token_objects_with_generation(
             derive: false,
             wrap: false,
             unwrap: false,
-            encapsulate: false,
+            encapsulate: public_attributes.encapsulate,
             decapsulate: false,
             sensitive: false,
             extractable: public_attributes.extractable,
@@ -3804,6 +3832,8 @@ fn yubihsm_primary_policy(
         (CKA_DERIVE, object.derive, native.derive),
         (CKA_WRAP, object.wrap, native.wrap),
         (CKA_UNWRAP, object.unwrap, native.unwrap),
+        (CKA_ENCAPSULATE, object.encapsulate, native.encapsulate),
+        (CKA_DECAPSULATE, object.decapsulate, native.decapsulate),
     ] {
         if value == native_value {
             continue;
@@ -3855,6 +3885,8 @@ fn apply_yubihsm_primary_policy(
             x if x == u64::from(CKA_DERIVE) => &mut object.derive,
             x if x == u64::from(CKA_WRAP) => &mut object.wrap,
             x if x == u64::from(CKA_UNWRAP) => &mut object.unwrap,
+            x if x == u64::from(CKA_ENCAPSULATE) => &mut object.encapsulate,
+            x if x == u64::from(CKA_DECAPSULATE) => &mut object.decapsulate,
             _ => return Err(CKR_DATA_INVALID.into()),
         };
         // Companion metadata may narrow a device capability, never grant one.
@@ -3923,11 +3955,20 @@ fn apply_yubihsm_public_projection_metadata(
                         x if x == CKK_RSA as CK_KEY_TYPE
                             || x == CKK_EC as CK_KEY_TYPE
                             || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                            || x == CKK_ML_DSA as CK_KEY_TYPE
                     )
                 {
                     return Err(CKR_DATA_INVALID.into());
                 }
                 object.verify = *value;
+            }
+            (attribute, KeyAttributeValue::Boolean(value))
+                if attribute == u64::from(CKA_ENCAPSULATE) =>
+            {
+                if *value && object.key_type != CKK_ML_KEM as CK_KEY_TYPE {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                object.encapsulate &= *value;
             }
             (attribute, KeyAttributeValue::Boolean(value))
                 if attribute == u64::from(CKA_EXTRACTABLE) =>
@@ -3994,6 +4035,11 @@ fn yubihsm_public_projection_attributes(
             u64::from(CKA_EXTRACTABLE),
             object.extractable,
             native.extractable,
+        ),
+        (
+            u64::from(CKA_ENCAPSULATE),
+            object.encapsulate,
+            native.encapsulate,
         ),
         (u64::from(CKA_LOCAL), object.local, info.origin & 0x01 != 0),
     ] {
@@ -4146,10 +4192,7 @@ impl Slot for YubiHsmSlot {
         SlotKind::YubiHsm
     }
     fn client_auth_search_tier(&self) -> ClientAuthSearchTier {
-        if self
-            .algorithms
-            .contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION)
-        {
+        if yubihsm_has_virtual_extensions(&self.algorithms) {
             ClientAuthSearchTier::TokenNativeDerivation
         } else {
             ClientAuthSearchTier::HardwareCredential
@@ -4220,9 +4263,6 @@ impl Slot for YubiHsmSlot {
             flags,
             connector: self.connector.clone(),
             session: self.session.clone(),
-            native_session_objects: self
-                .algorithms
-                .contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION),
         })
     }
     #[cfg(all(test, not(feature = "abi-tests")))]
@@ -4824,7 +4864,6 @@ pub(crate) struct YubiHsmSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<YubiHsmSessionState>>,
-    native_session_objects: bool,
 }
 
 impl BackendSession for YubiHsmSession {
@@ -4856,7 +4895,16 @@ impl BackendSession for YubiHsmSession {
         self.send_secure_cmd(command)
     }
     fn supports_native_session_objects(&self) -> bool {
-        self.native_session_objects
+        self.session.try_borrow().is_ok_and(|state| {
+            matches!(
+                *state,
+                YubiHsmSessionState::Active {
+                    role: YubiHsmSessionRole::User,
+                    native_session_objects: true,
+                    ..
+                }
+            )
+        })
     }
     fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
         crate::get_yubihsm_device_public_key(self.connector.as_ref()).map(Vec::from)
@@ -4892,6 +4940,8 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
     let cap = |bit| yubihsm_capability(capabilities, bit);
     let pair = |yes, flags| if yes { flags } else { 0 };
     let native = match m {
+        x if x == CKM_ML_DSA as CK_MECHANISM_TYPE => pair(cap(0x3a), CKF_SIGN),
+        x if x == CKM_ML_KEM as CK_MECHANISM_TYPE => pair(cap(0x3c), CKF_DECAPSULATE),
         x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
             pair(cap(0x05), CKF_SIGN)
                 | pair(cap(0x09), CKF_DECRYPT)
@@ -4921,7 +4971,7 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
         {
             pair(cap(0x0b), CKF_DERIVE)
         }
-        x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => pair(cap(0x38) || cap(0x0b), CKF_DERIVE),
+        x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => pair(cap(0x38), CKF_DERIVE),
         x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => {
             pair(cap(0x33), CKF_ENCRYPT) | pair(cap(0x32), CKF_DECRYPT)
         }
@@ -4974,6 +5024,21 @@ mod primary_policy_tests {
         }
     }
 
+    fn ml_kem_info() -> YubiHsmObjectInfo {
+        YubiHsmObjectInfo {
+            capabilities: yubihsm_capabilities(&[0x3b, 0x3c]),
+            id: 2,
+            length: 3168,
+            domains: 1,
+            object_type: YUBIHSM_ASYMMETRIC_KEY,
+            algorithm: YUBIHSM_ALGO_ML_KEM_1024,
+            sequence: 1,
+            origin: 1,
+            label: "ML-KEM credential".to_owned(),
+            delegated_capabilities: [0; 8],
+        }
+    }
+
     fn roundtrip(info: &YubiHsmObjectInfo, object: &TokenObject) -> TokenObject {
         let mut metadata = YubiHsmSlot::empty_pkcs11_metadata(info);
         metadata.primary_attributes = yubihsm_primary_policy(object, info).unwrap();
@@ -5017,6 +5082,19 @@ mod primary_policy_tests {
         assert_eq!(roundtrip(&info, &object).allowed_mechanisms, None);
         object.allowed_mechanisms = Some(vec![]);
         assert_eq!(roundtrip(&info, &object).allowed_mechanisms, Some(vec![]));
+    }
+
+    #[test]
+    fn yubihsm_ml_kem_primary_policy_survives_cbor_rediscovery() {
+        let info = ml_kem_info();
+        let mut object = yubihsm_token_objects(7, info.clone(), None)
+            .unwrap()
+            .remove(0);
+        assert!(!object.encapsulate && object.decapsulate);
+        object.decapsulate = false;
+        let restored = roundtrip(&info, &object);
+        assert!(!restored.encapsulate);
+        assert!(!restored.decapsulate);
     }
 
     #[test]

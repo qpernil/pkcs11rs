@@ -1008,6 +1008,7 @@ pub(super) fn key_pair_object(
             x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
                 || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                || x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
         ) {
             continue;
         }
@@ -1343,6 +1344,34 @@ pub(crate) fn yubihsm_generate_key_pair_command(
             }
             (CKK_EC_EDWARDS as CK_KEY_TYPE, algorithm)
         }
+        x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            || x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE =>
+        {
+            let parameter = read_ulong_template_attribute(
+                template_attribute(public_template, CKA_PARAMETER_SET as _)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            if !(1..=3).contains(&parameter) {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            if let Some(attribute) = template_attribute(private_template, CKA_PARAMETER_SET as _)
+                && read_ulong_template_attribute(attribute).map_err(Error::from)? != parameter
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+                (
+                    CKK_ML_DSA as CK_KEY_TYPE,
+                    YUBIHSM_ALGO_ML_DSA_44 + parameter as u8 - 1,
+                )
+            } else {
+                (
+                    CKK_ML_KEM as CK_KEY_TYPE,
+                    YUBIHSM_ALGO_ML_KEM_512 + parameter as u8 - 1,
+                )
+            }
+        }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
     validate_unique_template(public_template)?;
@@ -1414,7 +1443,8 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     if private_object.label.is_empty() {
         private_object.label = public_object.label.clone();
     }
-    let hardware = yubihsm_hardware_import_object(&private_object)?;
+    let mut hardware = yubihsm_hardware_import_object(&private_object)?;
+    hardware.encapsulate = public_object.encapsulate;
     if public_unwrap
         || private_wrap
         || (wrap_key && key_type != CKK_RSA as CK_KEY_TYPE)

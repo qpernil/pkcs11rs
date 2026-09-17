@@ -3,6 +3,37 @@ use crate::{CKR_DATA_LEN_RANGE, error::Error};
 use zeroize::Zeroizing;
 
 impl Command {
+    pub(crate) fn ml_kem(decapsulate: bool, key_id: u16, ciphertext: &[u8]) -> Result<Self, Error> {
+        if !decapsulate && !ciphertext.is_empty() {
+            return Err(crate::CKR_ARGUMENTS_BAD.into());
+        }
+        let mut data = key_id.to_be_bytes().to_vec();
+        data.push(u8::from(decapsulate));
+        data.extend_from_slice(ciphertext);
+        Self::from_vec(CommandCode::MlKem, data)
+    }
+
+    pub(crate) fn sign_ml_dsa(
+        key_id: u16,
+        parameters: &crate::MlDsaSignatureParameters,
+        message: &[u8],
+    ) -> Result<Self, Error> {
+        use crate::*;
+        let mode = match parameters.hedge_variant {
+            x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => 0,
+            x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => 1,
+            x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => 2,
+            _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+        };
+        let length =
+            u8::try_from(parameters.context.len()).map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let mut payload = key_id.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[mode, length]);
+        payload.extend_from_slice(&parameters.context);
+        payload.extend_from_slice(message);
+        Self::from_vec(CommandCode::SignMlDsa, payload)
+    }
+
     pub(crate) fn derive_ecdh_kdf(
         key_id: u16,
         hash: u8,

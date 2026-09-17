@@ -839,6 +839,11 @@ fn sign(
                 OpenPgpAlgorithm::Ed25519 => 64,
                 OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
+            KeyMaterial::YubiHsm { algorithm, .. } if yubihsm_ml_dsa(*algorithm).is_some() => {
+                yubihsm_ml_dsa(*algorithm)
+                    .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                    .signature_length()
+            }
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                 match *algorithm {
                     YUBIHSM_ALGO_RSA_2048 => 256,
@@ -1027,12 +1032,23 @@ fn sign(
                         mac.truncate(required);
                         return Ok(mac);
                     }
-                    let command = yubihsm_asymmetric_signature_command(
-                        operation.mechanism,
-                        operation.pss,
-                        *id,
-                        data,
-                    )?;
+                    let command = if operation.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE {
+                        YubiHsmCommand::sign_ml_dsa(
+                            *id,
+                            operation
+                                .ml_dsa
+                                .as_ref()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            data,
+                        )?
+                    } else {
+                        yubihsm_asymmetric_signature_command(
+                            operation.mechanism,
+                            operation.pss,
+                            *id,
+                            data,
+                        )?
+                    };
                     let response = ctx
                         ._get_session(session_handle)?
                         .1

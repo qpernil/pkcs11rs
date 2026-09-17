@@ -9,16 +9,16 @@ use crate::{
     YUBIHSM_ALGO_EC_BP256, YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512,
     YUBIHSM_ALGO_EC_ECDSA_SHA1, YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384,
     YUBIHSM_ALGO_EC_ECDSA_SHA512, YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256,
-    YUBIHSM_ALGO_EC_P384, YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ECDH_KDF, YUBIHSM_ALGO_ED448,
-    YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256,
-    YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_RSA_OAEP_SHA1,
-    YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384, YUBIHSM_ALGO_RSA_OAEP_SHA512,
-    YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1, YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-    YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512, YUBIHSM_ALGO_RSA_PKCS1_WRAP,
+    YUBIHSM_ALGO_EC_P384, YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_ED25519,
+    YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256, YUBIHSM_ALGO_HMAC_SHA384,
+    YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512,
+    YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096,
+    YUBIHSM_ALGO_RSA_OAEP_SHA1, YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384,
+    YUBIHSM_ALGO_RSA_OAEP_SHA512, YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+    YUBIHSM_ALGO_RSA_PKCS1_SHA256, YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512,
     YUBIHSM_ALGO_RSA_PSS_SHA1, YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384,
-    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_SESSION_KEY_DERIVATION, YUBIHSM_ALGO_X448,
-    YUBIHSM_ALGO_X25519, as_mut, map, with_slot_context_mut,
+    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519, as_mut, map,
+    with_slot_context_mut, yubihsm_has_virtual_extensions,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -806,6 +806,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
     ]);
     let has_montgomery = any(&[YUBIHSM_ALGO_X25519, YUBIHSM_ALGO_X448]);
     let has_edwards = any(&[YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_ED448]);
+    let has_virtual_extensions = yubihsm_has_virtual_extensions(algorithms);
     let has_rsa_wrap = has_rsa
         && algorithms.contains(&YUBIHSM_ALGO_AES_KWP)
         && any(&[
@@ -814,7 +815,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             YUBIHSM_ALGO_RSA_OAEP_SHA384,
             YUBIHSM_ALGO_RSA_OAEP_SHA512,
         ]);
-    let has_rsa_pkcs_wrap = has_rsa && algorithms.contains(&YUBIHSM_ALGO_RSA_PKCS1_WRAP);
+    let has_rsa_pkcs_wrap = has_rsa && has_virtual_extensions;
     let rsa_sizes: Vec<CK_ULONG> = algorithms
         .iter()
         .filter_map(|algorithm| match *algorithm {
@@ -990,7 +991,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_edwards,
                 x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => has_ec || has_montgomery,
                 x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => {
-                    algorithms.contains(&YUBIHSM_ALGO_ECDH_KDF) && (has_ec || has_montgomery)
+                    has_virtual_extensions && (has_ec || has_montgomery)
                 }
                 x if x == CKM_EDDSA as CK_MECHANISM_TYPE => has_edwards,
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => any(&[
@@ -1053,6 +1054,41 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             supported.then_some(details)
         })
         .collect();
+    for (base, sizes, generation, operation, flags) in [
+        (
+            YUBIHSM_ALGO_ML_DSA_44,
+            [1312, 1952, 2592],
+            CKM_ML_DSA_KEY_PAIR_GEN,
+            CKM_ML_DSA,
+            CKF_SIGN | CKF_VERIFY,
+        ),
+        (
+            YUBIHSM_ALGO_ML_KEM_512,
+            [800, 1184, 1568],
+            CKM_ML_KEM_KEY_PAIR_GEN,
+            CKM_ML_KEM,
+            CKF_ENCAPSULATE | CKF_DECAPSULATE,
+        ),
+    ] {
+        let sizes: Vec<CK_ULONG> = sizes
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, size)| algorithms.contains(&(base + i as u8)).then_some(size))
+            .collect();
+        if let (Some(min), Some(max)) = (sizes.iter().min(), sizes.iter().max()) {
+            for (kind, flags) in [
+                (generation, CKF_HW | CKF_GENERATE_KEY_PAIR),
+                (operation, CKF_HW | flags),
+            ] {
+                mechanisms.push(MechanismDetails {
+                    type_: kind as _,
+                    min_key_size: *min,
+                    max_key_size: *max,
+                    flags: flags as _,
+                });
+            }
+        }
+    }
     for (algorithm, type_) in [
         (YUBIHSM_ALGO_RSA_PKCS1_SHA1, CKM_SHA1_RSA_PKCS),
         (YUBIHSM_ALGO_RSA_PKCS1_SHA256, CKM_SHA256_RSA_PKCS),
@@ -1111,7 +1147,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             });
         }
     }
-    if algorithms.contains(&YUBIHSM_ALGO_SESSION_KEY_DERIVATION) {
+    if has_virtual_extensions {
         for native in [
             MechanismDetails {
                 type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -1331,18 +1367,14 @@ mod name_tests {
     }
 
     #[test]
-    fn protected_ecdh_is_advertised_only_by_the_extension_and_includes_montgomery_curves() {
+    fn protected_ecdh_requires_a_virtual_key_algorithm_and_includes_montgomery_curves() {
         assert!(
-            yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_X25519])
+            yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256])
                 .iter()
                 .all(|details| details.type_ != CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
         );
-        let mechanisms = yubihsm_mechanisms(&[
-            YUBIHSM_ALGO_EC_P256,
-            YUBIHSM_ALGO_X25519,
-            YUBIHSM_ALGO_X448,
-            YUBIHSM_ALGO_ECDH_KDF,
-        ]);
+        let mechanisms =
+            yubihsm_mechanisms(&[YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_X25519, YUBIHSM_ALGO_X448]);
         let details = mechanisms
             .iter()
             .find(|details| details.type_ == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
@@ -1359,7 +1391,6 @@ mod name_tests {
             YUBIHSM_ALGO_X448,
             YUBIHSM_ALGO_ED25519,
             YUBIHSM_ALGO_ED448,
-            YUBIHSM_ALGO_ECDH_KDF,
         ]);
         for mechanism_type in [
             CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -1377,7 +1408,7 @@ mod name_tests {
     }
 
     #[test]
-    fn rsa_pkcs_wrap_flags_require_the_virtual_extension_marker() {
+    fn rsa_pkcs_wrap_flags_require_an_actual_virtual_key_algorithm() {
         let algorithms = [YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_PKCS1_SHA256];
         let ordinary = yubihsm_mechanisms(&algorithms)
             .into_iter()
@@ -1388,7 +1419,7 @@ mod name_tests {
         let extended = yubihsm_mechanisms(&[
             YUBIHSM_ALGO_RSA_2048,
             YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-            YUBIHSM_ALGO_RSA_PKCS1_WRAP,
+            YUBIHSM_ALGO_X25519,
         ])
         .into_iter()
         .find(|details| details.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)

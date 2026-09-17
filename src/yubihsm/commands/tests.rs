@@ -161,6 +161,16 @@ fn all_sample_commands() -> Vec<Command> {
         )
         .unwrap(),
         Command::import_rsa_wrapped(1, 26, 33, b"object", &[0; 32]).unwrap(),
+        Command::sign_ml_dsa(
+            1,
+            &crate::MlDsaSignatureParameters {
+                hedge_variant: crate::CKH_DETERMINISTIC_REQUIRED as crate::CK_HEDGE_TYPE,
+                context: b"context".to_vec(),
+            },
+            b"message",
+        )
+        .unwrap(),
+        Command::ml_kem(true, 1, &[0; 768]).unwrap(),
     ];
     commands.sort_by_key(|command| command.code() as u8);
     commands
@@ -175,7 +185,7 @@ fn device_info_page_zero_uses_the_legacy_empty_request() {
 #[test]
 fn every_official_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
-    assert_eq!(commands.len(), 68);
+    assert_eq!(commands.len(), 70);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
     assert_eq!(
         commands
@@ -193,7 +203,7 @@ fn every_official_command_code_has_a_sample_request() {
             .filter(|command| (**command as u8) >= 0x40)
             .map(|command| *command as u8)
             .collect::<Vec<_>>(),
-        (0x40..=0x7c).collect::<Vec<_>>()
+        (0x40..=0x7e).collect::<Vec<_>>()
     );
 }
 
@@ -237,6 +247,24 @@ fn optional_fields_use_the_canonical_wire_layout() {
 
 #[test]
 fn crypto_commands_match_wire_vectors() {
+    let ml_dsa = Command::sign_ml_dsa(
+        0x1234,
+        &crate::MlDsaSignatureParameters {
+            hedge_variant: crate::CKH_HEDGE_REQUIRED as crate::CK_HEDGE_TYPE,
+            context: vec![0xaa, 0xbb],
+        },
+        &[0xcc, 0xdd],
+    )
+    .unwrap();
+    assert_eq!(ml_dsa.code(), CommandCode::SignMlDsa);
+    assert_eq!(ml_dsa.data(), [0x12, 0x34, 1, 2, 0xaa, 0xbb, 0xcc, 0xdd]);
+    let encapsulate = Command::ml_kem(false, 0x1234, &[]).unwrap();
+    assert_eq!(encapsulate.code(), CommandCode::MlKem);
+    assert_eq!(encapsulate.data(), [0x12, 0x34, 0]);
+    let decapsulate = Command::ml_kem(true, 0x1234, &[0xaa, 0xbb]).unwrap();
+    assert_eq!(decapsulate.data(), [0x12, 0x34, 1, 0xaa, 0xbb]);
+    assert!(Command::ml_kem(false, 0x1234, &[0xaa]).is_err());
+
     assert_eq!(
         Command::key_data(CommandCode::SignPkcs1, 0x1234, &[0xaa, 0xbb])
             .unwrap()

@@ -58,6 +58,9 @@ an exact-length payload read. The connector holds the shared bus lock through
 the request's cleanup acknowledgment, releases it while the HSM computes, then
 reacquires it for the entire response read. Different targets can compute
 concurrently. All other clients must cooperate in this advisory bus lock.
+Requests and responses use the same 8,192-byte total frame limit as the USB and
+HTTP transports. The target frontend refuses to start if its kernel driver
+reports a smaller maximum transfer.
 
 READY is active-low. Before writing, the connector arms rising-only detection and drains old GPIO events.
 The target acknowledges cleanup with a physical rising edge, using a short
@@ -152,7 +155,12 @@ USB device ID -> serial number -> device entry
 Each device entry owns an asynchronous access gate and its opened nusb device.
 The gate is held from command submission through USB response completion. This
 means concurrent HTTP requests for one serial block without executing
-concurrently, while separate physical HSMs remain independent.
+concurrently, while separate physical HSMs remain independent. Once submitted,
+the USB exchange continues through its response read even if the HTTP requester
+is cancelled, so an unread response cannot be mistaken for the following
+command's reply. The connector also requires each USB read to contain exactly
+one complete YubiHSM frame; a short or concatenated response invalidates the
+uncertain transport and causes the next request to reopen and flush it.
 
 An optional Unix-only `embedded-virtual-yubihsm` build feature adds headless
 virtual devices to the same registry. Each embedded device owns a dedicated OS
@@ -421,26 +429,37 @@ code `device_filtered`, without any device I/O. A modern command addressed to
 a `legacy_only` device returns `403 Forbidden` with `device_legacy_only`; its
 commands are available only through `/connector/api`.
 
-The HTTP middleware accepts request bodies up to 8,192 bytes. This deliberately
-generic resource ceiling leaves room for a future firmware generation while
-preventing an unbounded body from consuming connector memory. It does not
-interpret YubiHSM framing before device selection or queueing.
+The HTTP middleware accepts request bodies up to 8,192 bytes. This deliberate
+resource ceiling is semi-arbitrary: it is believed to be large enough for all
+anticipated post-quantum key and signature payloads while keeping connector
+memory bounded. It is an implementation limit rather than a limit imposed by
+the protocol's two-byte length field. The middleware does not interpret YubiHSM
+framing before device selection or queueing.
 
 After the selected device gate is acquired, the shared USB transport requires
 the body to contain the command byte and two-byte big-endian payload length and
 requires that declared length to match the remaining bytes exactly. It then
-applies the firmware-specific total frame limit from that device's USB firmware
-version: 2,048 bytes for firmware before 2.4 and 3,136 bytes for firmware 2.4
-or any higher reported version. Future versions are thus treated like the
-newest known firmware until support for a larger device frame is added. Both
-checks run before endpoint access or bulk OUT submission. This protects
-asynchronous HTTP and blocking local access from malformed frames and sizes
-that can trigger hardware failures in some firmware versions.
+applies a 2,048-byte total frame limit to USB firmware before 2.4 because some
+older devices do not handle oversized commands safely. Firmware 2.4 and later
+accepts up to an 8,192-byte total frame, or 8,189 payload bytes. Both checks run
+before endpoint access or bulk OUT submission. This protects asynchronous HTTP
+and blocking local access from malformed frames and protects older firmware
+from oversized commands. Receive buffers accept an 8,192-byte frame for every
+firmware version; the pre-2.4 compatibility limit applies only to commands sent
+to the device. One additional USB packet is read so a maximum-size response
+with trailing data is detected and rejected.
 
 The server never automatically retries a command. This is important for
 non-idempotent operations whose outcome may be unknown after a transport
-timeout. A transport failure invalidates the USB handle; a later request may
+failure. A transport failure invalidates the USB handle; a later request may
 reopen the same identified device, but the failed command is never replayed.
+
+The pkcs11rs HTTP client bounds name resolution, connection establishment, and
+ordinary inventory requests. A command POST has no deadline after connection
+establishment: it waits for either the complete response or a transport
+failure. This is required for SCP because the authenticated response advances
+the channel transcript. Draining the USB response only in the connector cannot
+keep a client session usable if that client abandons the HTTP reply.
 
 ## Legacy protocol
 
@@ -526,11 +545,14 @@ HTTP transport stages are bounded independently from HSM processing:
 
 There is no overall HTTP handler deadline. Once a complete request has entered
 the command handler, it may wait indefinitely for its device gate. After it
-obtains the gate, USB bulk writes have a fixed three-second timeout and the USB
-response has the timeout selected by `--command-timeout-seconds`, which defaults
-to 60 seconds. The response timeout does not include time spent waiting for the
-device gate. Response headers are created only after the command result is
-known, allowing the connector to return the correct final HTTP status.
+obtains the gate, USB bulk writes have a fixed three-second timeout. A complete
+USB command write waits indefinitely for its response because abandoning a
+possibly executed command cannot preserve the SCP transcript or safely recover
+the operation's result. Physical removal completes the transfer with an error;
+a wedged device blocks only its own per-device gate. Experimental I2C targets
+instead use the finite `--i2c-response-timeout-seconds` READY deadline, which
+defaults to 60 seconds. Response headers are created only after the command
+result is known, allowing the connector to return the correct final HTTP status.
 
 These boundaries avoid racing a generic HTTP request timer against an active
 USB command. The connector never automatically retries a command because a
@@ -674,7 +696,7 @@ client and does not change the connector's inventory or policy.
 --listen ADDRESS
 --serials SERIALS
 --legacy-serial SERIAL
---command-timeout-seconds SECONDS
+--i2c-response-timeout-seconds SECONDS
 --http-max-in-flight-requests COUNT
 --tls-certificate PATH
 --tls-key PATH

@@ -241,12 +241,14 @@ mod yubihsm_algorithm {
     pub(super) const YUBIHSM_ALGO_AES_CBC: u8 = 54;
     pub(super) const YUBIHSM_ALGO_AES_KWP: u8 = 55;
     pub(super) const YUBIHSM_ALGO_X25519: u8 = 56;
-    pub(super) const YUBIHSM_ALGO_ECDH_KDF: u8 = 57;
-    /// Virtual-YubiHSM discovery marker for direct PKCS #1 v1.5 secret-key wrapping.
-    pub(super) const YUBIHSM_ALGO_RSA_PKCS1_WRAP: u8 = 58;
-    pub(super) const YUBIHSM_ALGO_X448: u8 = 59;
-    pub(super) const YUBIHSM_ALGO_ED448: u8 = 60;
-    pub(super) const YUBIHSM_ALGO_SESSION_KEY_DERIVATION: u8 = 61;
+    pub(super) const YUBIHSM_ALGO_X448: u8 = 57;
+    pub(super) const YUBIHSM_ALGO_ED448: u8 = 58;
+    pub(super) const YUBIHSM_ALGO_ML_DSA_44: u8 = 59;
+    pub(super) const YUBIHSM_ALGO_ML_DSA_65: u8 = 60;
+    pub(super) const YUBIHSM_ALGO_ML_DSA_87: u8 = 61;
+    pub(super) const YUBIHSM_ALGO_ML_KEM_512: u8 = 62;
+    pub(super) const YUBIHSM_ALGO_ML_KEM_768: u8 = 63;
+    pub(super) const YUBIHSM_ALGO_ML_KEM_1024: u8 = 64;
 }
 use yubihsm_algorithm::*;
 
@@ -399,6 +401,8 @@ fn yubihsm_capabilities(bits: &[usize]) -> [u8; 8] {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct YubiHsmPkcs11Attributes {
+    encapsulate: bool,
+    decapsulate: bool,
     encrypt: bool,
     decrypt: bool,
     sign: bool,
@@ -425,6 +429,10 @@ fn yubihsm_capabilities_to_attributes(
                     || yubihsm_capability(capabilities, 0x06);
                 attributes.decrypt = yubihsm_capability(capabilities, 0x09)
                     || yubihsm_capability(capabilities, 0x0a);
+            } else if yubihsm_ml_dsa(algorithm).is_some() {
+                attributes.sign = yubihsm_capability(capabilities, 0x3a);
+            } else if yubihsm_ml_kem(algorithm).is_some() {
+                attributes.decapsulate = yubihsm_capability(capabilities, 0x3c);
             } else if is_yubihsm_edwards(algorithm) {
                 attributes.sign = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
@@ -443,6 +451,10 @@ fn yubihsm_capabilities_to_attributes(
                     || yubihsm_capability(capabilities, 0x06);
                 attributes.encrypt = yubihsm_capability(capabilities, 0x09)
                     || yubihsm_capability(capabilities, 0x0a);
+            } else if yubihsm_ml_dsa(algorithm).is_some() {
+                attributes.verify = true;
+            } else if yubihsm_ml_kem(algorithm).is_some() {
+                attributes.encapsulate = yubihsm_capability(capabilities, 0x3b);
             } else if is_yubihsm_edwards(algorithm) {
                 attributes.verify = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
@@ -495,10 +507,20 @@ fn yubihsm_attributes_to_capabilities(
             if attributes.sign {
                 if is_yubihsm_rsa(algorithm) {
                     bits.extend([0x05, 0x06]);
+                } else if yubihsm_ml_dsa(algorithm).is_some() {
+                    bits.push(0x3a);
                 } else if is_yubihsm_edwards(algorithm) {
                     bits.push(0x08);
                 } else if is_yubihsm_ec(algorithm) {
                     bits.push(0x07);
+                }
+            }
+            if yubihsm_ml_kem(algorithm).is_some() {
+                if attributes.encapsulate {
+                    bits.push(0x3b);
+                }
+                if attributes.decapsulate {
+                    bits.push(0x3c);
                 }
             }
             if attributes.decrypt && is_yubihsm_rsa(algorithm) {
@@ -582,6 +604,42 @@ fn is_yubihsm_ec(algorithm: u8) -> bool {
 
 fn is_yubihsm_montgomery(algorithm: u8) -> bool {
     matches!(algorithm, YUBIHSM_ALGO_X25519 | YUBIHSM_ALGO_X448)
+}
+
+fn yubihsm_ml_dsa(algorithm: u8) -> Option<software_key_core::post_quantum::MlDsaParameterSet> {
+    use software_key_core::post_quantum::MlDsaParameterSet::*;
+    match algorithm {
+        YUBIHSM_ALGO_ML_DSA_44 => Some(MlDsa44),
+        YUBIHSM_ALGO_ML_DSA_65 => Some(MlDsa65),
+        YUBIHSM_ALGO_ML_DSA_87 => Some(MlDsa87),
+        _ => None,
+    }
+}
+fn yubihsm_ml_kem(algorithm: u8) -> Option<software_key_core::post_quantum::MlKemParameterSet> {
+    use software_key_core::post_quantum::MlKemParameterSet::*;
+    match algorithm {
+        YUBIHSM_ALGO_ML_KEM_512 => Some(MlKem512),
+        YUBIHSM_ALGO_ML_KEM_768 => Some(MlKem768),
+        YUBIHSM_ALGO_ML_KEM_1024 => Some(MlKem1024),
+        _ => None,
+    }
+}
+
+fn yubihsm_has_virtual_extensions(algorithms: &[u8]) -> bool {
+    algorithms.iter().any(|algorithm| {
+        matches!(
+            *algorithm,
+            YUBIHSM_ALGO_X25519
+                | YUBIHSM_ALGO_X448
+                | YUBIHSM_ALGO_ED448
+                | YUBIHSM_ALGO_ML_DSA_44
+                | YUBIHSM_ALGO_ML_DSA_65
+                | YUBIHSM_ALGO_ML_DSA_87
+                | YUBIHSM_ALGO_ML_KEM_512
+                | YUBIHSM_ALGO_ML_KEM_768
+                | YUBIHSM_ALGO_ML_KEM_1024
+        )
+    })
 }
 
 fn is_yubihsm_edwards(algorithm: u8) -> bool {

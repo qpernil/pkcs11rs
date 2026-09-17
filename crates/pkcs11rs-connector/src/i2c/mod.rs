@@ -314,7 +314,7 @@ mod tests {
             "/dev/i2c-1@0x24=/dev/gpiochip0:23",
         ])
         .unwrap();
-        let registry = DeviceRegistry::new(Duration::from_secs(60));
+        let registry = DeviceRegistry::new();
         let error = register(&registry, &args.i2c_yubihsms, Duration::from_secs(60))
             .await
             .expect_err("an unavailable experimental transport must fail at startup");

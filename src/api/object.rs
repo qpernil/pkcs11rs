@@ -839,6 +839,8 @@ pub(super) fn yubihsm_object_parameters(
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     let attributes = YubiHsmPkcs11Attributes {
+        encapsulate: object.encapsulate,
+        decapsulate: object.decapsulate,
         encrypt: object.encrypt,
         decrypt: object.decrypt,
         sign: object.sign,
@@ -896,6 +898,44 @@ fn yubihsm_import_command(
                 )?,
                 object.class,
                 YUBIHSM_OPAQUE,
+            ))
+        }
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::MlDsa(key),
+        )) if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
+            let algorithm = match key.parameter_set() {
+                MlDsaParameterSet::MlDsa44 => YUBIHSM_ALGO_ML_DSA_44,
+                MlDsaParameterSet::MlDsa65 => YUBIHSM_ALGO_ML_DSA_65,
+                MlDsaParameterSet::MlDsa87 => YUBIHSM_ALGO_ML_DSA_87,
+            };
+            Ok((
+                YubiHsmCommand::put_object(
+                    YubiHsmCommandCode::PutAsymmetricKey,
+                    &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
+                    key.seed().as_ref(),
+                )?,
+                CKO_PRIVATE_KEY as _,
+                YUBIHSM_ASYMMETRIC_KEY,
+            ))
+        }
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::MlKem(key))
+            if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
+        {
+            use software_key_core::post_quantum::MlKemParameterSet::*;
+            let algorithm = match key.parameter_set() {
+                MlKem512 => YUBIHSM_ALGO_ML_KEM_512,
+                MlKem768 => YUBIHSM_ALGO_ML_KEM_768,
+                MlKem1024 => YUBIHSM_ALGO_ML_KEM_1024,
+            };
+            let seed = key.seed().ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+            Ok((
+                YubiHsmCommand::put_object(
+                    YubiHsmCommandCode::PutAsymmetricKey,
+                    &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
+                    &seed,
+                )?,
+                CKO_PRIVATE_KEY as _,
+                YUBIHSM_ASYMMETRIC_KEY,
             ))
         }
         KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(

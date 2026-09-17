@@ -154,6 +154,16 @@ impl ProviderSession {
     pub(crate) fn login(&self, pin: &[u8]) -> Result<(), Error> {
         self.call(|| api::rust::login(self.handle, CKU_USER as _, pin.as_ptr(), pin.len() as _))
     }
+    pub(crate) fn requires_unavailable_native_session_derivation(&self) -> Result<bool, Error> {
+        self.call(|| {
+            with_session_context(self.handle, |ctx| {
+                let (_, backend) = ctx._get_session(self.handle)?;
+                Ok(ctx.slot.client_auth_search_tier()
+                    == ClientAuthSearchTier::TokenNativeDerivation
+                    && !backend.supports_native_session_objects())
+            })
+        })
+    }
     pub(crate) fn call<T>(&self, operation: impl FnOnce() -> T) -> T {
         self.provider.call(operation)
     }

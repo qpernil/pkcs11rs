@@ -304,21 +304,21 @@ without exporting the native host private scalar. See the
 
 ## Native virtual-YubiHSM derivation
 
-Algorithm 61 and capability `derive-session-key` add generic protected-object
-commands using software-key-core: volatile P-256 generation and ECDH,
+Capability `derive-session-key` enables the generic protected-object commands
+implemented with software-key-core: volatile P-256 generation and ECDH,
 composition, extraction, SHA-256, SP 800-108 counter KDF, AES-CMAC verification,
 policy-controlled reads, and deletion. pkcs11rs maps the standard PKCS #11
 operation graph to those commands and marks the covered mechanisms with
 `CKF_HW`.
 
-Using a virtual YubiHSM as an authentication source requires its active
-Authentication Key to grant `derive-session-key`, in addition to the ECDH
-permission used by the persistent client key (`derive-ecdh`, or
-`derive-ecdh-kdf` for native prefixed derivation). A login that grants only
-`get-pseudo-random` cannot create the ephemeral P-256 session key: the device
-returns invalid permissions before the target handshake starts. These are
-permissions of the source login, separate from the client key's own capabilities
-and from the permissions granted by the target Authentication Key.
+The client selects these commands only when the active Authentication Key grants
+`derive-session-key`. Without that capability it does not issue commands
+`0x79`–`0x7c`; it can use the ordinary protected-key graph when the persistent
+client key allows the required ECDH operations. Sources whose policy requires
+the native volatile-object graph reject authentication. The session capability
+is separate from the persistent client key's `derive-ecdh` or
+`derive-ecdh-kdf` capability and from the permissions granted by the target
+Authentication Key.
 
 Long-term credentials remain ordinary persistent P-256 or AES objects. The
 bounded intermediate/output store contains at most 64 objects per authenticated

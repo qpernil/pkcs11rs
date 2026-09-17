@@ -646,10 +646,7 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     let source_backend = YubiHsmSlot::with_auth_slots_and_public_discovery(
         source_peer.clone(),
         (2, 5, 0),
-        vec![
-            YUBIHSM_ALGO_EC_P256,
-            crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION,
-        ],
+        vec![YUBIHSM_ALGO_EC_P256, crate::YUBIHSM_ALGO_X25519],
         source_auth_slots,
         None,
     );
@@ -749,8 +746,24 @@ fn nested_yubihsm_authentication(allow_session_derivation: bool) {
     let target_login = crate::pkcs11_uri::authentication_uri(&source_uri, TARGET_AUTHKEY_ID);
     let result = login_user_slot(&mut target, 7, target_login.as_bytes(), b"", &[]);
     if !allow_session_derivation {
-        assert!(matches!(result, Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as CK_RV));
-        assert_eq!(target_peer.create_session_count(), 0);
+        assert!(
+            matches!(result, Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as CK_RV),
+            "unexpected result: {result:?}"
+        );
+        // The source login does not authorize native volatile-session commands,
+        // so the provider follows the ordinary protected-key path. That path
+        // can begin the target handshake before the source key policy rejects
+        // the remaining derivation graph.
+        assert_eq!(target_peer.create_session_count(), 1);
+        assert_eq!(
+            source_peer
+                .inner_commands
+                .borrow()
+                .iter()
+                .filter(|(command, _)| { *command == CommandCode::DeriveSessionObject as u8 })
+                .count(),
+            0
+        );
         assert!(Slot::login_is_active(&*source_slot.lock().unwrap().slot));
         return;
     }

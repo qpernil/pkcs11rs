@@ -109,6 +109,10 @@ pub(crate) trait Connector {
         receive_buffer.truncate(len);
         Ok(receive_buffer)
     }
+
+    fn send_owned(&self, send_buffer: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.send(&send_buffer, timeout)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1223,7 +1227,25 @@ impl Connector for UsbConnector {
         self.state
             .lock()
             .map(|state| state.device.buffer_size())
-            .unwrap_or(3136)
+            .unwrap_or(YUBIHSM_MAX_MESSAGE_SIZE + 64)
+    }
+    fn send_owned(&self, send_buffer: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "usb.send_owned",
+            connector = %self.name(),
+            request_bytes = send_buffer.len(),
+            timeout_ms = timeout.as_millis() as u64
+        ));
+        let _entered = operation.enter();
+        let mut state = self.state.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        match state.device.transmit_owned_blocking(send_buffer, timeout) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                state.device.disconnect();
+                Err(Error::from(error))
+            }
+        }
     }
     fn transmit<'a>(
         &self,
@@ -1843,7 +1865,8 @@ fn run_pcsc_transaction(
     }
 }
 
-const YUBIHSM_CONNECTOR_BUFFER_SIZE: usize = 3139;
+const YUBIHSM_MAX_MESSAGE_SIZE: usize = 8192;
+const YUBIHSM_CONNECTOR_BUFFER_SIZE: usize = YUBIHSM_MAX_MESSAGE_SIZE;
 const YUBIHSM_CONNECTOR_DISCOVERY_LIMIT: u64 = 64 * 1024;
 const YUBIHSM_CONNECTOR_HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -2173,12 +2196,7 @@ impl Connector for HttpConnector {
     fn buffer_size(&self) -> usize {
         YUBIHSM_CONNECTOR_BUFFER_SIZE
     }
-    fn transmit<'a>(
-        &self,
-        send_buffer: &[u8],
-        receive_buffer: &'a mut [u8],
-        _timeout: Duration,
-    ) -> Result<&'a [u8], Error> {
+    fn send(&self, send_buffer: &[u8], _timeout: Duration) -> Result<Vec<u8>, Error> {
         let operation = crate::logging::Operation::trace(tracing::trace_span!(
             target: "pkcs11rs::transport",
             "http.command",
@@ -2187,46 +2205,34 @@ impl Connector for HttpConnector {
             request_bytes = send_buffer.len()
         ));
         let _entered = operation.enter();
-        let agent = self.request_agent()?;
-        let response = agent
-            .post(format!(
-                "{}/v1/devices/{}/commands",
-                self.endpoint.url, self.serial_path
-            ))
-            .content_type("application/octet-stream")
-            .config()
-            // Once the connector has received the command, its USB transport
-            // owns the response deadline. Do not race that deadline here.
-            .timeout_recv_response(None)
-            .build()
-            .send(send_buffer);
-        let mut response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                self.mark_disconnected();
-                return Err(error.into());
-            }
-        };
-        let received = response
-            .body_mut()
-            .with_config()
-            .limit((receive_buffer.len() + 1) as u64)
-            .read_to_vec();
-        let received = match received {
-            Ok(received) => received,
-            Err(ureq::Error::BodyExceedsLimit(_)) => {
-                return Err(CKR_DEVICE_MEMORY.into());
-            }
-            Err(error) => {
-                self.mark_disconnected();
-                return Err(error.into());
-            }
-        };
+        let response = self.begin_http_command(send_buffer)?;
+        self.finish_http_command(response, send_buffer.len())
+    }
+    fn send_owned(&self, send_buffer: Vec<u8>, _timeout: Duration) -> Result<Vec<u8>, Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "http.command",
+            endpoint = %self.endpoint.url,
+            serial = %self.serial,
+            request_bytes = send_buffer.len()
+        ));
+        let _entered = operation.enter();
+        let request_bytes = send_buffer.len();
+        let response = self.begin_http_command(&send_buffer)?;
+        drop(send_buffer);
+        self.finish_http_command(response, request_bytes)
+    }
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let received = self.send(send_buffer, timeout)?;
         if received.len() > receive_buffer.len() {
             return Err(CKR_DEVICE_MEMORY.into());
         }
         receive_buffer[..received.len()].copy_from_slice(&received);
-        log!(2, "http.post({:?}) -> {:?}", send_buffer, received);
         Ok(&receive_buffer[..received.len()])
     }
     fn refresh(&self) -> Result<(), Error> {
@@ -2241,6 +2247,71 @@ impl Connector for HttpConnector {
 }
 
 impl HttpConnector {
+    fn begin_http_command(
+        &self,
+        send_buffer: &[u8],
+    ) -> Result<ureq::http::Response<ureq::Body>, Error> {
+        let agent = self.request_agent()?;
+        let response = agent
+            .post(format!(
+                "{}/v1/devices/{}/commands",
+                self.endpoint.url, self.serial_path
+            ))
+            .content_type("application/octet-stream")
+            .config()
+            // Once the connector has received the command, its USB transport
+            // owns the command lifetime. ureq carries the send-request and
+            // send-body deadlines forward while awaiting response headers, so
+            // all post-connect stage deadlines must be cleared. Otherwise a
+            // long HSM operation can lose the response required to advance the
+            // SCP transcript even though its request body was sent promptly.
+            .timeout_send_request(None)
+            .timeout_send_body(None)
+            .timeout_recv_response(None)
+            .timeout_recv_body(None)
+            .build()
+            .send(send_buffer);
+        match response {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.mark_disconnected();
+                Err(error.into())
+            }
+        }
+    }
+
+    fn finish_http_command(
+        &self,
+        mut response: ureq::http::Response<ureq::Body>,
+        request_bytes: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let received = response
+            .body_mut()
+            .with_config()
+            .limit((YUBIHSM_CONNECTOR_BUFFER_SIZE + 1) as u64)
+            .read_to_vec();
+        let received = match received {
+            Ok(received) => received,
+            Err(ureq::Error::BodyExceedsLimit(_)) => {
+                return Err(CKR_DEVICE_MEMORY.into());
+            }
+            Err(error) => {
+                self.mark_disconnected();
+                return Err(error.into());
+            }
+        };
+        if received.len() > YUBIHSM_CONNECTOR_BUFFER_SIZE {
+            return Err(CKR_DEVICE_MEMORY.into());
+        }
+        log!(
+            2,
+            "http.post({} bytes) -> {} bytes",
+            request_bytes,
+            received.len()
+        );
+        Ok(received)
+    }
+
     fn mark_disconnected(&self) {
         self.endpoint.mark_disconnected();
     }

@@ -31,13 +31,13 @@ struct VirtualTransport {
 impl CommandTransport for VirtualTransport {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move {
             let (reply, response) = oneshot::channel();
             self.requests
                 .send(ActorRequest::Command {
-                    bytes: request.to_vec(),
+                    bytes: request,
                     reply,
                 })
                 .await
@@ -348,7 +348,7 @@ mod tests {
         });
 
         {
-            let first = transport.command(b"first");
+            let first = transport.command(b"first".to_vec());
             tokio::pin!(first);
             tokio::select! {
                 response = &mut first => panic!("first command completed unexpectedly: {response:?}"),
@@ -358,7 +358,7 @@ mod tests {
         release_first.send(()).unwrap();
 
         assert_eq!(
-            transport.command(b"second").await.unwrap(),
+            transport.command(b"second".to_vec()).await.unwrap(),
             b"second response"
         );
         worker.join().unwrap();
@@ -367,8 +367,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn filtered_virtual_hsm_is_visible_without_opening_its_state() {
         let directory = temporary_directory();
-        let registry =
-            DeviceRegistry::new(Duration::from_secs(1)).with_serials(Some("".parse().unwrap()));
+        let registry = DeviceRegistry::new().with_serials(Some("".parse().unwrap()));
         let actors = VirtualHsmActors::start(
             &registry,
             &[VirtualYubiHsmSpec {
@@ -395,7 +394,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn legacy_reserved_virtual_hsm_starts_outside_the_allowlist() {
         let directory = temporary_directory();
-        let registry = DeviceRegistry::new(Duration::from_secs(1))
+        let registry = DeviceRegistry::new()
             .with_serials(Some("".parse().unwrap()))
             .with_legacy_serial(Some("12345678".into()));
         let actors = VirtualHsmActors::start(
@@ -430,7 +429,7 @@ mod tests {
             serial: 12_345_678,
             state_directory: directory.clone(),
         };
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         let actors = VirtualHsmActors::start(
             &registry,
             std::slice::from_ref(&spec),
@@ -472,7 +471,7 @@ mod tests {
             serial: 12_345_678,
             state_directory: directory.clone(),
         };
-        let first_registry = DeviceRegistry::new(Duration::from_secs(1));
+        let first_registry = DeviceRegistry::new();
         let first = VirtualHsmActors::start(
             &first_registry,
             std::slice::from_ref(&spec),
@@ -481,7 +480,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let second_registry = DeviceRegistry::new(Duration::from_secs(1));
+        let second_registry = DeviceRegistry::new();
         let error = match VirtualHsmActors::start(
             &second_registry,
             &[spec],
@@ -513,7 +512,7 @@ mod tests {
                 state_directory: second_directory.clone(),
             },
         ];
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         let actors = VirtualHsmActors::start(
             &registry,
             &specs,

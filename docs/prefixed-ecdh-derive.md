@@ -171,7 +171,7 @@ protocol implementation with interchangeable software and native key providers.
 The native path protects long-term credentials and agreement inputs during
 derivation, then permits final working-key reads for local message crypto. There
 is no message-crypto placement option. The one-shot command returns KDF bytes to
-the host; virtual YubiHSM algorithm 61 supplies generic chainable device objects.
+the host; the virtual YubiHSM supplies generic chainable device objects.
 
 The [client operation matrix](scp-key-provider/operation-matrix.md) specifies
 the initial generic mechanism set and distinguishes the YubiHSM and
@@ -204,7 +204,7 @@ then invalidates those handles when their backing session is lost.
 
 `CKA_TOKEN=CK_FALSE` alone does not promise device residence. Physical YubiHSM
 firmware uses the common host software session layer for outputs that it cannot
-hold. A virtual device advertising algorithm 61 uses explicit native placement
-for the supported graph and reports those mechanisms with `CKF_HW`. Readable
+hold. A virtual device advertising actual virtual key algorithms uses explicit
+native placement for the supported graph and reports those mechanisms with `CKF_HW`. Readable
 outputs needing software-only operations are materialized once; protected
 outputs are never downgraded. Established channels use local working bytes.
