@@ -270,7 +270,7 @@ impl ProtocolPeer {
             version: [2, 4, 1],
             serial: 0x0102_0304,
             log_capacity: 62,
-            algorithms: (1..=crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION).collect(),
+            algorithms: (1..=crate::YUBIHSM_ALGO_ML_KEM_1024).collect(),
             part_number: *b"78CLUFX5000P\0",
         };
         VirtualYubiHsm::factory_default_with_device_static_private(
@@ -766,16 +766,15 @@ impl ProtocolPeer {
                                     .get(&id)
                                     .copied()
                                     .ok_or(CKR_DEVICE_ERROR)?;
+                                let mut capability_bits = Vec::new();
+                                if self.authkeys_with_get_opaque.borrow().contains(&id) {
+                                    capability_bits.push(0);
+                                }
+                                if self.native_session_commands.get() {
+                                    capability_bits.push(0x39);
+                                }
                                 let info = ObjectInfo {
-                                    capabilities: if self
-                                        .authkeys_with_get_opaque
-                                        .borrow()
-                                        .contains(&id)
-                                    {
-                                        crate::yubihsm_capabilities(&[0])
-                                    } else {
-                                        [0; 8]
-                                    },
+                                    capabilities: crate::yubihsm_capabilities(&capability_bits),
                                     id,
                                     length: 32,
                                     domains,
@@ -1539,7 +1538,7 @@ pub(crate) fn make_yubihsm_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 58,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -1559,11 +1558,7 @@ pub(crate) fn make_yubihsm_native_session_test_slot()
     let peer = Rc::new(ProtocolPeer::new());
     peer.native_session_commands.set(true);
     let control = NativeSessionTestControl(peer.clone());
-    let mut slot = crate::YubiHsmSlot::new(
-        peer,
-        (2, 4, 1),
-        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
-    );
+    let mut slot = crate::YubiHsmSlot::new(peer, (2, 4, 1), vec![crate::YUBIHSM_ALGO_X25519]);
     slot.recreate_sessions = true;
     (Box::new(slot), control)
 }
@@ -1576,7 +1571,7 @@ pub(crate) fn make_yubihsm_provisioning_test_slot()
         peer.clone(),
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56, 57, 58,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -6257,10 +6252,12 @@ fn wrong_password_is_reported_as_pin_incorrect() {
 
 #[test]
 fn secure_message_limits_match_supported_firmware_generations() {
-    assert!(secure_message_length(3_116) <= maximum_message_size(2, 4));
-    assert!(secure_message_length(3_117) > maximum_message_size(2, 4));
-    assert!(secure_message_length(2_028) <= maximum_message_size(2, 3));
-    assert!(secure_message_length(2_029) > maximum_message_size(2, 3));
+    assert!(secure_message_length(8_172) <= maximum_command_size(2, 4));
+    assert!(secure_message_length(8_173) > maximum_command_size(2, 4));
+    assert!(secure_message_length(8_172) <= maximum_command_size(2, 5));
+    assert!(secure_message_length(8_173) > maximum_command_size(2, 5));
+    assert!(secure_message_length(2_028) <= maximum_command_size(2, 3));
+    assert!(secure_message_length(2_029) > maximum_command_size(2, 3));
 }
 
 #[test]
@@ -6271,7 +6268,7 @@ fn oversized_commands_do_not_mutate_session_state() {
     assert!(!session.keys.is_empty());
     let counter = session.counter;
     let chaining_value = session.mac_chaining_value;
-    let command = Command::raw(CommandCode::Echo, &[0; 3_117]).unwrap();
+    let command = Command::raw(CommandCode::Echo, &vec![0; 8_173]).unwrap();
     assert!(matches!(
         session.send_command(&peer, &command),
         Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
@@ -6281,7 +6278,7 @@ fn oversized_commands_do_not_mutate_session_state() {
     assert_eq!(peer.commands.borrow().len(), 2);
     assert!(session.is_valid());
 
-    let random = Command::get_pseudo_random(3_117);
+    let random = Command::get_pseudo_random(8_173);
     assert!(matches!(
         session.send_command(&peer, &random),
         Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
@@ -6666,7 +6663,7 @@ fn ordinary_auth_order_follows_current_slot_capabilities() {
     let yubihsm_context = crate::ModuleContext::private_slot(Box::new(YubiHsmSlot::new(
         Rc::new(ProtocolPeer::new()),
         (0, 0, 0),
-        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
+        vec![crate::YUBIHSM_ALGO_X25519],
     )))
     .unwrap();
     let yubihsm = yubihsm_context

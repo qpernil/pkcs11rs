@@ -137,9 +137,9 @@ struct Args {
     #[arg(long, env = "PKCS11RS_CONNECTOR_SERIALS", value_name = "SERIALS")]
     serials: Option<SerialAllowlist>,
 
-    /// Maximum time waiting for a YubiHSM USB command response.
+    /// Maximum time waiting for an experimental I2C YubiHSM response.
     #[arg(long, default_value_t = 60)]
-    command_timeout_seconds: u64,
+    i2c_response_timeout_seconds: u64,
 
     /// Maximum number of HTTP requests processed concurrently across all connections.
     #[arg(long, default_value_t = 64)]
@@ -197,14 +197,14 @@ async fn main() -> Result<(), BoxError> {
 }
 
 async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
-    let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds))
+    let registry = DeviceRegistry::new()
         .with_serials(args.serials.clone())
         .with_legacy_serial(args.legacy_serial.clone());
     let virtual_hsms = VirtualHsmRuntime::start(args, &registry).await?;
     if let Err(error) = i2c::register(
         &registry,
         &args.i2c_yubihsms,
-        Duration::from_secs(args.command_timeout_seconds),
+        Duration::from_secs(args.i2c_response_timeout_seconds),
     )
     .await
     {
@@ -345,8 +345,8 @@ fn configure_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
 }
 
 fn validate_args(args: &Args) -> Result<(), BoxError> {
-    if args.command_timeout_seconds == 0 {
-        return Err("--command-timeout-seconds must be greater than zero".into());
+    if args.i2c_response_timeout_seconds == 0 {
+        return Err("--i2c-response-timeout-seconds must be greater than zero".into());
     }
     if args.http_max_in_flight_requests == 0 {
         return Err("--http-max-in-flight-requests must be greater than zero".into());
@@ -608,7 +608,7 @@ mod tests {
             tls_key: None,
             tls_client_ca: None,
             legacy_serial: None,
-            command_timeout_seconds: 30,
+            i2c_response_timeout_seconds: 30,
             serials: None,
             http_max_in_flight_requests: 64,
             hardware_discovery: true,
@@ -633,7 +633,7 @@ mod tests {
             let args = Args::try_parse_from(arguments).unwrap();
             let filter = args.serials;
             assert_eq!(filter.is_none(), case == "absent");
-            let registry = DeviceRegistry::new(Duration::from_secs(1)).with_serials(filter);
+            let registry = DeviceRegistry::new().with_serials(filter);
             match case.as_str() {
                 "absent" => assert!(registry.allows_serial("anything")),
                 "empty" | "empty_override" => assert!(!registry.allows_serial("123")),
@@ -674,9 +674,9 @@ mod tests {
     }
 
     #[test]
-    fn usb_command_response_timeout_defaults_to_one_minute() {
+    fn i2c_response_timeout_defaults_to_one_minute() {
         let args = Args::try_parse_from(["pkcs11rs-connector"]).unwrap();
-        assert_eq!(args.command_timeout_seconds, 60);
+        assert_eq!(args.i2c_response_timeout_seconds, 60);
         assert_eq!(args.http_max_in_flight_requests, 64);
         assert!(args.hardware_discovery);
         assert!(args.i2c_yubihsms.is_empty());
@@ -757,7 +757,7 @@ mod tests {
             "12345678=duplicate-that-is-also-ignored",
         ])
         .unwrap();
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         assert!(matches!(
             VirtualHsmRuntime::start(&args, &registry).await.unwrap(),
             VirtualHsmRuntime::Disabled
@@ -768,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn multi_device_api_works_over_http2_when_a_device_appears() {
         let _network_guard = NETWORK_TEST_LOCK.lock().await;
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry
             .insert_test_response("11111111", b"other device")
             .await;
@@ -813,7 +813,7 @@ mod tests {
     #[tokio::test]
     async fn http_server_can_drop_stale_connections_and_rebind_the_same_address() {
         let _network_guard = NETWORK_TEST_LOCK.lock().await;
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("12345678").await;
         let app = router(
             AppState {
@@ -872,7 +872,7 @@ mod tests {
     async fn multi_device_api_works_over_https2_at_startup() {
         let _network_guard = NETWORK_TEST_LOCK.lock().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry
             .insert_test_response("11111111", b"other device")
             .await;

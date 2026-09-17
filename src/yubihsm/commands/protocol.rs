@@ -3,7 +3,7 @@ use zeroize::Zeroizing;
 
 pub(super) const LABEL_LENGTH: usize = 40;
 pub(super) const CAPABILITIES_LENGTH: usize = 8;
-pub(super) const MAX_COMMAND_DATA_LENGTH: usize = 3133;
+pub(super) const MAX_COMMAND_DATA_LENGTH: usize = 8192 - 3;
 pub(super) const MAX_OBJECT_COUNT: usize = 256;
 pub(super) const MAX_LOG_ENTRY_COUNT: usize = 64;
 pub(super) const ALGORITHM_AES128_YUBICO_OTP: u8 = 37;
@@ -83,6 +83,8 @@ pub(crate) enum CommandCode {
     ReadSessionObject = 0x7a,
     VerifySessionObject = 0x7b,
     DeleteSessionObject = 0x7c,
+    SignMlDsa = 0x7d,
+    MlKem = 0x7e,
 }
 
 pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
@@ -154,6 +156,8 @@ pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::ReadSessionObject,
     CommandCode::VerifySessionObject,
     CommandCode::DeleteSessionObject,
+    CommandCode::SignMlDsa,
+    CommandCode::MlKem,
 ];
 
 impl TryFrom<u8> for CommandCode {

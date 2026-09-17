@@ -340,14 +340,14 @@ single-output AES-CMAC counter KDF are implemented in the common layer,
 subject to the slot's software filter. Counter KDF can also use a protected
 YubiHSM AES base through native AES-ECB-backed CMAC, without reading the base
 value or requiring its public sign/encrypt flags. On a virtual YubiHSM that
-advertises algorithm 61, supported results and intermediates are protected
-volatile device objects. Mechanism advertising describes total slot capability;
+advertises actual virtual key algorithms, supported results and intermediates
+are protected volatile device objects. Mechanism advertising describes total slot capability;
 `CKF_HW` marks mechanisms covered by this native extension.
 
 ### Implemented composition behavior
 
 Inputs and outputs use ordinary PKCS #11 secret session objects. Their material
-is software-backed on ordinary and physical-HSM slots. Algorithm-61 YubiHSM
+is software-backed on ordinary and physical-HSM slots. Virtual YubiHSM
 slots place supported objects in the backing secure session and export only
 results whose template explicitly permits reading.
 Both key inputs must be visible in the slot and permit derivation and the

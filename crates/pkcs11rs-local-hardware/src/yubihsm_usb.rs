@@ -12,7 +12,7 @@ const YUBIHSM_BULK_OUT_ENDPOINT: u8 = 0x01;
 const YUBIHSM_BULK_IN_ENDPOINT: u8 = 0x81;
 const YUBIHSM_MESSAGE_HEADER_SIZE: usize = 3;
 const YUBIHSM_LEGACY_MAX_MESSAGE_SIZE: usize = 2048;
-const YUBIHSM_MAX_MESSAGE_SIZE: usize = 3136;
+const YUBIHSM_MAX_MESSAGE_SIZE: usize = 8192;
 const YUBIHSM_LARGE_MESSAGE_MIN_VERSION: (u8, u8) = (2, 4);
 const YUBIHSM_USB_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -32,6 +32,10 @@ pub enum Error {
         firmware_version: (u8, u8),
     },
     ReceiveBufferTooLarge,
+    ReceiveMessageTooLarge {
+        actual: usize,
+        maximum: usize,
+    },
     IncompleteWrite {
         actual: usize,
         expected: usize,
@@ -69,6 +73,10 @@ impl std::fmt::Display for Error {
                 "YubiHSM message is too large: received {actual} bytes, maximum {maximum} bytes for firmware {major}.{minor}"
             ),
             Self::ReceiveBufferTooLarge => write!(fmt, "USB receive buffer is too large"),
+            Self::ReceiveMessageTooLarge { actual, maximum } => write!(
+                fmt,
+                "YubiHSM response is too large: received {actual} bytes, maximum {maximum} bytes"
+            ),
             Self::IncompleteWrite { actual, expected } => {
                 write!(
                     fmt,
@@ -320,7 +328,7 @@ impl YubiHsmUsbDevice {
     }
 
     pub fn buffer_size(&self) -> usize {
-        YUBIHSM_MAX_MESSAGE_SIZE + self.packet_size
+        yubihsm_receive_buffer_size(self.packet_size)
     }
 
     #[cfg(feature = "blocking")]
@@ -370,8 +378,56 @@ impl YubiHsmUsbDevice {
         receive_buffer: &'a mut [u8],
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let (mut bulk_out, mut bulk_in) =
-            self.transfer_endpoints(send_buffer, receive_buffer.len())?;
+        let completion =
+            self.transfer_blocking(send_buffer, receive_buffer.len(), response_timeout)?;
+        copy_received(completion, receive_buffer)
+    }
+
+    #[cfg(feature = "blocking")]
+    pub fn transmit_owned_blocking(
+        &self,
+        mut send_buffer: Vec<u8>,
+        response_timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        let receive_len = self.buffer_size();
+        let send_len = send_buffer.len();
+        let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(&send_buffer, receive_len)?;
+        reserve_response_capacity(&mut send_buffer, receive_len);
+        let completion = nusb_transfer_blocking(
+            &mut bulk_out,
+            nusb::transfer::Buffer::from(send_buffer),
+            YUBIHSM_USB_SEND_TIMEOUT,
+        );
+        let written = completion.actual_len;
+        completion.status?;
+        ensure_complete_write(written, send_len)?;
+        let needs_zero_length_packet = needs_zero_length_packet(written, self.packet_size);
+        let mut response = completion.buffer.into_vec();
+        if needs_zero_length_packet {
+            let completion = nusb_transfer_blocking(
+                &mut bulk_out,
+                nusb::transfer::Buffer::new(0),
+                YUBIHSM_USB_SEND_TIMEOUT,
+            );
+            completion.status?;
+        }
+        response.resize(receive_len, 0);
+        let completion = nusb_transfer_blocking(
+            &mut bulk_in,
+            nusb::transfer::Buffer::from(response),
+            response_timeout,
+        );
+        received_vec(completion, YUBIHSM_MAX_MESSAGE_SIZE)
+    }
+
+    #[cfg(feature = "blocking")]
+    fn transfer_blocking(
+        &self,
+        send_buffer: &[u8],
+        receive_len: usize,
+        response_timeout: Duration,
+    ) -> Result<nusb::transfer::Completion, Error> {
+        let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(send_buffer, receive_len)?;
         let completion = nusb_transfer_blocking(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
@@ -386,12 +442,11 @@ impl YubiHsmUsbDevice {
             completion.status?;
         }
 
-        let completion = nusb_transfer_blocking(
+        Ok(nusb_transfer_blocking(
             &mut bulk_in,
-            nusb::transfer::Buffer::new(receive_buffer.len()),
+            nusb::transfer::Buffer::new(receive_len),
             response_timeout,
-        );
-        copy_received(completion, receive_buffer)
+        ))
     }
 
     #[cfg(feature = "async-tokio")]
@@ -401,8 +456,60 @@ impl YubiHsmUsbDevice {
         receive_buffer: &'a mut [u8],
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let (mut bulk_out, mut bulk_in) =
-            self.transfer_endpoints(send_buffer, receive_buffer.len())?;
+        let completion = self
+            .transfer(send_buffer, receive_buffer.len(), response_timeout)
+            .await?;
+        copy_received(completion, receive_buffer)
+    }
+
+    #[cfg(feature = "async-tokio")]
+    pub async fn transmit_owned(
+        &self,
+        mut send_buffer: Vec<u8>,
+        response_timeout: Duration,
+    ) -> Result<Vec<u8>, Error> {
+        let receive_len = self.buffer_size();
+        let send_len = send_buffer.len();
+        let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(&send_buffer, receive_len)?;
+        reserve_response_capacity(&mut send_buffer, receive_len);
+        let completion = nusb_transfer(
+            &mut bulk_out,
+            nusb::transfer::Buffer::from(send_buffer),
+            YUBIHSM_USB_SEND_TIMEOUT,
+        )
+        .await;
+        let written = completion.actual_len;
+        completion.status?;
+        ensure_complete_write(written, send_len)?;
+        let needs_zero_length_packet = needs_zero_length_packet(written, self.packet_size);
+        let mut response = completion.buffer.into_vec();
+        if needs_zero_length_packet {
+            let completion = nusb_transfer(
+                &mut bulk_out,
+                nusb::transfer::Buffer::new(0),
+                YUBIHSM_USB_SEND_TIMEOUT,
+            )
+            .await;
+            completion.status?;
+        }
+        response.resize(receive_len, 0);
+        let completion = nusb_transfer(
+            &mut bulk_in,
+            nusb::transfer::Buffer::from(response),
+            response_timeout,
+        )
+        .await;
+        received_vec(completion, YUBIHSM_MAX_MESSAGE_SIZE)
+    }
+
+    #[cfg(feature = "async-tokio")]
+    async fn transfer(
+        &self,
+        send_buffer: &[u8],
+        receive_len: usize,
+        response_timeout: Duration,
+    ) -> Result<nusb::transfer::Completion, Error> {
+        let (mut bulk_out, mut bulk_in) = self.transfer_endpoints(send_buffer, receive_len)?;
         let completion = nusb_transfer(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
@@ -419,13 +526,12 @@ impl YubiHsmUsbDevice {
             completion.status?;
         }
 
-        let completion = nusb_transfer(
+        Ok(nusb_transfer(
             &mut bulk_in,
-            nusb::transfer::Buffer::new(receive_buffer.len()),
+            nusb::transfer::Buffer::new(receive_len),
             response_timeout,
         )
-        .await;
-        copy_received(completion, receive_buffer)
+        .await)
     }
 
     fn transfer_endpoints(
@@ -454,11 +560,21 @@ impl YubiHsmUsbDevice {
     }
 }
 
-fn yubihsm_max_message_size(version: (u8, u8)) -> usize {
+fn yubihsm_max_command_size(version: (u8, u8)) -> usize {
     if version < YUBIHSM_LARGE_MESSAGE_MIN_VERSION {
         YUBIHSM_LEGACY_MAX_MESSAGE_SIZE
     } else {
         YUBIHSM_MAX_MESSAGE_SIZE
+    }
+}
+
+fn yubihsm_receive_buffer_size(packet_size: usize) -> usize {
+    YUBIHSM_MAX_MESSAGE_SIZE + packet_size
+}
+
+fn reserve_response_capacity(buffer: &mut Vec<u8>, receive_len: usize) {
+    if buffer.capacity() < receive_len {
+        buffer.reserve_exact(receive_len - buffer.len());
     }
 }
 
@@ -483,7 +599,7 @@ fn ensure_yubihsm_message(version: (u8, u8), message: &[u8]) -> Result<(), Error
 }
 
 fn ensure_yubihsm_message_size(version: (u8, u8), actual: usize) -> Result<(), Error> {
-    let maximum = yubihsm_max_message_size(version);
+    let maximum = yubihsm_max_command_size(version);
     if actual <= maximum {
         Ok(())
     } else {
@@ -504,8 +620,24 @@ fn copy_received(
 ) -> Result<&[u8], Error> {
     let received = completion.actual_len;
     completion.status?;
+    ensure_receive_size(received, YUBIHSM_MAX_MESSAGE_SIZE)?;
     receive_buffer[..received].copy_from_slice(&completion.buffer[..received]);
     Ok(&receive_buffer[..received])
+}
+
+fn received_vec(completion: nusb::transfer::Completion, maximum: usize) -> Result<Vec<u8>, Error> {
+    let received = completion.actual_len;
+    completion.status?;
+    ensure_receive_size(received, maximum)?;
+    Ok(completion.buffer.into_vec())
+}
+
+fn ensure_receive_size(actual: usize, maximum: usize) -> Result<(), Error> {
+    if actual <= maximum {
+        Ok(())
+    } else {
+        Err(Error::ReceiveMessageTooLarge { actual, maximum })
+    }
 }
 
 #[cfg(feature = "async-tokio")]
@@ -659,12 +791,13 @@ mod tests {
 
     #[test]
     fn message_size_limit_tracks_yubihsm_firmware() {
-        assert_eq!(yubihsm_max_message_size((1, 9)), 2048);
-        assert_eq!(yubihsm_max_message_size((2, 3)), 2048);
-        assert_eq!(yubihsm_max_message_size((2, 4)), 3136);
-        assert_eq!(yubihsm_max_message_size((2, 9)), 3136);
-        assert_eq!(yubihsm_max_message_size((0, 0)), 2048);
-        assert_eq!(yubihsm_max_message_size((3, 0)), 3136);
+        assert_eq!(yubihsm_max_command_size((1, 9)), 2048);
+        assert_eq!(yubihsm_max_command_size((2, 3)), 2048);
+        assert_eq!(yubihsm_max_command_size((2, 4)), 8192);
+        assert_eq!(yubihsm_max_command_size((2, 5)), 8192);
+        assert_eq!(yubihsm_max_command_size((2, 9)), 8192);
+        assert_eq!(yubihsm_max_command_size((0, 0)), 2048);
+        assert_eq!(yubihsm_max_command_size((3, 0)), 8192);
 
         assert!(ensure_yubihsm_message((2, 3), &message_with_total_size(2048)).is_ok());
         assert!(matches!(
@@ -675,15 +808,43 @@ mod tests {
                 firmware_version: (2, 3)
             })
         ));
-        assert!(ensure_yubihsm_message((2, 4), &message_with_total_size(3136)).is_ok());
+        assert!(ensure_yubihsm_message((2, 4), &message_with_total_size(8192)).is_ok());
         assert!(matches!(
-            ensure_yubihsm_message((2, 4), &message_with_total_size(3137)),
+            ensure_yubihsm_message((2, 4), &message_with_total_size(8193)),
             Err(Error::SendBufferTooLarge {
-                actual: 3137,
-                maximum: 3136,
+                actual: 8193,
+                maximum: 8192,
                 firmware_version: (2, 4)
             })
         ));
+    }
+
+    #[test]
+    fn receive_buffer_accepts_a_full_frame_and_detects_one_trailing_packet() {
+        assert_eq!(yubihsm_receive_buffer_size(64), 8256);
+        assert!(ensure_receive_size(8192, 8192).is_ok());
+        assert!(matches!(
+            ensure_receive_size(8193, 8192),
+            Err(Error::ReceiveMessageTooLarge {
+                actual: 8193,
+                maximum: 8192
+            })
+        ));
+    }
+
+    #[test]
+    fn command_allocation_can_be_reused_for_the_maximum_response() {
+        let mut command = vec![0x03, 0, 0];
+        reserve_response_capacity(&mut command, 8256);
+        assert_eq!(command, [0x03, 0, 0]);
+        assert!(command.capacity() >= 8256);
+
+        let allocation = command.as_ptr();
+        let transfer_buffer = nusb::transfer::Buffer::from(command);
+        let mut command = transfer_buffer.into_vec();
+        assert_eq!(command.as_ptr(), allocation);
+        command.resize(8256, 0);
+        assert_eq!(command.as_ptr(), allocation);
     }
 
     #[test]

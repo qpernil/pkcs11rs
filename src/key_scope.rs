@@ -69,6 +69,12 @@ impl BoundKey {
         )
     }
 
+    pub(crate) fn requires_unavailable_authentication_derivation(&self) -> Result<bool, Error> {
+        self.0
+            .session
+            .requires_unavailable_native_session_derivation()
+    }
+
     /// Borrow a credential through its authorized session. Token objects stay
     /// token-owned; dropping this reference never deletes the source key.
     pub(crate) fn from_session(

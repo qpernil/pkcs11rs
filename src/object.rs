@@ -9,13 +9,14 @@ use crate::{
     CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_PKCS11RS_URI, CKA_YUBICO_HSMAUTH_RETRIES,
     CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
-    PivClient, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand,
-    YubiHsmSessionState, der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters,
-    hash, is_yubihsm_ec, is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa,
-    montgomery_curve_from_parameters, montgomery_curve_parameters,
-    openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
-    piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
-    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters,
+    PivClient, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
+    YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState, der_octet_string,
+    edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
+    is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa, montgomery_curve_from_parameters,
+    montgomery_curve_parameters, openpgp_signature_requires_context_specific_login,
+    piv_algorithm_from_certificate, piv_effective_pin_policy, piv_public_key_from_certificate,
+    send_yubihsm_secure_command, yubihsm_capabilities_to_attributes, yubihsm_capability,
+    yubihsm_ec_parameters,
 };
 use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
 #[cfg(test)]
@@ -1399,6 +1400,35 @@ impl TokenObject {
                 algorithm,
                 public_key,
                 ..
+            } if crate::yubihsm_ml_dsa(*algorithm).is_some() => {
+                let parameters =
+                    crate::yubihsm_ml_dsa(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                software_key_core::post_quantum::validate_ml_dsa_public_key(parameters, public_key)
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+                Ok(PublicKeyMaterial::MlDsa {
+                    parameter_set: (*algorithm - YUBIHSM_ALGO_ML_DSA_44 + 1) as _,
+                    public_key: public_key.clone(),
+                })
+            }
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if crate::yubihsm_ml_kem(*algorithm).is_some() => {
+                let parameters =
+                    crate::yubihsm_ml_kem(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if public_key.len() != parameters.public_key_length() {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                Ok(PublicKeyMaterial::MlKem {
+                    parameter_set: (*algorithm - YUBIHSM_ALGO_ML_KEM_512 + 1) as _,
+                    public_key: public_key.clone(),
+                })
+            }
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
             } => yubihsm_ec_parameters(*algorithm)
                 .map(|parameters| PublicKeyMaterial::Ec {
                     parameters: parameters.to_vec(),
@@ -1892,6 +1922,17 @@ impl TokenObject {
                 match &self.material {
                     KeyMaterial::SoftwarePrivate(key) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         key.private_value()
+                    }
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                        && self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                        && (crate::yubihsm_ml_dsa(*algorithm).is_some()
+                            || crate::yubihsm_ml_kem(*algorithm).is_some()) =>
+                    {
+                        Some(public_key.clone())
                     }
                     KeyMaterial::Public(PublicKeyMaterial::MlDsa { public_key, .. })
                     | KeyMaterial::Public(PublicKeyMaterial::MlKem { public_key, .. })

@@ -173,14 +173,14 @@ impl From<pkcs11rs_local_hardware::Error> for TransportError {
 pub(crate) trait CommandTransport: Send {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>>;
 }
 
 trait ConnectedCommandTransport: Send {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>>;
 }
 
@@ -209,7 +209,7 @@ impl RecoverableCommandTransport {
 impl CommandTransport for RecoverableCommandTransport {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move {
             if self.connected.is_none() {
@@ -237,32 +237,46 @@ impl CommandTransport for RecoverableCommandTransport {
 
 struct UsbConnectedTransport {
     device: YubiHsmUsbDevice,
-    timeout: Duration,
 }
 
 impl ConnectedCommandTransport for UsbConnectedTransport {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move {
-            let mut response = vec![0; self.device.buffer_size()];
-            let received = self
+            let response = self
                 .device
-                .transmit(request, &mut response, self.timeout)
+                .transmit_owned(request, Duration::ZERO)
                 .await
                 .map_err(TransportError::from)?;
-            let length = received.len();
-            response.truncate(length);
+            ensure_single_response_frame(&response)?;
             Ok(response)
         })
     }
 }
 
+fn ensure_single_response_frame(response: &[u8]) -> Result<(), TransportError> {
+    let Some(header) = response.get(..3) else {
+        return Err(TransportError::device(format!(
+            "YubiHSM returned an incomplete response header of {} bytes",
+            response.len()
+        )));
+    };
+    let payload_len = usize::from(u16::from_be_bytes([header[1], header[2]]));
+    let expected = 3 + payload_len;
+    if response.len() != expected {
+        return Err(TransportError::device(format!(
+            "YubiHSM returned {} response bytes, expected one {expected}-byte frame",
+            response.len()
+        )));
+    }
+    Ok(())
+}
+
 struct UsbTransportFactory {
     id: UsbDeviceId,
     serial: String,
-    timeout: Duration,
 }
 
 impl CommandTransportFactory for UsbTransportFactory {
@@ -297,10 +311,8 @@ impl CommandTransportFactory for UsbTransportFactory {
                     )));
                 }
                 device.connect().await.map_err(TransportError::from)?;
-                Ok(Box::new(UsbConnectedTransport {
-                    device,
-                    timeout: self.timeout,
-                }) as Box<dyn ConnectedCommandTransport>)
+                Ok(Box::new(UsbConnectedTransport { device })
+                    as Box<dyn ConnectedCommandTransport>)
             }
             .await;
             match &result {
@@ -347,11 +359,27 @@ impl DeviceEntry {
         self.id.map(|id| format!("{id:?}"))
     }
 
-    pub async fn command(&self, request: &[u8]) -> (Result<Vec<u8>, TransportError>, Duration) {
-        let mut transport = self.command_transport.lock().await;
-        let started_at = Instant::now();
-        let result = transport.command(request).await;
-        (result, started_at.elapsed())
+    pub async fn command(
+        self: &Arc<Self>,
+        request: &[u8],
+    ) -> (Result<Vec<u8>, TransportError>, Duration) {
+        let entry = self.clone();
+        let request = request.to_vec();
+        tokio::spawn(async move {
+            let mut transport = entry.command_transport.lock().await;
+            let started_at = Instant::now();
+            let result = transport.command(request).await;
+            (result, started_at.elapsed())
+        })
+        .await
+        .unwrap_or_else(|error| {
+            (
+                Err(TransportError::device(format!(
+                    "YubiHSM command task failed: {error}"
+                ))),
+                Duration::ZERO,
+            )
+        })
     }
 }
 
@@ -408,7 +436,6 @@ struct RegistryState {
 #[derive(Clone)]
 pub struct DeviceRegistry {
     state: Arc<RwLock<RegistryState>>,
-    command_timeout: Duration,
     serials: Option<Arc<SerialAllowlist>>,
     configured_legacy_serial: Option<Arc<str>>,
 }
@@ -419,10 +446,9 @@ pub enum LegacySelectionError {
 }
 
 impl DeviceRegistry {
-    pub fn new(command_timeout: Duration) -> Self {
+    pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(RegistryState::default())),
-            command_timeout,
             serials: None,
             configured_legacy_serial: None,
         }
@@ -703,14 +729,10 @@ impl DeviceRegistry {
                 connection_generation,
             },
             command_transport: Mutex::new(Box::new(RecoverableCommandTransport::new(
-                Box::new(UsbConnectedTransport {
-                    device,
-                    timeout: self.command_timeout,
-                }),
+                Box::new(UsbConnectedTransport { device }),
                 Box::new(UsbTransportFactory {
                     id,
                     serial: serial.clone(),
-                    timeout: self.command_timeout,
                 }),
             ))),
         });
@@ -830,9 +852,9 @@ struct EchoTransport;
 impl CommandTransport for EchoTransport {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
-        Box::pin(async move { Ok(request.to_vec()) })
+        Box::pin(async move { Ok(request) })
     }
 }
 
@@ -843,7 +865,7 @@ struct FixedTransport(&'static [u8]);
 impl CommandTransport for FixedTransport {
     fn command<'a>(
         &'a mut self,
-        _request: &'a [u8],
+        _request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move { Ok(self.0.to_vec()) })
     }
@@ -856,7 +878,7 @@ struct FixedErrorTransport(TransportError);
 impl CommandTransport for FixedErrorTransport {
     fn command<'a>(
         &'a mut self,
-        _request: &'a [u8],
+        _request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move { Err(self.0.clone()) })
     }
@@ -904,13 +926,13 @@ mod tests {
     impl ConnectedCommandTransport for ScriptedConnectedTransport {
         fn command<'a>(
             &'a mut self,
-            request: &'a [u8],
+            request: Vec<u8>,
         ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
             Box::pin(async move {
-                self.calls.lock().unwrap().push(request.to_vec());
+                self.calls.lock().unwrap().push(request.clone());
                 match self.outcomes.pop_front().flatten() {
                     Some(error) => Err(error),
-                    None => Ok(request.to_vec()),
+                    None => Ok(request),
                 }
             })
         }
@@ -980,9 +1002,9 @@ mod tests {
             0,
         );
 
-        assert!(transport.command(b"uncertain").await.is_err());
+        assert!(transport.command(b"uncertain".to_vec()).await.is_err());
         assert_eq!(opens.load(Ordering::SeqCst), 0);
-        assert_eq!(transport.command(b"next").await.unwrap(), b"next");
+        assert_eq!(transport.command(b"next".to_vec()).await.unwrap(), b"next");
         assert_eq!(opens.load(Ordering::SeqCst), 1);
         assert_eq!(
             *calls.lock().unwrap(),
@@ -1001,9 +1023,12 @@ mod tests {
             1,
         );
 
-        assert!(transport.command(b"uncertain").await.is_err());
-        assert!(transport.command(b"reopen fails").await.is_err());
-        assert_eq!(transport.command(b"later").await.unwrap(), b"later");
+        assert!(transport.command(b"uncertain".to_vec()).await.is_err());
+        assert!(transport.command(b"reopen fails".to_vec()).await.is_err());
+        assert_eq!(
+            transport.command(b"later".to_vec()).await.unwrap(),
+            b"later"
+        );
         assert_eq!(opens.load(Ordering::SeqCst), 2);
         assert_eq!(
             *calls.lock().unwrap(),
@@ -1023,8 +1048,11 @@ mod tests {
             opens,
         } = scripted_recoverable_transport([Some(invalid)], 0);
 
-        assert!(transport.command(b"invalid").await.is_err());
-        assert_eq!(transport.command(b"valid").await.unwrap(), b"valid");
+        assert!(transport.command(b"invalid".to_vec()).await.is_err());
+        assert_eq!(
+            transport.command(b"valid".to_vec()).await.unwrap(),
+            b"valid"
+        );
         assert_eq!(opens.load(Ordering::SeqCst), 0);
         assert_eq!(
             *calls.lock().unwrap(),
@@ -1034,7 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_selection_latches_the_first_serial_and_allows_an_override() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         assert!(matches!(
             registry.select_legacy(None).await,
             Err(LegacySelectionError::NoDevice)
@@ -1083,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_generation_increases_when_a_serial_is_registered_again() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_unclaimed("12345678").await;
         let first = registry.view("12345678").await.unwrap();
         assert_eq!(first.status, DeviceStatus::Unclaimed);
@@ -1106,21 +1134,21 @@ mod tests {
     impl CommandTransport for ConcurrencyProbe {
         fn command<'a>(
             &'a mut self,
-            request: &'a [u8],
+            request: Vec<u8>,
         ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
             Box::pin(async move {
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.maximum.fetch_max(active, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 self.active.fetch_sub(1, Ordering::SeqCst);
-                Ok(request.to_vec())
+                Ok(request)
             })
         }
     }
 
     #[tokio::test]
     async fn one_device_executes_only_one_command_at_a_time() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
         registry
@@ -1137,6 +1165,73 @@ mod tests {
         assert_eq!(left.0.unwrap(), b"left");
         assert_eq!(right.0.unwrap(), b"right");
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    struct CancellationProbe {
+        executions: Arc<AtomicUsize>,
+        first_started: Option<tokio::sync::oneshot::Sender<()>>,
+        release_first: Arc<tokio::sync::Notify>,
+    }
+
+    impl CommandTransport for CancellationProbe {
+        fn command<'a>(
+            &'a mut self,
+            request: Vec<u8>,
+        ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+            Box::pin(async move {
+                self.executions.fetch_add(1, Ordering::SeqCst);
+                if request == b"first" {
+                    self.first_started.take().unwrap().send(()).unwrap();
+                    self.release_first.notified().await;
+                }
+                Ok(request)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_cancel_or_overlap_device_command() {
+        let registry = DeviceRegistry::new();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let (first_started, started) = tokio::sync::oneshot::channel();
+        registry
+            .insert_test(
+                "12345678",
+                Box::new(CancellationProbe {
+                    executions: executions.clone(),
+                    first_started: Some(first_started),
+                    release_first: release_first.clone(),
+                }),
+            )
+            .await;
+        let entry = registry.get("12345678").await.unwrap();
+
+        let first_entry = entry.clone();
+        let first = tokio::spawn(async move { first_entry.command(b"first").await });
+        started.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(entry.command_transport.try_lock().is_err());
+
+        let second_entry = entry.clone();
+        let second = tokio::spawn(async move { second_entry.command(b"second").await });
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+
+        release_first.notify_one();
+        assert_eq!(second.await.unwrap().0.unwrap(), b"second");
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn usb_response_must_contain_exactly_one_frame() {
+        assert!(ensure_single_response_frame(&[0x86, 0x00, 0x01, 0x00]).is_ok());
+        assert!(ensure_single_response_frame(&[0x86, 0x00]).is_err());
+        assert!(
+            ensure_single_response_frame(&[0x86, 0x00, 0x01, 0x00, 0x86, 0x00, 0x01, 0x00])
+                .is_err()
+        );
     }
 
     struct StressProbe {
@@ -1158,10 +1253,10 @@ mod tests {
     impl ConnectedCommandTransport for StressConnectedTransport {
         fn command<'a>(
             &'a mut self,
-            request: &'a [u8],
+            request: Vec<u8>,
         ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
             Box::pin(async move {
-                let id = u64::from_be_bytes(request.try_into().unwrap());
+                let id = u64::from_be_bytes(request.as_slice().try_into().unwrap());
                 let active = self.probe.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.probe.maximum.fetch_max(active, Ordering::SeqCst);
                 let global_active = self.probe.global_active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1185,7 +1280,7 @@ mod tests {
                 if id % 29 == 0 {
                     Err(TransportError::device("injected transport failure"))
                 } else {
-                    Ok(request.to_vec())
+                    Ok(request)
                 }
             })
         }
@@ -1212,7 +1307,7 @@ mod tests {
         const DEVICES: usize = 8;
         const COMMANDS_PER_DEVICE: u64 = 256;
 
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         let barrier = Arc::new(Barrier::new(DEVICES));
         let global_active = Arc::new(AtomicUsize::new(0));
         let global_maximum = Arc::new(AtomicUsize::new(0));

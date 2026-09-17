@@ -98,8 +98,8 @@ extractability; the result can be copied, used for host cryptography, and
 removed through the same APIs as an imported or generated session key. There
 is no separate synthetic-result key type or forced read-only usage policy.
 
-A YubiHSM advertising algorithm 61 can instead back supported P-256,
-generic-secret, and AES session objects with its secure session. Native commands
+A virtual YubiHSM advertising actual virtual key algorithms can instead back
+supported P-256, generic-secret, and AES session objects with its secure session. Native commands
 cover P-256 generation and ECDH, key/data concatenation, extraction, SHA-256,
 SP 800-108 counter KDF, AES-CMAC verification, reads, and deletion. The PKCS #11
 creator session still owns the object, while all sessions on the slot can use
@@ -110,8 +110,8 @@ Native outputs preserve the requested readability, derivation, and verification
 policy. A readable result requesting an operation outside the native command set
 is read once and published as a software session key. A protected result cannot
 be materialized and fails if its requested operations cannot be honored
-natively. Mechanisms covered by algorithm 61 retain `CKF_HW` in the merged slot
-advertisement.
+natively. Mechanisms covered by the native command family retain `CKF_HW` in
+the merged slot advertisement.
 
 `CKA_TOKEN=CK_TRUE` selects persistent backend storage. Hardware generation and
 import retain their native mechanism, key-size, curve, and authorization limits;

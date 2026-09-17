@@ -6218,7 +6218,7 @@ fn yubihsm_asymmetric_authentication_uses_pkcs11_protected_derivation() {
     let mut target_slot = crate::YubiHsmSlot::with_auth_slots_and_public_discovery(
         target.clone(),
         (2, 4, 1),
-        vec![crate::YUBIHSM_ALGO_SESSION_KEY_DERIVATION],
+        vec![crate::YUBIHSM_ALGO_X25519],
         auth_slots,
         crate::configured_yubihsm_public_discovery_credential(Some("0001password".into())).unwrap(),
     );
@@ -7505,7 +7505,11 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
             .find(|mechanism| mechanism.type_ == type_)
             .copied()
     };
-    assert!(mechanism(CKM_RSA_PKCS as CK_MECHANISM_TYPE).is_none());
+    let rsa_pkcs = mechanism(CKM_RSA_PKCS as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!(
+        rsa_pkcs.flags & (CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
+        (CKF_WRAP | CKF_UNWRAP) as CK_FLAGS
+    );
     let aes = mechanism(CKM_AES_ECB as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((aes.min_key_size, aes.max_key_size), (16, 16));
     let gcm = mechanism(CKM_AES_GCM as CK_MECHANISM_TYPE).unwrap();
@@ -7526,7 +7530,7 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE,
     ] {
         let cmac = mechanism(cmac).unwrap();
-        assert_eq!((cmac.min_key_size, cmac.max_key_size), (16, 16));
+        assert_eq!((cmac.min_key_size, cmac.max_key_size), (16, 32));
         assert_eq!(
             cmac.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
             (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
@@ -7791,6 +7795,107 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
             .iter()
             .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
     );
+}
+
+#[test]
+fn yubihsm_post_quantum_mechanisms_follow_advertised_key_algorithms() {
+    let mechanisms = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_ML_DSA_44,
+        crate::YUBIHSM_ALGO_ML_DSA_87,
+        crate::YUBIHSM_ALGO_ML_KEM_768,
+    ]);
+    let mechanism = |type_| {
+        mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == type_)
+            .copied()
+            .unwrap()
+    };
+    let dsa = mechanism(CKM_ML_DSA as CK_MECHANISM_TYPE);
+    assert_eq!((dsa.min_key_size, dsa.max_key_size), (1_312, 2_592));
+    assert_eq!(
+        dsa.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
+    let dsa_generation = mechanism(CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE);
+    assert_eq!(
+        dsa_generation.flags,
+        (CKF_HW | CKF_GENERATE_KEY_PAIR) as CK_FLAGS
+    );
+    let kem = mechanism(CKM_ML_KEM as CK_MECHANISM_TYPE);
+    assert_eq!((kem.min_key_size, kem.max_key_size), (1_184, 1_184));
+    assert_eq!(
+        kem.flags & (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+        (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS
+    );
+    assert_ne!(dsa.flags & CKF_HW as CK_FLAGS, 0);
+    assert_ne!(kem.flags & CKF_HW as CK_FLAGS, 0);
+}
+
+#[test]
+fn yubihsm_post_quantum_objects_preserve_capabilities_and_public_material() {
+    for (algorithm, key_type, public_length, capabilities, private_use, public_use) in [
+        (
+            crate::YUBIHSM_ALGO_ML_DSA_65,
+            CKK_ML_DSA as CK_KEY_TYPE,
+            1_952,
+            crate::yubihsm_capabilities(&[0x3a]),
+            CKA_SIGN,
+            CKA_VERIFY,
+        ),
+        (
+            crate::YUBIHSM_ALGO_ML_KEM_512,
+            CKK_ML_KEM as CK_KEY_TYPE,
+            800,
+            crate::yubihsm_capabilities(&[0x3b, 0x3c]),
+            CKA_DECAPSULATE,
+            CKA_ENCAPSULATE,
+        ),
+    ] {
+        let info = crate::yubihsm::ObjectInfo {
+            capabilities,
+            id: 0x1250 + u16::from(algorithm),
+            length: if key_type == CKK_ML_DSA as CK_KEY_TYPE {
+                32
+            } else {
+                64
+            },
+            domains: 1,
+            object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+            algorithm,
+            sequence: 1,
+            origin: 1,
+            label: "post-quantum".to_owned(),
+            delegated_capabilities: [0; 8],
+        };
+        let public_key = crate::yubihsm::PublicKey {
+            algorithm,
+            key: vec![0x5a; public_length],
+        };
+        let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
+        let private = objects
+            .iter()
+            .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            .unwrap();
+        let public = objects
+            .iter()
+            .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .unwrap();
+        assert_eq!(private.key_type, key_type);
+        assert_eq!(public.key_type, key_type);
+        assert_eq!(
+            private.attribute_value(private_use as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(true))
+        );
+        assert_eq!(
+            public.attribute_value(public_use as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(true))
+        );
+        assert_eq!(
+            public.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            Some(vec![0x5a; public_length])
+        );
+    }
 }
 
 #[test]

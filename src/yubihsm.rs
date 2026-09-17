@@ -46,8 +46,8 @@ const P256_PUBLIC_KEY_LENGTH: usize = 65;
 const ASYMMETRIC_RECEIPT_LENGTH: usize = 16;
 const EC_P256_AUTHENTICATION_ALGORITHM: u8 = 49;
 const SCP11_SHARED_INFO: [u8; 3] = [0x3c, 0x88, 0x10];
-const MODERN_MESSAGE_SIZE: usize = 3136;
 const PRE_2_4_MESSAGE_SIZE: usize = 2048;
+const MAX_MESSAGE_SIZE: usize = 8192;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceInfo {
@@ -161,12 +161,12 @@ fn send_plain(connector: &dyn Connector, command: &Command) -> Result<Vec<u8>, E
     if !command.code().is_bare() {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    if 3 + command.data().len() > maximum_message_size(connector.major(), connector.minor()) {
+    if 3 + command.data().len() > maximum_command_size(connector.major(), connector.minor()) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let code = command.code() as u8;
     let request = Frame::new(code, command.data().to_vec())?;
-    Frame::parse(&connector.send(&request.encode(), Duration::ZERO)?)?.require_response(code)
+    Frame::parse(&connector.send_owned(request.encode(), Duration::ZERO)?)?.require_response(code)
 }
 
 fn send_plain_protocol(
@@ -185,7 +185,8 @@ fn send_plain_protocol(
     );
     let result = (|| {
         let request = Frame::new(command, data.to_vec())?;
-        Frame::parse(&connector.send(&request.encode(), Duration::ZERO)?)?.require_response(command)
+        Frame::parse(&connector.send_owned(request.encode(), Duration::ZERO)?)?
+            .require_response(command)
     })();
     match result {
         Ok(response) => {
@@ -771,6 +772,8 @@ impl SecureSession {
         credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Self, Error> {
+        let unavailable_native_derivation =
+            credential.requires_unavailable_authentication_derivation()?;
         let exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = Self::begin_asymmetric(connector, authkey_id, &public)?;
@@ -783,7 +786,13 @@ impl SecureSession {
                 &handshake.receipt,
             )
         })()
-        .map_err(|e| map_asymmetric_provider_error(e, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV));
+        .map_err(|error| {
+            if unavailable_native_derivation {
+                CKR_FUNCTION_REJECTED.into()
+            } else {
+                map_asymmetric_provider_error(error, CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV)
+            }
+        });
         match result {
             Ok(keys) => Ok(Self::complete_asymmetric(handshake, keys)),
             Err(error) => {
@@ -818,6 +827,8 @@ impl SecureSession {
         credential: &BoundKey,
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Option<Self>, Error> {
+        let unavailable_native_derivation =
+            credential.requires_unavailable_authentication_derivation()?;
         let exchange = AsymmetricKeys::for_key(credential)?;
         let public = exchange.public_key()?;
         let handshake = match Self::begin_asymmetric(connector, authkey_id, &public) {
@@ -834,7 +845,13 @@ impl SecureSession {
                     &handshake.context,
                     &handshake.receipt,
                 )
-                .map_err(|e| map_asymmetric_provider_error(e, CKR_PIN_INCORRECT as crate::CK_RV))
+                .map_err(|error| {
+                    if unavailable_native_derivation {
+                        CKR_FUNCTION_REJECTED.into()
+                    } else {
+                        map_asymmetric_provider_error(error, CKR_PIN_INCORRECT as crate::CK_RV)
+                    }
+                })
         })();
         match result {
             Ok(keys) => Ok(Some(Self::complete_asymmetric(handshake, keys))),
@@ -911,8 +928,8 @@ impl SecureSession {
         {
             return Err(CKR_DATA_INVALID.into());
         }
-        let maximum_message_size = maximum_message_size(connector.major(), connector.minor());
-        if secure_message_length(command.data().len()) > maximum_message_size {
+        let maximum_command_size = maximum_command_size(connector.major(), connector.minor());
+        if secure_message_length(command.data().len()) > maximum_command_size {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         if command.code() == CommandCode::GetPseudoRandom {
@@ -921,7 +938,7 @@ impl SecureSession {
                 .try_into()
                 .map(u16::from_be_bytes)
                 .map_err(|_| CKR_DATA_INVALID)? as usize;
-            if secure_message_length(requested) > maximum_message_size {
+            if secure_message_length(requested) > MAX_MESSAGE_SIZE {
                 return Err(CKR_DATA_LEN_RANGE.into());
             }
         }
@@ -949,7 +966,7 @@ impl SecureSession {
         self.mac_chaining_value = self.keys.command_mac(&mac_input)?;
         request.extend_from_slice(&self.mac_chaining_value[..MAC_LENGTH]);
 
-        let encoded_response = connector.send(&request, Duration::ZERO)?;
+        let encoded_response = connector.send_owned(request, Duration::ZERO)?;
         let response = Frame::parse(&encoded_response)?;
         if !require_response_mac && response.command == command | RESPONSE_BIT {
             return Ok(response);
@@ -1059,11 +1076,11 @@ fn secure_message_length(data_length: usize) -> usize {
     3 + 1 + encrypted_length + MAC_LENGTH
 }
 
-fn maximum_message_size(major: u8, minor: u8) -> usize {
+fn maximum_command_size(major: u8, minor: u8) -> usize {
     if major < 2 || (major == 2 && minor < 4) {
         PRE_2_4_MESSAGE_SIZE
     } else {
-        MODERN_MESSAGE_SIZE
+        MAX_MESSAGE_SIZE
     }
 }
 

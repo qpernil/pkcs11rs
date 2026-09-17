@@ -36,7 +36,6 @@ impl AbiYubiHsmConnector {
                 YUBIHSM_ALGO_RSA_PKCS1_SHA1,
                 YUBIHSM_ALGO_RSA_PKCS1_SHA256,
                 YUBIHSM_ALGO_RSA_PKCS1_DECRYPT,
-                YUBIHSM_ALGO_RSA_PKCS1_WRAP,
                 YUBIHSM_ALGO_X448,
                 YUBIHSM_ALGO_ED448,
                 YUBIHSM_ALGO_RSA_OAEP_SHA1,

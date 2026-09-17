@@ -45,6 +45,9 @@ software mechanism list for session keys.
 - Canonical names for mechanisms, return values, object classes, key types,
   attributes, and profiles, exposed through small C helper functions. See
   [Vendor extensions](docs/extensions.md).
+- Virtual YubiHSM slots can expose protected
+  [ML-DSA and ML-KEM keys](docs/yubihsm-post-quantum.md) when the device
+  advertises the corresponding virtual key algorithms.
 
 ### YubiKey applications
 
@@ -1128,6 +1131,51 @@ them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
 `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`; select one device with
 `PKCS11RS_TEST_YUBIHSM_SOURCE` when more than one is present.
 
+The two-device concurrency tests first run one RSA signing workload on one HSM
+and one client thread. The second phase runs the identical workload on two
+freely scheduled client threads, one per HSM, without any client-side lock or
+barrier. Each workload makes ten native RSA-2048 signatures by default. Before
+each HSM is first used, the test authenticates directly with the password-derived,
+full-capability symmetric Authentication Key `1007` (`reserve-symmetric`) and
+its deliberately known qualification password `password`. Override the compact
+login with `PKCS11RS_TEST_YUBIHSM_CONCURRENCY_LOGIN` for another installation.
+The test creates one temporary token RSA key pair on each HSM and deletes both
+pairs before logging out. Because an interrupted process could leave those
+objects behind, the test requires the explicit mutation gate
+`PKCS11RS_TEST_YUBIHSM_RSA_CONCURRENCY=1`.
+
+Run the local-discovery case while both HSMs are attached directly:
+
+```sh
+PKCS11RS_TEST_YUBIHSM_RSA_CONCURRENCY=1 \
+PKCS11RS_TEST_LOCAL_YUBIHSM_SERIALS=12345678,23456789 \
+cargo test one_then_two_yubihsm_clients_work_with_local_discovery \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Then run the same workload against two HSMs discovered through one HTTP
+connector:
+
+```sh
+PKCS11RS_TEST_YUBIHSM_RSA_CONCURRENCY=1 \
+PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL=http://connector.example:12345 \
+PKCS11RS_TEST_CONNECTOR_YUBIHSM_SERIALS=34567890,45678901 \
+cargo test one_then_two_yubihsm_clients_work_through_connector \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Each serial variable is optional but, when set, must contain exactly two
+comma-separated target management serials. The compact login is passed directly
+to each target's `C_Login`; keep non-qualification passwords out of checked-in
+files. The connector case disables local hardware discovery and therefore has
+no YubiKey or PC/SC dependency. Each client performs ten signatures by default;
+set
+`PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CYCLES` to a positive integer for a longer
+stress run. The test does not compare elapsed times: connector transports can
+serialize parts of their I/O even though the PKCS #11 clients and target
+devices execute independently. Completion verifies that parallel dispatch,
+sessions, and responses remain isolated.
+
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 only exported PKCS #11 calls to generate an exportable P-256 target and an
 RSA-2048 private wrap key. It materializes the distinct YubiHSM RSA public wrap
@@ -1284,8 +1332,8 @@ agreements, and intermediate objects remain in the provider; only the final
 working keys are exported once for local AES and CMAC message crypto.
 
 The protocol uses PKCS #11 key handles and operations. Software-backed session
-objects provide the common contract. A virtual YubiHSM advertising algorithm 61
-uses protected device-session objects for supported generation, agreement,
+objects provide the common contract. A virtual YubiHSM advertising actual
+virtual key algorithms uses protected device-session objects for supported generation, agreement,
 composition, KDF, extraction, and verification operations. Native coverage is
 reported with `CKF_HW`; a readable result needing a software-only operation is
 materialized once into the common layer. Complete channel qualification with a

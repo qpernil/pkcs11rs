@@ -29,6 +29,8 @@ mod hardware_provisioning {
     const SCP11B_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_SCP11B";
     const SCP11B_KVN_ENV: &str = "PKCS11RS_TEST_SCP11B_KVN";
     const RSA_WRAP_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_RSA_WRAP";
+    const RSA_CONCURRENCY_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_RSA_CONCURRENCY";
+    const PQ_QUALIFICATION_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_PQ";
     const X25519_INTEROP_ENABLE_ENV: &str = "PKCS11RS_TEST_X25519_INTEROP";
     const REPLACE_YUBIHSM_ADMIN_ENABLE_ENV: &str = "PKCS11RS_TEST_REPLACE_YUBIHSM_ADMIN";
     const RESUME_YUBIHSM_ADMIN_ENV: &str = "PKCS11RS_TEST_RESUME_YUBIHSM_ADMIN";
@@ -388,7 +390,8 @@ mod hardware_provisioning {
         })
     }
 
-    fn select_two_yubihsm_slots() -> Vec<(CK_SLOT_ID, String)> {
+    fn select_two_yubihsm_slots(serial_environment: Option<&str>) -> Vec<(CK_SLOT_ID, String)> {
+        let selected_serials = serial_environment.and_then(concurrency_serials);
         let mut count = 0;
         assert_eq!(
             crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count,),
@@ -400,7 +403,7 @@ mod hardware_provisioning {
             CKR_OK as CK_RV
         );
 
-        let slots = slot_ids
+        let mut slots = slot_ids
             .into_iter()
             .filter_map(|slot_id| {
                 let mut info = CK_SLOT_INFO {
@@ -417,16 +420,36 @@ mod hardware_provisioning {
                 let description = String::from_utf8_lossy(&info.slotDescription)
                     .trim_end()
                     .to_owned();
-                description
-                    .starts_with("Yubico YubiHSM ")
-                    .then_some((slot_id, description))
+                let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+                assert_eq!(
+                    crate::api::C_GetTokenInfo(slot_id, &mut token_info),
+                    CKR_OK as CK_RV
+                );
+                let label = String::from_utf8_lossy(&token_info.label)
+                    .trim_end()
+                    .to_owned();
+                let serial = String::from_utf8_lossy(&token_info.serialNumber)
+                    .trim_end()
+                    .to_owned();
+                (label.starts_with("YubiHSM #")
+                    && selected_serials
+                        .as_ref()
+                        .is_none_or(|selected| selected.contains(&serial)))
+                .then_some((slot_id, description))
             })
-            .take(2)
             .collect::<Vec<_>>();
+        if selected_serials.is_none() {
+            slots.truncate(2);
+        }
         assert_eq!(
             slots.len(),
             2,
-            "expected at least two present YubiHSM slots for concurrency testing"
+            "expected {} two YubiHSM slots for concurrency testing",
+            if selected_serials.is_some() {
+                "exactly"
+            } else {
+                "at least"
+            }
         );
         slots
     }
@@ -748,7 +771,7 @@ mod hardware_provisioning {
         finalize_for_test();
         assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
 
-        let slots = select_two_yubihsm_slots();
+        let slots = select_two_yubihsm_slots(None);
         eprintln!(
             "concurrency hardware test uses slot {} {} and slot {} {}",
             slots[0].0, slots[0].1, slots[1].0, slots[1].1
@@ -828,6 +851,585 @@ mod hardware_provisioning {
             THREAD_COUNT * CALLS_PER_THREAD
         );
         for session in control_sessions {
+            assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    fn concurrency_serials(environment_name: &str) -> Option<Vec<String>> {
+        std::env::var(environment_name).ok().map(|value| {
+            let serials = value
+                .split(',')
+                .map(str::trim)
+                .filter(|serial| !serial.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                serials.len(),
+                2,
+                "{environment_name} must contain exactly two comma-separated serials"
+            );
+            serials
+        })
+    }
+
+    fn initialize_yubihsm_concurrency_path(connector_url: Option<&str>) {
+        let configuration = serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": connector_url.is_none()},
+            "platform": {"enabled": false},
+            "yubihsm": {
+                "urls": connector_url.into_iter().collect::<Vec<_>>(),
+                "recreate_sessions": false
+            }
+        });
+        assert_eq!(
+            initialize_with_configuration(configuration),
+            CKR_OK as CK_RV
+        );
+    }
+
+    fn open_rw_hardware_session(slot_id: CK_SLOT_ID) -> CK_SESSION_HANDLE {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        session
+    }
+
+    fn open_logged_in_hardware_session(
+        slot: &(CK_SLOT_ID, String),
+        login: &[u8],
+    ) -> CK_SESSION_HANDLE {
+        let session = open_rw_hardware_session(slot.0);
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                login.as_ptr() as *mut CK_UTF8CHAR,
+                login.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV,
+            "configured credential failed to log in to {}",
+            slot.1
+        );
+        session
+    }
+
+    struct ConcurrencyRsaKey {
+        session: CK_SESSION_HANDLE,
+        public: CK_OBJECT_HANDLE,
+        private: CK_OBJECT_HANDLE,
+    }
+
+    impl ConcurrencyRsaKey {
+        fn destroy(mut self) {
+            for (name, handle) in [("public", self.public), ("private", self.private)] {
+                let rv = crate::api::C_DestroyObject(self.session, handle);
+                assert!(
+                    rv == CKR_OK as CK_RV || rv == CKR_OBJECT_HANDLE_INVALID as CK_RV,
+                    "temporary RSA {name} key cleanup returned CK_RV 0x{rv:08x} for handle {handle}"
+                );
+            }
+            self.public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            self.private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        }
+    }
+
+    impl Drop for ConcurrencyRsaKey {
+        fn drop(&mut self) {
+            for (name, handle) in [("public", self.public), ("private", self.private)] {
+                if handle == CK_INVALID_HANDLE as CK_OBJECT_HANDLE {
+                    continue;
+                }
+                let rv = crate::api::C_DestroyObject(self.session, handle);
+                if rv != CKR_OK as CK_RV && rv != CKR_OBJECT_HANDLE_INVALID as CK_RV {
+                    eprintln!(
+                        "temporary RSA {name} key cleanup returned CK_RV 0x{rv:08x} for handle {handle}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn generate_concurrency_rsa_key(session: CK_SESSION_HANDLE) -> ConcurrencyRsaKey {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut yes = CK_TRUE as CK_BBOOL;
+        let mut no = CK_FALSE as CK_BBOOL;
+        let mut modulus_bits = 2048 as CK_ULONG;
+        let mut exponent = vec![1, 0, 1];
+        let mut public_label = b"qualification-pkcs11rs-concurrency".to_vec();
+        let mut private_label = public_label.clone();
+        let mut public_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+            bytes_attribute(CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE, &mut exponent),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut public_label),
+        ];
+        let mut private_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut no),
+            scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut yes),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut private_label),
+        ];
+        let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut public,
+                &mut private,
+            ),
+            CKR_OK as CK_RV,
+            "temporary native RSA-2048 key generation failed"
+        );
+        ConcurrencyRsaKey {
+            session,
+            public,
+            private,
+        }
+    }
+
+    fn rsa_signing_client(
+        slot: (CK_SLOT_ID, String),
+        private_key: CK_OBJECT_HANDLE,
+        cycles: usize,
+    ) -> std::time::Duration {
+        let session = open_hardware_session(slot.0);
+        assert_eq!(
+            hardware_session_state(session),
+            CKS_RO_USER_FUNCTIONS as CK_STATE,
+            "worker session was not logged in on {}",
+            slot.1
+        );
+        let started = std::time::Instant::now();
+        for cycle in 0..cycles {
+            let mut mechanism = CK_MECHANISM {
+                mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            assert_eq!(
+                crate::api::C_SignInit(session, &mut mechanism, private_key),
+                CKR_OK as CK_RV,
+                "RSA sign initialization {} failed on {}",
+                cycle + 1,
+                slot.1
+            );
+            let mut message = [0u8; 64];
+            message[..8].copy_from_slice(&(cycle as u64).to_be_bytes());
+            message[8..16].copy_from_slice(&(slot.0 as u64).to_be_bytes());
+            let mut signature = [0u8; 256];
+            let mut signature_length = signature.len() as CK_ULONG;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV,
+                "RSA signature {} failed on {}",
+                cycle + 1,
+                slot.1
+            );
+            assert_eq!(
+                signature_length,
+                signature.len() as CK_ULONG,
+                "RSA signature {} had the wrong size on {}",
+                cycle + 1,
+                slot.1
+            );
+            assert!(signature.iter().any(|byte| *byte != 0));
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        elapsed
+    }
+
+    fn qualify_one_then_two_yubihsm_clients(
+        path_name: &str,
+        connector_url: Option<&str>,
+        serial_environment: &str,
+    ) {
+        finalize_for_test();
+        initialize_yubihsm_concurrency_path(connector_url);
+        let slots = select_two_yubihsm_slots(Some(serial_environment));
+        eprintln!(
+            "{path_name}: selected slot {} {} and slot {} {}",
+            slots[0].0, slots[0].1, slots[1].0, slots[1].1
+        );
+
+        let cycles = std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CYCLES")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CYCLES must be a positive integer")
+            })
+            .unwrap_or(10);
+        assert!(
+            cycles > 0,
+            "PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CYCLES must be positive"
+        );
+
+        let login = zeroize::Zeroizing::new(
+            std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_LOGIN")
+                .unwrap_or_else(|_| "1007password".to_owned()),
+        );
+        let first_target_session = open_logged_in_hardware_session(&slots[0], login.as_bytes());
+        let first_key = generate_concurrency_rsa_key(first_target_session);
+
+        let single_worker = {
+            let slot = slots[0].clone();
+            let private_key = first_key.private;
+            std::thread::spawn(move || rsa_signing_client(slot, private_key, cycles))
+        };
+        let single_elapsed = single_worker.join().unwrap();
+        eprintln!(
+            "{path_name}: one client completed {cycles} native RSA-2048 signatures on {} in {single_elapsed:?}",
+            slots[0].1
+        );
+
+        // Do not leave the second HSM's authenticated session idle throughout a
+        // long baseline. Its normal session timeout is unrelated to concurrent
+        // dispatch and would expire before the parallel phase in stress runs.
+        let second_target_session = open_logged_in_hardware_session(&slots[1], login.as_bytes());
+        let second_key = generate_concurrency_rsa_key(second_target_session);
+        let target_sessions = [first_target_session, second_target_session];
+        let keys = [first_key, second_key];
+
+        let workers = slots
+            .iter()
+            .cloned()
+            .zip(keys.iter().map(|key| key.private))
+            .map(|(slot, private_key)| {
+                std::thread::spawn(move || rsa_signing_client(slot, private_key, cycles))
+            })
+            .collect::<Vec<_>>();
+        let concurrent_started = std::time::Instant::now();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let concurrent_elapsed = concurrent_started.elapsed();
+        eprintln!(
+            "{path_name}: two clients completed {cycles} native RSA-2048 signatures each in {concurrent_elapsed:?} (individual {:?} and {:?})",
+            results[0], results[1]
+        );
+
+        for key in keys {
+            key.destroy();
+        }
+        for session in target_sessions {
+            assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
+    #[ignore = "creates temporary RSA keys and compares one and two PKCS #11 signing clients on local YubiHSMs"]
+    fn one_then_two_yubihsm_clients_work_with_local_discovery() {
+        if std::env::var(RSA_CONCURRENCY_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped RSA concurrency test; set {RSA_CONCURRENCY_ENABLE_ENV}=1");
+            return;
+        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        qualify_one_then_two_yubihsm_clients(
+            "local discovery",
+            None,
+            "PKCS11RS_TEST_LOCAL_YUBIHSM_SERIALS",
+        );
+    }
+
+    #[test]
+    #[ignore = "creates temporary RSA keys and compares one and two PKCS #11 signing clients through a connector"]
+    fn one_then_two_yubihsm_clients_work_through_connector() {
+        if std::env::var(RSA_CONCURRENCY_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped RSA concurrency test; set {RSA_CONCURRENCY_ENABLE_ENV}=1");
+            return;
+        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        let connector_url = std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL")
+            .expect("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL is required for this test");
+        qualify_one_then_two_yubihsm_clients(
+            "HTTP connector",
+            Some(&connector_url),
+            "PKCS11RS_TEST_CONNECTOR_YUBIHSM_SERIALS",
+        );
+    }
+
+    struct PostQuantumKeys {
+        session: CK_SESSION_HANDLE,
+        dsa_public: CK_OBJECT_HANDLE,
+        dsa_private: CK_OBJECT_HANDLE,
+        kem_public: CK_OBJECT_HANDLE,
+        kem_private: CK_OBJECT_HANDLE,
+    }
+
+    impl PostQuantumKeys {
+        fn destroy(self) {
+            for handle in [
+                self.dsa_public,
+                self.dsa_private,
+                self.kem_public,
+                self.kem_private,
+            ] {
+                let result = crate::api::C_DestroyObject(self.session, handle);
+                assert!(
+                    matches!(result, x if x == CKR_OK as CK_RV || x == CKR_OBJECT_HANDLE_INVALID as CK_RV),
+                    "PQ key cleanup returned CK_RV 0x{result:08x}"
+                );
+            }
+        }
+    }
+
+    fn generate_post_quantum_pair(
+        session: CK_SESSION_HANDLE,
+        mechanism_type: CK_MECHANISM_TYPE,
+        parameter_set: CK_ULONG,
+        id: u16,
+        public_usage: CK_ATTRIBUTE_TYPE,
+        private_usage: CK_ATTRIBUTE_TYPE,
+    ) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut parameter_set = parameter_set;
+        let mut id = id.to_be_bytes();
+        let mut yes = CK_TRUE as CK_BBOOL;
+        let mut no = CK_FALSE as CK_BBOOL;
+        let mut label = format!("pq-qualification-{id:02x?}").into_bytes();
+        let mut private_label = label.clone();
+        let mut public_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            scalar_attribute(public_usage, &mut yes),
+        ];
+        let mut private_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut no),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut private_label),
+            scalar_attribute(private_usage, &mut yes),
+        ];
+        let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut public,
+                &mut private,
+            ),
+            CKR_OK as CK_RV
+        );
+        (public, private)
+    }
+
+    fn generate_post_quantum_keys(session: CK_SESSION_HANDLE, ordinal: u16) -> PostQuantumKeys {
+        let (dsa_public, dsa_private) = generate_post_quantum_pair(
+            session,
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKP_ML_DSA_87 as CK_ULONG,
+            0x7d00 + ordinal * 2,
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN as CK_ATTRIBUTE_TYPE,
+        );
+        let (kem_public, kem_private) = generate_post_quantum_pair(
+            session,
+            CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKP_ML_KEM_1024 as CK_ULONG,
+            0x7d01 + ordinal * 2,
+            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+        );
+        PostQuantumKeys {
+            session,
+            dsa_public,
+            dsa_private,
+            kem_public,
+            kem_private,
+        }
+    }
+
+    fn exercise_post_quantum_keys(slot: &(CK_SLOT_ID, String), keys: &PostQuantumKeys) {
+        let session = open_rw_hardware_session(slot.0);
+        let mut sign_mechanism = CK_MECHANISM {
+            mechanism: CKM_ML_DSA as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut message = format!("ML-DSA-87 through {}", slot.1).into_bytes();
+        assert_eq!(
+            crate::api::C_SignInit(session, &mut sign_mechanism, keys.dsa_private),
+            CKR_OK as CK_RV
+        );
+        let mut signature_length = 0;
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                message.as_mut_ptr(),
+                message.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(signature_length, 4_627);
+        assert!(signature_length > 3_136);
+        let mut signature = vec![0; signature_length as usize];
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                message.as_mut_ptr(),
+                message.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut sign_mechanism, keys.dsa_public),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                session,
+                message.as_mut_ptr(),
+                message.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let mut kem_mechanism = CK_MECHANISM {
+            mechanism: CKM_ML_KEM as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut secret_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+        let mut no = CK_FALSE as CK_BBOOL;
+        let mut yes = CK_TRUE as CK_BBOOL;
+        let mut secret_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut secret_type),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut no),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut no),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut yes),
+        ];
+        let mut ciphertext = vec![0; 1_568];
+        let mut ciphertext_length = ciphertext.len() as CK_ULONG;
+        let mut encapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                session,
+                &mut kem_mechanism,
+                keys.kem_public,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_length,
+                &mut encapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(ciphertext_length, 1_568);
+        let mut decapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                session,
+                &mut kem_mechanism,
+                keys.kem_private,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                ciphertext_length,
+                &mut decapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            read_hardware_attribute(session, encapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            read_hardware_attribute(session, decapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        );
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
+
+    #[test]
+    #[ignore = "generates temporary ML-DSA-87 and ML-KEM-1024 keys on two virtual YubiHSMs through one HTTP connector"]
+    fn post_quantum_yubihsm_clients_work_concurrently_through_connector() {
+        if std::env::var(PQ_QUALIFICATION_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped PQ qualification; set {PQ_QUALIFICATION_ENABLE_ENV}=1");
+            return;
+        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let connector_url = std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL")
+            .expect("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL is required");
+        initialize_yubihsm_concurrency_path(Some(&connector_url));
+        let slots = select_two_yubihsm_slots(Some("PKCS11RS_TEST_CONNECTOR_YUBIHSM_SERIALS"));
+        let login = zeroize::Zeroizing::new(
+            std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_LOGIN")
+                .unwrap_or_else(|_| "0001password".to_owned()),
+        );
+        let sessions = slots
+            .iter()
+            .map(|slot| open_logged_in_hardware_session(slot, login.as_bytes()))
+            .collect::<Vec<_>>();
+        let keys = sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| generate_post_quantum_keys(*session, index as u16))
+            .collect::<Vec<_>>();
+
+        std::thread::scope(|scope| {
+            for (slot, keys) in slots.iter().zip(&keys) {
+                scope.spawn(move || exercise_post_quantum_keys(slot, keys));
+            }
+        });
+
+        for keys in keys {
+            keys.destroy();
+        }
+        for session in sessions {
             assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
             assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
         }

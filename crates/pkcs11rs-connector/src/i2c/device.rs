@@ -11,7 +11,7 @@ use std::{
 
 const I2C_SLAVE: libc::c_ulong = 0x0703;
 const FRAME_HEADER_LENGTH: usize = 3;
-const MAX_FRAME_LENGTH: usize = 3_136;
+const MAX_FRAME_LENGTH: usize = 8_192;
 const MAX_FRAME_DATA_LENGTH: usize = MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH;
 const BUS_LOCK_RETRY_DELAY: Duration = Duration::from_millis(2);
 const DEVICE_INFO_REQUEST: [u8; 3] = [0x06, 0x00, 0x00];
@@ -367,6 +367,21 @@ mod tests {
         assert_eq!(
             validate_request(&[0x01, 0, 1]).unwrap_err().kind(),
             crate::registry::TransportErrorKind::InvalidCommandFrame
+        );
+
+        let mut maximum = vec![0x01];
+        maximum.extend_from_slice(&((MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH) as u16).to_be_bytes());
+        maximum.resize(MAX_FRAME_LENGTH, 0);
+        assert!(validate_request(&maximum).is_ok());
+
+        let mut oversized = vec![0x01];
+        oversized.extend_from_slice(
+            &((MAX_FRAME_LENGTH + 1 - FRAME_HEADER_LENGTH) as u16).to_be_bytes(),
+        );
+        oversized.resize(MAX_FRAME_LENGTH + 1, 0);
+        assert_eq!(
+            validate_request(&oversized).unwrap_err().kind(),
+            crate::registry::TransportErrorKind::CommandTooLarge
         );
     }
 }

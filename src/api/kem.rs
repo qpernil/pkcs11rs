@@ -79,7 +79,22 @@ fn encapsulate_key(
         }
         let key_handle = unsafe { as_mut(key) }?;
         let output = unsafe { _from_raw_parts_mut(ciphertext, required) }?;
-        let (encapsulated, shared) = ml_kem_encapsulate(&public_material)?;
+        let (encapsulated, shared) = if let KeyMaterial::YubiHsm { id, .. } = &public.material {
+            let response = Zeroizing::new(
+                ctx._get_session(session_handle)?
+                    .1
+                    .yubihsm_command(&YubiHsmCommand::ml_kem(false, *id, &[])?)?,
+            );
+            if response.len() != required + ML_KEM_SHARED_SECRET_LENGTH {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            (
+                response[..required].to_vec(),
+                Zeroizing::new(response[required..].to_vec()),
+            )
+        } else {
+            ml_kem_encapsulate(&public_material)?
+        };
         let object = ml_kem_secret_object(templ, shared, flags, logged_in, mechanism.mechanism)?;
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
         output.copy_from_slice(&encapsulated);
@@ -151,10 +166,25 @@ fn decapsulate_key(
         if !private.decapsulate {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let KeyMaterial::SoftwarePrivate(material) = &private.material else {
-            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        let shared = match &private.material {
+            KeyMaterial::SoftwarePrivate(material) => ml_kem_decapsulate(material, ciphertext)?,
+            KeyMaterial::YubiHsm { id, algorithm, .. } => {
+                let parameters = yubihsm_ml_kem(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if ciphertext.len() != parameters.ciphertext_length() {
+                    return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+                }
+                let shared = Zeroizing::new(
+                    ctx._get_session(session_handle)?
+                        .1
+                        .yubihsm_command(&YubiHsmCommand::ml_kem(true, *id, ciphertext)?)?,
+                );
+                if shared.len() != ML_KEM_SHARED_SECRET_LENGTH {
+                    return Err(CKR_DEVICE_ERROR.into());
+                }
+                shared
+            }
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        let shared = ml_kem_decapsulate(material, ciphertext)?;
         let object = ml_kem_secret_object(templ, shared, flags, logged_in, mechanism.mechanism)?;
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
         Ok(())

@@ -355,7 +355,7 @@ mod tests {
             .finish();
         tracing::subscriber::set_global_default(subscriber).unwrap();
 
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("logging-test-serial").await;
         registry
             .insert_test_error(
@@ -452,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn filtered_devices_are_inventory_only_and_missing_serials_are_not_listed() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1))
+        let registry = DeviceRegistry::new()
             .with_serials(Some("12345678,99999999".parse().unwrap()))
             .with_legacy_serial(Some("99999999".into()));
         registry
@@ -529,7 +529,7 @@ mod tests {
             (Some("87654321"), "legacy_only", StatusCode::FORBIDDEN),
             (Some(""), "legacy_only", StatusCode::FORBIDDEN),
         ] {
-            let registry = DeviceRegistry::new(Duration::from_secs(1))
+            let registry = DeviceRegistry::new()
                 .with_serials(serials.map(|value| value.parse().unwrap()))
                 .with_legacy_serial(Some("12345678".into()));
             assert!(registry.should_claim("12345678"));
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn modern_routes_enumerate_and_address_devices_by_serial() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("12345678").await;
         registry.insert_test_unclaimed("87654321").await;
         let app = router(
@@ -672,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_routes_latch_a_device_present_at_startup() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry
             .insert_test_response("12345678", b"first device")
             .await;
@@ -777,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_routes_latch_the_first_device_discovered_after_startup() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         let app = router(
             AppState {
                 registry: registry.clone(),
@@ -849,7 +849,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_commands_are_rejected_before_transport() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("12345678").await;
         let response = router(
             AppState {
@@ -872,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn declared_oversized_body_is_rejected_without_being_read() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("12345678").await;
         let pending_body =
             Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
@@ -907,13 +907,13 @@ mod tests {
             ),
             (
                 pkcs11rs_local_hardware::Error::SendBufferTooLarge {
-                    actual: 3137,
-                    maximum: 3136,
-                    firmware_version: (2, 5),
+                    actual: 2049,
+                    maximum: 2048,
+                    firmware_version: (2, 3),
                 },
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "command_too_large",
-                "received 3137 bytes, maximum 3136 bytes for firmware 2.5",
+                "received 2049 bytes, maximum 2048 bytes for firmware 2.3",
             ),
             (
                 pkcs11rs_local_hardware::Error::DeviceRemoved,
@@ -941,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_body_deadline_does_not_reset_when_data_arrives() {
-        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let registry = DeviceRegistry::new();
         registry.insert_test_echo("12345678").await;
         let stream = futures_util::stream::unfold(0, |index| async move {
             if index == 10 {

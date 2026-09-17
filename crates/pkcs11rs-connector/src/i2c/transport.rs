@@ -46,10 +46,9 @@ struct I2cTransport(Arc<Mutex<Connection>>);
 impl CommandTransport for I2cTransport {
     fn command<'a>(
         &'a mut self,
-        request: &'a [u8],
+        request: Vec<u8>,
     ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         let state = self.0.clone();
-        let request = request.to_vec();
         Box::pin(super::with_device(state, move |state| {
             state.command(&request)
         }))

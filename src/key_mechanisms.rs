@@ -474,7 +474,7 @@ mod tests {
         );
         let allowed = slot.allowed_key_mechanisms(&ec);
         assert!(allowed.contains(&(CKM_ECDH1_DERIVE as _)));
-        assert!(allowed.contains(&CKM_PKCS11RS_PREFIXED_ECDH_DERIVE));
+        assert!(!allowed.contains(&CKM_PKCS11RS_PREFIXED_ECDH_DERIVE));
         let mut aes = native(
             CKK_AES as _,
             CKO_SECRET_KEY as _,
