@@ -85,6 +85,22 @@ pub(crate) enum CommandCode {
     ImportRsaWrapped = 0x77,
 }
 
+/// Operation selectors inside the `SessionObject` command namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SessionObjectCommand {
+    Read = 0x01,
+    VerifyCmac = 0x02,
+    ConcatenateKey = 0x03,
+    ConcatenateData = 0x04,
+    Extract = 0x05,
+    Sha256 = 0x06,
+    CounterKdf = 0x07,
+    GenerateAsymmetricKey = 0x46,
+    DeriveEcdh = 0x57,
+    DeleteObject = 0x58,
+}
+
 pub(crate) const ALL_COMMAND_CODES: &[CommandCode] = &[
     CommandCode::Echo,
     CommandCode::CreateSession,

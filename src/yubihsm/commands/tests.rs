@@ -1,3 +1,4 @@
+use super::protocol::SessionObjectCommand;
 use super::*;
 use std::collections::BTreeSet;
 
@@ -220,7 +221,7 @@ fn session_object_envelope_reuses_matching_command_codes() {
     assert_eq!(
         generate.data(),
         [
-            CommandCode::GenerateAsymmetricKey as u8,
+            SessionObjectCommand::GenerateAsymmetricKey as u8,
             super::session_object::FLAG_DERIVE,
             12,
         ]
@@ -235,19 +236,19 @@ fn session_object_envelope_reuses_matching_command_codes() {
     )
     .unwrap();
     assert_eq!(derive.code(), CommandCode::SessionObject);
-    assert_eq!(derive.data()[0], CommandCode::DeriveEcdh as u8);
+    assert_eq!(derive.data()[0], SessionObjectCommand::DeriveEcdh as u8);
 
     let read = Command::read_session_object(0x0102_0304_0506_0708);
     assert_eq!(read.code(), CommandCode::SessionObject);
-    assert_eq!(read.data()[0], 0x01);
+    assert_eq!(read.data()[0], SessionObjectCommand::Read as u8);
 
     let verify = Command::verify_session_object(1, &[0xaa; 8], b"message").unwrap();
     assert_eq!(verify.code(), CommandCode::SessionObject);
-    assert_eq!(verify.data()[0], 0x02);
+    assert_eq!(verify.data()[0], SessionObjectCommand::VerifyCmac as u8);
 
     let delete = Command::delete_session_object(0x0102_0304_0506_0708);
     assert_eq!(delete.code(), CommandCode::SessionObject);
-    assert_eq!(delete.data()[0], CommandCode::DeleteObject as u8);
+    assert_eq!(delete.data()[0], SessionObjectCommand::DeleteObject as u8);
 }
 
 #[test]
