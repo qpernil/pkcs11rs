@@ -1194,6 +1194,50 @@ mod hardware_provisioning {
         kem_private: CK_OBJECT_HANDLE,
     }
 
+    fn cleanup_post_quantum_qualification_objects(session: CK_SESSION_HANDLE) {
+        for id in 0x7d00_u16..=0x7d03 {
+            let mut id = id.to_be_bytes();
+            let mut label = format!("pq-qualification-{id:02x?}").into_bytes();
+            let mut template = [
+                bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+                bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            ];
+            assert_eq!(
+                crate::api::C_FindObjectsInit(
+                    session,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                ),
+                CKR_OK as CK_RV
+            );
+            let mut objects = Vec::new();
+            loop {
+                let mut batch = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 4];
+                let mut count = 0;
+                assert_eq!(
+                    crate::api::C_FindObjects(
+                        session,
+                        batch.as_mut_ptr(),
+                        batch.len() as CK_ULONG,
+                        &mut count,
+                    ),
+                    CKR_OK as CK_RV
+                );
+                if count == 0 {
+                    break;
+                }
+                objects.extend_from_slice(&batch[..count as usize]);
+            }
+            assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+            for object in objects {
+                assert_eq!(
+                    crate::api::C_DestroyObject(session, object),
+                    CKR_OK as CK_RV
+                );
+            }
+        }
+    }
+
     impl PostQuantumKeys {
         fn destroy(self) {
             for handle in [
@@ -1414,6 +1458,9 @@ mod hardware_provisioning {
             .iter()
             .map(|slot| open_logged_in_hardware_session(slot, login.as_bytes()))
             .collect::<Vec<_>>();
+        for session in &sessions {
+            cleanup_post_quantum_qualification_objects(*session);
+        }
         let keys = sessions
             .iter()
             .enumerate()
