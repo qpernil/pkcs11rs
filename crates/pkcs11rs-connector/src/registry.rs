@@ -53,7 +53,7 @@ pub enum DeviceTransportKind {
     Usb,
     #[cfg(any(test, all(embedded_virtual_yubihsm, unix)))]
     Embedded,
-    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    #[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
     I2c,
 }
 
@@ -99,6 +99,8 @@ pub enum TransportErrorKind {
     InvalidCommandFrame,
     CommandTooLarge,
     DeviceTransport,
+    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    EndpointUnavailable,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +133,14 @@ impl TransportError {
         }
     }
 
+    #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+    pub(crate) fn endpoint_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            kind: TransportErrorKind::EndpointUnavailable,
+            message: message.into(),
+        }
+    }
+
     pub fn kind(&self) -> TransportErrorKind {
         self.kind
     }
@@ -140,6 +150,8 @@ impl TransportError {
             TransportErrorKind::InvalidCommandFrame => "invalid_command_frame",
             TransportErrorKind::CommandTooLarge => "command_too_large",
             TransportErrorKind::DeviceTransport => "device_transport_error",
+            #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+            TransportErrorKind::EndpointUnavailable => "endpoint_unavailable",
         }
     }
 }
@@ -615,6 +627,7 @@ impl DeviceRegistry {
     }
 
     #[cfg(any(
+        test,
         all(feature = "experimental-i2c", target_os = "linux"),
         all(embedded_virtual_yubihsm, unix)
     ))]
@@ -623,7 +636,7 @@ impl DeviceRegistry {
         serial: String,
         version: [u8; 3],
         kind: DeviceTransportKind,
-        transport: Box<dyn CommandTransport>,
+        transport: impl FnOnce(u64) -> Box<dyn CommandTransport> + Send,
     ) -> Result<(), TransportError> {
         if !self.should_claim(&serial) {
             return self.register_filtered(serial, Some(version), kind).await;
@@ -652,13 +665,35 @@ impl DeviceRegistry {
                 kind,
                 connection_generation: *connection_generation,
             },
-            command_transport: Mutex::new(transport),
+            command_transport: Mutex::new(transport(*connection_generation)),
         });
         if state.legacy_serial.is_none() {
             state.legacy_serial = Some(serial.clone());
         }
         state.records.insert(serial, DeviceRecord::Claimed(entry));
         Ok(())
+    }
+
+    #[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
+    pub(crate) async fn remove_i2c(&self, serial: u32, connection_generation: u64) -> bool {
+        let serial = serial.to_string();
+        let mut state = self.state.write().await;
+        let is_matching_i2c = state
+            .records
+            .get(&serial)
+            .map(DeviceRecord::view)
+            .is_some_and(|view| {
+                view.transport.kind == DeviceTransportKind::I2c
+                    && view.transport.connection_generation == connection_generation
+            });
+        if !is_matching_i2c {
+            return false;
+        }
+        state.records.remove(&serial);
+        if state.legacy_serial.as_deref() == Some(&serial) {
+            state.legacy_serial = None;
+        }
+        true
     }
 
     fn candidate_metadata(candidate: &YubiHsmUsbCandidate, serial: String) -> DeviceMetadata {
@@ -887,13 +922,26 @@ impl CommandTransport for FixedErrorTransport {
 pub async fn spawn_discovery(
     registry: DeviceRegistry,
 ) -> Result<tokio::task::JoinHandle<()>, BoxError> {
-    // Start watching before the initial list so no attachment can be missed in
-    // the interval between enumeration and hot-plug subscription.
-    let mut watch = pkcs11rs_local_hardware::watch_yubihsms()?;
-    for candidate in pkcs11rs_local_hardware::yubihsm_candidates().await? {
-        registry.attach_candidate(candidate).await;
-    }
     Ok(tokio::spawn(async move {
+        // Start watching before the initial list so no attachment can be missed
+        // in the interval between enumeration and hot-plug subscription.
+        let mut watch = match pkcs11rs_local_hardware::watch_yubihsms() {
+            Ok(watch) => watch,
+            Err(error) => {
+                tracing::error!(%error, "USB hot-plug watcher could not start");
+                return;
+            }
+        };
+        match pkcs11rs_local_hardware::yubihsm_candidates().await {
+            Ok(candidates) => {
+                for candidate in candidates {
+                    registry.attach_candidate(candidate).await;
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "initial USB YubiHSM enumeration failed");
+            }
+        }
         while let Some(event) = watch.next_event().await {
             match event {
                 YubiHsmHotplugEvent::Connected(candidate) => {
@@ -1124,6 +1172,55 @@ mod tests {
         assert_eq!(second.status, DeviceStatus::Claimed);
         assert_eq!(second.transport.kind, DeviceTransportKind::Embedded);
         assert_eq!(second.transport.connection_generation, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_i2c_loss_does_not_remove_a_new_connection_generation() {
+        let registry = DeviceRegistry::new();
+        registry
+            .register_configured(
+                String::from("12345678"),
+                [2, 4, 0],
+                DeviceTransportKind::I2c,
+                |_| Box::new(EchoTransport),
+            )
+            .await
+            .unwrap();
+        let first_generation = registry
+            .view("12345678")
+            .await
+            .unwrap()
+            .transport
+            .connection_generation;
+        assert!(registry.remove_i2c(12345678, first_generation).await);
+
+        registry
+            .register_configured(
+                String::from("12345678"),
+                [2, 4, 0],
+                DeviceTransportKind::I2c,
+                |_| Box::new(EchoTransport),
+            )
+            .await
+            .unwrap();
+        let second_generation = registry
+            .view("12345678")
+            .await
+            .unwrap()
+            .transport
+            .connection_generation;
+        assert!(second_generation > first_generation);
+
+        assert!(!registry.remove_i2c(12345678, first_generation).await);
+        assert_eq!(
+            registry
+                .view("12345678")
+                .await
+                .unwrap()
+                .transport
+                .connection_generation,
+            second_generation
+        );
     }
 
     struct ConcurrencyProbe {

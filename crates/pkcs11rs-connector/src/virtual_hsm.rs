@@ -142,7 +142,7 @@ impl VirtualHsmActors {
                     spec.serial.to_string(),
                     version,
                     DeviceTransportKind::Embedded,
-                    Box::new(transport),
+                    move |_| Box::new(transport),
                 )
                 .await
             {

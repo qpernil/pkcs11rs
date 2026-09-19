@@ -201,20 +201,26 @@ async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
         .with_serials(args.serials.clone())
         .with_legacy_serial(args.legacy_serial.clone());
     let virtual_hsms = VirtualHsmRuntime::start(args, &registry).await?;
-    if let Err(error) = i2c::register(
+    let i2c_discovery = match i2c::register(
         &registry,
         &args.i2c_yubihsms,
         Duration::from_secs(args.i2c_response_timeout_seconds),
     )
     .await
     {
-        virtual_hsms.shutdown().await?;
-        return Err(error);
-    }
+        Ok(discovery) => discovery,
+        Err(error) => {
+            virtual_hsms.shutdown().await?;
+            return Err(error);
+        }
+    };
     let discovery = if hardware_discovery_enabled(args) {
         match spawn_discovery(registry.clone()).await {
             Ok(discovery) => Some(discovery),
             Err(error) => {
+                if let Some(discovery) = &i2c_discovery {
+                    discovery.abort();
+                }
                 virtual_hsms.shutdown().await?;
                 return Err(error);
             }
@@ -235,6 +241,9 @@ async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
     let mut server = match connector_server(args, app, handle.clone()) {
         Ok(server) => server,
         Err(error) => {
+            if let Some(discovery) = &i2c_discovery {
+                discovery.abort();
+            }
             if let Some(discovery) = &discovery {
                 discovery.abort();
             }
@@ -255,6 +264,9 @@ async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
         }
     };
     if let Some(discovery) = discovery {
+        discovery.abort();
+    }
+    if let Some(discovery) = i2c_discovery {
         discovery.abort();
     }
     let virtual_result = virtual_hsms.shutdown().await;

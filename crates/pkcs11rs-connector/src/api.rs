@@ -258,6 +258,8 @@ fn command_response(
                 TransportErrorKind::InvalidCommandFrame => StatusCode::BAD_REQUEST,
                 TransportErrorKind::CommandTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
                 TransportErrorKind::DeviceTransport => StatusCode::SERVICE_UNAVAILABLE,
+                #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+                TransportErrorKind::EndpointUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             };
             problem(status, error.code(), error.to_string())
         }

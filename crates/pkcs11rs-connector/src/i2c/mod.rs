@@ -4,8 +4,7 @@ mod device;
 mod transport;
 
 use crate::{BoxError, registry::DeviceRegistry};
-use std::time::Duration;
-use std::{collections::HashSet, path::PathBuf, str::FromStr};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ReadyGpioSpec {
@@ -18,6 +17,16 @@ pub(crate) struct I2cYubiHsmSpec {
     pub(crate) bus: PathBuf,
     pub(crate) address: u16,
     pub(crate) ready: ReadyGpioSpec,
+}
+
+#[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
+#[derive(Clone, Debug)]
+pub(super) enum I2cEvent {
+    EndpointLost {
+        spec: I2cYubiHsmSpec,
+        serial: u32,
+        connection_generation: u64,
+    },
 }
 
 impl FromStr for I2cYubiHsmSpec {
@@ -70,7 +79,7 @@ pub(crate) async fn register(
     registry: &DeviceRegistry,
     specs: &[I2cYubiHsmSpec],
     timeout: Duration,
-) -> Result<(), BoxError> {
+) -> Result<Option<tokio::task::JoinHandle<()>>, BoxError> {
     #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
     {
         transport::register(registry, specs, timeout).await
@@ -84,7 +93,7 @@ pub(crate) async fn register(
                     .into(),
             );
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -154,7 +163,6 @@ mod tests {
         validate_args,
     };
     use clap::Parser;
-
     #[tokio::test]
     async fn cancelled_waiter_does_not_overlap_or_replay_device_work() {
         use std::sync::{Arc, mpsc};
