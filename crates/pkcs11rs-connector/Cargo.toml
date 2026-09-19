@@ -4,12 +4,14 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 default-run = "pkcs11rs-connector"
+autobins = false
 description = "Asynchronous multi-device HTTP(S) gateway for locally attached YubiHSMs"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
 default = []
+diagnostic-binaries = []
 experimental-i2c = ["dep:libc", "dep:gpiocdev-uapi"]
 firmware-yubihsm2 = [
     "dep:virtual-yubihsm-core",
@@ -36,6 +38,20 @@ test-firmware-session-objects = [
     "virtual-yubihsm-core/persistent-runtime",
     "virtual-yubihsm-core/test-firmware-session-objects",
 ]
+
+[[bin]]
+name = "pkcs11rs-connector"
+path = "src/main.rs"
+
+[[bin]]
+name = "http-resume-test"
+path = "src/bin/http-resume-test.rs"
+required-features = ["diagnostic-binaries"]
+
+[[bin]]
+name = "yubihsm-usb-resume-test"
+path = "src/bin/yubihsm-usb-resume-test.rs"
+required-features = ["diagnostic-binaries"]
 
 [dependencies]
 axum = "0.8.9"

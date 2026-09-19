@@ -290,6 +290,7 @@ any other process using the selected YubiHSM, then run:
 
 ```sh
 cargo run -p pkcs11rs-connector --release \
+  --features diagnostic-binaries \
   --bin yubihsm-usb-resume-test -- --serial 12345678
 ```
 
@@ -315,6 +316,7 @@ Run it on a port separate from the connector, then sleep the Mac when prompted:
 
 ```sh
 cargo run -p pkcs11rs-connector --release \
+  --features diagnostic-binaries \
   --bin http-resume-test
 ```
 
