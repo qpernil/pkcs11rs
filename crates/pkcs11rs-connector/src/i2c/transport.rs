@@ -7,16 +7,17 @@ use crate::{
 };
 use futures_util::future::BoxFuture;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
-const REGISTRATION_ATTEMPTS: usize = 3;
-const REGISTRATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(8);
 
 struct Connection {
     endpoint: I2cYubiHsmSpec,
     timeout: Duration,
     serial: u32,
     device: Option<YubiHsmI2cDevice>,
+    events: mpsc::UnboundedSender<super::I2cEvent>,
 }
 
 impl Connection {
@@ -32,13 +33,24 @@ impl Connection {
             .as_mut()
             .expect("device was opened above")
             .transmit(request);
-        if result
-            .as_ref()
-            .is_err_and(|error| error.kind() == TransportErrorKind::DeviceTransport)
-        {
+        if result.as_ref().is_err_and(|error| {
+            matches!(
+                error.kind(),
+                TransportErrorKind::DeviceTransport | TransportErrorKind::EndpointUnavailable
+            )
+        }) {
             // The request may have executed. Close uncertain handles and reopen
             // only for a later command; never replay this request.
             self.device = None;
+        }
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == TransportErrorKind::EndpointUnavailable)
+        {
+            let _ = self.events.send(super::I2cEvent::EndpointLost {
+                spec: self.endpoint.clone(),
+                serial: self.serial,
+            });
         }
         result
     }
@@ -63,31 +75,88 @@ pub(super) async fn register(
     specs: &[I2cYubiHsmSpec],
     timeout: Duration,
 ) -> Result<(), BoxError> {
-    let failures = super::attempt_with_retries(
-        specs,
-        REGISTRATION_ATTEMPTS,
-        |spec| register_one(registry, spec, timeout),
-        || tokio::time::sleep(REGISTRATION_RETRY_DELAY),
-    )
-    .await;
-    for (spec, error) in failures {
-        tracing::error!(
-            bus = %spec.bus.display(),
-            address = spec.address,
-            ready_chip = %spec.ready.chip.display(),
-            ready_offset = spec.ready.offset,
-            attempts = REGISTRATION_ATTEMPTS,
-            %error,
-            "giving up on configured I2C YubiHSM for this connector run"
-        );
+    if specs.is_empty() {
+        return Ok(());
     }
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let registry = registry.clone();
+    let specs = specs.to_vec();
+    tokio::spawn(async move {
+        let mut pending = specs;
+        let mut retry_delay = INITIAL_RETRY_DELAY;
+        loop {
+            let results = futures_util::future::join_all(pending.into_iter().map(|spec| {
+                let events = events.clone();
+                let registry = registry.clone();
+                async move {
+                    let result = register_one(&registry, spec.clone(), timeout, events).await;
+                    (spec, result)
+                }
+            }))
+            .await;
+            pending = results
+                .into_iter()
+                .filter_map(|(spec, result)| match result {
+                    Ok(()) => None,
+                    Err(error) => {
+                        tracing::warn!(bus = %spec.bus.display(), address = spec.address, %error,
+                            "I2C YubiHSM registration failed; scheduling retry");
+                        Some(spec)
+                    }
+                })
+                .collect();
+            while let Ok(event) = event_rx.try_recv() {
+                handle_event(&registry, &mut pending, event).await;
+                retry_delay = INITIAL_RETRY_DELAY;
+            }
+            if pending.is_empty() {
+                match event_rx.recv().await {
+                    Some(event) => {
+                        handle_event(&registry, &mut pending, event).await;
+                        retry_delay = INITIAL_RETRY_DELAY;
+                        continue;
+                    }
+                    None => return,
+                }
+            }
+            tokio::select! {
+                event = event_rx.recv() => {
+                    if let Some(event) = event {
+                        handle_event(&registry, &mut pending, event).await;
+                        retry_delay = INITIAL_RETRY_DELAY;
+                    } else {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(retry_delay) => {
+                    retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
+                }
+            }
+        }
+    });
     Ok(())
+}
+
+async fn handle_event(
+    registry: &DeviceRegistry,
+    pending: &mut Vec<I2cYubiHsmSpec>,
+    event: super::I2cEvent,
+) {
+    match event {
+        super::I2cEvent::EndpointLost { spec, serial } => {
+            registry.remove_i2c(serial).await;
+            if !pending.contains(&spec) {
+                pending.push(spec);
+            }
+        }
+    }
 }
 
 async fn register_one(
     registry: &DeviceRegistry,
     spec: I2cYubiHsmSpec,
     timeout: Duration,
+    events: mpsc::UnboundedSender<super::I2cEvent>,
 ) -> Result<(), BoxError> {
     let endpoint = spec.clone();
     let (device, identity) =
@@ -113,6 +182,7 @@ async fn register_one(
                 timeout,
                 serial: identity.serial,
                 device: Some(device),
+                events,
             })))),
         )
         .await?;

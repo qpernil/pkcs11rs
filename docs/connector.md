@@ -38,14 +38,14 @@ target/release/pkcs11rs-connector \
 READY is required on both ends. Use driver ABI 3 and configure `--ready-gpio`
 on the target launcher. Upgrade target and controller together.
 
-The connector probes `DeviceInfo` on every configured endpoint during startup
-and registers the returned serial and firmware version. Each unavailable
-endpoint is tried three times, with one second between rounds. A successful
-endpoint is omitted from later rounds, and one failed endpoint does not prevent
-the remaining endpoints from being probed. After the third attempt, the
-connector logs each unavailable endpoint and starts its HTTP service with the
-devices that registered successfully; if none registered, the inventory is
-empty. Device I/O runs on Tokio's blocking pool with one mutex per endpoint.
+The connector starts HTTP immediately, then probes `DeviceInfo` on every
+configured endpoint in a background coordinator. Endpoint probes run in
+parallel. A failed endpoint is retried with an increasing delay starting at
+one second and capped at 8 seconds. A successful endpoint is removed from the
+pending set and registered in the shared inventory; if no endpoint is currently
+available, the inventory is empty. An immediate endpoint-loss error removes a
+registered I2C device and queues it for the same retry coordinator. Device I/O
+runs on Tokio's blocking pool with one mutex per endpoint.
 The mutex remains held until an exchange finishes, even if the HTTP request
 waiting for it is cancelled. After a transport failure, the failed command is
 returned without replay. A later command reopens the endpoint and probes
