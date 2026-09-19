@@ -3887,8 +3887,9 @@ mod discovery_tests {
                 .iter()
                 .map(|serial| serde_json::json!({
                     "serial": serial,
-                    "usb_version": "2.5",
-                    "status": "claimed"
+                    "version": "2.5",
+                    "status": "claimed",
+                    "transport": {"kind": "usb", "connection_generation": 1}
                 }))
                 .collect::<Vec<_>>()
         }))

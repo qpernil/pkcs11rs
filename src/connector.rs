@@ -20,6 +20,9 @@ pub(crate) trait Connector {
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         None
     }
+    fn set_yubihsm_device_info_version(&self, _version: (u8, u8, u8)) -> Result<(), Error> {
+        Ok(())
+    }
     fn connection_epoch(&self) -> u64 {
         0
     }
@@ -1103,6 +1106,7 @@ pub(crate) struct UsbConnector {
 struct UsbConnectorState {
     device: pkcs11rs_local_hardware::YubiHsmUsbDevice,
     connection_epoch: u64,
+    yubihsm_version: (u8, u8, u8),
 }
 
 #[cfg(feature = "native-hardware")]
@@ -1119,6 +1123,7 @@ impl UsbConnector {
             state: Arc::new(Mutex::new(UsbConnectorState {
                 device,
                 connection_epoch: 0,
+                yubihsm_version: (0, 0, 0),
             })),
         })
     }
@@ -1154,6 +1159,7 @@ impl UsbConnector {
         }
         state.device = device;
         state.connection_epoch = state.connection_epoch.wrapping_add(1);
+        state.yubihsm_version = (0, 0, 0);
         Ok(())
     }
 
@@ -1203,13 +1209,33 @@ impl Connector for UsbConnector {
         format!("{} {} {}", self.manufacturer(), self.product(), self.serial)
     }
     fn major(&self) -> u8 {
-        self.version.0
+        self.state
+            .lock()
+            .map(|state| state.yubihsm_version.0)
+            .unwrap_or(0)
     }
     fn minor(&self) -> u8 {
-        self.version.1
+        self.state
+            .lock()
+            .map(|state| state.yubihsm_version.1)
+            .unwrap_or(0)
     }
     fn hardware_version(&self) -> Option<(u8, u8)> {
         Some(self.version)
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.state
+            .lock()
+            .ok()
+            .map(|state| state.yubihsm_version)
+            .filter(|version| *version != (0, 0, 0))
+    }
+    fn set_yubihsm_device_info_version(&self, version: (u8, u8, u8)) -> Result<(), Error> {
+        self.state
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .yubihsm_version = version;
+        Ok(())
     }
     fn connection_epoch(&self) -> u64 {
         self.state
@@ -1873,14 +1899,19 @@ const YUBIHSM_CONNECTOR_HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct YubiHsmConnectorStatus {
     serial: String,
-    version: (u8, u8, u8),
+    connection_generation: u64,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct HttpConnectorDevice {
     serial: String,
-    usb_version: String,
     status: String,
+    transport: HttpConnectorTransport,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct HttpConnectorTransport {
+    connection_generation: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1893,20 +1924,9 @@ impl HttpConnectorDevice {
         if self.serial.is_empty() || self.status != "claimed" {
             return Err(CKR_DEVICE_REMOVED.into());
         }
-        let components = self
-            .usb_version
-            .split('.')
-            .map(str::parse::<u8>)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        let version = match components.as_slice() {
-            [major, minor] => (*major, *minor, 0),
-            [major, minor, patch] => (*major, *minor, *patch),
-            _ => return Err(CKR_DEVICE_ERROR.into()),
-        };
         Ok(YubiHsmConnectorStatus {
             serial: self.serial.clone(),
-            version,
+            connection_generation: self.transport.connection_generation,
         })
     }
 }
@@ -2066,7 +2086,8 @@ struct HttpConnectorState {
 
 #[derive(Debug)]
 struct HttpConnectorDeviceState {
-    version: (u8, u8, u8),
+    connection_generation: u64,
+    yubihsm_version: (u8, u8, u8),
     present: bool,
 }
 
@@ -2153,7 +2174,7 @@ impl Connector for HttpConnector {
             .current
             .read()
             .ok()
-            .map(|current| current.version.0)
+            .map(|current| current.yubihsm_version.0)
             .unwrap_or(0)
     }
     fn minor(&self) -> u8 {
@@ -2161,7 +2182,7 @@ impl Connector for HttpConnector {
             .current
             .read()
             .ok()
-            .map(|current| current.version.1)
+            .map(|current| current.yubihsm_version.1)
             .unwrap_or(0)
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
@@ -2169,7 +2190,16 @@ impl Connector for HttpConnector {
             .current
             .read()
             .ok()
-            .map(|current| current.version)
+            .map(|current| current.yubihsm_version)
+            .filter(|version| *version != (0, 0, 0))
+    }
+    fn set_yubihsm_device_info_version(&self, version: (u8, u8, u8)) -> Result<(), Error> {
+        self.state
+            .current
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .yubihsm_version = version;
+        Ok(())
     }
     fn connection_epoch(&self) -> u64 {
         self.endpoint
@@ -2355,18 +2385,21 @@ impl HttpConnector {
         if !discovered_current.present || !discovered.endpoint.is_connected() {
             return Err(CKR_DEVICE_REMOVED.into());
         }
-        let version = discovered_current.version;
+        let connection_generation = discovered_current.connection_generation;
         drop(discovered_current);
         let mut current = self
             .state
             .current
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        let version_changed = current.version != version;
+        let generation_changed = current.connection_generation != connection_generation;
         current.present = true;
-        current.version = version;
+        if generation_changed {
+            current.connection_generation = connection_generation;
+            current.yubihsm_version = (0, 0, 0);
+        }
         drop(current);
-        if version_changed {
+        if generation_changed {
             self.state
                 .connection_epoch
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2383,8 +2416,9 @@ impl HttpConnector {
             .current
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        if current.version != status.version {
-            current.version = status.version;
+        if current.connection_generation != status.connection_generation {
+            current.connection_generation = status.connection_generation;
+            current.yubihsm_version = (0, 0, 0);
             self.state
                 .connection_epoch
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2414,7 +2448,7 @@ impl HttpConnector {
             endpoint,
             YubiHsmConnectorStatus {
                 serial: serial.to_owned(),
-                version: (2, 5, 0),
+                connection_generation: 1,
             },
             false,
         )
@@ -2453,7 +2487,8 @@ impl HttpConnector {
             state: Arc::new(HttpConnectorState {
                 connection_epoch: std::sync::atomic::AtomicU64::new(0),
                 current: std::sync::RwLock::new(HttpConnectorDeviceState {
-                    version: identity.version,
+                    connection_generation: identity.connection_generation,
+                    yubihsm_version: (0, 0, 0),
                     present,
                 }),
             }),
@@ -2940,10 +2975,10 @@ mod tests {
         stream.write_all(body).unwrap();
     }
 
-    fn http_identity(serial: &str, version: (u8, u8, u8)) -> YubiHsmConnectorStatus {
+    fn http_identity(serial: &str, connection_generation: u64) -> YubiHsmConnectorStatus {
         YubiHsmConnectorStatus {
             serial: serial.to_owned(),
-            version,
+            connection_generation,
         }
     }
 
@@ -2954,29 +2989,30 @@ mod tests {
     #[test]
     fn parses_multi_device_connector_identity() {
         let device: HttpConnectorDevice = serde_json::from_slice(
-            br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
+            br#"{"serial":"12345678","version":"not-protocol-input","status":"claimed","transport":{"kind":"usb","connection_generation":7}}"#,
         )
         .unwrap();
-        assert_eq!(
-            device.identity().unwrap(),
-            http_identity("12345678", (2, 5, 0))
-        );
+        assert_eq!(device.identity().unwrap(), http_identity("12345678", 7));
     }
 
     #[test]
-    fn rejects_unavailable_or_malformed_multi_device_identity() {
+    fn rejects_unavailable_or_incomplete_multi_device_identity() {
         for encoded in [
-            br#"{"serial":"12345678","usb_version":"2.5","status":"busy"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"","status":"filtered"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2.5","status":"legacy_only"}"#.as_slice(),
-            br#"{"serial":"","usb_version":"2.5","status":"claimed"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2","status":"claimed"}"#.as_slice(),
-            br#"{"serial":"12345678","usb_version":"2.x","status":"claimed"}"#.as_slice(),
+            br#"{"serial":"12345678","status":"busy","transport":{"connection_generation":1}}"#.as_slice(),
+            br#"{"serial":"12345678","status":"available","transport":{"connection_generation":1}}"#.as_slice(),
+            br#"{"serial":"12345678","status":"filtered","transport":{"connection_generation":1}}"#.as_slice(),
+            br#"{"serial":"12345678","status":"legacy_only","transport":{"connection_generation":1}}"#.as_slice(),
+            br#"{"serial":"","status":"claimed","transport":{"connection_generation":1}}"#.as_slice(),
         ] {
             let device: HttpConnectorDevice = serde_json::from_slice(encoded).unwrap();
             assert!(device.identity().is_err());
         }
+        assert!(
+            serde_json::from_slice::<HttpConnectorDevice>(
+                br#"{"serial":"12345678","status":"claimed"}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2989,7 +3025,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"claimed"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"44444444","usb_version":"","status":"filtered"},{"serial":"33333333","usb_version":"2.5","status":"legacy_only"},{"serial":"12345678","usb_version":"2.4","status":"claimed"}]}"#,
+                br#"{"devices":[{"serial":"87654321","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}},{"serial":"55555555","version":"2.5","status":"unclaimed","transport":{"kind":"usb","connection_generation":1}},{"serial":"44444444","version":"","status":"filtered","transport":{"kind":"usb","connection_generation":1}},{"serial":"33333333","version":"2.5","status":"legacy_only","transport":{"kind":"usb","connection_generation":1}},{"serial":"12345678","version":"2.4","status":"claimed","transport":{"kind":"usb","connection_generation":1}}]}"#,
                 true,
             );
         });
@@ -3000,9 +3036,9 @@ mod tests {
                 .unwrap();
         assert_eq!(connectors.len(), 2);
         assert_eq!(connectors[0].serial_path, "12345678");
-        assert_eq!((connectors[0].major(), connectors[0].minor()), (2, 4));
+        assert_eq!((connectors[0].major(), connectors[0].minor()), (0, 0));
         assert_eq!(connectors[1].serial_path, "87654321");
-        assert_eq!((connectors[1].major(), connectors[1].minor()), (2, 5));
+        assert_eq!((connectors[1].major(), connectors[1].minor()), (0, 0));
         assert!(connectors[0].shares_endpoint_with(&connectors[1]));
         connectors[0].mark_disconnected();
         assert!(!connectors[0].is_present());
@@ -3020,7 +3056,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                br#"{"devices":[{"serial":"12345678","version":"2.5","status":"available","transport":{"kind":"usb","connection_generation":1}}]}"#,
                 true,
             );
         });
@@ -3047,7 +3083,7 @@ mod tests {
                 assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
                 write_http_response(
                     &mut connection,
-                    br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
+                    br#"{"devices":[{"serial":"12345678","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}]}"#,
                     close,
                 );
             }
@@ -3073,8 +3109,9 @@ mod tests {
                 .iter()
                 .map(|serial| serde_json::json!({
                     "serial": serial,
-                    "usb_version": "2.5",
-                    "status": "claimed"
+                    "version": "2.5",
+                    "status": "claimed",
+                    "transport": {"kind": "usb", "connection_generation": 1}
                 }))
                 .collect::<Vec<_>>()
         }))
@@ -3216,12 +3253,9 @@ mod tests {
         let url = String::from("http://127.0.0.1:12345");
         let old_agent =
             ureq::Agent::new_with_config(ureq::Agent::config_builder().max_redirects(1).build());
-        let connector = HttpConnector::new_with_agent(
-            url.clone(),
-            http_identity("12345678", (2, 5, 0)),
-            old_agent,
-        )
-        .unwrap();
+        let connector =
+            HttpConnector::new_with_agent(url.clone(), http_identity("12345678", 1), old_agent)
+                .unwrap();
         let slot_connector = connector.clone();
 
         let fresh_agent =
@@ -3229,7 +3263,7 @@ mod tests {
         connector.endpoint.install_agent(fresh_agent).unwrap();
         let discovered = HttpConnector::new_with_endpoint(
             connector.endpoint.clone(),
-            http_identity("12345678", (2, 5, 0)),
+            http_identity("12345678", 1),
             true,
         )
         .unwrap();
@@ -3251,7 +3285,7 @@ mod tests {
         let tls = HttpConnectorTlsConfig::from_client_identity(&certificate, &private_key).unwrap();
         let https = HttpConnector::new_with_tls(
             "https://connector.example".to_owned(),
-            http_identity("12345678", (2, 5, 0)),
+            http_identity("12345678", 1),
             &tls,
         )
         .unwrap();
@@ -3262,7 +3296,7 @@ mod tests {
 
         let http = HttpConnector::new_with_tls(
             "http://connector.example".to_owned(),
-            http_identity("12345678", (2, 5, 0)),
+            http_identity("12345678", 1),
             &tls,
         )
         .unwrap();
@@ -3307,7 +3341,7 @@ mod tests {
             .unwrap();
         let https = HttpConnector::new_with_tls(
             "https://connector.example".to_owned(),
-            http_identity("12345678", (2, 5, 0)),
+            http_identity("12345678", 1),
             &tls,
         )
         .unwrap();
@@ -3347,7 +3381,7 @@ mod tests {
             );
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
+                br#"{"devices":[{"serial":"12345678","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}]}"#,
                 true,
             );
         });
@@ -3409,7 +3443,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"claimed"}]}"#,
+                br#"{"devices":[{"serial":"12345678","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}]}"#,
                 false,
             );
 
@@ -3417,7 +3451,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
+                br#"{"serial":"12345678","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}"#,
                 false,
             );
 
@@ -3425,7 +3459,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"serial":"12345678","usb_version":"2.5","status":"claimed"}"#,
+                br#"{"serial":"12345678","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}"#,
                 false,
             );
 
@@ -3453,7 +3487,12 @@ mod tests {
         connector.connect().unwrap();
         assert!(connector.is_present());
         assert_eq!(connector.serial, "12345678");
+        assert_eq!((connector.major(), connector.minor()), (0, 0));
+        connector
+            .set_yubihsm_device_info_version((2, 5, 3))
+            .unwrap();
         assert_eq!((connector.major(), connector.minor()), (2, 5));
+        assert_eq!(connector.firmware_version(), Some((2, 5, 3)));
         connector.refresh().unwrap();
         let mut response = [0; 32];
         assert_eq!(
@@ -3477,19 +3516,20 @@ mod tests {
             for (index, (path, identity)) in [
                 (
                     b"GET /v1/devices HTTP/1.1\r\n".as_slice(),
-                    br#"{"devices":[{"serial":"11111111","usb_version":"2.5","status":"claimed"}]}"#.as_slice(),
+                    br#"{"devices":[{"serial":"11111111","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}]}"#
+                        .as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.5","status":"claimed"}"#.as_slice(),
+                    br#"{"serial":"11111111","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}"#.as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.5","status":"claimed"}"#.as_slice(),
+                    br#"{"serial":"11111111","version":"2.5","status":"claimed","transport":{"kind":"usb","connection_generation":1}}"#.as_slice(),
                 ),
                 (
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.6","status":"claimed"}"#.as_slice(),
+                    br#"{"serial":"11111111","version":"2.6","status":"claimed","transport":{"kind":"usb","connection_generation":2}}"#.as_slice(),
                 ),
             ]
             .into_iter()
@@ -3509,6 +3549,9 @@ mod tests {
         connector.connect().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
         assert_eq!(connector.serial, "11111111");
+        connector
+            .set_yubihsm_device_info_version((2, 5, 0))
+            .unwrap();
 
         connector.refresh().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
@@ -3517,7 +3560,8 @@ mod tests {
         assert_eq!(connector.connection_epoch(), 1);
         {
             let current = connector.state.current.read().unwrap();
-            assert_eq!(current.version, (2, 6, 0));
+            assert_eq!(current.connection_generation, 2);
+            assert_eq!(current.yubihsm_version, (0, 0, 0));
         }
 
         connector.mark_disconnected();

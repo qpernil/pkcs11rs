@@ -4342,6 +4342,8 @@ impl Slot for YubiHsmSlot {
         self.metadata_storage_writes.try_borrow_mut()?.clear();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
+        self.connector
+            .set_yubihsm_device_info_version(self.version)?;
         self.serial = device_info.serial.to_string();
         self.algorithms = device_info.algorithms;
         self.model = device_info
