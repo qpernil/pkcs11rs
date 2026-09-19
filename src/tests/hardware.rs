@@ -1437,6 +1437,65 @@ mod hardware_provisioning {
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     }
 
+    fn exercise_ml_dsa_signing(
+        slot: &(CK_SLOT_ID, String),
+        public_key: CK_OBJECT_HANDLE,
+        private_key: CK_OBJECT_HANDLE,
+        cycles: usize,
+    ) {
+        let session = open_rw_hardware_session(slot.0);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_ML_DSA as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut signature = vec![0; 4_627];
+        let started = std::time::Instant::now();
+        for cycle in 0..cycles {
+            let mut message =
+                format!("ML-DSA-87 signing cycle {cycle} through {}", slot.1).into_bytes();
+            assert_eq!(
+                crate::api::C_SignInit(session, &mut mechanism, private_key),
+                CKR_OK as CK_RV
+            );
+            let mut signature_length = signature.len() as CK_ULONG;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(signature_length, signature.len() as CK_ULONG);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "{} completed {cycles} ML-DSA-87 signatures in {elapsed:?}",
+            slot.1
+        );
+
+        let mut message =
+            format!("ML-DSA-87 signing cycle {} through {}", cycles - 1, slot.1).into_bytes();
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut mechanism, public_key),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                session,
+                message.as_mut_ptr(),
+                message.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                signature.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
+
     #[test]
     #[ignore = "generates temporary ML-DSA-87 and ML-KEM-1024 keys on two virtual YubiHSMs through one HTTP connector"]
     fn post_quantum_yubihsm_clients_work_concurrently_through_connector() {
@@ -1480,6 +1539,59 @@ mod hardware_provisioning {
             assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
             assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
         }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
+    #[ignore = "generates one temporary ML-DSA-87 key and performs repeated signatures on one virtual YubiHSM"]
+    fn ml_dsa_signing_workload_runs_on_one_yubihsm() {
+        if std::env::var(PQ_QUALIFICATION_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped PQ qualification; set {PQ_QUALIFICATION_ENABLE_ENV}=1");
+            return;
+        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let connector_url = std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL").ok();
+        let serial = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE")
+            .expect("PKCS11RS_TEST_YUBIHSM_SOURCE is required");
+        initialize_yubihsm_concurrency_path(connector_url.as_deref());
+        let slot = (select_yubihsm_slot(), serial);
+        let login = zeroize::Zeroizing::new(
+            std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_LOGIN")
+                .unwrap_or_else(|_| "0001password".to_owned()),
+        );
+        let session = open_logged_in_hardware_session(&slot, login.as_bytes());
+        cleanup_post_quantum_qualification_objects(session);
+        let (public_key, private_key) = generate_post_quantum_pair(
+            session,
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKP_ML_DSA_87 as CK_ULONG,
+            0x7d00,
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN as CK_ATTRIBUTE_TYPE,
+        );
+        let cycles = std::env::var("PKCS11RS_TEST_YUBIHSM_PQ_SIGNING_CYCLES")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("PKCS11RS_TEST_YUBIHSM_PQ_SIGNING_CYCLES must be a positive integer")
+            })
+            .unwrap_or(100);
+        assert!(
+            cycles > 0,
+            "PKCS11RS_TEST_YUBIHSM_PQ_SIGNING_CYCLES must be positive"
+        );
+
+        exercise_ml_dsa_signing(&slot, public_key, private_key, cycles);
+
+        for key in [public_key, private_key] {
+            assert_eq!(crate::api::C_DestroyObject(session, key), CKR_OK as CK_RV);
+        }
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
         assert_eq!(
             crate::api::C_Finalize(std::ptr::null_mut()),
             CKR_OK as CK_RV
