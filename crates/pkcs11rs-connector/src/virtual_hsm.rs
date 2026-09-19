@@ -432,7 +432,7 @@ mod tests {
         let view = registry.view("12345678").await.unwrap();
         assert_eq!(view.status, crate::registry::DeviceStatus::Filtered);
         assert_eq!(view.transport.kind, DeviceTransportKind::Embedded);
-        assert_eq!(view.usb_version, "");
+        assert_eq!(view.version, "");
         assert!(registry.get("12345678").await.is_none());
         assert!(registry.select_legacy(Some("12345678")).await.is_err());
         actors.shutdown().await.unwrap();

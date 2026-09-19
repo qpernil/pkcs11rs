@@ -68,7 +68,7 @@ pub struct DeviceView {
     pub serial: String,
     pub manufacturer: String,
     pub product: String,
-    pub usb_version: String,
+    pub version: String,
     pub status: DeviceStatus,
     pub transport: DeviceTransportView,
 }
@@ -78,7 +78,7 @@ struct DeviceMetadata {
     serial: String,
     manufacturer: String,
     product: String,
-    usb_version: String,
+    version: String,
 }
 
 impl DeviceMetadata {
@@ -87,7 +87,7 @@ impl DeviceMetadata {
             serial: self.serial.clone(),
             manufacturer: self.manufacturer.clone(),
             product: self.product.clone(),
-            usb_version: self.usb_version.clone(),
+            version: self.version.clone(),
             status,
             transport,
         }
@@ -513,7 +513,7 @@ impl DeviceRegistry {
                 serial: serial.clone(),
                 manufacturer: "Yubico".into(),
                 product: "YubiHSM".into(),
-                usb_version: version
+                version: version
                     .map(|version| format!("{}.{}", version[0], version[1]))
                     .unwrap_or_default(),
             },
@@ -659,7 +659,7 @@ impl DeviceRegistry {
                 serial: serial.clone(),
                 manufacturer: String::from("Yubico"),
                 product: String::from("YubiHSM"),
-                usb_version: format!("{}.{}", version[0], version[1]),
+                version: format!("{}.{}", version[0], version[1]),
             },
             device_transport: DeviceTransportView {
                 kind,
@@ -702,7 +702,7 @@ impl DeviceRegistry {
             serial,
             manufacturer: candidate.manufacturer().to_owned(),
             product: candidate.product().to_owned(),
-            usb_version: format!("{}.{}", version.0, version.1),
+            version: format!("{}.{}", version.0, version.1),
         }
     }
 
@@ -752,7 +752,7 @@ impl DeviceRegistry {
             serial: serial.clone(),
             manufacturer: device.manufacturer().to_owned(),
             product: device.product().to_owned(),
-            usb_version: format!("{}.{}", version.0, version.1),
+            version: format!("{}.{}", version.0, version.1),
         };
         let connection_generation = self.next_connection_generation(&serial).await;
         let entry = Arc::new(DeviceEntry {
@@ -820,7 +820,7 @@ impl DeviceRegistry {
                 serial: serial.to_owned(),
                 manufacturer: String::from("Test"),
                 product: String::from("YubiHSM"),
-                usb_version: String::from("2.0"),
+                version: String::from("2.0"),
             },
             device_transport: DeviceTransportView {
                 kind: DeviceTransportKind::Embedded,
@@ -847,7 +847,7 @@ impl DeviceRegistry {
                     serial: serial.to_owned(),
                     manufacturer: String::from("Test"),
                     product: String::from("YubiHSM"),
-                    usb_version: String::from("2.0"),
+                    version: String::from("2.0"),
                 },
                 transport: DeviceTransportView {
                     kind: DeviceTransportKind::Usb,

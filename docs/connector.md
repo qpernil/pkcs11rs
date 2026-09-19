@@ -373,7 +373,7 @@ GET /v1/devices
       "serial": "12345678",
       "manufacturer": "Yubico",
       "product": "YubiHSM",
-      "usb_version": "2.5",
+      "version": "2.5",
       "status": "claimed",
       "transport": {
         "kind": "usb",
@@ -384,7 +384,7 @@ GET /v1/devices
       "serial": "87654321",
       "manufacturer": "Yubico",
       "product": "YubiHSM",
-      "usb_version": "2.5",
+      "version": "2.5",
       "status": "unclaimed",
       "transport": {
         "kind": "usb",
@@ -394,6 +394,14 @@ GET /v1/devices
   ]
 }
 ```
+
+`version` is the YubiHSM device or firmware release, formatted as
+`MAJOR.MINOR`. For physical USB devices it comes from the USB descriptor's
+`bcdDevice` field, not the `bcdUSB` protocol-version field. I2C devices report
+it in their `DeviceInfo` response, and embedded devices report the version of
+their selected virtual firmware. This field is inventory metadata. PKCS #11
+clients obtain the firmware version used for YubiHSM protocol limits from the
+device's `DeviceInfo` command response.
 
 The USB inventory contains every identifiable YubiHSM seen by enumeration,
 regardless of the serial filter. Serial allowlists and `--legacy-serial` may name
@@ -695,7 +703,7 @@ No HSM command is sent to it. Explicit I2C and embedded virtual-device definitio
 are sources subject to the same filter: I2C sends only its initial `DeviceInfo`
 request before deciding, then closes an excluded endpoint; an excluded virtual
 device is reported without starting an actor or opening its state directory.
-Its unknown `usb_version` is the empty string. An excluded USB device remains
+Its unknown `version` is the empty string. An excluded USB device remains
 in inventory until detachment; reconnecting it reapplies the filter.
 
 `--legacy-serial SERIAL` reserves that device for the legacy endpoint even if
