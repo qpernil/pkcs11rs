@@ -4,8 +4,7 @@ mod device;
 mod transport;
 
 use crate::{BoxError, registry::DeviceRegistry};
-use std::time::Duration;
-use std::{collections::HashSet, path::PathBuf, str::FromStr};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ReadyGpioSpec {
@@ -88,6 +87,39 @@ pub(crate) async fn register(
     }
 }
 
+#[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
+async fn attempt_with_retries<T, E, F, Fut, D, DelayFuture>(
+    items: &[T],
+    max_attempts: usize,
+    mut attempt: F,
+    mut delay: D,
+) -> Vec<(T, E)>
+where
+    T: Clone,
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    D: FnMut() -> DelayFuture,
+    DelayFuture: std::future::Future<Output = ()>,
+{
+    assert!(max_attempts > 0);
+    let mut pending = items.to_vec();
+    let mut failures = Vec::new();
+    for attempt_index in 0..max_attempts {
+        failures = Vec::new();
+        for item in pending {
+            if let Err(error) = attempt(item.clone()).await {
+                failures.push((item, error));
+            }
+        }
+        if failures.is_empty() || attempt_index + 1 == max_attempts {
+            break;
+        }
+        pending = failures.iter().map(|(item, _)| item.clone()).collect();
+        delay().await;
+    }
+    failures
+}
+
 pub(crate) fn validate(specs: &[I2cYubiHsmSpec]) -> Result<(), BoxError> {
     let mut endpoint_ids = HashSet::<(PathBuf, u16)>::new();
     let mut ready_lines = HashSet::<(PathBuf, u32)>::new();
@@ -154,6 +186,49 @@ mod tests {
         validate_args,
     };
     use clap::Parser;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[tokio::test]
+    async fn endpoint_attempts_continue_after_failures_and_stop_after_the_limit() {
+        let endpoints = [0x24, 0x25];
+        let attempted = Arc::new(StdMutex::new(Vec::new()));
+        let delays = Arc::new(StdMutex::new(0));
+        let failures = attempt_with_retries(
+            &endpoints,
+            3,
+            {
+                let attempted = attempted.clone();
+                move |address| {
+                    let attempt = {
+                        let mut attempted = attempted.lock().unwrap();
+                        attempted.push(address);
+                        attempted.iter().filter(|&&seen| seen == address).count()
+                    };
+                    async move {
+                        match (address, attempt) {
+                            (0x25, 2) => Ok(()),
+                            _ => Err("unavailable"),
+                        }
+                    }
+                }
+            },
+            {
+                let delays = delays.clone();
+                move || {
+                    *delays.lock().unwrap() += 1;
+                    async {}
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(
+            *attempted.lock().unwrap(),
+            vec![0x24, 0x25, 0x24, 0x25, 0x24]
+        );
+        assert_eq!(*delays.lock().unwrap(), 2);
+        assert_eq!(failures, vec![(0x24, "unavailable")]);
+    }
 
     #[tokio::test]
     async fn cancelled_waiter_does_not_overlap_or_replay_device_work() {
