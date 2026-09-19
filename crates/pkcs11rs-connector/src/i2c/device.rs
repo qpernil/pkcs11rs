@@ -95,8 +95,13 @@ impl YubiHsmI2cDevice {
         let bus_lock = BusLock::acquire(&self.bus, deadline)?;
         self.ready.listen_for(gpio::LineFlags::EDGE_RISING)?;
         self.ready.discard_events()?;
-        write_transaction(&mut self.bus, request)
-            .map_err(|error| device_error("write I2C request", error))?;
+        write_transaction(&mut self.bus, request).map_err(|error| {
+            if matches!(error.raw_os_error(), Some(libc::EREMOTEIO | libc::ENXIO)) {
+                TransportError::endpoint_unavailable(format!("write I2C request: {error}"))
+            } else {
+                device_error("write I2C request", error)
+            }
+        })?;
         // Arm a single edge: Linux's both-edge threaded handler infers the
         // direction from a later pin reading and can mislabel a fast pulse.
         if !self.ready.wait_for_ack(deadline)? {
