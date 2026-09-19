@@ -963,7 +963,11 @@ mod hardware_provisioning {
         }
     }
 
-    fn generate_concurrency_rsa_key(session: CK_SESSION_HANDLE) -> ConcurrencyRsaKey {
+    fn generate_rsa_signing_key(
+        session: CK_SESSION_HANDLE,
+        bits: CK_ULONG,
+        label: &str,
+    ) -> ConcurrencyRsaKey {
         let mut mechanism = CK_MECHANISM {
             mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             pParameter: std::ptr::null_mut(),
@@ -971,9 +975,9 @@ mod hardware_provisioning {
         };
         let mut yes = CK_TRUE as CK_BBOOL;
         let mut no = CK_FALSE as CK_BBOOL;
-        let mut modulus_bits = 2048 as CK_ULONG;
+        let mut modulus_bits = bits;
         let mut exponent = vec![1, 0, 1];
-        let mut public_label = b"qualification-pkcs11rs-concurrency".to_vec();
+        let mut public_label = label.as_bytes().to_vec();
         let mut private_label = public_label.clone();
         let mut public_template = [
             scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
@@ -1004,7 +1008,7 @@ mod hardware_provisioning {
                 &mut private,
             ),
             CKR_OK as CK_RV,
-            "temporary native RSA-2048 key generation failed"
+            "temporary native RSA-{bits} key generation failed"
         );
         ConcurrencyRsaKey {
             session,
@@ -1101,7 +1105,11 @@ mod hardware_provisioning {
                 .unwrap_or_else(|_| "1007password".to_owned()),
         );
         let first_target_session = open_logged_in_hardware_session(&slots[0], login.as_bytes());
-        let first_key = generate_concurrency_rsa_key(first_target_session);
+        let first_key = generate_rsa_signing_key(
+            first_target_session,
+            2048,
+            "qualification-pkcs11rs-concurrency",
+        );
 
         let single_worker = {
             let slot = slots[0].clone();
@@ -1118,7 +1126,11 @@ mod hardware_provisioning {
         // long baseline. Its normal session timeout is unrelated to concurrent
         // dispatch and would expire before the parallel phase in stress runs.
         let second_target_session = open_logged_in_hardware_session(&slots[1], login.as_bytes());
-        let second_key = generate_concurrency_rsa_key(second_target_session);
+        let second_key = generate_rsa_signing_key(
+            second_target_session,
+            2048,
+            "qualification-pkcs11rs-concurrency",
+        );
         let target_sessions = [first_target_session, second_target_session];
         let keys = [first_key, second_key];
 
@@ -1496,6 +1508,49 @@ mod hardware_provisioning {
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     }
 
+    fn exercise_rsa_signing(
+        slot: &(CK_SLOT_ID, String),
+        private_key: CK_OBJECT_HANDLE,
+        bits: usize,
+        cycles: usize,
+    ) {
+        let session = open_rw_hardware_session(slot.0);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut signature = vec![0; bits / 8];
+        let started = std::time::Instant::now();
+        for cycle in 0..cycles {
+            let mut message = [0_u8; 64];
+            message[..8].copy_from_slice(&(cycle as u64).to_be_bytes());
+            message[8..16].copy_from_slice(&(slot.0 as u64).to_be_bytes());
+            assert_eq!(
+                crate::api::C_SignInit(session, &mut mechanism, private_key),
+                CKR_OK as CK_RV
+            );
+            let mut signature_length = signature.len() as CK_ULONG;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(signature_length, signature.len() as CK_ULONG);
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "{} completed {cycles} RSA-{bits} signatures in {elapsed:?}",
+            slot.1
+        );
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
+
     #[test]
     #[ignore = "generates temporary ML-DSA-87 and ML-KEM-1024 keys on two virtual YubiHSMs through one HTTP connector"]
     fn post_quantum_yubihsm_clients_work_concurrently_through_connector() {
@@ -1590,6 +1645,49 @@ mod hardware_provisioning {
         for key in [public_key, private_key] {
             assert_eq!(crate::api::C_DestroyObject(session, key), CKR_OK as CK_RV);
         }
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
+    #[ignore = "generates one temporary RSA-4096 key and performs repeated signatures on one virtual YubiHSM"]
+    fn rsa_4096_signing_workload_runs_on_one_yubihsm() {
+        if std::env::var(RSA_CONCURRENCY_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped RSA signing qualification; set {RSA_CONCURRENCY_ENABLE_ENV}=1");
+            return;
+        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let connector_url = std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_CONNECTOR_URL").ok();
+        let serial = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE")
+            .expect("PKCS11RS_TEST_YUBIHSM_SOURCE is required");
+        initialize_yubihsm_concurrency_path(connector_url.as_deref());
+        let slot = (select_yubihsm_slot(), serial);
+        let login = zeroize::Zeroizing::new(
+            std::env::var("PKCS11RS_TEST_YUBIHSM_CONCURRENCY_LOGIN")
+                .unwrap_or_else(|_| "0001password".to_owned()),
+        );
+        let session = open_logged_in_hardware_session(&slot, login.as_bytes());
+        let key = generate_rsa_signing_key(session, 4096, "qualification-rsa-4096-signing");
+        let cycles = std::env::var("PKCS11RS_TEST_YUBIHSM_RSA_SIGNING_CYCLES")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("PKCS11RS_TEST_YUBIHSM_RSA_SIGNING_CYCLES must be a positive integer")
+            })
+            .unwrap_or(100);
+        assert!(
+            cycles > 0,
+            "PKCS11RS_TEST_YUBIHSM_RSA_SIGNING_CYCLES must be positive"
+        );
+
+        exercise_rsa_signing(&slot, key.private, 4096, cycles);
+
+        key.destroy();
         assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
         assert_eq!(
