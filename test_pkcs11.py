@@ -20,7 +20,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 ABI_TARGET = ROOT / "target" / "abi-tests"
-MOCK_YUBIKEY_TARGET = ROOT / "target" / "mock-yubikey-abi-tests"
+EMBEDDED_VIRTUAL_YUBIKEY_TARGET = ROOT / "target" / "embedded-virtual-yubikey-abi-tests"
 CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
 CKR_CANT_LOCK = 0xA
@@ -239,8 +239,8 @@ def library_path() -> pathlib.Path:
     return ABI_TARGET / "debug" / name
 
 
-def mock_yubikey_library_path() -> pathlib.Path:
-    return MOCK_YUBIKEY_TARGET / "debug" / library_path().name
+def embedded_virtual_yubikey_library_path() -> pathlib.Path:
+    return EMBEDDED_VIRTUAL_YUBIKEY_TARGET / "debug" / library_path().name
 
 
 def openssl_pkcs11_provider_path() -> pathlib.Path | None:
@@ -303,8 +303,8 @@ def load_library() -> ctypes.CDLL:
     return ctypes.CDLL(str(path))
 
 
-def load_mock_yubikey_library() -> ctypes.CDLL:
-    path = mock_yubikey_library_path()
+def load_embedded_virtual_yubikey_library() -> ctypes.CDLL:
+    path = embedded_virtual_yubikey_library_path()
     subprocess.run(
         [
             "cargo",
@@ -312,9 +312,9 @@ def load_mock_yubikey_library() -> ctypes.CDLL:
             "--locked",
             "--no-default-features",
             "--features",
-            "mock-yubikey",
+            "embedded-virtual-yubikey",
             "--target-dir",
-            str(MOCK_YUBIKEY_TARGET),
+            str(EMBEDDED_VIRTUAL_YUBIKEY_TARGET),
         ],
         cwd=ROOT,
         check=True,
@@ -697,10 +697,10 @@ class CK_FUNCTION_LIST_3_2(ctypes.Structure):
     ]
 
 
-class MockYubiKeyAbiTests(unittest.TestCase):
+class EmbeddedVirtualYubiKeyAbiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.lib = load_mock_yubikey_library()
+        cls.lib = load_embedded_virtual_yubikey_library()
         cls.lib.C_Initialize.argtypes = [ctypes.c_void_p]
         cls.lib.C_Initialize.restype = CK_RV
         cls.lib.C_Finalize.argtypes = [ctypes.c_void_p]
@@ -895,7 +895,7 @@ class MockYubiKeyAbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        digest_input_bytes = b"mock YubiKey provider digest"
+        digest_input_bytes = b"embedded virtual YubiKey provider digest"
         digest_input = (CK_BYTE * len(digest_input_bytes))(*digest_input_bytes)
         for mechanism_type, constructor in digests.items():
             digest_mechanism = CK_MECHANISM(mechanism_type, None, 0)
@@ -1726,7 +1726,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.lib.C_Finalize(None)
 
     @unittest.skipUnless(shutil.which("pkcs11-tool"), "OpenSC pkcs11-tool is unavailable")
-    def test_pkcs11_tool_lists_all_mock_slots_without_unsupported_attributes(
+    def test_pkcs11_tool_lists_all_embedded_slots_without_unsupported_attributes(
         self,
     ) -> None:
         slots = {

@@ -25,17 +25,27 @@ impl TestFidoStorage {
     fn initialize(&self) -> CK_RV {
         super::initialize_with_configuration(serde_json::json!({
             "version": 1,
+            "hardware": {"discovery": false},
+            "yubihsm": {"urls": []},
             "storage": {"tokens": self.root.to_string_lossy()}
         }))
     }
 
-    fn mock_objects(&self) -> PathBuf {
+    fn embedded_objects(&self) -> PathBuf {
         self.root
             .join("tokens-v1")
-            .join("yubico-serial-4d4f434b30303031")
+            .join("yubico-serial-454d42454444454430303031")
             .join("fido2")
             .join("objects")
     }
+}
+
+fn initialize_embedded() -> CK_RV {
+    super::initialize_with_configuration(serde_json::json!({
+        "version": 1,
+        "hardware": {"discovery": false},
+        "yubihsm": {"urls": []}
+    }))
 }
 
 impl Drop for TestFidoStorage {
@@ -92,7 +102,7 @@ fn read_attribute(
     value
 }
 
-fn open_logged_in_mock(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
+fn open_logged_in_embedded(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
     assert_eq!(storage.initialize(), CKR_OK as CK_RV);
     let mut count = 0;
     assert_eq!(
@@ -129,7 +139,7 @@ fn open_logged_in_mock(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HAN
     (slot, session)
 }
 
-fn create_mock_resident_credential(slot: CK_SLOT_ID) -> Vec<u8> {
+fn create_embedded_resident_credential(slot: CK_SLOT_ID) -> Vec<u8> {
     crate::with_context(|context| {
         let slot_contexts = context
             .slot_contexts
@@ -147,7 +157,7 @@ fn create_mock_resident_credential(slot: CK_SLOT_ID) -> Vec<u8> {
     .expect("failed to create resident credential in virtual YubiKey")
 }
 
-fn delete_mock_resident_credential(slot: CK_SLOT_ID, credential_id: &[u8]) {
+fn delete_embedded_resident_credential(slot: CK_SLOT_ID, credential_id: &[u8]) {
     crate::with_context(|context| {
         let slot_contexts = context
             .slot_contexts
@@ -212,13 +222,10 @@ fn authorize_preview_operation(session: CK_SESSION_HANDLE, digest: &[u8; 32]) {
 }
 
 #[test]
-fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
+fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
+    assert_eq!(initialize_embedded(), CKR_OK as CK_RV);
 
     let mut count = 0;
     assert_eq!(
@@ -544,7 +551,7 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     );
 
     let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
-        .digest(b"pkcs11rs previewSign PKCS #11 mock")
+        .digest(b"pkcs11rs previewSign PKCS #11 embedded")
         .try_into()
         .unwrap();
     mechanism = CK_MECHANISM {
@@ -706,7 +713,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
     let storage = TestFidoStorage::new();
-    let (_, session) = open_logged_in_mock(&storage);
+    let (_, session) = open_logged_in_embedded(&storage);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
@@ -812,7 +819,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         CKR_OK as CK_RV
     );
 
-    let object_files = std::fs::read_dir(storage.mock_objects())
+    let object_files = std::fs::read_dir(storage.embedded_objects())
         .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -824,7 +831,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         .count();
     assert!(object_files >= 3);
 
-    let (_, session) = open_logged_in_mock(&storage);
+    let (_, session) = open_logged_in_embedded(&storage);
     let mut registration_match = registration.clone();
     let mut registration_find = [
         ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
@@ -959,7 +966,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         CKR_OK as CK_RV
     );
 
-    let (_, session) = open_logged_in_mock(&storage);
+    let (_, session) = open_logged_in_embedded(&storage);
     assert!(find_objects(session, &mut registration_find).is_empty());
     assert!(find_objects(session, &mut derived_find).is_empty());
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
@@ -974,7 +981,7 @@ fn corrupt_local_fido_storage_fails_discovery_closed() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
     let storage = TestFidoStorage::new();
-    let objects = storage.mock_objects();
+    let objects = storage.embedded_objects();
     std::fs::create_dir_all(&objects).unwrap();
     std::fs::write(
         objects.join(format!("sha3-256-{}.cbor", "00".repeat(32))),
@@ -991,13 +998,10 @@ fn corrupt_local_fido_storage_fails_discovery_closed() {
 }
 
 #[test]
-fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
+fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
+    assert_eq!(initialize_embedded(), CKR_OK as CK_RV);
 
     let mut slot_count = 0;
     assert_eq!(
@@ -1010,7 +1014,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut slot_count),
         CKR_OK as CK_RV
     );
-    let credential_id = create_mock_resident_credential(slot);
+    let credential_id = create_embedded_resident_credential(slot);
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -1093,7 +1097,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
     let point = crate::der_octet_string_value(&point).unwrap();
     VerifyingKey::from_sec1_bytes(point).unwrap();
     let client_data_hash: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
-        .digest(b"pkcs11rs resident assertion mock")
+        .digest(b"pkcs11rs resident assertion embedded")
         .try_into()
         .unwrap();
     let mut mechanism = CK_MECHANISM {
@@ -1228,7 +1232,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
-    delete_mock_resident_credential(slot, &credential_id);
+    delete_embedded_resident_credential(slot, &credential_id);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
         CKR_OK as CK_RV

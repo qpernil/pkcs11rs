@@ -5,11 +5,11 @@ use std::{
 };
 use virtual_yubikey_core::{DeviceProfile, FidoConfiguration, VirtualYubiKey};
 
-const MOCK_SERIAL: u32 = 1;
+const EMBEDDED_SERIAL: u32 = 1;
 
 fn device(configuration: FidoConfiguration) -> VirtualYubiKey {
     VirtualYubiKey::with_fido_configuration(
-        DeviceProfile::yubikey_5_8_ccid(MOCK_SERIAL),
+        DeviceProfile::yubikey_5_8_ccid(EMBEDDED_SERIAL),
         configuration,
     )
 }
@@ -21,16 +21,16 @@ fn protocol_one_configuration() -> FidoConfiguration {
         .with_permissioned_pin_uv_auth_tokens(false)
 }
 
-static PROCESS_MOCK_STATE: OnceLock<Arc<Mutex<VirtualYubiKey>>> = OnceLock::new();
+static PROCESS_EMBEDDED_STATE: OnceLock<Arc<Mutex<VirtualYubiKey>>> = OnceLock::new();
 
-/// An in-process YubiKey FIDO2 applet visible only through a pkcs11rs build
-/// compiled with the `mock-yubikey` feature.
+/// An embedded virtual YubiKey FIDO2 applet visible through a pkcs11rs build
+/// compiled with the `embedded-virtual-yubikey` feature.
 #[derive(Debug)]
-pub(crate) struct MockYubiKeyConnector {
+pub(crate) struct EmbeddedVirtualYubiKeyConnector {
     state: Arc<Mutex<VirtualYubiKey>>,
 }
 
-impl MockYubiKeyConnector {
+impl EmbeddedVirtualYubiKeyConnector {
     #[cfg(test)]
     pub(crate) fn restore_persistent_state(&self, profile: DeviceProfile) {
         let mut state = self.state.lock().unwrap();
@@ -58,7 +58,7 @@ impl MockYubiKeyConnector {
     }
 
     pub(crate) fn process_device() -> Result<Self, Error> {
-        let state = PROCESS_MOCK_STATE
+        let state = PROCESS_EMBEDDED_STATE
             .get_or_init(|| Arc::new(Mutex::new(device(FidoConfiguration::default()))))
             .clone();
         state
@@ -93,7 +93,7 @@ impl MockYubiKeyConnector {
     }
 }
 
-impl Connector for MockYubiKeyConnector {
+impl Connector for EmbeddedVirtualYubiKeyConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -103,7 +103,7 @@ impl Connector for MockYubiKeyConnector {
     }
 
     fn product(&self) -> &str {
-        "Mock YubiKey FIDO2"
+        "Embedded Virtual YubiKey FIDO2"
     }
 
     fn major(&self) -> u8 {
@@ -160,8 +160,8 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
-    fn mock_selects_only_fido_and_answers_get_info_through_ccid() {
-        let connector = Rc::new(MockYubiKeyConnector::new().unwrap());
+    fn embedded_device_selects_only_fido_and_answers_get_info_through_ccid() {
+        let connector = Rc::new(EmbeddedVirtualYubiKeyConnector::new().unwrap());
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let info = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)))
             .get_info()
@@ -172,7 +172,7 @@ mod tests {
         assert!(info.option("clientPin"));
     }
 
-    fn exercise_pin_and_credential_management(connector: Rc<MockYubiKeyConnector>) {
+    fn exercise_pin_and_credential_management(connector: Rc<EmbeddedVirtualYubiKeyConnector>) {
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
 
@@ -205,7 +205,10 @@ mod tests {
             .unwrap();
         let preview_authorization = client.authorize_preview_sign(&info, b"123456").unwrap();
         client
-            .create_preview_sign_registration(&preview_authorization, Some("MOCK0001".to_owned()))
+            .create_preview_sign_registration(
+                &preview_authorization,
+                Some("EMBEDDED0001".to_owned()),
+            )
             .unwrap();
 
         client.change_pin(&info, b"123456", b"654321").unwrap();
@@ -220,13 +223,15 @@ mod tests {
     }
 
     #[test]
-    fn mock_default_pin_can_be_verified_and_changed_through_ctap() {
-        exercise_pin_and_credential_management(Rc::new(MockYubiKeyConnector::new().unwrap()));
+    fn embedded_default_pin_can_be_verified_and_changed_through_ctap() {
+        exercise_pin_and_credential_management(Rc::new(
+            EmbeddedVirtualYubiKeyConnector::new().unwrap(),
+        ));
     }
 
     #[test]
     fn legacy_pin_token_does_not_authorize_modern_credential_management() {
-        let connector = Rc::new(MockYubiKeyConnector::protocol_one_only().unwrap());
+        let connector = Rc::new(EmbeddedVirtualYubiKeyConnector::protocol_one_only().unwrap());
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
         let info = client.get_info().unwrap();
@@ -244,14 +249,17 @@ mod tests {
 
     #[test]
     fn protocol_one_permissioned_tokens_support_credential_management() {
-        exercise_pin_and_credential_management(Rc::new(MockYubiKeyConnector::from_device(device(
-            FidoConfiguration::default().with_pin_uv_auth_protocols(vec![1]),
-        ))));
+        exercise_pin_and_credential_management(Rc::new(
+            EmbeddedVirtualYubiKeyConnector::from_device(device(
+                FidoConfiguration::default().with_pin_uv_auth_protocols(vec![1]),
+            )),
+        ));
     }
 
     #[test]
-    fn protocol_one_only_mock_supports_initial_pin_provisioning() {
-        let connector = Rc::new(MockYubiKeyConnector::protocol_one_without_pin().unwrap());
+    fn protocol_one_only_embedded_device_supports_initial_pin_provisioning() {
+        let connector =
+            Rc::new(EmbeddedVirtualYubiKeyConnector::protocol_one_without_pin().unwrap());
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
         let info = client.get_info().unwrap();
@@ -265,7 +273,7 @@ mod tests {
 
     #[test]
     fn host_scp03_implementation_interoperates_with_the_virtual_yubikey() {
-        let connector = MockYubiKeyConnector::new().unwrap();
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
         select_application(&connector, &crate::piv::PIV_AID).unwrap();
         let keys = Scp03KeySet::yubikey_factory();
         let mut session = Scp03Session::authenticate_selected(
@@ -292,7 +300,7 @@ mod tests {
 
     #[test]
     fn host_scp11b_validates_the_virtual_chain_and_protects_piv() {
-        let connector = MockYubiKeyConnector::new().unwrap();
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
         select_application(
             &connector,
             &virtual_yubikey_core::ISSUER_SECURITY_DOMAIN_AID,

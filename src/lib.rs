@@ -1085,10 +1085,10 @@ pub(crate) use connector::{PcscConnector, UsbConnector};
 #[cfg(all(test, feature = "native-hardware"))]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, usb_bcd_version};
 
-#[cfg(feature = "mock-yubikey")]
-mod mock_yubikey;
-#[cfg(feature = "mock-yubikey")]
-pub(crate) use mock_yubikey::MockYubiKeyConnector;
+#[cfg(feature = "embedded-virtual-yubikey")]
+mod embedded_virtual_yubikey;
+#[cfg(feature = "embedded-virtual-yubikey")]
+pub(crate) use embedded_virtual_yubikey::EmbeddedVirtualYubiKeyConnector;
 
 mod context;
 pub(crate) use context::*;

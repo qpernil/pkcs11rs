@@ -1,6 +1,9 @@
-#[cfg(feature = "mock-yubikey")]
-use crate::MockYubiKeyConnector;
-#[cfg(all(test, not(any(feature = "abi-tests", feature = "mock-yubikey"))))]
+#[cfg(feature = "embedded-virtual-yubikey")]
+use crate::EmbeddedVirtualYubiKeyConnector;
+#[cfg(all(
+    test,
+    not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey"))
+))]
 use crate::SlotKind;
 #[cfg(not(feature = "abi-tests"))]
 use crate::configured_yubihsm_public_discovery_credential_with_pinentry;
@@ -44,6 +47,8 @@ use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
+#[cfg(feature = "embedded-virtual-yubikey")]
+const EMBEDDED_VIRTUAL_YUBIKEY_SERIAL: &str = "EMBEDDED0001";
 
 #[derive(Clone, Debug)]
 pub(crate) struct TokenStorageConfig {
@@ -480,7 +485,10 @@ impl DiscoveredSlotBackend {
         }
     }
 
-    #[cfg(all(test, not(any(feature = "abi-tests", feature = "mock-yubikey"))))]
+    #[cfg(all(
+        test,
+        not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey"))
+    ))]
     fn http_yubihsm_connector(&self) -> &HttpConnector {
         match self {
             Self::HttpYubiHsm(connector) => connector,
@@ -2768,16 +2776,16 @@ impl ModuleContext {
         {
             return Ok(true);
         }
-        #[cfg(feature = "mock-yubikey")]
-        {
-            let connector = Rc::new(MockYubiKeyConnector::process_device()?);
+        #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+        if self.serial_is_visible(EMBEDDED_VIRTUAL_YUBIKEY_SERIAL) {
+            let connector = Rc::new(EmbeddedVirtualYubiKeyConnector::process_device()?);
             select_application(connector.as_ref(), &crate::ctap::FIDO2_AID)?;
             let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
             let device = Arc::new(crate::device::DeviceContext::new(
                 crate::device::DeviceIdentity {
                     manufacturer: String::from("Yubico"),
-                    product: String::from("Mock YubiKey FIDO2"),
-                    serial: String::from("MOCK0001"),
+                    product: String::from("Embedded Virtual YubiKey FIDO2"),
+                    serial: String::from(EMBEDDED_VIRTUAL_YUBIKEY_SERIAL),
                     hardware_version: Some((1, 0)),
                     firmware_version: None,
                 },
@@ -2797,10 +2805,6 @@ impl ModuleContext {
                 self.token_storage.as_ref(),
                 self.fido_storage.as_ref(),
             )?;
-            // A mock build is a deterministic, self-contained PKCS #11
-            // artifact. Do not mix its synthetic slot with USB, HTTP, or
-            // PC/SC hardware discovery.
-            return Ok(true);
         }
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, CcidFidoRegistration> = HashMap::new();
         let ccid_devices = self.reconcile_ccid_readers(&mut slot_contexts, &mut ccid_fido_slots)?;
@@ -3559,11 +3563,6 @@ impl ModuleContext {
             let _ = initialized;
             return self.refresh_registered_slots();
         }
-        #[cfg(feature = "mock-yubikey")]
-        {
-            let _ = initialized;
-            return self.refresh_registered_slots();
-        }
         #[cfg(target_os = "ios")]
         refresh_ios_smartcard_discovery(
             initialized,
@@ -3693,7 +3692,7 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     use std::io::{Read, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3824,7 +3823,7 @@ mod discovery_tests {
         assert_eq!(current.nfc_reacquisitions.get(), 0);
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
@@ -3853,7 +3852,7 @@ mod discovery_tests {
         request
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn http_response(stream: &mut impl Write, body: &[u8]) {
         write!(
             stream,
@@ -3864,7 +3863,7 @@ mod discovery_tests {
         stream.write_all(body).unwrap();
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn yubihsm_frame(command: u8, data: &[u8]) -> Vec<u8> {
         let mut frame = vec![command];
         frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
@@ -3872,7 +3871,7 @@ mod discovery_tests {
         frame
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn yubihsm_device_info(serial: u32) -> Vec<u8> {
         let mut data = vec![2, 5, 0];
         data.extend_from_slice(&serial.to_be_bytes());
@@ -3880,7 +3879,7 @@ mod discovery_tests {
         yubihsm_frame(0x86, &data)
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn connector_inventory(serials: &[&str]) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "devices": serials
@@ -3907,7 +3906,40 @@ mod discovery_tests {
         assert!(!context.serial_discovery_is_enabled());
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+    #[test]
+    fn embedded_virtual_yubikey_is_additive_to_software_slots() {
+        let configuration = ModuleConfiguration::private_software().unwrap();
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        context.init().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        let kinds = slots
+            .values()
+            .map(|slot| slot.lock().unwrap().slot.kind())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds.len(), 2);
+        assert!(kinds.contains(&crate::SlotKind::Fido2));
+        assert!(kinds.contains(&crate::SlotKind::Software));
+    }
+
+    #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+    #[test]
+    fn embedded_virtual_yubikey_obeys_the_serial_allowlist() {
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration.slot_serials = Some(HashSet::from([SoftwareSlot::serial_for_ordinal(0)]));
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        context.init().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            slots.values().next().unwrap().lock().unwrap().slot.kind(),
+            crate::SlotKind::Software
+        );
+    }
+
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn connector_test_context(url: String) -> ModuleContext {
         let mut configuration = ModuleConfiguration::resolve(None).unwrap();
         configuration.logging_level = Some(crate::logging::LogLevel::Off);
@@ -3926,7 +3958,7 @@ mod discovery_tests {
         ModuleContext::new_with_configuration(configuration).unwrap()
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     fn http_slot_identity(endpoint_index: usize, serial: &str) -> DiscoveredSlotIdentity {
         DiscoveredSlotIdentity {
             source: DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index),
@@ -3934,7 +3966,7 @@ mod discovery_tests {
         }
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn excluded_ccid_serial_does_not_probe_even_hsmauth() {
         #[derive(Debug)]
@@ -3993,7 +4025,7 @@ mod discovery_tests {
         assert!(slots.is_empty());
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn excluded_http_serial_does_not_send_device_commands() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4043,7 +4075,7 @@ mod discovery_tests {
         assert!(context.slot_contexts.read().unwrap().is_empty());
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn unavailable_http_yubihsm_does_not_hide_local_software_slots() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4063,7 +4095,7 @@ mod discovery_tests {
         );
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn repeated_http_discovery_preserves_slots_and_presence() {
         struct Interaction {
@@ -4216,7 +4248,7 @@ mod discovery_tests {
         server.join().unwrap();
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn duplicate_http_urls_remain_independent_slots() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4280,7 +4312,7 @@ mod discovery_tests {
         );
     }
 
-    #[cfg(not(any(feature = "abi-tests", feature = "mock-yubikey")))]
+    #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     #[test]
     fn http_discovery_recovers_after_listener_restart() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4362,7 +4394,7 @@ mod discovery_tests {
     }
 
     #[test]
-    #[cfg(not(feature = "mock-yubikey"))]
+    #[cfg(not(feature = "embedded-virtual-yubikey"))]
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
         let configuration = ModuleConfiguration::resolve(None).unwrap();
         let auth_slots = Arc::new(crate::auth_slots::AuthSlots::default());

@@ -1321,10 +1321,12 @@ mod tests {
     use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO, FIDO2_AID};
     use std::{cell::RefCell, collections::VecDeque};
 
-    #[cfg(feature = "mock-yubikey")]
+    #[cfg(feature = "embedded-virtual-yubikey")]
     #[test]
     fn login_retains_only_one_shot_administration_authorization() {
-        let connector = Rc::new(crate::mock_yubikey::MockYubiKeyConnector::new().unwrap());
+        let connector = Rc::new(
+            crate::embedded_virtual_yubikey::EmbeddedVirtualYubiKeyConnector::new().unwrap(),
+        );
         crate::select_application(connector.as_ref(), &FIDO2_AID).unwrap();
         let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
         slot.login(Some(b"123456"), &crate::pinentry::Pinentry::unconfigured())
