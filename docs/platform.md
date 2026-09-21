@@ -55,8 +55,9 @@ deletion, or attribute updates through Cryptoki. It advertises write-protected
 token storage while allowing read-write sessions for session objects.
 
 The slot requires `CKU_USER` login. `C_LoginUser` also requires an empty
-username. The backend accepts an omitted or supplied PIN and ignores its value;
-nonempty usernames are rejected and there is no SO role. This login establishes PKCS #11 authorization state,
+username. The backend accepts only an omitted or explicitly empty PIN;
+nonempty PINs fail with `CKR_PIN_LEN_RANGE`, nonempty usernames are rejected,
+and there is no SO role. This login establishes PKCS #11 authorization state,
 without prompting for or retaining an OS password. `CKF_LOGIN_REQUIRED` and
 `CKF_USER_PIN_INITIALIZED` are set, with a zero-length PIN range. Private
 objects are hidden and unusable before login and after logout; public key
@@ -89,7 +90,7 @@ Universal `pkcs11:` considers all eligible public credentials. Multiple matches
 are ordered with the other source slots. Only asymmetric matching is automatic.
 
 The application first performs USER login on the platform slot. The Secure
-Enclave backend accepts an omitted or supplied PIN and ignores its value. A
+Enclave backend accepts only an omitted or explicitly empty PIN. A
 later YubiHSM target login can select the key only while that source login is
 active, and never forwards the target PIN to the platform slot. The resolved
 token key is bound through `Pkcs11Auth`. Static and ephemeral ECDH

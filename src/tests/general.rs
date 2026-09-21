@@ -546,7 +546,7 @@ pub fn yubikey_login_preserves_connector_errors() {
 
     let rv: CK_RV = crate::Slot::login(
         &mut slot,
-        Some(b"arbitrary"),
+        Some(&[]),
         &crate::pinentry::Pinentry::unconfigured(),
     )
     .unwrap_err()
@@ -1593,7 +1593,12 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert!(crate::Slot::login(&mut slot, Some(&[]), &pinentry).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::logout(&mut slot).unwrap();
-    assert!(crate::Slot::login(&mut slot, Some(b"ignored"), &pinentry).is_ok());
+    assert!(crate::Slot::login(&mut slot, None, &pinentry).is_ok());
+    assert!(crate::Slot::login_is_active(&slot));
+    crate::Slot::logout(&mut slot).unwrap();
+    let error = crate::Slot::login(&mut slot, Some(b"not a slot PIN"), &pinentry).unwrap_err();
+    assert_eq!(CK_RV::from(error), CKR_PIN_LEN_RANGE as CK_RV);
+    assert!(!crate::Slot::login_is_active(&slot));
 }
 
 #[test]

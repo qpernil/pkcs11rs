@@ -2029,7 +2029,7 @@ fn platform_credential_opens_a_real_asymmetric_secure_session() {
         crate::pkcs11_provider::Pkcs11Provider::from_slot(source_slot.clone()).unwrap(),
     )
     .unwrap();
-    source_owner.login(b"ignored by Host").unwrap();
+    source_owner.login(b"").unwrap();
     let peer = Rc::new(peer);
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&source_slot).unwrap();
@@ -6774,12 +6774,12 @@ fn ordinary_wildcard_selects_the_first_matching_public_credential() {
         crate::pkcs11_provider::Pkcs11Provider::from_slot(decoy.clone()).unwrap(),
     )
     .unwrap();
-    decoy_owner.login(b"ignored by Host").unwrap();
+    decoy_owner.login(b"").unwrap();
     let source_owner = crate::pkcs11_provider::ProviderSession::open(
         crate::pkcs11_provider::Pkcs11Provider::from_slot(child.clone()).unwrap(),
     )
     .unwrap();
-    source_owner.login(b"ignored by Host").unwrap();
+    source_owner.login(b"").unwrap();
     let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), Vec::new());
     slot.auth_slots.register(&decoy).unwrap();
     slot.auth_slots.register(&child).unwrap();
@@ -6843,7 +6843,7 @@ fn ordinary_wildcard_stops_before_a_later_busy_source() {
         crate::pkcs11_provider::Pkcs11Provider::from_slot(first.clone()).unwrap(),
     )
     .unwrap();
-    first_owner.login(b"ignored by Host").unwrap();
+    first_owner.login(b"").unwrap();
 
     let sources = Arc::new(crate::auth_slots::AuthSlots::default());
     sources.register(&first).unwrap();
@@ -7043,7 +7043,7 @@ fn auth_source_exclusion_uses_reference_equality_not_serial() {
         crate::pkcs11_provider::Pkcs11Provider::from_slot(second.clone()).unwrap(),
     )
     .unwrap();
-    second_owner.login(b"ignored by Host").unwrap();
+    second_owner.login(b"").unwrap();
     sources.register(&first).unwrap();
     sources.register(&second).unwrap();
     let serial = second.lock().unwrap().slot.serial().to_owned();

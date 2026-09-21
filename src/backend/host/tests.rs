@@ -47,12 +47,16 @@ fn host_profiles_include_login_and_software_operations() {
 }
 
 #[test]
-fn host_login_accepts_supplied_or_omitted_pins() {
+fn host_login_accepts_only_omitted_or_empty_pins() {
     let pinentry = crate::pinentry::Pinentry::unconfigured();
     let mut slot = HostSlot::with_keys(Vec::new());
-    Slot::login(&mut slot, Some(b"any supplied PIN"), &pinentry).unwrap();
+    Slot::login(&mut slot, Some(&[]), &pinentry).unwrap();
     slot.logout().unwrap();
     Slot::login(&mut slot, None, &pinentry).unwrap();
+    slot.logout().unwrap();
+    let error = Slot::login(&mut slot, Some(b"not a slot PIN"), &pinentry).unwrap_err();
+    assert_eq!(CK_RV::from(error), CKR_PIN_LEN_RANGE as CK_RV);
+    assert!(!slot.login_is_active());
 }
 
 struct NativeKey {

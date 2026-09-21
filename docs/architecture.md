@@ -42,15 +42,16 @@ public data, certificate storage, and credential metadata remain available.
 
 Generic operation routing uses advertised mechanisms, object material, and
 backend capabilities. Software-token persistence uses
-`stores_software_token_keys`. Login always passes the supplied PIN through the
-common session path; each backend validates, uses, or ignores it according to
-that slot's authentication contract.
+`stores_software_token_keys`. Login passes the optional PIN through the common
+session path. Secret-bearing backends validate or use it according to their
+authentication contract; backends without a slot login secret accept only an
+omitted or explicitly empty PIN.
 
 `C_Login` and `C_LoginUser` preserve the distinction between a null PIN and an
 explicitly empty PIN. A null PIN reaches the backend as `None`. A backend that
-needs a secret calls the shared protected-prompt helper; a backend such as the
-platform slot can ignore it. Token flags report this backend capability when a
-prompt provider is installed and do not control the login path. Desktop builds
+needs a secret calls the shared protected-prompt helper. Token flags report
+this backend capability when a prompt provider is installed and do not control
+the login path. Desktop builds
 implement the provider with an Assuan pinentry subprocess. The iOS provider is
 planned as an application callback with the same prompt metadata and
 secret/cancel result; the application presents its native dialog while the
