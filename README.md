@@ -1219,12 +1219,14 @@ slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
-## In-process mock YubiKey
+## Embedded virtual YubiKey
 
-The `mock-yubikey` Cargo feature builds a deterministic PKCS #11 module with
-one in-process YubiKey FIDO2 applet and disables USB, HTTP, and PC/SC hardware
-discovery. The mock is visible only through pkcs11rs; it does not install a
-virtual reader or card.
+The `embedded-virtual-yubikey` Cargo feature builds a deterministic PKCS #11
+module with one embedded virtual YubiKey. The embedded device is additive: it
+coexists with configured software and platform slots and with ordinary USB,
+HTTP, and PC/SC discovery. It is visible only through pkcs11rs and does not
+install a virtual reader or card. The ordinary serial allowlist can include or
+exclude its `EMBEDDED0001` serial like any other token.
 
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
@@ -1240,14 +1242,14 @@ always see first-party edits immediately; there is no dependency-source switch
 or generated override.
 
 ```sh
-cargo build --release --features mock-yubikey
+cargo build --release --features embedded-virtual-yubikey
 pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 ```
 
-The initial PIN is `123456`. Mock device state, including PIN changes and
+The initial PIN is `123456`. Embedded device state, including PIN changes and
 created credentials, lasts for the client process and survives
 `C_Finalize`/`C_Initialize`; unloading the library or ending the process resets
-it. The mock begins without resident credentials. Tests can create a
+it. The device begins without resident credentials. Tests can create a
 deterministic resident credential through previewSign registration and then
 exercise credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification

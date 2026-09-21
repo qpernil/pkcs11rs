@@ -169,7 +169,7 @@ opens generated tickets, reproduces the draft's exact derived private scalar,
 and signs digests that are verified against the production-derived public key.
 It also rejects modified tags, contexts, and malformed ephemeral points. No
 private-seed operation is compiled into a normal hardware build. The
-`mock-yubikey` feature includes that private side specifically to provide a
+`embedded-virtual-yubikey` feature includes that private side specifically to provide a
 self-contained test authenticator.
 
 ## PKCS #11 mapping
@@ -237,7 +237,7 @@ use the slot token provider. The default FIDO slot provider is unavailable, so
 durable token creation currently fails with `CKR_TOKEN_WRITE_PROTECTED` until a
 provider is supplied; it never silently degrades to module-local storage.
 
-The in-process mock exercises this complete flow through the exported PKCS #11
+The embedded virtual YubiKey exercises this complete flow through the exported PKCS #11
 entry points: login with the initial PIN `123456`, GenerateKeyPair, read and
 re-import the registration attribute as a token object, derive a token signing
 key, export both wrappers, destroy the signing key, reject incomplete and

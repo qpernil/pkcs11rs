@@ -32,7 +32,7 @@ pub(crate) use crypto::{
 };
 #[cfg(test)]
 pub(crate) use crypto::{mgf_digest, rsa_pkcs1_sign, verify_rsa_pss};
-#[cfg(all(test, feature = "mock-yubikey"))]
+#[cfg(all(test, feature = "embedded-virtual-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
 #[cfg(feature = "native-hardware")]
 pub(crate) use ctap::HidFidoEndpoint;

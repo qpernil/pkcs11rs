@@ -67,9 +67,9 @@ mod interfaces;
 mod key;
 #[path = "object.rs"]
 mod object;
-#[cfg(all(feature = "mock-yubikey", not(feature = "abi-tests")))]
-#[path = "preview_sign_mock.rs"]
-mod preview_sign_mock;
+#[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+#[path = "preview_sign_embedded.rs"]
+mod preview_sign_embedded;
 #[path = "wrap.rs"]
 mod wrap;
 #[cfg(not(feature = "abi-tests"))]

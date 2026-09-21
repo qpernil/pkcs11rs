@@ -1,13 +1,16 @@
 use super::*;
 use crate::security_domain::{KeyRef, Scp11Administration as Op};
-use crate::{SecurityDomainClient, mock_yubikey::MockYubiKeyConnector, select_application};
+use crate::{
+    SecurityDomainClient, embedded_virtual_yubikey::EmbeddedVirtualYubiKeyConnector,
+    select_application,
+};
 use spki::EncodePublicKey;
 use virtual_yubikey_core::{
     DeviceProfile, ISSUER_SECURITY_DOMAIN_AID as SD, PIV_AID, VirtualYubiKey,
 };
 use zeroize::Zeroizing;
 
-fn factory_session(connector: &MockYubiKeyConnector) -> Scp03Session {
+fn factory_session(connector: &EmbeddedVirtualYubiKeyConnector) -> Scp03Session {
     select_application(connector, &SD).unwrap();
     Scp03Session::authenticate_selected(
         connector,
@@ -19,7 +22,7 @@ fn factory_session(connector: &MockYubiKeyConnector) -> Scp03Session {
 }
 
 fn administer(
-    connector: &MockYubiKeyConnector,
+    connector: &EmbeddedVirtualYubiKeyConnector,
     session: &mut Scp03Session,
     operation: Op,
 ) -> Result<Vec<u8>, Error> {
@@ -43,7 +46,8 @@ fn version_command() -> CommandApdu {
 fn commands_provision_scp11a_and_c_with_discovery_and_persistent_policy() {
     for variant in [Scp11Variant::A, Scp11Variant::C] {
         let profile = DeviceProfile::yubikey_5_8_ccid(42);
-        let connector = MockYubiKeyConnector::from_device(VirtualYubiKey::new(profile.clone()));
+        let connector =
+            EmbeddedVirtualYubiKeyConnector::from_device(VirtualYubiKey::new(profile.clone()));
         let mut session = factory_session(&connector);
         let key_ref = KeyRef {
             kid: variant.key_id(),
@@ -222,7 +226,7 @@ fn commands_provision_scp11a_and_c_with_discovery_and_persistent_policy() {
 
 #[test]
 fn administration_rejects_plain_and_scp11b_commands() {
-    let connector = MockYubiKeyConnector::new().unwrap();
+    let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
     select_application(&connector, &SD).unwrap();
     let chain = SecurityDomainClient
         .get_certificate_bundle(&connector, KeyRef { kid: 0x13, kvn: 1 })
@@ -275,7 +279,8 @@ fn scp03_rotation_removes_factory_keys_and_validates_kcv_atomically() {
     use crate::configuration::{Scp03Configuration, Scp03KeyMaterialConfiguration};
     use crate::security_domain::Scp03ProvisioningKeys;
     let profile = DeviceProfile::yubikey_5_8_ccid(42);
-    let connector = MockYubiKeyConnector::from_device(VirtualYubiKey::new(profile.clone()));
+    let connector =
+        EmbeddedVirtualYubiKeyConnector::from_device(VirtualYubiKey::new(profile.clone()));
     let mut session = factory_session(&connector);
     let material = Scp03ProvisioningKeys {
         enc: &[0x11; 16],

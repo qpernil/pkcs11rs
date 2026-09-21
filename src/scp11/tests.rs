@@ -2,7 +2,7 @@ use super::*;
 #[cfg(not(feature = "abi-tests"))]
 #[path = "hardware_tests.rs"]
 mod hardware_qualification;
-#[cfg(feature = "mock-yubikey")]
+#[cfg(feature = "embedded-virtual-yubikey")]
 #[path = "virtual_admin_tests.rs"]
 mod virtual_administration;
 use p256::ecdsa::SigningKey;
@@ -370,16 +370,16 @@ fn rejects_noncanonical_or_trailing_response_tlvs() {
     assert!(parse_authentication_response(&noncanonical, true).is_err());
 }
 
-#[cfg(feature = "mock-yubikey")]
+#[cfg(feature = "embedded-virtual-yubikey")]
 mod virtual_card {
     use super::*;
-    use crate::{mock_yubikey::MockYubiKeyConnector, select_application};
+    use crate::{embedded_virtual_yubikey::EmbeddedVirtualYubiKeyConnector, select_application};
     use virtual_yubikey_core::{
         DeviceProfile, FIDO2_AID, HSMAUTH_AID, ISSUER_SECURITY_DOMAIN_AID, MANAGEMENT_AID,
         OPENPGP_AID, PIV_AID, VirtualYubiKey,
     };
 
-    fn fixture(variant: Scp11Variant) -> (MockYubiKeyConnector, Scp11KeySet) {
+    fn fixture(variant: Scp11Variant) -> (EmbeddedVirtualYubiKeyConnector, Scp11KeySet) {
         let mut profile = DeviceProfile::yubikey_5_8_ccid(42);
         profile.applets.openpgp = true;
         let mut device = VirtualYubiKey::new(profile.clone());
@@ -418,7 +418,7 @@ mod virtual_card {
                 certificates: chain.into_iter().rev().collect(),
             }),
         };
-        (MockYubiKeyConnector::from_device(device), keys)
+        (EmbeddedVirtualYubiKeyConnector::from_device(device), keys)
     }
 
     fn command(ins: u8, p2: u8, data: &[u8]) -> CommandApdu {
@@ -470,7 +470,7 @@ mod virtual_card {
                 }
                 for &(aid, ins, p2, data) in cases {
                     select_application(&connector, aid).unwrap();
-                    // Mock transport is SHORT_ONLY, so certificates use ISO chaining.
+                    // The embedded transport is SHORT_ONLY, so certificates use ISO chaining.
                     let mut session = keys.authenticate_selected(&connector).unwrap();
                     session.require_oce_authentication().unwrap();
                     let response = session
