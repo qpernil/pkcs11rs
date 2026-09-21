@@ -147,7 +147,8 @@ impl Slot for HostSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login(&mut self, _pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+    fn login(&mut self, pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
+        super::validate_no_secret_login_pin(pin)?;
         self.logged_in = true;
         Ok(())
     }

@@ -572,7 +572,7 @@ fn nested_yubihsm_authentication(profile: DerivationProfile) {
         .clone();
     let host_owner =
         ProviderSession::open(Pkcs11Provider::from_slot(host_slot.clone()).unwrap()).unwrap();
-    host_owner.login(b"ignored by Host").unwrap();
+    host_owner.login(b"").unwrap();
 
     let source_peer = Rc::new(ProtocolPeer::new());
     source_peer

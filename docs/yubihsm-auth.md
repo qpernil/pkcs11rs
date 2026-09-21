@@ -1034,8 +1034,8 @@ YubiHSM login selector
 
 `pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003`
 selects target Authentication Key `1003` and `CKA_LABEL=reserve` on the Secure
-Enclave token. The selected platform slot accepts an omitted or supplied PIN
-and ignores its value. Because the token has no serial, it is selected through
+Enclave token. The selected platform slot accepts only an omitted or explicitly
+empty PIN. Because the token has no serial, it is selected through
 `C_LoginUser`; the compact `C_Login` source syntax cannot name it.
 
 `pkcs11:token=Secure%20Enclave;object=reserve;type=public` matches that key's

@@ -11,6 +11,13 @@ mod software;
 mod traits;
 mod yubihsm;
 
+fn validate_no_secret_login_pin(pin: Option<&[u8]>) -> Result<(), crate::Error> {
+    if pin.is_some_and(|pin| !pin.is_empty()) {
+        return Err(crate::CKR_PIN_LEN_RANGE.into());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "ios")]
 pub(crate) use crate::apple::cryptotokenkit::{CcidProvider, CcidReader};
 pub(crate) use ccid::{
