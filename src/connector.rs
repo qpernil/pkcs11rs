@@ -69,6 +69,17 @@ pub(crate) trait Connector {
 
     fn clear_secure_channel(&self) {}
 
+    /// Returns the logical PKCS #11 login state of this applet when the
+    /// connector participates in a shared CCID card state. `None` means that
+    /// the connector does not use that state (rather than that it is public).
+    fn ccid_login_state(&self) -> Option<CcidLoginState> {
+        None
+    }
+
+    fn set_ccid_login_state(&self, _state: CcidLoginState) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn security_domain_put_scp03_key_set(
         &self,
         _new_kvn: u8,
@@ -118,58 +129,56 @@ pub(crate) trait Connector {
     }
 }
 
-#[derive(Debug, Default)]
-struct SmartCardTransactionState {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CcidLoginState {
+    #[default]
+    Public,
+    User,
+    So,
+}
+
+#[derive(Debug)]
+struct SelectedApplet {
     application_aid: Vec<u8>,
     session: Option<Scp03Session>,
+    login: CcidLoginState,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SecureChannelState {
-    transaction: Option<SmartCardTransactionState>,
+    selected_applet: Option<SelectedApplet>,
     pub(crate) validated_scp11_keys: HashMap<Scp11CertificateCacheKey, Vec<u8>>,
     pub(crate) connection_epoch: u64,
 }
 
 impl SecureChannelState {
-    fn begin_transaction(&mut self) -> Result<(), Error> {
-        if self.transaction.is_some() {
-            return Err(CKR_OPERATION_ACTIVE.into());
-        }
-        self.transaction = Some(SmartCardTransactionState::default());
-        Ok(())
-    }
-
-    fn end_transaction(&mut self) {
-        self.transaction = None;
-    }
-
-    fn transaction(&self) -> Result<&SmartCardTransactionState, Error> {
-        self.transaction
+    fn selected_applet(&self) -> Result<&SelectedApplet, Error> {
+        self.selected_applet
             .as_ref()
             .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
     }
 
-    fn transaction_mut(&mut self) -> Result<&mut SmartCardTransactionState, Error> {
-        #[cfg(test)]
-        if self.transaction.is_none() {
-            self.begin_transaction()?;
-        }
-        self.transaction
+    fn selected_applet_mut(&mut self) -> Result<&mut SelectedApplet, Error> {
+        self.selected_applet
             .as_mut()
             .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
     }
 
-    fn clear_transaction_selection(&mut self) {
-        if let Some(transaction) = &mut self.transaction {
-            transaction.session = None;
-            transaction.application_aid.clear();
-        }
+    fn clear_selection(&mut self) {
+        self.selected_applet = None;
+    }
+
+    fn select(&mut self, application_aid: &[u8]) {
+        self.selected_applet = Some(SelectedApplet {
+            application_aid: application_aid.to_vec(),
+            session: None,
+            login: CcidLoginState::Public,
+        });
     }
 
     fn synchronize_connection(&mut self, connection_epoch: u64) {
         if self.connection_epoch != connection_epoch {
-            self.clear_transaction_selection();
+            self.clear_selection();
             self.validated_scp11_keys.clear();
             self.connection_epoch = connection_epoch;
         }
@@ -251,25 +260,9 @@ impl PcscReaderState {
     pub(crate) fn set_selected_application(&self, application_aid: &[u8]) -> Result<(), Error> {
         self.with_operation(|| {
             let mut state = self.secure_channel()?;
-            let transaction = state.transaction_mut()?;
-            transaction.session = None;
-            transaction.application_aid = application_aid.to_vec();
+            state.select(application_aid);
             Ok(())
         })
-    }
-
-    pub(crate) fn begin_transaction(&self) -> Result<(), Error> {
-        self.with_operation(|| {
-            let mut state = self.secure_channel()?;
-            state.begin_transaction()
-        })
-    }
-
-    pub(crate) fn end_transaction(&self) {
-        let _ = self.with_operation(|| {
-            self.secure_channel()?.end_transaction();
-            Ok(())
-        });
     }
 
     #[cfg(test)]
@@ -279,9 +272,10 @@ impl PcscReaderState {
             #[cfg(feature = "native-hardware")]
             transport: Mutex::new(PcscTransportState::default()),
             secure_channel: Mutex::new(SecureChannelState {
-                transaction: Some(SmartCardTransactionState {
+                selected_applet: Some(SelectedApplet {
                     application_aid,
                     session: Some(session),
+                    login: CcidLoginState::Public,
                 }),
                 ..SecureChannelState::default()
             }),
@@ -434,7 +428,6 @@ impl CcidDeviceConnector {
             // absent. A switchable FIDO slot may use this protected refresh to
             // reconnect its HID route; ordinary CCID calls still fail when
             // they reach the absent connector.
-            self.reader_state.begin_transaction()?;
             return Ok(());
         }
         let current = {
@@ -446,9 +439,7 @@ impl CcidDeviceConnector {
             binding.active = Some(current.clone());
             current
         };
-        self.reader_state.begin_transaction()?;
         if let Err(error) = current.begin_transport_operation(message) {
-            self.reader_state.end_transaction();
             if let Ok(mut binding) = self.binding.lock() {
                 binding.active = None;
             }
@@ -466,7 +457,6 @@ impl CcidDeviceConnector {
         if let Some(current) = current {
             current.end_transport_operation();
         }
-        self.reader_state.end_transaction();
     }
 
     fn refresh_current(&self) -> Result<(), Error> {
@@ -705,13 +695,22 @@ impl PcscAppletConnector {
         let mut state = self.state.secure_channel()?;
         let connection_epoch = self.base.connection_epoch();
         state.synchronize_connection(connection_epoch);
-        if state.transaction_mut()?.application_aid != self.application_aid {
-            state.clear_transaction_selection();
+        if state
+            .selected_applet
+            .as_ref()
+            .is_none_or(|selected| selected.application_aid != self.application_aid)
+        {
+            state.clear_selection();
             select_application(self.base.as_ref(), &self.application_aid)?;
-            state.transaction_mut()?.application_aid = self.application_aid.clone();
+            // The first APDU may lazily acquire or replace the native card and
+            // advance its connection generation. Record that generation before
+            // publishing the selection created by this APDU.
+            state.synchronize_connection(self.base.connection_epoch());
+            state.select(&self.application_aid);
         }
 
-        if self.protocol.is_none() || !self.enabled() || state.transaction()?.session.is_some() {
+        if self.protocol.is_none() || !self.enabled() || state.selected_applet()?.session.is_some()
+        {
             return Ok(());
         }
 
@@ -732,13 +731,11 @@ impl PcscAppletConnector {
         let established = match established {
             Ok(established) => established,
             Err(error) => {
-                state.clear_transaction_selection();
+                state.clear_selection();
                 return Err(error);
             }
         };
-        let transaction = state.transaction_mut()?;
-        transaction.application_aid = self.application_aid.clone();
-        transaction.session = Some(established);
+        state.selected_applet_mut()?.session = Some(established);
         Ok(())
     }
 
@@ -786,17 +783,21 @@ impl PcscAppletConnector {
     fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
         if self.protocol.is_none() || !self.enabled() {
-            return self.base.send_apdu(command);
+            let result = self.base.send_apdu(command);
+            if result.is_err() {
+                self.state.secure_channel()?.clear_selection();
+            }
+            return result;
         }
         let mut state = self.state.secure_channel()?;
         let channel = state
-            .transaction_mut()?
+            .selected_applet_mut()?
             .session
             .as_mut()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit(self.base.as_ref(), command);
         if result.is_err() {
-            state.clear_transaction_selection();
+            state.clear_selection();
         }
         result
     }
@@ -804,17 +805,21 @@ impl PcscAppletConnector {
     fn send_short_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
         if self.protocol.is_none() || !self.enabled() {
-            return crate::iso7816::transmit_short(self.base.as_ref(), command);
+            let result = crate::iso7816::transmit_short(self.base.as_ref(), command);
+            if result.is_err() {
+                self.state.secure_channel()?.clear_selection();
+            }
+            return result;
         }
         let mut state = self.state.secure_channel()?;
         let channel = state
-            .transaction_mut()?
+            .selected_applet_mut()?
             .session
             .as_mut()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit_short(self.base.as_ref(), command);
         if result.is_err() {
-            state.clear_transaction_selection();
+            state.clear_selection();
         }
         result
     }
@@ -823,11 +828,13 @@ impl PcscAppletConnector {
         self.set_enabled(false);
         let mut state = self.state.secure_channel()?;
         if state
-            .transaction
+            .selected_applet
             .as_ref()
-            .is_some_and(|transaction| transaction.application_aid == self.application_aid)
+            .is_some_and(|selected| selected.application_aid == self.application_aid)
         {
-            state.clear_transaction_selection();
+            let selected = state.selected_applet_mut()?;
+            selected.session = None;
+            selected.login = CcidLoginState::Public;
         }
         Ok(())
     }
@@ -912,7 +919,11 @@ impl Connector for PcscAppletConnector {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
             if self.protocol.is_none() || !self.enabled() {
-                return self.base.transmit(send_buffer, receive_buffer, timeout);
+                let result = self.base.transmit(send_buffer, receive_buffer, timeout);
+                if result.is_err() {
+                    self.state.secure_channel()?.clear_selection();
+                }
+                return result;
             }
             let command = CommandApdu::decode(send_buffer)?;
             let encoded = self.send_apdu_locked(&command)?.encode();
@@ -934,22 +945,35 @@ impl Connector for PcscAppletConnector {
                 } else {
                     self.record_discovery_error(&Error::from(CKR_DEVICE_REMOVED));
                 }
-                self.clear_secure_channel_locked()?;
+                self.set_enabled(false);
+                self.state.secure_channel()?.clear_selection();
                 return result;
             }
 
-            self.clear_secure_channel_locked()?;
+            let mut state = self.state.secure_channel()?;
+            state.synchronize_connection(self.base.connection_epoch());
             if self.base.stable_applet_topology() {
                 self.set_applet_presence(true);
                 self.forget_discovery_error();
                 return Ok(());
             }
+
+            // Discovery must not deselect an authenticated applet. Its cached
+            // topology remains authoritative until that login ends.
+            if state
+                .selected_applet
+                .as_ref()
+                .is_some_and(|selected| selected.login != CcidLoginState::Public)
+            {
+                self.forget_discovery_error();
+                return Ok(());
+            }
+            state.clear_selection();
+            drop(state);
             match select_application(self.base.as_ref(), &self.application_aid) {
                 Ok(()) => {
                     let mut state = self.state.secure_channel()?;
-                    let transaction = state.transaction_mut()?;
-                    transaction.session = None;
-                    transaction.application_aid = self.application_aid.clone();
+                    state.select(&self.application_aid);
                     self.set_applet_presence(true);
                     self.forget_discovery_error();
                     Ok(())
@@ -991,6 +1015,35 @@ impl Connector for PcscAppletConnector {
             .with_operation(|| self.clear_secure_channel_locked());
     }
 
+    fn ccid_login_state(&self) -> Option<CcidLoginState> {
+        self.state.secure_channel().ok().map(|mut state| {
+            state.synchronize_connection(self.base.connection_epoch());
+            state
+                .selected_applet
+                .as_ref()
+                .filter(|selected| selected.application_aid == self.application_aid)
+                .map_or(CcidLoginState::Public, |selected| selected.login)
+        })
+    }
+
+    fn set_ccid_login_state(&self, login: CcidLoginState) -> Result<(), Error> {
+        self.state.with_operation(|| {
+            if login == CcidLoginState::Public {
+                let mut state = self.state.secure_channel()?;
+                state.synchronize_connection(self.base.connection_epoch());
+                if let Some(selected) = &mut state.selected_applet
+                    && selected.application_aid == self.application_aid
+                {
+                    selected.login = CcidLoginState::Public;
+                }
+                return Ok(());
+            }
+            self.ensure_selected_locked()?;
+            self.state.secure_channel()?.selected_applet_mut()?.login = login;
+            Ok(())
+        })
+    }
+
     fn security_domain_put_scp03_key_set(
         &self,
         new_kvn: u8,
@@ -1004,7 +1057,7 @@ impl Connector for PcscAppletConnector {
             }
             let mut state = self.state.secure_channel()?;
             let session = state
-                .transaction_mut()?
+                .selected_applet_mut()?
                 .session
                 .as_mut()
                 .ok_or(CKR_USER_NOT_LOGGED_IN)?;
@@ -1019,7 +1072,7 @@ impl Connector for PcscAppletConnector {
                 keys,
             );
             if result.is_err() {
-                state.clear_transaction_selection();
+                state.clear_selection();
             }
             result
         })
@@ -1037,7 +1090,7 @@ impl Connector for PcscAppletConnector {
             }
             let mut state = self.state.secure_channel()?;
             let session = state
-                .transaction_mut()?
+                .selected_applet_mut()?
                 .session
                 .as_mut()
                 .ok_or(CKR_USER_NOT_LOGGED_IN)?;
@@ -1048,7 +1101,7 @@ impl Connector for PcscAppletConnector {
                 delete_last,
             );
             if result.is_err() {
-                state.clear_transaction_selection();
+                state.clear_selection();
             }
             result
         })
@@ -1065,7 +1118,7 @@ impl Connector for PcscAppletConnector {
             }
             let mut state = self.state.secure_channel()?;
             let session = state
-                .transaction_mut()?
+                .selected_applet_mut()?
                 .session
                 .as_mut()
                 .ok_or(CKR_USER_NOT_LOGGED_IN)?;
@@ -1078,7 +1131,7 @@ impl Connector for PcscAppletConnector {
             if result.is_ok() {
                 state.invalidate_scp11_certificates();
             } else {
-                state.clear_transaction_selection();
+                state.clear_selection();
             }
             result
         })
@@ -1390,13 +1443,8 @@ impl DeviceOperationLifecycle for PcscLifecycle {
         if kind == crate::device::DeviceOperationKind::Hid {
             return Ok(());
         }
-        let reader_state = self.reader_state.upgrade().ok_or(CKR_DEVICE_ERROR)?;
-        reader_state.begin_transaction()?;
-        if let Err(error) = self.worker().and_then(PcscWorker::begin_operation) {
-            reader_state.end_transaction();
-            return Err(error);
-        }
-        Ok(())
+        self.reader_state.upgrade().ok_or(CKR_DEVICE_ERROR)?;
+        self.worker().and_then(PcscWorker::begin_operation)
     }
 
     fn exit(&self, kind: crate::device::DeviceOperationKind) {
@@ -1410,11 +1458,8 @@ impl DeviceOperationLifecycle for PcscLifecycle {
                 target: "pkcs11rs::transport",
                 reader = %self.reader.to_string_lossy(),
                 ?error,
-                "failed to end PC/SC transaction"
+                "failed to end PC/SC device operation"
             );
-        }
-        if let Some(reader_state) = self.reader_state.upgrade() {
-            reader_state.end_transaction();
         }
     }
 }
@@ -1723,13 +1768,6 @@ impl PcscWorker {
 }
 
 #[cfg(feature = "native-hardware")]
-enum PcscTransactionOutcome {
-    OperationActive,
-    OperationEnded,
-    Shutdown,
-}
-
-#[cfg(feature = "native-hardware")]
 fn run_pcsc_worker(
     reader: std::ffi::CString,
     context: pcsc::Context,
@@ -1763,24 +1801,7 @@ fn run_pcsc_worker(
                     let _ = reply.try_send(Err(pcsc::Error::NoSmartcard));
                     continue;
                 };
-                if !operation_active {
-                    let _ = reply.try_send(transmit_pcsc_once(current, &command));
-                    continue;
-                }
-
-                let transaction = match current.transaction() {
-                    Ok(transaction) => transaction,
-                    Err(error) => {
-                        let _ = reply.try_send(Err(error));
-                        continue;
-                    }
-                };
-                match run_pcsc_transaction(transaction, command, reply, &receiver, connection_epoch)
-                {
-                    PcscTransactionOutcome::OperationActive => {}
-                    PcscTransactionOutcome::OperationEnded => operation_active = false,
-                    PcscTransactionOutcome::Shutdown => break,
-                }
+                let _ = reply.try_send(transmit_pcsc(current, &command));
             }
         }
     }
@@ -1805,7 +1826,7 @@ fn refresh_pcsc_card(
     *card = None;
     let connected = context.connect(
         reader,
-        pcsc::ShareMode::Shared,
+        pcsc::ShareMode::Exclusive,
         pcsc::Protocols::T0 | pcsc::Protocols::T1,
     )?;
     *connection_epoch = connection_epoch.wrapping_add(1);
@@ -1824,71 +1845,6 @@ fn transmit_pcsc(card: &pcsc::Card, command: &[u8]) -> Result<Vec<u8>, pcsc::Err
     let length = received.len();
     response.truncate(length);
     Ok(response)
-}
-
-#[cfg(feature = "native-hardware")]
-fn transmit_pcsc_once(card: &mut pcsc::Card, command: &[u8]) -> Result<Vec<u8>, pcsc::Error> {
-    let transaction = card.transaction()?;
-    let result = transmit_pcsc(&transaction, command);
-    let ended = transaction
-        .end(pcsc::Disposition::LeaveCard)
-        .map_err(|(_, error)| error);
-    match result {
-        Ok(response) => ended.map(|()| response),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(feature = "native-hardware")]
-fn run_pcsc_transaction(
-    transaction: pcsc::Transaction<'_>,
-    first_command: Vec<u8>,
-    first_reply: mpsc::SyncSender<Result<Vec<u8>, pcsc::Error>>,
-    receiver: &mpsc::Receiver<PcscWorkerRequest>,
-    connection_epoch: u64,
-) -> PcscTransactionOutcome {
-    let first = transmit_pcsc(&transaction, &first_command);
-    let first_failed = first.is_err();
-    let _ = first_reply.try_send(first);
-    if first_failed {
-        drop(transaction);
-        return PcscTransactionOutcome::OperationActive;
-    }
-
-    loop {
-        match receiver.recv() {
-            Ok(PcscWorkerRequest::BeginOperation { reply }) => {
-                let _ = reply.try_send(Err(CKR_OPERATION_ACTIVE as CK_RV));
-            }
-            Ok(PcscWorkerRequest::EndOperation { reply }) => {
-                let result = transaction
-                    .end(pcsc::Disposition::LeaveCard)
-                    .map_err(|(_, error)| error);
-                let _ = reply.try_send(result);
-                return PcscTransactionOutcome::OperationEnded;
-            }
-            Ok(PcscWorkerRequest::Refresh { reply }) => {
-                let result = transaction.status2_owned().map(|_| PcscRefresh {
-                    apdu_capabilities: detect_pcsc_apdu_capabilities(&transaction),
-                    connection_epoch,
-                });
-                let _ = reply.try_send(result);
-            }
-            Ok(PcscWorkerRequest::Transmit { command, reply }) => {
-                let result = transmit_pcsc(&transaction, &command);
-                let failed = result.is_err();
-                let _ = reply.try_send(result);
-                if failed {
-                    drop(transaction);
-                    return PcscTransactionOutcome::OperationActive;
-                }
-            }
-            Err(_) => {
-                drop(transaction);
-                return PcscTransactionOutcome::Shutdown;
-            }
-        }
-    }
 }
 
 const YUBIHSM_MAX_MESSAGE_SIZE: usize = 8192;
@@ -3615,10 +3571,9 @@ mod tests {
     }
 
     #[test]
-    fn transaction_end_discards_selection_but_preserves_scp11_validation() {
+    fn applet_selection_persists_and_preserves_scp11_validation() {
         let state = PcscReaderState::default();
         let key = (0x13, 1, [0x55; 32]);
-        state.begin_transaction().unwrap();
         state.set_selected_application(&[1, 2, 3]).unwrap();
         {
             let mut secure_channel = state.secure_channel().unwrap();
@@ -3627,10 +3582,11 @@ mod tests {
                 .insert(key, vec![0x04; 65]);
         }
 
-        state.end_transaction();
-
         let secure_channel = state.secure_channel().unwrap();
-        assert!(secure_channel.transaction.is_none());
+        assert_eq!(
+            secure_channel.selected_applet().unwrap().application_aid,
+            [1, 2, 3]
+        );
         assert!(secure_channel.validated_scp11_keys.contains_key(&key));
     }
 
@@ -3639,9 +3595,10 @@ mod tests {
         let key = (0x13, 1, [0x55; 32]);
         let mut state = SecureChannelState {
             connection_epoch: 7,
-            transaction: Some(SmartCardTransactionState {
+            selected_applet: Some(SelectedApplet {
                 application_aid: vec![1, 2, 3],
                 session: None,
+                login: CcidLoginState::Public,
             }),
             ..SecureChannelState::default()
         };
@@ -3656,7 +3613,7 @@ mod tests {
 
         state.synchronize_connection(8);
         assert!(state.validated_scp11_keys.is_empty());
-        assert!(state.transaction().unwrap().application_aid.is_empty());
+        assert!(state.selected_applet.is_none());
         assert_eq!(state.connection_epoch, 8);
     }
 }

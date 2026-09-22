@@ -338,6 +338,13 @@ impl Slot for HsmAuthSlot {
         self.connector.clear_secure_channel();
         Ok(())
     }
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        self.connector.set_ccid_login_state(match role {
+            Some(LoginRole::User) => CcidLoginState::User,
+            Some(LoginRole::So) => CcidLoginState::So,
+            None => CcidLoginState::Public,
+        })
+    }
     fn init_slot(&mut self) -> Result<(), Error> {
         Ok(())
     }
@@ -369,7 +376,10 @@ impl Slot for HsmAuthSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get()
+        self.connector.ccid_login_state().map_or_else(
+            || self.authenticated.get(),
+            |state| state != CcidLoginState::Public && self.authenticated.get(),
+        )
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
@@ -726,7 +736,10 @@ impl Slot for IssuerSecurityDomainSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get()
+        self.connector.ccid_login_state().map_or_else(
+            || self.authenticated.get(),
+            |state| state != CcidLoginState::Public && self.authenticated.get(),
+        )
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(PcscAppletSession {
@@ -759,6 +772,13 @@ impl Slot for IssuerSecurityDomainSlot {
         self.authenticated.set(false);
         self.connector.clear_secure_channel();
         Ok(())
+    }
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        self.connector.set_ccid_login_state(match role {
+            Some(LoginRole::User) => CcidLoginState::User,
+            Some(LoginRole::So) => CcidLoginState::So,
+            None => CcidLoginState::Public,
+        })
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         Ok(())

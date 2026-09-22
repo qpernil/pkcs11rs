@@ -30,11 +30,12 @@ lifetime is distinct from retaining the login secret to authenticate again.
   described below.
 - Card SCP03/SCP11 uses protected provider objects for establishment. Configured
   SCP03 inputs are imported per handshake; the static administration DEK remains
-  a protected binding until the card transaction ends. A configured SCP11 OCE key
+  a protected binding until the selected applet or card connection changes. A
+  configured SCP11 OCE key
   is decrypted once into a protected provider credential; its file-unlock password
   is not retained. Separate handshake sessions release all ephemeral agreements,
   receipt keys, and KDF intermediates. Final message keys and SCP11's derived DEK
-  remain in zeroizing local storage for the card transaction lifetime.
+  remain in zeroizing local storage for the live card-channel lifetime.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
   they are not a cache populated from ordinary user login.

@@ -331,6 +331,9 @@ pub(crate) trait Slot {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn logout(&mut self) -> Result<(), Error>;
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
+        Ok(())
+    }
     fn init_slot(&mut self) -> Result<(), Error>;
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error>;

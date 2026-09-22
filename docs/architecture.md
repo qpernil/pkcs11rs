@@ -359,13 +359,12 @@ and a slot-local connector facade, while all facades share:
 
 Calls on different applet slots may overlap while using their independent slot
 and session state, but their interactions with one physical reader are
-serialized for the complete device-backed PKCS #11 operation. On desktop the
-reader worker lazily enters a PC/SC transaction at the first APDU and retains
-it through the operation; on iOS the analogous boundary is a CryptoTokenKit
-smart-card session. The first APDU in every operation reselects its AID and
-establishes the configured secure channel. The transaction itself owns the
-selected AID and live SCP03 or SCP11 session; ending it destroys that entire
-state. Only validated SCP11 public-key material survives the boundary.
+serialized for the complete device-backed PKCS #11 operation. The shared card
+state is either empty or contains one selected AID, its live SCP03/SCP11
+session, and its logical PKCS #11 login role. Repeated operations reuse that
+state. Selecting another applet replaces it and makes the previous applet's
+still-open PKCS #11 sessions public. Reconnection clears it and the separately
+connection-scoped validated SCP11 public-key cache.
 
 Native PC/SC and native iOS CryptoTokenKit produce the same internal transport
 records. A reader or CryptoTokenKit slot name is only an enumeration locator,
@@ -378,33 +377,26 @@ The first encounter with a serial probes its configured applet AIDs once. A
 later locator for the same serial is attached to those existing slots without
 repeating applet discovery; this includes movement between NFC and USB CCID.
 An established connection performs no discovery APDUs during an ordinary
-refresh. After reconnection, pkcs11rs reads only enough management information
-to validate the serial, and each real operation reselects its applet as part of
-normal transaction handling. Removal marks the serial's slots absent, while a
+refresh. An authenticated selection prevents inventory refresh from probing
+other applets. After reconnection, pkcs11rs reads only enough management
+information to validate the serial, and the next real operation selects its
+applet. Removal marks the serial's slots absent, while a
 different serial at a reused locator is treated as a different token. See
 [CCID applet configuration](ccid.md).
 
 The native iOS connector starts a worker lazily for each retained reader. The
 worker confines its retained `TKSmartCard` and all of that card's session and
-transmit operations to one thread, reuses the card while it remains valid, and
-serializes APDU requests. Retaining that card object does not claim exclusive
-access. Reader enumeration itself still uses the current
+transmit operations to one thread, marks it sensitive before beginning the
+native session, reuses the session while the card remains valid, and serializes
+APDU requests. Reader enumeration itself still uses the current
 `TKSmartCardSlotManager` inventory on every slot-list refresh. CryptoTokenKit
 provides smart-card APDU transport rather than general USB bulk access.
 
 The desktop connector likewise gives each reader a worker that owns its PC/SC
-card handle. Reader workers share the provider's PC/SC context; transactions on
-different readers remain independent. Connections use `SCARD_SHARE_SHARED`.
-The worker keeps the borrowed PC/SC transaction object on its own stack while
-it services all APDU requests for one high-level operation, which avoids both
-unsafe self-references and transaction gaps between APDUs.
-
-A future refinement may allow selected PKCS #11 multipart lifecycles, such as
-`C_FindObjectsInit` through `C_FindObjectsFinal`, to retain one smart-card
-transaction across calls. The present boundary remains one PKCS #11 function
-call. A longer boundary requires an explicit lease, timeout, and abandoned-
-operation cleanup so an application cannot hold PC/SC or the NFC UI while it
-is idle indefinitely.
+card handle. Reader workers share the provider's PC/SC context, but connections
+to different readers remain independent. Each handle uses
+`SCARD_SHARE_EXCLUSIVE` and remains open for the connector lifetime; per-call
+PC/SC transactions are unnecessary.
 
 ## FIDO transports
 
@@ -449,11 +441,9 @@ shared PC/SC `DeviceContext`, even when the FIDO CCID applet is unavailable or
 its slot is removed by transport deduplication. PKCS #11 operations through
 those HID and CCID views cannot overlap. HID-to-HID access remains shareable;
 pkcs11rs does not request `CTAPHID_LOCK` or an operating-system-exclusive HID
-open, and cannot serialize unrelated browser or process access. PC/SC uses a
-shared connection and transaction-bounded operations, so other cooperative
-PC/SC clients can remain connected and run between pkcs11rs calls. An exclusive
-owner can still prevent discovery or reconnection, and a direct USB CCID client
-bypasses PC/SC coordination entirely.
+open, and cannot serialize unrelated browser or process access. PC/SC uses an
+exclusive retained connection, so another PC/SC or direct USB CCID owner can
+prevent discovery or reconnection.
 
 CTAPHID report exchange is also serialized inside each FIDO slot. A response
 on an invalid channel causes one fresh channel allocation and retry because
@@ -493,10 +483,10 @@ monotonic provisioning epoch in every successful `SELECT` response. Each
 applet would advance its own epoch when a persistent change affects its exposed
 token view, including object creation, import, deletion, certificate or
 metadata replacement, policy changes, and reset. Authentication attempts and
-session-only state would leave it unchanged. Since applet selection already
-occurs when a backend takes ownership of the card transaction, comparing this
-value with the cached epoch would detect provisioning performed by another
-process without an inventory probe. Virtual applets can implement the contract
+session-only state would leave it unchanged. Since applet selection occurs when
+a backend first uses or switches to the applet, comparing this value with the
+cached epoch would detect provisioning performed by another process without an
+inventory probe. Virtual applets can implement the contract
 directly; physical applets require corresponding firmware support.
 
 YubiHSM slots find native HSM Auth and ordinary source credentials through a

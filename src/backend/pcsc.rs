@@ -1,5 +1,8 @@
 use crate::*;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak, atomic::AtomicBool},
+};
 
 #[cfg(feature = "native-hardware")]
 pub(crate) use crate::PcscConnector as CcidConnector;
@@ -14,6 +17,8 @@ pub(crate) struct CcidProvider {
     enabled: bool,
     #[cfg(feature = "native-hardware")]
     context: Option<pcsc::Context>,
+    #[cfg(feature = "native-hardware")]
+    connectors: Mutex<HashMap<String, Weak<CcidConnector>>>,
 }
 
 impl CcidProvider {
@@ -37,6 +42,8 @@ impl CcidProvider {
             enabled,
             #[cfg(feature = "native-hardware")]
             context,
+            #[cfg(feature = "native-hardware")]
+            connectors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -54,18 +61,32 @@ impl CcidProvider {
             let readers = context
                 .list_readers_owned()
                 .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-            return Ok(readers
+            let mut connectors = self.connectors.lock().map_err(|_| CKR_MUTEX_BAD)?;
+            let mut present = std::collections::HashSet::new();
+            let readers = readers
                 .into_iter()
                 .map(|reader| {
-                    let connector = CcidConnector::new(reader, context.clone());
+                    let name = reader.to_string_lossy().into_owned();
+                    present.insert(name.clone());
+                    let connector = connectors
+                        .get(&name)
+                        .and_then(Weak::upgrade)
+                        .unwrap_or_else(|| {
+                            let connector = Arc::new(CcidConnector::new(reader, context.clone()));
+                            connectors.insert(name, Arc::downgrade(&connector));
+                            connector
+                        });
                     let reader_state = connector.reader_state();
                     CcidReader {
-                        connector: Arc::new(connector) as SharedConnector,
+                        connector: connector as SharedConnector,
                         reader_state,
                         inventory_presence: None,
                     }
                 })
-                .collect());
+                .collect();
+            connectors
+                .retain(|name, connector| present.contains(name) || connector.strong_count() > 0);
+            return Ok(readers);
         }
 
         Ok(Vec::new())

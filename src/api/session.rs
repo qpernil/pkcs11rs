@@ -318,11 +318,16 @@ fn login_role(
         return Err(CKR_SESSION_READ_ONLY_EXISTS.into());
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
+    if let Err(error) = ctx.get_slot(slot_id)?.set_login_role(Some(role)) {
+        let _ = ctx._get_slot_mut(slot_id)?.logout();
+        return Err(error);
+    }
     ctx.login_role = Some(role);
     if ctx.get_slot(slot_id)?.refresh_token_objects_after_login()
         && let Err(error) = ctx.refresh_slot_token_objects(slot_id)
     {
         let _ = ctx._get_slot_mut(slot_id)?.logout();
+        let _ = ctx.get_slot(slot_id)?.set_login_role(None);
         ctx.clear_login_state(slot_id);
         return Err(error);
     }

@@ -1,12 +1,12 @@
 use super::card::{
-    OwnedSessionGuard, SessionGuard, begin_session, card_is_valid, discover_card_identity,
-    resolve_card, transmit_card,
+    OwnedSessionGuard, begin_session, card_is_valid, discover_card_identity, resolve_card,
+    transmit_card,
 };
 use super::{DEFAULT_TIMEOUT, NfcTransport, nfc_diagnostic};
 use crate::*;
 use objc2::rc::Retained;
 use objc2_crypto_token_kit::TKSmartCard;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
 enum WorkerRequest {
@@ -34,11 +34,12 @@ impl AppleCcidWorker {
         reader_name: String,
         nfc: Option<Arc<NfcTransport>>,
         present: Arc<AtomicBool>,
+        connection_epoch: Arc<AtomicU64>,
     ) -> Result<Self, CK_RV> {
         let (requests, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("pkcs11rs-apple-ccid".to_owned())
-            .spawn(move || run_worker(reader_name, nfc, present, receiver))
+            .spawn(move || run_worker(reader_name, nfc, present, connection_epoch, receiver))
             .map_err(|_| CKR_HOST_MEMORY)?;
         Ok(Self { requests })
     }
@@ -93,6 +94,7 @@ fn run_worker(
     reader_name: String,
     nfc: Option<Arc<NfcTransport>>,
     present: Arc<AtomicBool>,
+    connection_epoch: Arc<AtomicU64>,
     receiver: mpsc::Receiver<WorkerRequest>,
 ) {
     let mut card: Option<Retained<TKSmartCard>> = None;
@@ -117,12 +119,6 @@ fn run_worker(
                 let _ = reply.try_send(result);
             }
             WorkerRequest::EndOperation { reply } => {
-                active_session = None;
-                // A retained TKSmartCard can keep the physical token reserved by
-                // this process even after endSession. Resolve it again for the
-                // next operation so other apps can use the same smart card.
-                card = None;
-                card_generation = None;
                 operation_active = false;
                 let _ = reply.try_send(());
             }
@@ -131,12 +127,18 @@ fn run_worker(
                     if nfc.has_verified_card() {
                         Ok(false)
                     } else {
-                        prepare_nfc_card(nfc, &mut card, &mut card_generation, DEFAULT_TIMEOUT)
-                            .map(|()| true)
+                        prepare_nfc_card(
+                            nfc,
+                            &mut card,
+                            &mut card_generation,
+                            &mut active_session,
+                            DEFAULT_TIMEOUT,
+                        )
                     }
                 } else if card.as_deref().is_some_and(card_is_valid) {
                     Ok(false)
                 } else {
+                    active_session = None;
                     match resolve_card(&reader_name) {
                         Ok(resolved) if card_is_valid(&resolved) => {
                             card = Some(resolved);
@@ -152,6 +154,9 @@ fn run_worker(
                         }
                     }
                 };
+                if result.as_ref().is_ok_and(|changed| *changed) {
+                    connection_epoch.fetch_add(1, Ordering::AcqRel);
+                }
                 present.store(result.is_ok(), Ordering::Release);
                 let _ = reply.try_send(result);
             }
@@ -161,32 +166,38 @@ fn run_worker(
                 reply,
             } => {
                 let result = (|| {
+                    let mut changed = false;
                     if let Some(nfc) = &nfc {
-                        prepare_nfc_card(nfc, &mut card, &mut card_generation, timeout)?;
+                        changed |= prepare_nfc_card(
+                            nfc,
+                            &mut card,
+                            &mut card_generation,
+                            &mut active_session,
+                            timeout,
+                        )?;
                     }
                     if !card.as_deref().is_some_and(card_is_valid) {
+                        active_session = None;
                         card = Some(resolve_card(&reader_name)?);
+                        changed = true;
                     }
-                    if operation_active {
-                        if active_session.is_none() {
-                            let current = card.as_ref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
-                            begin_session(current, timeout)?;
-                            active_session = Some(OwnedSessionGuard::new(current.clone()));
-                        }
-                        transmit_card(
-                            active_session
-                                .as_ref()
-                                .ok_or(CKR_DEVICE_ERROR as CK_RV)?
-                                .card(),
-                            &command,
-                            timeout,
-                        )
-                    } else {
-                        let current = card.as_deref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
+                    if changed {
+                        connection_epoch.fetch_add(1, Ordering::AcqRel);
+                    }
+                    if active_session.is_none() {
+                        let current = card.as_ref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
+                        unsafe { current.setSensitive(true) };
                         begin_session(current, timeout)?;
-                        let _session = SessionGuard::new(current);
-                        transmit_card(current, &command, timeout)
+                        active_session = Some(OwnedSessionGuard::new(current.clone()));
                     }
+                    transmit_card(
+                        active_session
+                            .as_ref()
+                            .ok_or(CKR_DEVICE_ERROR as CK_RV)?
+                            .card(),
+                        &command,
+                        timeout,
+                    )
                 })();
                 if let Err(error) = result.as_ref() {
                     nfc_diagnostic(format_args!(
@@ -199,6 +210,7 @@ fn run_worker(
                         card_generation = None;
                     }
                     active_session = None;
+                    connection_epoch.fetch_add(1, Ordering::AcqRel);
                 }
                 if result.is_err() && !card.as_deref().is_some_and(card_is_valid) {
                     card = None;
@@ -213,26 +225,35 @@ fn prepare_nfc_card(
     nfc: &NfcTransport,
     card: &mut Option<Retained<TKSmartCard>>,
     card_generation: &mut Option<u64>,
+    active_session: &mut Option<OwnedSessionGuard>,
     timeout: Duration,
-) -> Result<(), CK_RV> {
+) -> Result<bool, CK_RV> {
     let prepared = nfc.prepare()?;
+    let mut changed = false;
     loop {
         if *card_generation != Some(prepared.generation) {
+            *active_session = None;
             *card = None;
             *card_generation = Some(prepared.generation);
+            changed = true;
         }
         if !card.as_deref().is_some_and(card_is_valid) {
+            *active_session = None;
             *card = Some(resolve_card(&prepared.slot_name)?);
+            changed = true;
         }
         if !prepared.verify_serial {
-            return Ok(());
+            return Ok(changed);
         }
         let current = card.as_deref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
+        unsafe { current.setSensitive(true) };
         let identity = discover_card_identity(current, timeout)?;
         if nfc.verify_serial(prepared.generation, identity.serial.as_deref())? {
-            return Ok(());
+            return Ok(changed);
         }
+        *active_session = None;
         nfc.wait_for_replacement(prepared.generation)?;
         *card = None;
+        changed = true;
     }
 }

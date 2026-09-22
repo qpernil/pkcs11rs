@@ -627,6 +627,13 @@ impl Slot for PivSlot {
         self.connector.clear_secure_channel();
         result.map(|_| ())
     }
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        self.connector.set_ccid_login_state(match role {
+            Some(LoginRole::User) => CcidLoginState::User,
+            Some(LoginRole::So) => CcidLoginState::So,
+            None => CcidLoginState::Public,
+        })
+    }
     fn login_context_specific(
         &mut self,
         pin: &[u8],
@@ -892,7 +899,10 @@ impl Slot for PivSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get() || self.management_authenticated.get()
+        let local = self.authenticated.get() || self.management_authenticated.get();
+        self.connector
+            .ccid_login_state()
+            .map_or(local, |state| state != CcidLoginState::Public && local)
     }
     fn piv_generate_key_pair(
         &mut self,

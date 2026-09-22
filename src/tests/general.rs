@@ -726,7 +726,7 @@ fn pcsc_applet_connectors_share_selected_aid_state() {
 }
 
 #[test]
-fn selected_aid_is_reused_only_within_its_transaction() {
+fn selected_aid_is_reused_across_device_operations() {
     let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let base = std::sync::Arc::new(RecordingConnector {
         commands: commands.clone(),
@@ -744,14 +744,9 @@ fn selected_aid_is_reused_only_within_its_transaction() {
         extended: false,
     };
 
-    state.begin_transaction().unwrap();
     crate::Connector::send_apdu(&connector, &command).unwrap();
     crate::Connector::send_apdu(&connector, &command).unwrap();
-    state.end_transaction();
-
-    state.begin_transaction().unwrap();
     crate::Connector::send_apdu(&connector, &command).unwrap();
-    state.end_transaction();
 
     let selected = commands
         .lock()
@@ -762,7 +757,259 @@ fn selected_aid_is_reused_only_within_its_transaction() {
             (command.ins == 0xa4).then_some(command.data)
         })
         .collect::<Vec<_>>();
-    assert_eq!(selected, vec![aid.clone(), aid]);
+    assert_eq!(selected, vec![aid]);
+}
+
+#[test]
+fn lazy_card_acquisition_does_not_invalidate_the_selection_that_acquired_it() {
+    #[derive(Debug)]
+    struct LazyEpochConnector {
+        connection_epoch: std::sync::atomic::AtomicU64,
+        commands: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl crate::Connector for LazyEpochConnector {
+        fn as_debug(&self) -> &dyn std::fmt::Debug {
+            self
+        }
+        fn manufacturer(&self) -> &str {
+            "Test"
+        }
+        fn product(&self) -> &str {
+            "Lazy epoch connector"
+        }
+        fn major(&self) -> u8 {
+            1
+        }
+        fn minor(&self) -> u8 {
+            0
+        }
+        fn connection_epoch(&self) -> u64 {
+            self.connection_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+        }
+        fn is_present(&self) -> bool {
+            true
+        }
+        fn buffer_size(&self) -> usize {
+            256
+        }
+        fn transmit<'a>(
+            &self,
+            send_buffer: &[u8],
+            receive_buffer: &'a mut [u8],
+            _timeout: std::time::Duration,
+        ) -> Result<&'a [u8], crate::Error> {
+            self.connection_epoch
+                .compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .ok();
+            self.commands.lock().unwrap().push(send_buffer.to_vec());
+            receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);
+            Ok(&receive_buffer[..2])
+        }
+    }
+
+    let base = std::sync::Arc::new(LazyEpochConnector {
+        connection_epoch: std::sync::atomic::AtomicU64::new(0),
+        commands: std::sync::Mutex::new(Vec::new()),
+    });
+    let aid = vec![1, 2, 3, 4, 5];
+    let connector = crate::PcscAppletConnector::new(
+        base.clone(),
+        &aid,
+        None,
+        std::sync::Arc::new(crate::PcscReaderState::default()),
+    );
+    let command = crate::CommandApdu {
+        cla: 0,
+        ins: 0xca,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+        le: None,
+        extended: false,
+    };
+
+    crate::Connector::send_apdu(&connector, &command).unwrap();
+    crate::Connector::set_ccid_login_state(&connector, crate::CcidLoginState::User).unwrap();
+    crate::Connector::send_apdu(&connector, &command).unwrap();
+
+    let selects = base
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|encoded| {
+            crate::CommandApdu::decode(encoded).is_ok_and(|command| command.ins == 0xa4)
+        })
+        .count();
+    assert_eq!(selects, 1);
+    assert_eq!(
+        crate::Connector::ccid_login_state(&connector),
+        Some(crate::CcidLoginState::User)
+    );
+}
+
+#[test]
+fn switching_applets_clears_the_previous_card_login() {
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base = std::sync::Arc::new(RecordingConnector {
+        commands: commands.clone(),
+    });
+    let state = std::sync::Arc::new(crate::PcscReaderState::default());
+    let first =
+        crate::PcscAppletConnector::new(base.clone(), &[1, 2, 3, 4, 5], None, state.clone());
+    let second = crate::PcscAppletConnector::new(base, &[6, 7, 8, 9, 10], None, state);
+    let command = crate::CommandApdu {
+        cla: 0,
+        ins: 0xca,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+        le: None,
+        extended: false,
+    };
+
+    crate::Connector::send_apdu(&first, &command).unwrap();
+    crate::Connector::set_ccid_login_state(&first, crate::CcidLoginState::User).unwrap();
+    assert_eq!(
+        crate::Connector::ccid_login_state(&first),
+        Some(crate::CcidLoginState::User)
+    );
+
+    crate::Connector::refresh(&second).unwrap();
+    assert_eq!(
+        crate::Connector::ccid_login_state(&first),
+        Some(crate::CcidLoginState::User),
+        "inventory refresh must not deselect an authenticated applet"
+    );
+
+    crate::Connector::send_apdu(&second, &command).unwrap();
+    assert_eq!(
+        crate::Connector::ccid_login_state(&first),
+        Some(crate::CcidLoginState::Public)
+    );
+    assert_eq!(
+        crate::Connector::ccid_login_state(&second),
+        Some(crate::CcidLoginState::Public)
+    );
+}
+
+#[test]
+fn switching_logged_in_ccid_slots_keeps_sessions_but_makes_the_old_slot_public() {
+    const FIRST_SLOT_ID: CK_SLOT_ID = 226;
+    const SECOND_SLOT_ID: CK_SLOT_ID = 227;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": false}
+        })),
+        CKR_OK as CK_RV
+    );
+
+    let base: crate::SharedConnector = std::sync::Arc::new(RecordingConnector {
+        commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+    let device = reader.device.clone();
+    let first_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x01];
+    let second_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x02];
+    let first_connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(
+        crate::PcscAppletConnector::new(base.clone(), &first_aid, None, reader.clone()),
+    );
+    let second_connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(
+        crate::PcscAppletConnector::new(base, &second_aid, None, reader),
+    );
+    install_test_slot_with_backend(
+        FIRST_SLOT_ID,
+        Box::new(crate::IssuerSecurityDomainSlot::new_with_device(
+            first_connector,
+            first_aid,
+            device.clone(),
+        )),
+    );
+    install_test_slot_with_backend(
+        SECOND_SLOT_ID,
+        Box::new(crate::IssuerSecurityDomainSlot::new_with_device(
+            second_connector,
+            second_aid,
+            device,
+        )),
+    );
+
+    let open = |slot_id| {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        session
+    };
+    let first_session = open(FIRST_SLOT_ID);
+    let second_session = open(SECOND_SLOT_ID);
+    let mut empty = [];
+    assert_eq!(
+        crate::api::C_Login(
+            first_session,
+            CKU_USER as CK_USER_TYPE,
+            empty.as_mut_ptr(),
+            0,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut first_info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(first_session, &mut first_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(first_info.state, CKS_RO_USER_FUNCTIONS as CK_STATE);
+
+    assert_eq!(
+        crate::api::C_Login(
+            second_session,
+            CKU_USER as CK_USER_TYPE,
+            empty.as_mut_ptr(),
+            0,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut second_info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(first_session, &mut first_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(first_info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(second_session, &mut second_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(second_info.state, CKS_RO_USER_FUNCTIONS as CK_STATE);
+    assert_eq!(
+        crate::api::C_Logout(first_session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(crate::api::C_CloseSession(first_session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(second_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -1591,9 +1838,11 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     }
     let pinentry = crate::pinentry::Pinentry::unconfigured();
     assert!(crate::Slot::login(&mut slot, Some(&[]), &pinentry).is_ok());
+    crate::Slot::set_login_role(&slot, Some(crate::LoginRole::User)).unwrap();
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::logout(&mut slot).unwrap();
     assert!(crate::Slot::login(&mut slot, None, &pinentry).is_ok());
+    crate::Slot::set_login_role(&slot, Some(crate::LoginRole::User)).unwrap();
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::logout(&mut slot).unwrap();
     let error = crate::Slot::login(&mut slot, Some(b"not a slot PIN"), &pinentry).unwrap_err();
