@@ -1313,3 +1313,42 @@ enable flag and target ID have been validated. Existing companion public
 objects with the selected label and ID are replaced through ordinary PKCS #11
 object operations. The freshly generated keys are not deleted, including after
 a partial provisioning failure.
+
+## Mirroring an established YubiHSM authentication inventory
+
+The ignored `mirrors_yubihsm_authentication_inventory` test copies explicitly
+selected asymmetric Authentication Keys from one reference YubiHSM to an exact,
+sorted list of remote target serials. It reads each reference key's public
+projection and preserves its label, domains, capabilities, and delegated
+capabilities. The matching public projection and Authentication Key are created
+idempotently on each target; unrelated target objects are not changed.
+
+The helper uses only configured connector URLs. Its PKCS11RS configuration
+filters inventory to the source and target serials and limits CCID discovery to
+the HSM Auth application. A run without `PKCS11RS_MIRROR_APPLY=1` performs
+preflight only. It rejects conflicting Authentication Keys before writing. An
+apply run installs and verifies every selected identity on every target before
+replacing Authentication Key `0001` with `pkcs11rs public discovery`, derived
+from the discovery password and limited to `get-opaque` with no delegated
+capabilities. A repeated apply run verifies the completed inventory and leaves
+an already restricted discovery credential unchanged.
+
+```sh
+PKCS11RS_MIRROR_HSM_URLS=http://connector.example:12345 \
+PKCS11RS_MIRROR_SOURCE=1238075073 \
+PKCS11RS_MIRROR_TARGETS=24000001,25000002,99000001 \
+PKCS11RS_MIRROR_AUTHENTICATION_KEY_IDS=1001,1002,1003 \
+cargo test --locked -p pkcs11rs --lib \
+  mirrors_yubihsm_authentication_inventory -- --ignored --nocapture
+```
+
+Set `PKCS11RS_MIRROR_APPLY=1` only after the preflight output identifies the
+intended source policy and targets. The bootstrap and final discovery
+credentials both default to Authentication Key `0001` derived from `password`;
+override their passwords with `PKCS11RS_MIRROR_BOOTSTRAP_PASSWORD` and
+`PKCS11RS_MIRROR_DISCOVERY_PASSWORD` when necessary. Authentication Key IDs
+must be four hexadecimal digits in ascending order.
+
+This operation mirrors only asymmetric identities with public projections.
+Symmetric Authentication Keys have no copyable public material and require a
+separate key-distribution workflow.

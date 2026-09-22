@@ -430,6 +430,364 @@ fn initialize_hsms(
     );
 }
 
+fn initialize_remote_hsms(serials: Vec<String>, public_discovery: &str) {
+    let urls: Vec<_> = required("PKCS11RS_MIRROR_HSM_URLS")
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!urls.is_empty(), "PKCS11RS_MIRROR_HSM_URLS is empty");
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": true},
+            "slots": {"serials": serials},
+            "ccid": {"applications": ["hsmauth"]},
+            "software": {"slots": []},
+            "platform": {"enabled": false},
+            "yubihsm": {
+                "urls": urls,
+                "public_discovery": public_discovery,
+                "recreate_sessions": false
+            }
+        })),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut discovered = crate::with_context(|context| {
+        let slots = context
+            .slot_contexts
+            .read()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+        Ok(slots
+            .values()
+            .filter_map(|child| {
+                let child = child.lock().ok()?;
+                (child.slot.is_present() && child.slot.supports_yubihsm_management())
+                    .then(|| child.slot.serial().to_owned())
+            })
+            .collect::<Vec<_>>())
+    })
+    .expect("failed to inspect the remote HSM inventory");
+    discovered.sort();
+    let mut expected = serials;
+    expected.sort();
+    assert_eq!(
+        discovered, expected,
+        "the remote HSM inventory did not exactly match the requested serials"
+    );
+}
+
+#[derive(Clone, Debug)]
+struct MirroredAuthenticationKey {
+    info: crate::YubiHsmObjectInfo,
+    public_key: crate::SoftwarePublicKey,
+}
+
+fn read_authentication_key_for_mirror(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+) -> MirroredAuthenticationKey {
+    let info = crate::YubiHsmObjectInfo::parse(
+        &command(
+            session,
+            &crate::YubiHsmCommand::get_object_info(id, crate::YUBIHSM_AUTHENTICATION_KEY),
+        )
+        .unwrap_or_else(|error| {
+            panic!("reference Authentication Key {id:04x} is unreadable: {error:?}")
+        }),
+    )
+    .unwrap_or_else(|error| {
+        panic!("reference Authentication Key {id:04x} has invalid metadata: {error:?}")
+    });
+    assert_eq!(
+        info.algorithm,
+        crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+        "reference Authentication Key {id:04x} is not asymmetric P-256"
+    );
+    let public = find_hardware_object(session, CKO_PUBLIC_KEY as _, &id.to_be_bytes())
+        .unwrap_or_else(|| {
+            panic!("reference Authentication Key {id:04x} has no public projection")
+        });
+    assert_eq!(
+        read_hardware_attribute(session, public, CKA_LABEL as _),
+        info.label.as_bytes(),
+        "reference Authentication Key {id:04x} and its projection have different labels"
+    );
+    let public_key = p256_public_key(session, public);
+    MirroredAuthenticationKey { info, public_key }
+}
+
+fn inspect_target_authentication_key(
+    session: CK_SESSION_HANDLE,
+    expected: &MirroredAuthenticationKey,
+) -> Option<crate::YubiHsmObjectInfo> {
+    let listed = command(
+        session,
+        &crate::YubiHsmCommand::list_objects(&[
+            crate::yubihsm::ObjectFilter::Id(expected.info.id),
+            crate::yubihsm::ObjectFilter::Type(crate::YUBIHSM_AUTHENTICATION_KEY),
+        ])
+        .unwrap(),
+    )
+    .and_then(|response| crate::parse_yubihsm_object_list(&response))
+    .expect("target authentication-key inventory is unreadable");
+    match listed.as_slice() {
+        [] => None,
+        [entry] => Some(
+            crate::YubiHsmObjectInfo::parse(
+                &command(
+                    session,
+                    &crate::YubiHsmCommand::get_object_info(entry.id, entry.object_type),
+                )
+                .expect("target Authentication Key metadata is unreadable"),
+            )
+            .expect("target Authentication Key metadata is invalid"),
+        ),
+        _ => panic!(
+            "target contains duplicate Authentication Key {:04x}",
+            expected.info.id
+        ),
+    }
+}
+
+fn assert_matching_authentication_key(
+    target: &str,
+    actual: &crate::YubiHsmObjectInfo,
+    expected: &crate::YubiHsmObjectInfo,
+) {
+    assert_eq!(actual.id, expected.id, "{target}: ID differs");
+    assert_eq!(actual.label, expected.label, "{target}: label differs");
+    assert_eq!(actual.domains, expected.domains, "{target}: domains differ");
+    assert_eq!(
+        actual.algorithm, expected.algorithm,
+        "{target}: algorithm differs"
+    );
+    assert_eq!(
+        actual.capabilities, expected.capabilities,
+        "{target}: capabilities differ"
+    );
+    assert_eq!(
+        actual.delegated_capabilities, expected.delegated_capabilities,
+        "{target}: delegated capabilities differ"
+    );
+}
+
+fn is_restricted_public_discovery(info: &crate::YubiHsmObjectInfo) -> bool {
+    info.id == 1
+        && info.label == "pkcs11rs public discovery"
+        && info.domains == u16::MAX
+        && info.algorithm == crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION
+        && info.capabilities == crate::yubihsm_capabilities(&[0x00])
+        && info.delegated_capabilities == [0; 8]
+}
+
+#[test]
+#[ignore = "persistent mirroring of explicitly selected YubiHSM authentication identities"]
+fn mirrors_yubihsm_authentication_inventory() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = required("PKCS11RS_MIRROR_SOURCE");
+    let targets: Vec<_> = required("PKCS11RS_MIRROR_TARGETS")
+        .split(',')
+        .map(str::trim)
+        .filter(|serial| !serial.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!targets.is_empty(), "PKCS11RS_MIRROR_TARGETS is empty");
+    assert!(!targets.contains(&source), "source is also a target");
+    let mut unique_targets = targets.clone();
+    unique_targets.sort();
+    unique_targets.dedup();
+    assert_eq!(targets, unique_targets, "targets must be unique and sorted");
+    let ids: Vec<_> = required("PKCS11RS_MIRROR_AUTHENTICATION_KEY_IDS")
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|id| hex_u16("PKCS11RS_MIRROR_AUTHENTICATION_KEY_IDS", id))
+        .collect();
+    assert!(!ids.is_empty(), "no Authentication Key IDs were selected");
+    assert!(
+        !ids.contains(&1),
+        "Authentication Key 0001 is reserved for discovery"
+    );
+    let mut unique_ids = ids.clone();
+    unique_ids.sort_unstable();
+    unique_ids.dedup();
+    assert_eq!(
+        ids, unique_ids,
+        "Authentication Key IDs must be unique and sorted"
+    );
+
+    let discovery_password = crate::Zeroizing::new(
+        std::env::var("PKCS11RS_MIRROR_DISCOVERY_PASSWORD")
+            .unwrap_or_else(|_| "password".to_owned()),
+    );
+    let bootstrap_password = crate::Zeroizing::new(
+        std::env::var("PKCS11RS_MIRROR_BOOTSTRAP_PASSWORD")
+            .unwrap_or_else(|_| "password".to_owned()),
+    );
+    let discovery_pin = format!("0001{}", discovery_password.as_str());
+    let bootstrap_pin = format!("0001{}", bootstrap_password.as_str());
+    let mut serials = vec![source.clone()];
+    serials.extend(targets.iter().cloned());
+    initialize_remote_hsms(serials.clone(), &discovery_pin);
+
+    let source_session = open(&source);
+    let mirrored = ids
+        .iter()
+        .map(|id| read_authentication_key_for_mirror(source_session, *id))
+        .collect::<Vec<_>>();
+    for key in &mirrored {
+        eprintln!(
+            "reference {:04x} {:?}: domains {:04x}, capabilities {:02x?}, delegated {:02x?}",
+            key.info.id,
+            key.info.label,
+            key.info.domains,
+            key.info.capabilities,
+            key.info.delegated_capabilities
+        );
+    }
+    assert_eq!(crate::api::C_CloseSession(source_session), CKR_OK as CK_RV);
+
+    let mut target_sessions = Vec::with_capacity(targets.len());
+    for target in &targets {
+        let session = open(target);
+        login(session, &bootstrap_pin, &format!("target {target}"));
+        let discovery = crate::YubiHsmObjectInfo::parse(
+            &command(
+                session,
+                &crate::YubiHsmCommand::get_object_info(1, crate::YUBIHSM_AUTHENTICATION_KEY),
+            )
+            .expect("target discovery Authentication Key is unreadable"),
+        )
+        .expect("target discovery Authentication Key metadata is invalid");
+        let discovery_is_restricted = is_restricted_public_discovery(&discovery);
+        for key in &mirrored {
+            if let Some(actual) = inspect_target_authentication_key(session, key) {
+                assert_matching_authentication_key(target, &actual, &key.info);
+            }
+        }
+        target_sessions.push((target, session, discovery_is_restricted));
+    }
+    if std::env::var("PKCS11RS_MIRROR_APPLY").as_deref() != Ok("1") {
+        eprintln!("preflight complete; no objects were written");
+        for (_, session, _) in target_sessions {
+            assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+        finalize_for_test();
+        return;
+    }
+
+    for (target, session, _) in &target_sessions {
+        for key in &mirrored {
+            let result = crate::api::platform_credential::provision_platform_credential(
+                *session,
+                &key.info.label,
+                key.info.id,
+                &key.info.label,
+                key.info.domains,
+                key.info.capabilities,
+                key.info.delegated_capabilities,
+                &key.public_key,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to mirror Authentication Key {:04x} to {target}: {error:?}",
+                    key.info.id
+                )
+            });
+            let actual = inspect_target_authentication_key(*session, key)
+                .expect("mirrored Authentication Key is absent");
+            assert_matching_authentication_key(target, &actual, &key.info);
+            eprintln!(
+                "{target}: Authentication Key {:04x} {:?} result {result}",
+                key.info.id, key.info.label
+            );
+        }
+    }
+
+    let discovery_static_keys = crate::yubico_password_kdf(discovery_password.as_bytes())
+        .expect("failed to derive public-discovery authentication keys");
+    for (target, session, already_restricted) in &target_sessions {
+        if *already_restricted {
+            eprintln!("{target}: public discovery is already restricted");
+            continue;
+        }
+        command(
+            *session,
+            &crate::YubiHsmCommand::delete_object(1, crate::YUBIHSM_AUTHENTICATION_KEY),
+        )
+        .unwrap_or_else(|error| panic!("failed to remove factory key from {target}: {error:?}"));
+        let parameters = crate::yubihsm::DelegatedObjectParameters {
+            object: crate::YubiHsmObjectParameters {
+                id: 1,
+                label: "pkcs11rs public discovery",
+                domains: u16::MAX,
+                capabilities: crate::yubihsm_capabilities(&[0x00]),
+                algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+            },
+            delegated_capabilities: [0; 8],
+        };
+        let installed = command(
+            *session,
+            &crate::YubiHsmCommand::put_delegated_object(
+                crate::YubiHsmCommandCode::PutAuthenticationKey,
+                &parameters,
+                discovery_static_keys.as_slice(),
+            )
+            .expect("failed to encode public-discovery Authentication Key"),
+        )
+        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+        .unwrap_or_else(|error| {
+            panic!("failed to create restricted public-discovery key on {target}: {error:?}")
+        });
+        assert_eq!(installed, 1);
+        eprintln!("{target}: replaced factory key with restricted public discovery");
+    }
+    for (_, session, _) in target_sessions {
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
+
+    finalize_for_test();
+    initialize_remote_hsms(serials, &discovery_pin);
+    for target in &targets {
+        let session = open(target);
+        let objects = inventory(session);
+        for id in &ids {
+            assert!(
+                objects.iter().any(|(object_id, object_type, _)| {
+                    object_id == id && *object_type == crate::YUBIHSM_AUTHENTICATION_KEY
+                }),
+                "{target}: mirrored Authentication Key {id:04x} is absent"
+            );
+        }
+        let discovery = crate::YubiHsmObjectInfo::parse(
+            &command(
+                session,
+                &crate::YubiHsmCommand::get_object_info(1, crate::YUBIHSM_AUTHENTICATION_KEY),
+            )
+            .expect("public-discovery metadata is unreadable"),
+        )
+        .expect("public-discovery metadata is invalid");
+        assert!(is_restricted_public_discovery(&discovery));
+        assert!(
+            command(session, &crate::YubiHsmCommand::get_pseudo_random(1)).is_err(),
+            "{target}: public-discovery credential unexpectedly generated random data"
+        );
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        eprintln!("{target}: verified mirrored inventory and restricted discovery");
+    }
+    finalize_for_test();
+}
+
 fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
     initialize_hsms(
         vec![source.to_owned(), target.to_owned()],
