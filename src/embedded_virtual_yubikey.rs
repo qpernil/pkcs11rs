@@ -1,6 +1,8 @@
 use crate::{ApduCapabilities, CKR_DEVICE_ERROR, Connector, Error};
+#[cfg(not(feature = "abi-tests"))]
+use std::sync::OnceLock;
 use std::{
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use virtual_yubikey_core::{DeviceProfile, FidoConfiguration, VirtualYubiKey};
@@ -21,6 +23,7 @@ fn protocol_one_configuration() -> FidoConfiguration {
         .with_permissioned_pin_uv_auth_tokens(false)
 }
 
+#[cfg(not(feature = "abi-tests"))]
 static PROCESS_EMBEDDED_STATE: OnceLock<Arc<Mutex<VirtualYubiKey>>> = OnceLock::new();
 
 /// An embedded virtual YubiKey FIDO2 applet visible through a pkcs11rs build
@@ -57,6 +60,7 @@ impl EmbeddedVirtualYubiKeyConnector {
         })
     }
 
+    #[cfg(not(feature = "abi-tests"))]
     pub(crate) fn process_device() -> Result<Self, Error> {
         let state = PROCESS_EMBEDDED_STATE
             .get_or_init(|| Arc::new(Mutex::new(device(FidoConfiguration::default()))))
