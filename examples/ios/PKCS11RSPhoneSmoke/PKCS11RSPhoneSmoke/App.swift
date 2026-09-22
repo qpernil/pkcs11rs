@@ -1440,15 +1440,12 @@ private func loginSourceSlot(_ slot: CK_SLOT_ID) -> SourceLogin {
         return SourceLogin(authorization: nil, result: openResult)
     }
 
-    var password = Array(yubiHsmAuthPassword.utf8)
-    let loginResult = password.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_USER),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
+    let loginResult = C_Login(
+        session,
+        CK_USER_TYPE(CKU_USER),
+        nil,
+        0
+    )
     guard loginResult == CKR_OK || loginResult == CKR_USER_ALREADY_LOGGED_IN else {
         _ = C_CloseSession(session)
         return SourceLogin(authorization: nil, result: loginResult)

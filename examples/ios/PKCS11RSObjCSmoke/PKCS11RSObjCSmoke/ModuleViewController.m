@@ -1298,13 +1298,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     if (*result != CKR_OK) {
         return nil;
     }
-    NSMutableData *password =
-        [[PKCS11RSHsmAuthPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     *result = C_Login(session,
                       CKU_USER,
-                      password.mutableBytes,
-                      (CK_ULONG)password.length);
-    [password resetBytesInRange:NSMakeRange(0, password.length)];
+                      NULL_PTR,
+                      0);
     if (*result != CKR_OK && *result != CKR_USER_ALREADY_LOGGED_IN) {
         C_CloseSession(session);
         return nil;
