@@ -43,6 +43,11 @@ appears inside that slot's section as soon as the login is attempted. Every
 login performed during Refresh has a terse line containing the PKCS #11 entry
 point, user type, selector when applicable, and named return value.
 
+The Secure Enclave host slot has a no-secret login. The app authorizes it with
+`C_Login(CKU_USER, NULL_PTR, 0)` and retains that session while resolving
+YubiHSM credentials. The prototype password below is supplied only to the
+selected YubiHSM Auth credential; it is not a host-slot PIN.
+
 The initialization JSON enables NFC discovery. At launch, the app calls
 `C_Initialize` and `C_GetInfo` on its background inspection queue, but does not
 enumerate slots. The first tap on **Refresh** calls `C_GetSlotList` and presents

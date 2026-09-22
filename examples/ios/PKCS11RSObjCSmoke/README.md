@@ -13,9 +13,10 @@ The app uses UIKit's scene lifecycle, with a single `UIWindowScene` and a
 iOS 27 SDK. PKCS #11 inspection runs on its background queue.
 
 The inventory also exercises automatic YubiHSM authentication. It first logs
-in and retains a Secure Enclave source session. It then calls `C_LoginUser`
-with the provider-independent wildcard URI `pkcs11:` and the prototype
-YubiHSM Auth credential password `password` for each YubiHSM, processing
+in and retains a Secure Enclave source session using the host slot's no-secret
+`C_Login(CKU_USER, NULL_PTR, 0)` contract. It then calls `C_LoginUser` with the
+provider-independent wildcard URI `pkcs11:` and the prototype YubiHSM Auth
+credential password `password` for each YubiHSM, processing
 hardware session-key providers first and retaining successful sessions. This
 lets an authorized virtual YubiHSM supply a credential to later targets.
 Native YubiHSM Auth slots need no preliminary login. Other ordinary slots are
