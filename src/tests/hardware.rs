@@ -3506,7 +3506,7 @@ mod fido2_hardware {
 
     #[test]
     #[ignore = "requires a YubiKey exposed through PC/SC"]
-    fn pcsc_shared_connection_blocks_peers_only_during_an_operation() {
+    fn pcsc_exclusive_connection_rejects_peers_until_the_connector_is_dropped() {
         let _guard = TEST_LOCK.lock().unwrap();
         let context = pcsc::Context::establish(pcsc::Scope::System)
             .expect("failed to establish PC/SC context");
@@ -3519,46 +3519,47 @@ mod fido2_hardware {
         let connector = crate::PcscConnector::new(reader.clone(), context.clone());
         connector
             .refresh()
-            .expect("pkcs11rs failed to open a shared PC/SC connection");
+            .expect("pkcs11rs failed to open an exclusive PC/SC connection");
         let peer_context = pcsc::Context::establish(pcsc::Scope::System)
             .expect("failed to establish the peer PC/SC context");
-        let mut peer = peer_context
-            .connect(
+        let peer = peer_context.connect(
+            &reader,
+            pcsc::ShareMode::Shared,
+            pcsc::Protocols::T0 | pcsc::Protocols::T1,
+        );
+        match peer {
+            Err(pcsc::Error::SharingViolation) => {}
+            Err(error) => panic!(
+                "shared peer failed with {error}, expected a sharing violation while pkcs11rs owned the card exclusively"
+            ),
+            Ok(peer) => {
+                let _ = peer.disconnect(pcsc::Disposition::LeaveCard);
+                panic!("a shared peer connected while pkcs11rs owned the card exclusively");
+            }
+        }
+
+        drop(connector);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match peer_context.connect(
                 &reader,
                 pcsc::ShareMode::Shared,
                 pcsc::Protocols::T0 | pcsc::Protocols::T1,
-            )
-            .expect("a second shared PC/SC connection could not coexist with pkcs11rs");
-
-        let device = connector.device_context().unwrap();
-        let operation = device
-            .lock_operation(crate::device::DeviceOperationKind::Ccid)
-            .expect("failed to enter the pkcs11rs PC/SC operation");
-        CcidProbe::Management
-            .run(&connector)
-            .expect("read-only management probe failed inside the transaction");
-
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
-        let peer_thread = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let result = peer.transaction().map(drop);
-            finished_tx.send(result).unwrap();
-        });
-        started_rx.recv().unwrap();
-        assert!(
-            finished_rx
-                .recv_timeout(Duration::from_millis(250))
-                .is_err(),
-            "the peer entered a PC/SC transaction before pkcs11rs released its operation"
-        );
-
-        drop(operation);
-        finished_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the peer remained blocked after pkcs11rs ended its operation")
-            .expect("the peer transaction failed after pkcs11rs released the card");
-        peer_thread.join().unwrap();
+            ) {
+                Ok(peer) => {
+                    peer.disconnect(pcsc::Disposition::LeaveCard)
+                        .map_err(|(_, error)| error)
+                        .expect("failed to release the peer connection");
+                    break;
+                }
+                Err(pcsc::Error::SharingViolation) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => {
+                    panic!("peer did not connect after pkcs11rs released the card: {error}")
+                }
+            }
+        }
     }
 
     #[test]
@@ -3600,7 +3601,7 @@ mod fido2_hardware {
         });
         finished_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("the second reader was blocked by the first reader's transaction")
+            .expect("the second reader was blocked by the first reader's exclusive connection")
             .expect("the second read-only management probe failed");
 
         drop(first_operation);
@@ -3609,7 +3610,7 @@ mod fido2_hardware {
 
     #[test]
     #[ignore = "requires two YubiKeys exposed through PC/SC"]
-    fn one_pcsc_context_allows_transactions_on_different_readers() {
+    fn one_pcsc_context_allows_exclusive_connections_on_different_readers() {
         let _guard = TEST_LOCK.lock().unwrap();
         let context = pcsc::Context::establish(pcsc::Scope::System)
             .expect("failed to establish PC/SC context");
@@ -3620,35 +3621,35 @@ mod fido2_hardware {
             .take(2)
             .collect::<Vec<_>>();
         assert_eq!(readers.len(), 2, "two PC/SC readers are required");
-        let mut first = context
+        let first = context
             .connect(
                 &readers[0],
-                pcsc::ShareMode::Shared,
+                pcsc::ShareMode::Exclusive,
                 pcsc::Protocols::T0 | pcsc::Protocols::T1,
             )
             .expect("failed to connect to the first reader");
-        let mut second = context
-            .connect(
-                &readers[1],
-                pcsc::ShareMode::Shared,
-                pcsc::Protocols::T0 | pcsc::Protocols::T1,
-            )
-            .expect("failed to connect to the second reader");
-
-        let first_transaction = first
-            .transaction()
-            .expect("failed to begin the first reader transaction");
+        let second_context = context.clone();
+        let second_reader = readers[1].clone();
         let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
         let second_thread = std::thread::spawn(move || {
-            let result = second.transaction().map(drop);
+            let result = second_context
+                .connect(
+                    &second_reader,
+                    pcsc::ShareMode::Exclusive,
+                    pcsc::Protocols::T0 | pcsc::Protocols::T1,
+                )
+                .map(drop);
             finished_tx.send(result).unwrap();
         });
         finished_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("the shared context blocked a transaction on another reader")
-            .expect("the second reader transaction failed");
+            .expect("the shared context blocked an exclusive connection on another reader")
+            .expect("the second reader exclusive connection failed");
 
-        drop(first_transaction);
+        first
+            .disconnect(pcsc::Disposition::LeaveCard)
+            .map_err(|(_, error)| error)
+            .expect("failed to release the first reader");
         second_thread.join().unwrap();
     }
 

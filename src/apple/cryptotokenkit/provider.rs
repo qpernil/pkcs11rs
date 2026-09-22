@@ -10,8 +10,9 @@ use crate::*;
 use objc2::rc::autoreleasepool;
 use objc2_crypto_token_kit::{TKSmartCardSlot, TKSmartCardSlotManager, TKSmartCardSlotState};
 use objc2_foundation::NSString;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Instant;
@@ -48,6 +49,7 @@ impl CcidConnector {
                 worker: worker.clone(),
                 reader_state: reader_state.clone(),
                 present: present.clone(),
+                connection_epoch: connection_epoch.clone(),
                 nfc: nfc.clone(),
             });
             let device = Arc::new(DeviceContext::with_lifecycle(
@@ -234,6 +236,7 @@ impl CcidConnector {
                     self.reader_name.clone(),
                     self.nfc.clone(),
                     self.present.clone(),
+                    self.connection_epoch.clone(),
                 )
             })
             .as_ref()
@@ -379,9 +382,7 @@ impl Connector for CcidConnector {
     }
 
     fn refresh(&self) -> Result<(), Error> {
-        if self.worker()?.refresh()? {
-            self.connection_epoch.fetch_add(1, Ordering::AcqRel);
-        }
+        self.worker()?.refresh()?;
         Ok(())
     }
 }
@@ -394,11 +395,15 @@ pub(crate) struct CcidReader {
 
 pub(crate) struct CcidProvider {
     enabled: bool,
+    connectors: Mutex<HashMap<String, Weak<CcidConnector>>>,
 }
 
 impl CcidProvider {
     pub(crate) fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            connectors: Mutex::new(HashMap::new()),
+        }
     }
 
     pub(crate) fn name(&self) -> &'static str {
@@ -409,18 +414,35 @@ impl CcidProvider {
         if !self.enabled {
             return Ok(Vec::new());
         }
-        CcidConnector::enumerate()?
+        let candidates = CcidConnector::enumerate()?;
+        let mut connectors = self.connectors.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        let present = candidates
+            .iter()
+            .map(|connector| connector.reader_name.clone())
+            .collect::<HashSet<_>>();
+        let readers = candidates
             .into_iter()
-            .map(|connector| {
+            .map(|candidate| {
+                let name = candidate.reader_name.clone();
+                let connector = connectors
+                    .get(&name)
+                    .and_then(Weak::upgrade)
+                    .unwrap_or_else(|| {
+                        let connector = Arc::new(candidate);
+                        connectors.insert(name, Arc::downgrade(&connector));
+                        connector
+                    });
                 let reader_state = connector.reader_state();
                 let inventory_presence = Some(connector.presence());
                 Ok(CcidReader {
-                    connector: Arc::new(connector) as SharedConnector,
+                    connector: connector as SharedConnector,
                     reader_state,
                     inventory_presence,
                 })
             })
-            .collect()
+            .collect();
+        connectors.retain(|name, connector| present.contains(name) || connector.strong_count() > 0);
+        readers
     }
 }
 

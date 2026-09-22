@@ -3,7 +3,7 @@ use super::*;
 
 #[test]
 #[ignore = "requires an explicit YubiKey serial and configured SCP credentials"]
-fn card_scp_protected_reads_across_transactions() {
+fn card_scp_protected_reads_across_operations() {
     let _guard = TEST_LOCK.lock().unwrap();
     let serial = std::env::var("PKCS11RS_TEST_ISSUER_SD_SOURCE")
         .expect("PKCS11RS_TEST_ISSUER_SD_SOURCE must select one serial");
@@ -66,8 +66,8 @@ fn card_scp_protected_reads_across_transactions() {
                 let connector = ctx.slot.security_domain_provisioning_connector().unwrap();
                 connector
                     .establish_secure_channel(&crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID)?;
-                // Each closure owns a separate device transaction. Both GET DATA
-                // responses must pass channel MAC verification and decryption.
+                // Repeated operations retain one selected applet and channel.
+                // Both responses must pass MAC verification and decryption.
                 let keys = crate::SecurityDomainClient.get_key_information(connector.as_ref())?;
                 let cplc = crate::SecurityDomainClient.get_cplc(connector.as_ref())?;
                 Ok((keys, cplc))
@@ -82,7 +82,7 @@ fn card_scp_protected_reads_across_transactions() {
             }
         }
         eprintln!(
-            "{serial}: {protocol} authenticated and verified protected reads in three separate transactions"
+            "{serial}: {protocol} authenticated and verified protected reads in three operations"
         );
     });
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);

@@ -32,8 +32,9 @@ once per connected card and trust policy by temporarily selecting the Issuer
 SD and reading the chain for the configured SCP11 KID/KVN. It validates the
 chain against the selected CA, including validity periods and CA constraints,
 and caches the validated leaf P-256 public key. The module then selects the
-target applet and performs the actual SCP11 handshake there. Later transactions
-reuse the validated public key without selecting the Issuer SD. The cache is
+target applet and performs the actual SCP11 handshake there. Later channel
+establishment reuses the validated public key without selecting the Issuer SD.
+The cache is
 discarded after reconnection or Security Domain mutation. The module never
 implicitly trusts a certificate obtained from the card.
 
@@ -99,10 +100,10 @@ provider objects are released on both success and failure. Existing provider
 sessions use the same operations, but card configuration does not yet select
 credentials by slot and label.
 
-The live SCP11 session and selected applet belong to one native smart-card
-transaction and are destroyed together when the device-backed PKCS #11 call
-ends. Later calls reuse only the connection-scoped validated card public key;
-they perform a fresh SCP11 handshake for their transaction.
+The live SCP11 session remains paired with the selected applet across calls.
+Selecting another applet or reconnecting destroys the live channel. The
+validated card public key is cached separately for the connection and can be
+reused by later channel establishment.
 
 ## Issuer SD key provisioning
 

@@ -389,6 +389,13 @@ impl Slot for OpenPgpSlot {
         self.connector.clear_secure_channel();
         Ok(())
     }
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        self.connector.set_ccid_login_state(match role {
+            Some(LoginRole::User) => CcidLoginState::User,
+            Some(LoginRole::So) => CcidLoginState::So,
+            None => CcidLoginState::Public,
+        })
+    }
     fn init_slot(&mut self) -> Result<(), Error> {
         let info = OpenPgpClient
             .select(self.connector.as_ref(), &self.application_aid)
@@ -642,7 +649,10 @@ impl Slot for OpenPgpSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get()
+        self.connector.ccid_login_state().map_or_else(
+            || self.authenticated.get(),
+            |state| state != CcidLoginState::Public && self.authenticated.get(),
+        )
     }
     fn openpgp_generate_key_pair(
         &mut self,

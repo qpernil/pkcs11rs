@@ -33,6 +33,11 @@ resolver = "3"
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[[bin]]
+name = "pcsc-exclusive-test"
+path = "src/bin/pcsc-exclusive-test.rs"
+required-features = ["native-hardware"]
+
 [features]
 default = ["native-hardware"]
 abi-tests = ["dep:p256", "dep:virtual-yubihsm-core"]

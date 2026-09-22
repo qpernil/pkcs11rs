@@ -486,7 +486,8 @@ have a separate local lifetime: provider removal cannot revoke already-read
 bytes. Channel close or protocol/transport failure clears them. Authenticated
 device-command errors keep the channel usable; local validation errors leave
 its keys, counters, and MAC chain intact. Reconnection never silently recreates
-lost working keys. Preserve transaction-scoped CCID lifetimes for card channels.
+lost working keys. Card-channel lifetime follows the retained selected applet
+and ends on applet switch or reconnection.
 
 ## Remaining acceptance checks
 

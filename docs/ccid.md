@@ -35,8 +35,8 @@ transport behind those slots, including when the YubiKey moves between NFC and
 USB CCID. Applet discovery is not repeated. A normal refresh of an unchanged
 connection sends no discovery APDUs; after a connection is reacquired,
 pkcs11rs reads only enough YubiKey management data to validate the serial.
-Each actual applet operation still selects its AID inside its native smart-card
-transaction, which is normal PKCS #11 use rather than rediscovery.
+The first operation on an applet selects its AID. Repeated operations reuse
+that selection until another applet is selected or the card reconnects.
 
 A removed token therefore leaves its slots registered but absent. A different
 serial appearing under a reused reader name does not inherit those slots; it is
@@ -50,12 +50,12 @@ An iOS build calls CryptoTokenKit directly through Rust Objective-C bindings.
 It obtains the current `TKSmartCardSlotManager` names on every slot-list
 refresh. Those names are transient locators; the validated serial owns the
 slots. The connector lazily starts one worker for each active locator. That
-worker owns and reuses the reader's `TKSmartCard`, serializes its
-APDUs, and adapts asynchronous session and transmit completions to the
-synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains
-cached, but the current transport opens one exclusive CryptoTokenKit session
-at the first APDU of a device-backed PKCS #11 call and ends it when that call
-returns. A removed card invalidates the retained object; enumeration may
+worker owns and reuses the reader's `TKSmartCard`, serializes its APDUs, and
+adapts asynchronous session and transmit completions to the synchronous
+PKCS #11 call. Before beginning the native session it marks the card sensitive,
+then retains that session while the card and connector remain valid. A removed
+card invalidates the retained object and advances the connection generation;
+enumeration may
 resolve the same serial through the same or a different locator when it
 returns.
 Objective-C objects retained for card I/O stay confined to the worker that
@@ -93,69 +93,58 @@ initial-discovery, reacquisition, reuse, and cancellation cases.
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 
-For each device-backed PKCS #11 call, pkcs11rs lazily begins one native
-smart-card transaction before the first APDU and ends it when the call returns.
-This is a CryptoTokenKit smart-card session on iOS and an
-`SCardBeginTransaction`/`SCardEndTransaction` pair on desktop PC/SC. Every APDU
-belonging to that call therefore runs without interleaving from another
-cooperative client. Because another client may select a different applet
-between calls, a new transaction begins without any assumed card selection.
-The first APDU selects the configured AID while the transaction is held. The
-selected AID and live SCP03 or SCP11 session belong to that transaction and are
-destroyed together when it ends. Validated SCP11 public-key material remains
-available across transactions for the same connected card.
+One card-wide state records either no selected applet or the selected AID with
+its live SCP03/SCP11 session and logical PKCS #11 login role. Selecting another
+applet replaces this state: the old applet's PKCS #11 sessions remain open but
+become public. Repeated operations on the same applet do not send another
+SELECT. Card removal, replacement, or transport reconnection clears the whole
+state. Validated SCP11 public-key material is separately cached for the same
+connected card and is also discarded on reconnection.
 
 ## PC/SC ownership and external daemons
 
-pkcs11rs connects to each card with `SCARD_SHARE_SHARED`. Its reader worker
-serializes all local APDUs and retains one PC/SC transaction across all APDUs
-in a device-backed PKCS #11 call. Calls that perform no APDU do not acquire a
-transaction. Low-level calls made outside a PKCS #11 operation use a one-APDU
-transaction as a fallback. Another shared PC/SC client can therefore remain
-connected and use the card between pkcs11rs calls. An exclusive PC/SC owner can
-still prevent connection. Until the reader has contributed a slot, a later
-`C_GetSlotList` retries the applet probe. If the reader already has slots, they
-remain registered and report the failed connection as token absence. PC/SC
+pkcs11rs connects to each desktop card with `SCARD_SHARE_EXCLUSIVE`. Its reader
+worker retains that connection and serializes all local APDUs; it does not use
+per-call PC/SC transactions. Another process cannot connect to the card until
+the pkcs11rs connector releases it. An existing shared or exclusive owner can
+therefore prevent pkcs11rs from connecting. Until the reader has contributed a
+slot, a later `C_GetSlotList` retries the applet probe. If the reader already
+has slots, they remain registered and report the failed connection as token
+absence. PC/SC
 ownership applies to the reader, not one selected applet: an exclusive client
 using OpenPGP can therefore also make PIV, YubiHSM Auth, Issuer SD, and FIDO
 over CCID unavailable through that reader. A separate native FIDO HID
 interface does not depend on PC/SC ownership.
 
 On macOS, GnuPG `scdaemon` is a common competing owner. It can use either its
-built-in CCID driver, which opens the USB CCID interface directly and bypasses
-PC/SC, or Apple's `PCSC.framework`. A typical `~/.gnupg/scdaemon.conf`
-configuration that disables the direct driver and makes GnuPG request a shared
-PC/SC connection is:
-
-```text
-disable-ccid
-pcsc-shared
-card-timeout 5
-```
-
-Apply it to the next daemon instance with:
+built-in CCID driver, which opens the USB interface directly, or Apple's
+`PCSC.framework`. Stop it before opening pkcs11rs:
 
 ```sh
 gpgconf --kill scdaemon
 ```
 
-`disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. They allow
-both programs to hold shared PC/SC connections, and pkcs11rs's operations are
-protected by transactions and applet re-selection. GnuPG documents
-`pcsc-shared` as potentially unsafe because `scdaemon` still assumes exclusive
-ownership and caches card state. Its current PC/SC implementation loads the
-transaction entry points but does not use them around commands. pkcs11rs cannot
-make such a peer's own multi-APDU operations atomic: another client can still
-take a transaction between two unprotected `scdaemon` commands. Fully safe
-coexistence requires every client to use shared connections,
-transaction-bounded multi-APDU operations, and correct applet re-selection.
+`disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. Shared mode
+does not permit coexistence with pkcs11rs's exclusive connection. The exclusive
+boundary is intentional: smart-card applet selection, PIN verification, and
+secure-channel state are card-global and cannot be reconstructed safely after
+arbitrary traffic from another process.
 
 Native FIDO HID discovery does not use PC/SC and may remain available while
 the CCID interface is owned by another process.
 
 [GnuPG documents `pcsc-shared` and its warning](https://www.gnupg.org/documentation/manuals/gnupg26/scdaemon.1.html).
-[The GnuPG transaction discussion](https://dev.gnupg.org/T5484) confirms the
-unimplemented boundary.
+
+The standalone ownership check sends no APDUs. With exactly one reader and one
+inserted card, run:
+
+```sh
+cargo run --features native-hardware --bin pcsc-exclusive-test
+```
+
+If more readers are installed, pass one exact PC/SC reader name after `--`. The
+check verifies that a peer is rejected while the exclusive connection is alive
+and can connect after it is released.
 
 ## Allowlist
 
@@ -187,11 +176,9 @@ remain local to their applet slot and do not overwrite the physical identity.
 ## Secure channels
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, `scp11b`, or `scp11c`
-to use that transport for every selected CCID applet. A live secure channel is
-owned by one native smart-card transaction. The first APDU selects the
-transaction's requested AID and establishes the configured channel; ending the
-transaction destroys both states. A later operation therefore selects and
-authenticates again instead of trusting reader state retained between calls.
+to use that transport for every selected CCID applet. Selecting an applet
+establishes the configured channel, and the live channel remains paired with
+that selected AID. Selecting another applet or reconnecting destroys it.
 
 The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,

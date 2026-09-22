@@ -1760,6 +1760,7 @@ impl SlotState {
         slot_id: CK_SLOT_ID,
     ) {
         if self.login_role.is_some() && !self.is_slot_logged_in(slot, slot_id) {
+            slot.clear_session();
             self.clear_login_state(slot_id);
         }
     }
@@ -2025,6 +2026,7 @@ impl SlotState {
         slot_id: CK_SLOT_ID,
     ) -> Result<(), Error> {
         self._get_slot_mut(slot, slot_id)?.logout()?;
+        self.get_slot(slot, slot_id)?.set_login_role(None)?;
         self.clear_login_state(slot_id);
         if self
             .get_slot(slot, slot_id)?

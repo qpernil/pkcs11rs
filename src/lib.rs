@@ -1077,8 +1077,8 @@ use abi_test_backend::*;
 
 mod connector;
 pub(crate) use connector::{
-    CcidDeviceConnector, Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
-    PcscAppletConnector, PcscReaderState, SharedConnector,
+    CcidDeviceConnector, CcidLoginState, Connector, HttpConnector, HttpConnectorEndpoint,
+    HttpConnectorTlsConfig, PcscAppletConnector, PcscReaderState, SharedConnector,
 };
 #[cfg(feature = "native-hardware")]
 pub(crate) use connector::{PcscConnector, UsbConnector};

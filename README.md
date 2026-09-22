@@ -65,9 +65,9 @@ software mechanism list for session keys.
   chains, plus explicit SCP03 and SCP11 administration. See
   [CCID applets](docs/ccid.md), [SCP03](docs/scp03.md), and
   [SCP11](docs/scp11.md).
-- Shared PC/SC/CryptoTokenKit reader ownership prevents different applet slots
-  on the same physical YubiKey from racing each other while preserving
-  concurrency between devices. See [CCID applets](docs/ccid.md).
+- Exclusive PC/SC ownership and sensitive CryptoTokenKit sessions preserve one
+  selected applet, secure channel, and logical login state per physical card,
+  while different readers remain concurrent. See [CCID applets](docs/ccid.md).
 
 ### FIDO2 as PKCS #11
 
@@ -139,7 +139,8 @@ software mechanism list for session keys.
 
 ### Secure transport, remote access, and virtual devices
 
-- SCP03 and SCP11a/b/c secure messaging share the same CCID transaction model.
+- SCP03 and SCP11a/b/c secure messaging share the same retained CCID applet
+  state.
   See [SCP03](docs/scp03.md) and [SCP11](docs/scp11.md).
 - The asynchronous multi-device connector exposes every attached YubiHSM by
   verified serial, serializes requests per device, runs different devices
@@ -264,14 +265,15 @@ return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
 calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
 
 Applet connectors on a reader share one `PcscReaderState`, which owns the card
-connection, APDU capabilities, validated SCP11 trust cache, and complete APDU
-exchange lock. Each device-backed PKCS #11 call creates transaction-local
-selected-AID and live SCP03/SCP11 state and destroys both when the transaction
-ends. PKCS #11 calls targeting different applet slots may overlap
-while working with their independent slot and session state, but their card
-interactions cannot: each applet selection or complete APDU exchange on one
-reader holds the shared physical-reader gate. Different YubiHSMs and different
-native CCID readers can execute concurrently. When Yubico's
+connection, APDU capabilities, selected AID, live SCP03/SCP11 state, logical
+login role, validated SCP11 trust cache, and complete APDU-exchange lock.
+Repeated operations on the selected applet send no extra SELECT. Selecting a
+different applet discards the previous applet's secure channel and logical
+login, so its existing PKCS #11 sessions remain open but become public.
+PKCS #11 calls targeting different applet slots may overlap while working with
+their independent slot and session state, but their card interactions cannot.
+Different YubiHSMs and different native CCID readers can execute concurrently.
+When Yubico's
 device-information commands report the same physical serial over HID and CCID,
 pkcs11rs additionally prevents its own HID and CCID operations from
 overlapping. HID remains shared with other HID clients; no exclusive HID lock
@@ -860,18 +862,16 @@ USB re-enumeration can rename the same reader. The validated YubiKey serial
 instead owns the applet topology and slot IDs for the module lifetime. A new
 serial is probed once; a different PC/SC, CryptoTokenKit USB, or NFC locator for
 a known serial is rebound without repeating applet discovery. Later listings
-refresh presence, and real operations reconnect and reselect the slot's AID as
-normal PKCS #11 transaction handling. Removing the token therefore marks its
-existing slots absent without forgetting them.
+refresh presence without probing or deselecting an authenticated applet.
+Removing the token marks its existing slots absent without forgetting them.
 
-pkcs11rs opens PC/SC cards with `SCARD_SHARE_SHARED`. Each device-backed
-PKCS #11 call lazily begins one PC/SC transaction before its first APDU and
-ends it when the call returns. The applet is reselected inside every new
-transaction, so cooperative PC/SC clients can use the card between calls
-without corrupting pkcs11rs's selected-applet state. On macOS, GnuPG
-`scdaemon` must use its PC/SC path and shared mode to coexist; its direct CCID
-driver bypasses PC/SC coordination. Native FIDO HID discovery is independent
-and may still expose the authenticator. `PKCS11RS_LOG=warn` logs reader-open
+pkcs11rs opens each desktop PC/SC card with `SCARD_SHARE_EXCLUSIVE` and retains
+that connection for the reader connector's lifetime. This prevents another
+process from changing the selected applet or invalidating card authentication
+between PKCS #11 calls. Stop competing owners such as GnuPG `scdaemon` before
+using the module; `pcsc-shared` does not make it coexist with pkcs11rs's
+exclusive connection. Native FIDO HID discovery is independent and may still
+expose the authenticator. `PKCS11RS_LOG=warn` logs reader-open
 failures, `debug` adds successful discovery and phase timing, and `trace` adds
 per-request transport timing.
 See [CCID applet configuration](docs/ccid.md#pcsc-ownership-and-external-daemons)

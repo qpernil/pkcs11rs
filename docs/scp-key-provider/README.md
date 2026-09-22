@@ -264,8 +264,8 @@ remain independent of this fixture.
 ## 2. Card derivation
 
 Card SCP03 S8 and SCP11a/b/c use `Pkcs11Auth` through scoped provider objects.
-Their transcripts, security levels, response IV direction bit, and native
-smart-card transaction lifetime remain protocol-specific. Message AES/CMAC
+Their transcripts, security levels, response IV direction bit, and live
+card-channel lifetime remain protocol-specific. Message AES/CMAC
 runs locally with the derived working keys.
 
 SCP03 accepts AES-128/192/256 configured inputs. A temporary software provider
@@ -285,14 +285,14 @@ OCE authentication. Every temporary object is released on success or failure.
 
 Provider and session ownership uses `Arc`; the module's existing slot locks
 serialize backend access and provider selection remains thread-local. A retained
-DEK can move with a card transaction between caller threads. Direct input
+DEK can move with a live card channel between caller threads. Direct input
 configuration remains supported; selecting card credentials by a configured
 slot/label is future work. Existing authorized sources are covered at the
 provider layer without copying or reading their credential values.
 
 Validation includes fixed card vectors, AES-192/256, batch diversification,
 all ECDH placement paths, failed receipts and source policies, source logout, cross-thread
-DEK use and cleanup, plus virtual-YubiKey provisioning and transaction-lifetime
+DEK use and cleanup, plus virtual-YubiKey provisioning and channel-lifetime
 regressions. Caller-supplied new-key material and KCV calculation remain an
 explicit administration input workflow. SCP03 S16 is outside this plan.
 

@@ -9,7 +9,10 @@ pub(crate) use provider::{CcidConnector, CcidProvider, CcidReader};
 use crate::device::DeviceOperationLifecycle;
 use crate::*;
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::{Arc, OnceLock, Weak, atomic::AtomicBool};
+use std::sync::{
+    Arc, OnceLock, Weak,
+    atomic::{AtomicBool, AtomicU64},
+};
 use worker::AppleCcidWorker;
 
 fn nfc_diagnostic(message: std::fmt::Arguments<'_>) {
@@ -44,6 +47,7 @@ struct AppleCcidLifecycle {
     worker: Arc<OnceLock<Result<AppleCcidWorker, CK_RV>>>,
     reader_state: Weak<PcscReaderState>,
     present: Arc<AtomicBool>,
+    connection_epoch: Arc<AtomicU64>,
     nfc: Option<Arc<NfcTransport>>,
 }
 
@@ -65,6 +69,7 @@ impl AppleCcidLifecycle {
                     self.reader_name.clone(),
                     self.nfc.clone(),
                     self.present.clone(),
+                    self.connection_epoch.clone(),
                 )
             })
             .as_ref()
@@ -80,20 +85,13 @@ impl DeviceOperationLifecycle for AppleCcidLifecycle {
         if let Some(nfc) = &self.nfc {
             nfc.enter(kind, message)?;
         }
-        let Some(reader_state) = self.reader_state.upgrade() else {
+        let Some(_reader_state) = self.reader_state.upgrade() else {
             if let Some(nfc) = &self.nfc {
                 nfc.exit(kind);
             }
             return Err(CKR_DEVICE_ERROR.into());
         };
-        if let Err(error) = reader_state.begin_transaction() {
-            if let Some(nfc) = &self.nfc {
-                nfc.exit(kind);
-            }
-            return Err(error);
-        }
         if let Err(error) = self.worker().and_then(AppleCcidWorker::begin_operation) {
-            reader_state.end_transaction();
             if let Some(nfc) = &self.nfc {
                 nfc.exit(kind);
             }
@@ -115,9 +113,6 @@ impl DeviceOperationLifecycle for AppleCcidLifecycle {
                     "failed to end CryptoTokenKit device operation"
                 );
             }
-        }
-        if let Some(reader_state) = self.reader_state.upgrade() {
-            reader_state.end_transaction();
         }
         if let Some(nfc) = &self.nfc {
             nfc.exit(kind);
