@@ -1,4 +1,4 @@
-#[cfg(feature = "embedded-virtual-yubikey")]
+#[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
 use crate::EmbeddedVirtualYubiKeyConnector;
 #[cfg(all(
     test,
@@ -47,7 +47,7 @@ use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
-#[cfg(feature = "embedded-virtual-yubikey")]
+#[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
 const EMBEDDED_VIRTUAL_YUBIKEY_SERIAL: &str = "EMBEDDED0001";
 
 #[derive(Clone, Debug)]
