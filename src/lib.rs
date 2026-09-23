@@ -77,6 +77,8 @@ use error::*;
 mod apple;
 mod configuration;
 mod logging;
+#[cfg(any(target_os = "ios", test))]
+mod nested_session;
 use configuration::{
     JsonConfiguration, ModuleConfiguration, ReservedConfiguration, Scp03KeyMaterialConfiguration,
     SecureChannelConfiguration,

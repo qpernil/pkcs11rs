@@ -1,4 +1,5 @@
 use super::card::{discover_card_identity, resolve_card};
+use super::worker::AppleCcidWorker;
 use super::{CcidConnector, DEFAULT_TIMEOUT, load_crypto_token_kit, nfc_diagnostic};
 use crate::device::{DeviceIdentity, DeviceOperationLifecycle};
 use crate::*;
@@ -9,7 +10,7 @@ use objc2_crypto_token_kit::{
 };
 use objc2_foundation::{NSError, NSString};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc};
 use std::time::Instant;
 
 pub(super) const NFC_CARD_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
@@ -92,6 +93,40 @@ impl Drop for NfcSessionGuard {
     }
 }
 
+// The worker holds a clone for as long as its card session is open. Removing
+// the transport's clone cannot end the NFC slot before that card session.
+#[derive(Clone)]
+pub(super) struct SharedNfcSession {
+    id: u64,
+    guard: Arc<Mutex<NfcSessionGuard>>,
+}
+
+impl SharedNfcSession {
+    fn new(guard: NfcSessionGuard) -> Self {
+        Self {
+            id: guard.id,
+            guard: Arc::new(Mutex::new(guard)),
+        }
+    }
+
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn update_message_checked(&self, message: &str) -> Result<(), Error> {
+        self.guard
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .update_message_checked(message)
+    }
+
+    fn set_close_reason(&self, reason: &'static str) {
+        if let Ok(mut guard) = self.guard.lock() {
+            guard.close_reason = reason;
+        }
+    }
+}
+
 fn create_nfc_session(message: &str) -> Result<(NfcSessionGuard, String), Error> {
     load_crypto_token_kit()?;
     let manager = unsafe { TKSmartCardSlotManager::defaultManager() }.ok_or(CKR_DEVICE_ERROR)?;
@@ -164,6 +199,7 @@ pub(super) struct PreparedNfcCard {
     pub(super) generation: u64,
     pub(super) slot_name: String,
     pub(super) verify_serial: bool,
+    pub(super) session: SharedNfcSession,
 }
 
 // CryptoTokenKit NFC slot names are session-scoped. The initial identity scan
@@ -171,7 +207,7 @@ pub(super) struct PreparedNfcCard {
 // session is only transport state for that same stable identity.
 struct NfcTransportState {
     mounted_serial: Option<String>,
-    session: Option<NfcSessionGuard>,
+    session: Option<SharedNfcSession>,
     slot_name: Option<String>,
     generation: u64,
     verified_generation: Option<u64>,
@@ -183,9 +219,9 @@ struct NfcTransportState {
 }
 
 impl NfcTransportState {
-    fn take_session(&mut self, reason: &'static str) -> Option<NfcSessionGuard> {
-        self.session.take().map(|mut session| {
-            session.close_reason = reason;
+    fn take_session(&mut self, reason: &'static str) -> Option<SharedNfcSession> {
+        self.session.take().map(|session| {
+            session.set_close_reason(reason);
             nfc_diagnostic(format_args!(
                 "NFC session {}: releasing generation={}; operation_active={}; slot={:?}; reason={reason}",
                 session.id, self.generation, self.operation_active, self.slot_name
@@ -197,6 +233,7 @@ impl NfcTransportState {
 
 pub(crate) struct NfcTransport {
     state: Mutex<NfcTransportState>,
+    worker: Mutex<Option<Weak<OnceLock<Result<AppleCcidWorker, CK_RV>>>>>,
     present: Arc<AtomicBool>,
     acquire: Mutex<()>,
     wake: Condvar,
@@ -219,6 +256,26 @@ impl std::fmt::Debug for NfcTransport {
 }
 
 impl NfcTransport {
+    pub(super) fn bind_worker(&self, worker: Weak<OnceLock<Result<AppleCcidWorker, CK_RV>>>) {
+        if let Ok(mut bound) = self.worker.lock() {
+            *bound = Some(worker);
+        }
+    }
+
+    fn release_session(&self, ended: Option<SharedNfcSession>) {
+        let Some(ended) = ended else { return };
+        let id = ended.id;
+        drop(ended);
+        let worker = self
+            .worker
+            .lock()
+            .ok()
+            .and_then(|bound| bound.as_ref().and_then(Weak::upgrade));
+        if let Some(Ok(worker)) = worker.as_ref().and_then(|worker| worker.get()) {
+            worker.release_nfc_session(id);
+        }
+    }
+
     fn new(
         mut session: NfcSessionGuard,
         slot_name: String,
@@ -228,7 +285,7 @@ impl NfcTransport {
         let transport = Arc::new(Self {
             state: Mutex::new(NfcTransportState {
                 mounted_serial: Some(expected_serial),
-                session: Some(session),
+                session: Some(SharedNfcSession::new(session)),
                 slot_name: Some(slot_name),
                 generation: 1,
                 verified_generation: Some(1),
@@ -238,6 +295,7 @@ impl NfcTransport {
                 missing_since: None,
                 cancel_retry_after: None,
             }),
+            worker: Mutex::new(None),
             present: Arc::new(AtomicBool::new(true)),
             acquire: Mutex::new(()),
             wake: Condvar::new(),
@@ -304,7 +362,7 @@ impl NfcTransport {
                 state.missing_since = None;
                 self.present.store(false, Ordering::Release);
                 drop(state);
-                drop(ended);
+                self.release_session(ended);
                 state = match self.state.lock() {
                     Ok(state) => state,
                     Err(_) => return,
@@ -324,13 +382,23 @@ impl NfcTransport {
         }
     }
 
-    pub(super) fn prepare(&self) -> Result<PreparedNfcCard, CK_RV> {
+    pub(super) fn prepare(
+        &self,
+        active_session_id: Option<u64>,
+        mut release_card_session: impl FnMut(),
+    ) -> Result<PreparedNfcCard, CK_RV> {
         let _acquire = self.acquire.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
         let mut stale = None;
         let mut inactive_error = None;
         let expected_serial;
         {
             let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
+            if active_session_id.is_some_and(|id| state.session.as_ref().map(|s| s.id) != Some(id))
+            {
+                drop(state);
+                release_card_session();
+                state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
+            }
             expected_serial = state
                 .mounted_serial
                 .clone()
@@ -351,6 +419,7 @@ impl NfcTransport {
                             generation: state.generation,
                             slot_name: state.slot_name.clone().ok_or(CKR_DEVICE_ERROR as CK_RV)?,
                             verify_serial: state.verified_generation != Some(state.generation),
+                            session: session.clone(),
                         });
                     }
                     Err(error) => {
@@ -371,7 +440,10 @@ impl NfcTransport {
                 self.present.store(false, Ordering::Release);
             }
         }
-        drop(stale);
+        if stale.is_some() {
+            release_card_session();
+        }
+        self.release_session(stale);
         if let Some(error) = inactive_error {
             return Err(error);
         }
@@ -404,13 +476,15 @@ impl NfcTransport {
         state.verified_generation = None;
         state.slot_name = Some(slot_name.clone());
         session.close_reason = "transport dropped";
-        state.session = Some(session);
+        let session = SharedNfcSession::new(session);
+        state.session = Some(session.clone());
         state.missing_since = None;
         self.present.store(false, Ordering::Release);
         Ok(PreparedNfcCard {
             generation: state.generation,
             slot_name,
             verify_serial: state.verified_generation != Some(state.generation),
+            session,
         })
     }
 
@@ -564,7 +638,7 @@ impl NfcTransport {
         });
         self.present.store(false, Ordering::Release);
         self.wake.notify_all();
-        drop(ended);
+        self.release_session(ended);
     }
 }
 
@@ -601,7 +675,7 @@ impl DeviceOperationLifecycle for NfcTransport {
             }
         }
         self.wake.notify_all();
-        drop(ended);
+        self.release_session(ended);
         Ok(())
     }
 
@@ -635,7 +709,7 @@ impl DeviceOperationLifecycle for NfcTransport {
                 }
             }
         }
-        drop(ended);
+        self.release_session(ended);
     }
 }
 

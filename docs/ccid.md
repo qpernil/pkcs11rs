@@ -96,6 +96,10 @@ cannot open duplicate NFC requests. See
 [When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears) for the
 initial-discovery, reacquisition, reuse, and cancellation cases.
 
+The CryptoTokenKit smart-card session that carries APDUs holds a lease on its
+NFC slot session. On removal, cancellation, or module shutdown, the worker ends
+card access before the NFC slot session is released and its UI dismissed.
+
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 

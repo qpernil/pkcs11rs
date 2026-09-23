@@ -2,7 +2,9 @@ use super::card::{
     OwnedSessionGuard, begin_session, card_is_valid, discover_card_identity, resolve_card,
     transmit_card,
 };
+use super::nfc::SharedNfcSession;
 use super::{DEFAULT_TIMEOUT, NfcTransport, nfc_diagnostic};
+use crate::nested_session::NestedSession;
 use crate::*;
 use objc2::rc::Retained;
 use objc2_crypto_token_kit::TKSmartCard;
@@ -10,6 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 
 enum WorkerRequest {
+    ReleaseNfcSession {
+        id: u64,
+    },
     BeginOperation {
         reply: mpsc::SyncSender<Result<(), CK_RV>>,
     },
@@ -26,10 +31,41 @@ enum WorkerRequest {
     },
 }
 
+struct ActiveCardSession {
+    nested: NestedSession<OwnedSessionGuard, SharedNfcSession>,
+}
+
+impl ActiveCardSession {
+    fn new(card: Retained<TKSmartCard>, nfc_session: Option<SharedNfcSession>) -> Self {
+        Self {
+            nested: NestedSession {
+                inner: Some(OwnedSessionGuard::new(card)),
+                outer: nfc_session,
+            },
+        }
+    }
+
+    fn card(&self) -> &TKSmartCard {
+        self.nested
+            .inner
+            .as_ref()
+            .expect("active card session")
+            .card()
+    }
+
+    fn nfc_session_id(&self) -> Option<u64> {
+        self.nested.outer.as_ref().map(|session| session.id())
+    }
+}
+
 pub(super) struct AppleCcidWorker {
     requests: mpsc::Sender<WorkerRequest>,
 }
 impl AppleCcidWorker {
+    pub(super) fn release_nfc_session(&self, id: u64) {
+        let _ = self.requests.send(WorkerRequest::ReleaseNfcSession { id });
+    }
+
     pub(super) fn spawn(
         reader_name: String,
         nfc: Option<Arc<NfcTransport>>,
@@ -100,7 +136,7 @@ fn run_worker(
     let mut card: Option<Retained<TKSmartCard>> = None;
     let mut card_generation = None;
     let mut operation_active = false;
-    let mut active_session: Option<OwnedSessionGuard> = None;
+    let mut active_session: Option<ActiveCardSession> = None;
 
     loop {
         let request = match receiver.recv() {
@@ -109,6 +145,18 @@ fn run_worker(
         };
 
         match request {
+            WorkerRequest::ReleaseNfcSession { id } => {
+                if active_session
+                    .as_ref()
+                    .and_then(ActiveCardSession::nfc_session_id)
+                    == Some(id)
+                {
+                    active_session = None;
+                    card = None;
+                    card_generation = None;
+                    connection_epoch.fetch_add(1, Ordering::AcqRel);
+                }
+            }
             WorkerRequest::BeginOperation { reply } => {
                 let result = if operation_active {
                     Err(CKR_OPERATION_ACTIVE as CK_RV)
@@ -134,6 +182,7 @@ fn run_worker(
                             &mut active_session,
                             DEFAULT_TIMEOUT,
                         )
+                        .map(|(changed, _)| changed)
                     }
                 } else if card.as_deref().is_some_and(card_is_valid) {
                     Ok(false)
@@ -167,15 +216,19 @@ fn run_worker(
             } => {
                 let result = (|| {
                     let mut changed = false;
-                    if let Some(nfc) = &nfc {
-                        changed |= prepare_nfc_card(
+                    let nfc_session = if let Some(nfc) = &nfc {
+                        let (prepared_changed, session) = prepare_nfc_card(
                             nfc,
                             &mut card,
                             &mut card_generation,
                             &mut active_session,
                             timeout,
                         )?;
-                    }
+                        changed |= prepared_changed;
+                        Some(session)
+                    } else {
+                        None
+                    };
                     if !card.as_deref().is_some_and(card_is_valid) {
                         active_session = None;
                         card = Some(resolve_card(&reader_name)?);
@@ -188,7 +241,7 @@ fn run_worker(
                         let current = card.as_ref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
                         unsafe { current.setSensitive(true) };
                         begin_session(current, timeout)?;
-                        active_session = Some(OwnedSessionGuard::new(current.clone()));
+                        active_session = Some(ActiveCardSession::new(current.clone(), nfc_session));
                     }
                     transmit_card(
                         active_session
@@ -225,10 +278,13 @@ fn prepare_nfc_card(
     nfc: &NfcTransport,
     card: &mut Option<Retained<TKSmartCard>>,
     card_generation: &mut Option<u64>,
-    active_session: &mut Option<OwnedSessionGuard>,
+    active_session: &mut Option<ActiveCardSession>,
     timeout: Duration,
-) -> Result<bool, CK_RV> {
-    let prepared = nfc.prepare()?;
+) -> Result<(bool, SharedNfcSession), CK_RV> {
+    let active_id = active_session
+        .as_ref()
+        .and_then(ActiveCardSession::nfc_session_id);
+    let prepared = nfc.prepare(active_id, || *active_session = None)?;
     let mut changed = false;
     loop {
         if *card_generation != Some(prepared.generation) {
@@ -243,13 +299,14 @@ fn prepare_nfc_card(
             changed = true;
         }
         if !prepared.verify_serial {
-            return Ok(changed);
+            return Ok((changed, prepared.session));
         }
+        *active_session = None;
         let current = card.as_deref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
         unsafe { current.setSensitive(true) };
         let identity = discover_card_identity(current, timeout)?;
         if nfc.verify_serial(prepared.generation, identity.serial.as_deref())? {
-            return Ok(changed);
+            return Ok((changed, prepared.session));
         }
         *active_session = None;
         nfc.wait_for_replacement(prepared.generation)?;

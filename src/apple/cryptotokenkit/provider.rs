@@ -42,6 +42,9 @@ impl CcidConnector {
             .as_ref()
             .map_or_else(|| Arc::new(AtomicBool::new(true)), |nfc| nfc.presence());
         let worker = Arc::new(OnceLock::new());
+        if let Some(nfc) = &nfc {
+            nfc.bind_worker(Arc::downgrade(&worker));
+        }
         let connection_epoch = Arc::new(AtomicU64::new(0));
         let state = Arc::new_cyclic(|reader_state| {
             let lifecycle = Arc::new(AppleCcidLifecycle {
