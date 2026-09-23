@@ -542,8 +542,9 @@ cryptographic guidance. pkcs11rs has an isolated request encoder,
 structural registration parser, canonical
 [previewSign persistence model](preview-sign.md), protocol vectors, and an
 ignored capability-gated registration test. It also exposes an experimental
-vendor PKCS #11 flow and a complete embedded virtual YubiKey. Registration and derived
-metadata use the [content-addressed CBOR storage boundary](storage.md).
+vendor PKCS #11 flow and a process-local embedded FIDO2 integration fixture.
+Registration and derived metadata use the
+[content-addressed CBOR storage boundary](storage.md).
 Applications can export and strictly re-import both wrappers with
 `C_CreateObject`. Setting `PKCS11RS_TOKEN_STORAGE` installs an applet- and
 serial-scoped local provider on validated YubiKey slots;
