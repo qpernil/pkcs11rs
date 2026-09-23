@@ -1146,9 +1146,17 @@ fn hsmauth_object_search_reuses_inventory_until_the_connection_changes() {
     find();
     assert_eq!(connector.commands.borrow().len(), 3);
 
-    connector.connection_epoch.set(1);
+    assert_eq!(
+        crate::api::PKCS11RS_RefreshTokenObjects(HSMAUTH_ADMIN_SLOT_ID),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(connector.commands.borrow().len(), 6);
     find();
     assert_eq!(connector.commands.borrow().len(), 6);
+
+    connector.connection_epoch.set(1);
+    find();
+    assert_eq!(connector.commands.borrow().len(), 9);
 
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();

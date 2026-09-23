@@ -2309,6 +2309,26 @@ ffi_entry_point! {
     }
 }
 
+/// Refresh the token-object inventory for one slot, bypassing any
+/// connection-scoped backend inventory cache.
+///
+/// This is intentionally separate from `C_FindObjectsInit`: ordinary object
+/// searches remain cache-backed, while callers that require a live hardware
+/// view can opt into the APDUs and any resulting CCID applet switch.
+#[unsafe(no_mangle)]
+pub extern "C" fn PKCS11RS_RefreshTokenObjects(slot_id: CK_SLOT_ID) -> CK_RV {
+    log!(2, "PKCS11RS_RefreshTokenObjects called with {:?}", slot_id);
+    map(refresh_token_objects(slot_id))
+}
+
+fn refresh_token_objects(slot_id: CK_SLOT_ID) -> Result<(), Error> {
+    with_slot_context_mut(slot_id, |ctx| {
+        ctx.get_present_slot(slot_id)?.refresh()?;
+        ctx._get_slot_mut(slot_id)?.invalidate_token_objects();
+        ctx.refresh_slot_token_objects(slot_id)
+    })
+}
+
 pub(crate) fn find_objects_init(
     session_handle: CK_SESSION_HANDLE,
     templ: CK_ATTRIBUTE_PTR,

@@ -38,6 +38,17 @@ pub(crate) struct AppleWriter {
     message: Vec<u8>,
 }
 
+// NFC lifetime diagnostics also originate on timer and callback threads with
+// no tracing subscriber. Emit directly so dialog teardown remains observable.
+pub(crate) fn nfc_diagnostic(message: std::fmt::Arguments<'_>) {
+    let mut writer = AppleWriter {
+        log: apple_log("pkcs11rs::nfc"),
+        log_type: apple_log_type(Level::WARN),
+        message: Vec::new(),
+    };
+    let _ = write!(writer, "{message}");
+}
+
 impl<'writer> MakeWriter<'writer> for AppleMakeWriter {
     type Writer = AppleWriter;
 

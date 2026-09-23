@@ -129,6 +129,14 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_GetAuthenticatedCredential)(
   CK_ULONG_PTR pulDescriptionLen
 );
 
+/*
+ * Refresh one slot's token-object inventory from its backend. Unlike ordinary
+ * object search, this bypasses connection-scoped inventory caches. For a CCID
+ * slot it can therefore select that slot's applet and invalidate the login or
+ * secure-channel state associated with a previously selected applet.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_RefreshTokenObjects)(CK_SLOT_ID slotID);
+
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
   CK_ULONG format;
 } CKM_YUBICO_AES_CCM_WRAP_PARAMS;
