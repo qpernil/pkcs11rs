@@ -489,11 +489,13 @@ its keys, counters, and MAC chain intact. Reconnection never silently recreates
 lost working keys. Card-channel lifetime follows the retained selected applet
 and ends on applet switch or reconnection.
 
-## Remaining acceptance checks
+## Validation and remaining acceptance checks
 
-See the [key-provider design](README.md) for the remaining complete-channel
-qualification. Instrumented tests must show final working-key reads at
-establishment and no provider calls for subsequent message encryption/MAC.
+The complete-channel matrix establishes the working-key boundary: provider
+objects supply establishment, then established target channels continue
+encrypted exchanges after the provider references are released. The persistent
+virtual-YubiHSM regression additionally records the selected native derivation
+route and the source device's session-object commands across recreation.
 
 The discovery-disabled Cargo suite includes public mechanism tests exercising
 protected and readable SCP03/X9.63 graphs on ordinary slot kinds. Native HSM Auth

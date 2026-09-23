@@ -1360,11 +1360,14 @@ working keys are exported once for local AES and CMAC message crypto.
 
 The protocol uses PKCS #11 key handles and operations. Software-backed session
 objects provide the common contract. A virtual YubiHSM advertising actual
-virtual key algorithms uses protected device-session objects for supported generation, agreement,
-composition, KDF, extraction, and verification operations. Native coverage is
-reported with `CKF_HW`; a readable result needing a software-only operation is
-materialized once into the common layer. Complete channel qualification with a
-virtual YubiHSM derivation provider remains the integration milestone.
+virtual key algorithms uses protected device-session objects for supported
+generation, agreement, composition, KDF, extraction, and verification
+operations. Native coverage is reported with `CKF_HW`; a readable result
+needing a software-only operation is materialized once into the common layer.
+Complete-channel regressions select a persistent virtual-YubiHSM credential
+through the production lookup path, authenticate an independent virtual
+target, force session recreation, and verify the selected native derivation
+route and cleanup.
 
 ## Vendored Headers
 
