@@ -69,12 +69,14 @@ object search, attribute reading, or authentication. Generic communication
 still identifies the bound YubiKey serial, and serial-guidance messages remain
 stable.
 
-Each device-backed PKCS #11 call holds one CryptoTokenKit smart-card session
-across all of its APDUs. A new transaction begins without selected-applet or
-live secure-channel state, so its first APDU selects the slot's AID before any
-operation command. This prevents another CCID application from changing the
-selected applet between pkcs11rs calls without detection. Configured SCP03 or
-SCP11 channels are established inside the transaction and destroyed with it.
+The reader worker begins a CryptoTokenKit smart-card session lazily on its first
+APDU and retains that session while the card and connector remain valid.
+Applet selection, PIV or OpenPGP authentication, and configured SCP03 or SCP11
+state can therefore remain live across separate PKCS #11 calls. Reusing the
+selected applet sends no extra SELECT. Selecting a different applet through
+another pkcs11rs slot replaces the card-wide applet state and makes the old
+slot's still-open sessions public. A different `TKSmartCard` object cannot
+begin a competing session until pkcs11rs releases its retained session.
 
 After the NFC UI has closed, tap **Refresh** to repeat the ordinary PKCS #11
 inventory. If the NFC key was removed, Refresh asks for the bound serial again.
@@ -199,13 +201,13 @@ The PKCS #11 inspection runs on a background queue. Inside pkcs11rs, the native
 iOS provider adapts each synchronous transport request to CryptoTokenKit's
 asynchronous session and transmit APIs and copies the completed response into
 the PKCS #11 caller's buffer. The per-reader worker confines CryptoTokenKit
-card I/O to one thread, serializes APDUs, and reuses its non-exclusive
-`TKSmartCard`. The app uses a default-QoS serial inspection queue so its
+card I/O to one thread, serializes APDUs, and reuses its `TKSmartCard`. The app uses a default-QoS serial inspection queue so its
 synchronous PKCS #11 calls match the worker and blocking networking work while
-remaining off the main thread. The current transport begins and ends an
-exclusive CryptoTokenKit session around each complete device-backed PKCS #11
-operation, acquiring it lazily at the first APDU. This provides CCID/APDU
-transport, not access to arbitrary USB interfaces or bulk endpoints.
+remaining off the main thread. `makeSmartCard()` itself does not acquire the
+reader exclusively. The worker lazily calls `beginSession()` and retains that
+exclusive APDU session; CryptoTokenKit queues session requests from other card
+objects until it ends. This provides CCID/APDU transport, not access to
+arbitrary USB interfaces or bulk endpoints.
 
 The smoke JSON requests the `debug` level, so pkcs11rs writes directly to Apple
 Unified Logging under subsystem `com.nilssoncrypto.pkcs11rs`; Rust tracing
@@ -217,6 +219,15 @@ registration and retention, deduplication decisions, phase timing, and each
 PKCS #11 call with its outcome and duration. Connector payloads and responses,
 per-request transport and APDU timing, and session state remain reserved for
 `trace`.
+NFC lifecycle diagnostics also go directly to Unified Logging under category
+`pkcs11rs::nfc` and to the attached console with prefix `[pkcs11rs:nfc]`, including
+from background workers. Every explicit NFC dialog close logs its session ID,
+reason, session age, and whether cleanup is unwinding a panic, before calling
+`endSession`; a second record confirms that the call returned. Message-update
+failures include the session ID and Apple's error domain, code, and description.
+These records distinguish a module-requested close from an externally invalidated
+session; an error reported after the UI disappears can be a consequence of
+system dismissal rather than its cause. They contain no PINs or APDU payloads.
 The app does not modify objects on attached hardware. Its explicit YubiHSM Auth
 inspection login authenticates but remains read-only. Private hardware objects
 that require login are absent from the public-session view and may appear in

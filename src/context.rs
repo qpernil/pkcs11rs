@@ -303,7 +303,8 @@ struct NfcMountRegistration {
 #[cfg(target_os = "ios")]
 impl Drop for NfcMountRegistration {
     fn drop(&mut self) {
-        self.transport.shutdown();
+        self.transport
+            .shutdown("NFC mount registration dropped during module cleanup");
     }
 }
 
@@ -2172,7 +2173,7 @@ impl ModuleContext {
                 Ok(slot_ids)
             }
             Err(error) => {
-                transport.shutdown();
+                transport.shutdown("NFC applet discovery or slot registration failed");
                 Err(error)
             }
         }

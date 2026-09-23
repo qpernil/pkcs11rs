@@ -8,7 +8,7 @@ use objc2_crypto_token_kit::{
     TKErrorCode, TKSmartCardSlotManager, TKSmartCardSlotNFCSession, TKSmartCardSlotState,
 };
 use objc2_foundation::{NSError, NSString};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Instant;
 
@@ -22,9 +22,27 @@ const NFC_PROMPT: &str = "Hold your YubiKey near the top of this iPhone.";
 const NFC_READING: &str = "YubiKey found. Reading YubiHSM Auth credentials…";
 const NFC_IDLE: &str = "Idle — you may remove your YubiKey";
 
-pub(super) struct NfcSessionGuard(Retained<TKSmartCardSlotNFCSession>);
+static NEXT_NFC_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(super) struct NfcSessionGuard {
+    session: Retained<TKSmartCardSlotNFCSession>,
+    id: u64,
+    created: Instant,
+    close_reason: &'static str,
+}
 
 impl NfcSessionGuard {
+    fn new(session: Retained<TKSmartCardSlotNFCSession>) -> Self {
+        let guard = Self {
+            session,
+            id: NEXT_NFC_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            created: Instant::now(),
+            close_reason: "creation callback result was not adopted",
+        };
+        nfc_diagnostic(format_args!("NFC session {}: created", guard.id));
+        guard
+    }
+
     pub(super) fn check_active(&self, message: &str) -> Result<(), Error> {
         self.update_message_checked(message)
     }
@@ -32,9 +50,11 @@ impl NfcSessionGuard {
     fn update_message_checked(&self, message: &str) -> Result<(), Error> {
         autoreleasepool(|_| {
             let message = NSString::from_str(message);
-            unsafe { self.0.updateWithMessage_error(&message) }.map_err(|error| {
+            unsafe { self.session.updateWithMessage_error(&message) }.map_err(|error| {
                 nfc_diagnostic(format_args!(
-                    "NFC session message update failed: code={} description={}",
+                    "NFC session {}: message update failed: domain={} code={} description={}",
+                    self.id,
+                    error.domain(),
                     error.code(),
                     error.localizedDescription()
                 ));
@@ -60,8 +80,15 @@ impl NfcSessionGuard {
 
 impl Drop for NfcSessionGuard {
     fn drop(&mut self) {
-        nfc_diagnostic(format_args!("ending NFC slot session"));
-        unsafe { self.0.endSession() };
+        nfc_diagnostic(format_args!(
+            "NFC session {}: requesting dialog close via endSession; reason={}; age_ms={}; unwinding={}",
+            self.id,
+            self.close_reason,
+            self.created.elapsed().as_millis(),
+            std::thread::panicking()
+        ));
+        unsafe { self.session.endSession() };
+        nfc_diagnostic(format_args!("NFC session {}: endSession returned", self.id));
     }
 }
 
@@ -95,14 +122,16 @@ fn create_nfc_session(message: &str) -> Result<(NfcSessionGuard, String), Error>
                     let _ = sender.try_send(Err(return_value));
                     return;
                 };
-                let Some(slot_name) = session.slotName() else {
-                    session.endSession();
+                let mut session = NfcSessionGuard::new(session);
+                let Some(slot_name) = session.session.slotName() else {
+                    session.close_reason = "creation callback returned no slot name";
+                    drop(session);
                     let _ = sender.try_send(Err(CKR_DEVICE_ERROR as CK_RV));
                     return;
                 };
                 let slot_name = slot_name.to_string();
-                nfc_diagnostic(format_args!("created NFC slot session: {slot_name}"));
-                Ok((NfcSessionGuard(session), slot_name))
+                nfc_diagnostic(format_args!("NFC session {}: slot={slot_name}", session.id));
+                Ok((session, slot_name))
             };
             let _ = sender.try_send(result);
         },
@@ -153,6 +182,19 @@ struct NfcTransportState {
     cancel_retry_after: Option<Instant>,
 }
 
+impl NfcTransportState {
+    fn take_session(&mut self, reason: &'static str) -> Option<NfcSessionGuard> {
+        self.session.take().map(|mut session| {
+            session.close_reason = reason;
+            nfc_diagnostic(format_args!(
+                "NFC session {}: releasing generation={}; operation_active={}; slot={:?}; reason={reason}",
+                session.id, self.generation, self.operation_active, self.slot_name
+            ));
+            session
+        })
+    }
+}
+
 pub(crate) struct NfcTransport {
     state: Mutex<NfcTransportState>,
     present: Arc<AtomicBool>,
@@ -178,10 +220,11 @@ impl std::fmt::Debug for NfcTransport {
 
 impl NfcTransport {
     fn new(
-        session: NfcSessionGuard,
+        mut session: NfcSessionGuard,
         slot_name: String,
         expected_serial: String,
     ) -> Result<Arc<Self>, Error> {
+        session.close_reason = "transport dropped (including idle worker startup failure)";
         let transport = Arc::new(Self {
             state: Mutex::new(NfcTransportState {
                 mounted_serial: Some(expected_serial),
@@ -238,18 +281,24 @@ impl NfcTransport {
                 continue;
             }
 
-            let card_present = state
-                .slot_name
-                .as_deref()
-                .is_some_and(nfc_slot_has_valid_card);
-            if !card_present {
+            let slot_state = state.slot_name.as_deref().and_then(nfc_slot_state);
+            if nfc_slot_is_absent(slot_state) {
+                let first_missing = state.missing_since.is_none();
                 let missing_since = *state.missing_since.get_or_insert(now);
+                if first_missing {
+                    nfc_diagnostic(format_args!(
+                        "idle NFC slot reports no card ({slot_state:?}); waiting for removal confirmation"
+                    ));
+                }
                 let confirmed_at = missing_since + NFC_REMOVAL_CONFIRMATION;
                 if now < confirmed_at {
                     state.deadline = Some(confirmed_at);
                     continue;
                 }
-                let ended = state.session.take();
+                nfc_diagnostic(format_args!(
+                    "idle NFC removal confirmed ({slot_state:?}); releasing slot session"
+                ));
+                let ended = state.take_session("idle removal confirmation expired");
                 state.slot_name = None;
                 state.verified_generation = None;
                 state.missing_since = None;
@@ -316,7 +365,7 @@ impl NfcTransport {
                     "discarding inactive NFC slot session generation {}",
                     state.generation
                 ));
-                stale = state.session.take();
+                stale = state.take_session("preparing APDU found an inactive NFC session");
                 state.slot_name = None;
                 state.verified_generation = None;
                 self.present.store(false, Ordering::Release);
@@ -329,17 +378,21 @@ impl NfcTransport {
 
         nfc_diagnostic(format_args!("requesting replacement NFC slot session"));
         let prompt = nfc_prompt(Some(&expected_serial));
-        let (session, slot_name) =
+        let (mut session, slot_name) =
             create_nfc_session(&prompt).map_err(|error| self.latch_cancellation(error))?;
+        session.close_reason = "replacement card wait failed";
         CcidConnector::wait_for_named_card(&slot_name, &session, &prompt)
             .map_err(|error| self.latch_cancellation(error))?;
+        session.close_reason = "replacement transport state lock failed";
         let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
         if state.mounted_serial.is_none() {
+            session.close_reason = "mount shut down during replacement acquisition";
             drop(state);
             drop(session);
             return Err(CKR_TOKEN_NOT_PRESENT as CK_RV);
         }
         let message = Self::operation_display_message(&state);
+        session.close_reason = "replacement session message update failed";
         session
             .update_message_checked(&message)
             .map_err(CK_RV::from)?;
@@ -350,6 +403,7 @@ impl NfcTransport {
         ));
         state.verified_generation = None;
         state.slot_name = Some(slot_name.clone());
+        session.close_reason = "transport dropped";
         state.session = Some(session);
         state.missing_since = None;
         self.present.store(false, Ordering::Release);
@@ -497,14 +551,16 @@ impl NfcTransport {
         slot_name.as_deref().is_some_and(nfc_slot_has_valid_card)
     }
 
-    pub(crate) fn shutdown(&self) {
+    pub(crate) fn shutdown(&self, reason: &'static str) {
+        nfc_diagnostic(format_args!("NFC mount shutdown requested: {reason}"));
         let ended = self.state.lock().ok().and_then(|mut state| {
+            let ended = state.take_session(reason);
             state.mounted_serial = None;
             state.deadline = None;
             state.missing_since = None;
             state.slot_name = None;
             state.verified_generation = None;
-            state.session.take()
+            ended
         });
         self.present.store(false, Ordering::Release);
         self.wake.notify_all();
@@ -534,7 +590,10 @@ impl DeviceOperationLifecycle for NfcTransport {
                     // idle. A failure first observed by a new operation therefore
                     // represents an idle cancellation; the new operation is an
                     // explicit request to acquire another NFC session.
-                    ended = state.session.take();
+                    ended = state.take_session("new operation found an inactive NFC session");
+                    nfc_diagnostic(format_args!(
+                        "new operation found an inactive NFC slot session; releasing it"
+                    ));
                     state.slot_name = None;
                     state.verified_generation = None;
                     self.present.store(false, Ordering::Release);
@@ -562,7 +621,10 @@ impl DeviceOperationLifecycle for NfcTransport {
                     if CK_RV::from(error) == CKR_FUNCTION_CANCELED as CK_RV {
                         state.cancel_retry_after = Some(Instant::now() + NFC_CANCEL_COOLDOWN);
                     }
-                    ended = state.session.take();
+                    ended = state.take_session("idle message update failed");
+                    nfc_diagnostic(format_args!(
+                        "idle message update failed; releasing NFC slot session"
+                    ));
                     state.slot_name = None;
                     state.verified_generation = None;
                     state.missing_since = None;
@@ -578,24 +640,34 @@ impl DeviceOperationLifecycle for NfcTransport {
 }
 
 fn nfc_slot_has_valid_card(slot_name: &str) -> bool {
+    nfc_slot_state(slot_name) == Some(TKSmartCardSlotState::ValidCard)
+}
+
+fn nfc_slot_state(slot_name: &str) -> Option<TKSmartCardSlotState> {
     autoreleasepool(|_| unsafe {
-        let Some(manager) = TKSmartCardSlotManager::defaultManager() else {
-            return false;
-        };
+        let manager = TKSmartCardSlotManager::defaultManager()?;
         let name = NSString::from_str(slot_name);
-        manager
-            .slotNamed(&name)
-            .is_some_and(|slot| slot.state() == TKSmartCardSlotState::ValidCard)
+        manager.slotNamed(&name).map(|slot| slot.state())
+    })
+}
+
+fn nfc_slot_is_absent(state: Option<TKSmartCardSlotState>) -> bool {
+    state.is_none_or(|state| {
+        state == TKSmartCardSlotState::Missing || state == TKSmartCardSlotState::Empty
     })
 }
 
 pub(crate) fn begin_nfc_mount() -> Result<(Arc<NfcTransport>, CcidConnector, DeviceIdentity), Error>
 {
     let prompt = nfc_prompt(None);
-    let (session, slot_name) = create_nfc_session(&prompt)?;
+    let (mut session, slot_name) = create_nfc_session(&prompt)?;
+    session.close_reason = "initial card wait failed";
     let profile = CcidConnector::wait_for_named_card(&slot_name, &session, &prompt)?;
+    session.close_reason = "initial card resolution failed";
     let card = resolve_card(&slot_name).map_err(Error::from)?;
+    session.close_reason = "initial card identity discovery failed";
     let info = discover_card_identity(&card, DEFAULT_TIMEOUT).map_err(Error::from)?;
+    session.close_reason = "initial card identity has no usable serial";
     let serial = info
         .serial
         .filter(|serial| !serial.is_empty() && !serial.chars().all(|character| character == '0'))

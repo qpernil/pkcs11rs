@@ -16,7 +16,9 @@ use std::sync::{
 use worker::AppleCcidWorker;
 
 fn nfc_diagnostic(message: std::fmt::Arguments<'_>) {
-    eprintln!("[pkcs11rs:nfc] {message}");
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "[pkcs11rs:nfc] {message}");
+    crate::apple::logging::nfc_diagnostic(message);
 }
 
 unsafe extern "C" {

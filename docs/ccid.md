@@ -61,6 +61,12 @@ returns.
 Objective-C objects retained for card I/O stay confined to the worker that
 created them.
 
+CryptoTokenKit has no PC/SC-style exclusive reader-open mode. `makeSmartCard()`
+creates an ordinary card object; exclusivity begins with `beginSession()`.
+While pkcs11rs retains that session, CryptoTokenKit queues session requests
+from other `TKSmartCard` objects. The sensitive flag requests a reset before
+this session communicates and before the card is handed to another object.
+
 The static XCFramework loads Apple's public CryptoTokenKit framework internally
 before it first enumerates readers. Applications importing `PKCS11RS` need no
 CryptoTokenKit import or linker setting, reader object, callback registration,
@@ -239,6 +245,10 @@ successful credential-administration operation invalidates it. Before native
 YubiHSM authentication, the cached descriptor selects the applet credential by
 label. The applet operation and target secure-channel verification determine
 whether that credential remains usable, without a separate inventory scan.
+Call `PKCS11RS_RefreshTokenObjects` when an application explicitly requires a
+live inventory. On this slot the refresh sends the YubiHSM Auth inventory
+APDUs; like any real CCID operation, it can select the applet and thereby
+invalidate authentication or an SCP session belonging to another applet.
 
 ## Issuer SD objects
 
