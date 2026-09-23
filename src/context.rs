@@ -4418,6 +4418,10 @@ mod discovery_tests {
             ccid_configurations: configuration.ccid_configurations,
             ccid_aids: configuration.ccid_aids,
             nfc_discovery: configuration.nfc_discovery,
+            #[cfg(target_os = "ios")]
+            nfc_discovery_attempted: Mutex::new(false),
+            #[cfg(target_os = "ios")]
+            nfc_mount: Mutex::new(None),
             secure_channels: Arc::new(configuration.secure_channels),
             token_storage: None,
             fido_storage: None,
