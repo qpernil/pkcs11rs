@@ -1,4 +1,4 @@
-# Plan: SCP03/SCP11 derivation through PKCS #11
+# SCP03/SCP11 derivation through PKCS #11
 
 ## Goal and boundary
 
@@ -61,8 +61,10 @@ credential session and separate handshake sessions provide the required lifetime
 Both preparation paths use the same derivation and session cleanup operations.
 Existing ordinary source slots support exact named lookup and asymmetric
 public-key matching. Native HSM Auth slots use the profile and credential types
-described in [named lookup](credential-lookup.md). Native chainable
-protected-object commands remain unimplemented.
+described in [named lookup](credential-lookup.md). Virtual YubiHSM slots retain
+supported asymmetric derivation graphs in native protected session objects;
+their complete-channel tests cover selection, session recreation, route
+enforcement, and cleanup.
 
 The [complete-channel tests](../../src/yubihsm/tests/pkcs11_auth.rs) run the same
 symmetric and asymmetric establishment sequence with a private slot and an

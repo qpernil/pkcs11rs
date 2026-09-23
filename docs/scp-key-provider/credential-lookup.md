@@ -168,5 +168,8 @@ derivation graph in protected volatile objects owned by its authenticated secure
 Regression tests cover exact names, independent symmetric IDs, asymmetric
 label-and-ID pairing, deterministic first-match wildcard selection, one-attempt
 failure, private and persistent software sources, recreation, and cleanup.
-Remaining work includes retained-binding dependency cycles and complete channel
-tests using a virtual YubiHSM as the derivation provider.
+Complete-channel tests select a persistent virtual-YubiHSM credential, enforce
+its native derivation route, authenticate an independent virtual target, and
+exercise recreation and cleanup. Retained-binding dependency cycles remain a
+qualification item; mutually dependent source and target authentication chains
+must be avoided.
