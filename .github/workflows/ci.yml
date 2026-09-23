@@ -101,7 +101,7 @@ jobs:
         run: cargo test --release --locked --all-features
 
       - name: Run embedded virtual YubiKey PKCS #11 tests
-        run: cargo test --locked --features embedded-virtual-yubikey preview_sign_embedded
+        run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -279,7 +279,7 @@ jobs:
             build
 
       - name: Run embedded virtual YubiKey PKCS #11 tests
-        run: cargo test --locked --features embedded-virtual-yubikey preview_sign_embedded
+        run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -393,7 +393,7 @@ jobs:
           cargo xtask load-shared-library
 
       - name: Run embedded virtual YubiKey PKCS #11 tests
-        run: cargo test --locked --features embedded-virtual-yubikey preview_sign_embedded
+        run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
 
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests

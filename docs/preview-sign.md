@@ -169,8 +169,8 @@ opens generated tickets, reproduces the draft's exact derived private scalar,
 and signs digests that are verified against the production-derived public key.
 It also rejects modified tags, contexts, and malformed ephemeral points. No
 private-seed operation is compiled into a normal hardware build. The
-`embedded-virtual-yubikey` feature includes that private side specifically to provide a
-self-contained test authenticator.
+`embedded-virtual-yubikey` test feature includes that private side specifically
+to provide a self-contained, process-local FIDO2 integration fixture.
 
 ## PKCS #11 mapping
 
@@ -237,13 +237,14 @@ use the slot token provider. The default FIDO slot provider is unavailable, so
 durable token creation currently fails with `CKR_TOKEN_WRITE_PROTECTED` until a
 provider is supplied; it never silently degrades to module-local storage.
 
-The embedded virtual YubiKey exercises this complete flow through the exported PKCS #11
-entry points: login with the initial PIN `123456`, GenerateKeyPair, read and
-re-import the registration attribute as a token object, derive a token signing
-key, export both wrappers, destroy the signing key, reject incomplete and
-mismatched restoration attempts, restore the exact signing key as a session
-object, project its public key, Sign, `C_Verify`, and independently destroy the
-objects. A separate test configures local FIDO storage, finalizes and
+The embedded FIDO2 integration fixture exercises this complete flow through the
+exported PKCS #11 entry points: login with the initial PIN `123456`,
+GenerateKeyPair, read and re-import the registration attribute as a token
+object, derive a token signing key, export both wrappers, destroy the signing
+key, reject incomplete and mismatched restoration attempts, restore the exact
+signing key as a session object, project its public key, Sign, `C_Verify`, and
+independently destroy the objects. A separate test configures local FIDO
+storage, finalizes and
 reinitializes the module, discovers the token registration and derived key
 again, signs and verifies with the restored key, destroys both token objects,
 and verifies after another restart that they no longer appear. Corrupt

@@ -1219,14 +1219,39 @@ slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
-## Embedded virtual YubiKey
+## Embedded virtual YubiKey integration fixture
 
-The `embedded-virtual-yubikey` Cargo feature builds a deterministic PKCS #11
-module with one embedded virtual YubiKey. The embedded device is additive: it
-coexists with configured software and platform slots and with ordinary USB,
-HTTP, and PC/SC discovery. It is visible only through pkcs11rs and does not
-install a virtual reader or card. The ordinary serial allowlist can include or
-exclude its `EMBEDDED0001` serial like any other token.
+The `embedded-virtual-yubikey` Cargo feature is a process-local integration
+fixture for the FIDO2 PKCS #11 path. It links `virtual-yubikey-core` into the
+module, selects the FIDO2 applet over its smart-card APDU interface, and exposes
+one deterministic `Fido2Slot` with serial `EMBEDDED0001`. It does not install a
+virtual reader or card. The core also implements PIV, YubiHSM Auth, Management,
+and Issuer Security Domain behavior for direct protocol tests, but those
+applets are not published as PKCS #11 slots by this feature.
+
+This is not the configurable, persistent deployment model used by embedded
+virtual YubiHSMs. Its supported purpose is CI and manual integration testing of
+FIDO behavior, including features unavailable on ordinary hardware. The CI
+fixture compiles without native USB, HID, or PC/SC support:
+
+```sh
+cargo test --locked --no-default-features \
+  --features embedded-virtual-yubikey preview_sign_embedded
+```
+
+A loadable module can be built the same way for external-client testing:
+
+```sh
+cargo build --release --no-default-features \
+  --features embedded-virtual-yubikey
+pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
+```
+
+Building the feature without `--no-default-features` deliberately retains the
+ordinary native-hardware paths and makes the fixture additive. Runtime
+configuration can still disable discovery and the serial allowlist can include
+or exclude `EMBEDDED0001`, but neither form is a supported virtual-device
+deployment boundary.
 
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
@@ -1240,11 +1265,6 @@ error mapping, COSE/CBOR, object storage, and session state remain in this repos
 under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
 always see first-party edits immediately; there is no dependency-source switch
 or generated override.
-
-```sh
-cargo build --release --features embedded-virtual-yubikey
-pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
-```
 
 The initial PIN is `123456`. Embedded device state, including PIN changes and
 created credentials, lasts for the client process and survives
