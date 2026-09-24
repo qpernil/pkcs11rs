@@ -2104,16 +2104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_bytes"
-version = "0.11.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
-dependencies = [
- "serde",
- "serde_core",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2317,6 +2307,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "k256",
+ "libc",
  "ml-dsa",
  "ml-kem",
  "num-bigint-dig",
@@ -2722,16 +2713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "usb-gadget-worker"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "libc",
- "serde",
- "serde_bytes",
-]
-
-[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2767,7 +2748,6 @@ dependencies = [
  "software-key-core",
  "spki 0.8.0",
  "subtle",
- "usb-gadget-worker",
  "x509-cert",
  "zeroize",
 ]
