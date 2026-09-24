@@ -58,7 +58,7 @@ flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
 virtual-yubikey-core = { path = "../virtual-yubikey/crates/virtual-yubikey-core", optional = true }
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
-software-key-core = { path = "../software-key-core", features = ["x509"] }
+software-key-core = { path = "../software-key-core", features = ["x509-validation"] }
 platform-credential = { path = "crates/platform-credential" }
 yubihsm-auth-client = { path = "crates/yubihsm-auth-client" }
 zeroize = "1.9.0"

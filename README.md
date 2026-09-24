@@ -1256,8 +1256,8 @@ deployment boundary.
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
 The neutral sibling `software-key-core` crate supplies the software key
-ownership, signing, verification, key agreement, AES/SCP03 helpers, password
-KDFs, and ARKG-P256 derivation used by pkcs11rs and the virtual devices. Its general RSA layer
+ownership, signing, verification, key agreement, X.509 validation, AES/SCP03
+helpers, password KDFs, and ARKG-P256 derivation used by pkcs11rs and the virtual devices. Its general RSA layer
 covers raw signatures, caller-controlled PKCS #1 v1.5 payloads, all supported
 SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS with independent message hash,
 MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and
