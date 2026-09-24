@@ -5,8 +5,9 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, TrustAnchor, UnixTime},
     sign::CertifiedKey,
 };
-use software_key_core::software_signing::{
-    EcCurve, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey,
+use software_key_core::{
+    certificate_chain::{p256_public_point, verify_certificate_signature},
+    software_signing::{EcCurve, SignatureScheme, SoftwarePublicKey, SoftwareSigningKey},
 };
 use std::{collections::HashSet, path::Path};
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
@@ -16,8 +17,6 @@ use x509_cert::{
 };
 
 const CLIENT_AUTH: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.2");
-const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
-const P256_CURVE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Purpose {
@@ -230,13 +229,15 @@ fn validate_ordered_chain(certificates: &[ParsedCertificate]) -> Result<(), Stri
         issuer
             .require_ca()
             .map_err(|error| format!("certificate {}: {error}", index + 2))?;
-        verify_signature(&certificate.certificate, &issuer.certificate).map_err(|error| {
-            format!(
-                "certificate {} signature is not valid under certificate {}: {error}",
-                index + 1,
-                index + 2
-            )
-        })?;
+        verify_certificate_signature(&certificate.certificate, &issuer.certificate).map_err(
+            |error| {
+                format!(
+                    "certificate {} signature is not valid under certificate {}: {error}",
+                    index + 1,
+                    index + 2
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -273,7 +274,7 @@ fn validate_scp11_leaf(certificate: &ParsedCertificate) -> Result<(), String> {
     {
         return Err("SCP11 OCE leaf does not permit key agreement".to_owned());
     }
-    p256_public_point(&certificate.certificate)?;
+    p256_public_point(&certificate.certificate).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -302,7 +303,7 @@ fn validate_decrypted_key(
                 .map_err(|_| "SCP11 OCE private key is not a P-256 PKCS #8 key".to_owned())?;
         let certificate = Certificate::from_der(&certificates[0])
             .map_err(|error| format!("parse leaf certificate: {error}"))?;
-        let certificate_key = p256_public_point(&certificate)?;
+        let certificate_key = p256_public_point(&certificate).map_err(|error| error.to_string())?;
         let SoftwarePublicKey::Ec {
             curve: EcCurve::P256,
             uncompressed: private_key,
@@ -327,30 +328,6 @@ fn validate_decrypted_key(
     certified_key
         .keys_match()
         .map_err(|_| "private key does not match the leaf certificate".to_owned())
-}
-
-fn p256_public_point(certificate: &Certificate) -> Result<Vec<u8>, String> {
-    let spki = certificate.tbs_certificate().subject_public_key_info();
-    let parameters = spki
-        .algorithm
-        .parameters
-        .as_ref()
-        .and_then(|parameters| parameters.decode_as::<ObjectIdentifier>().ok());
-    if spki.algorithm.oid != EC_PUBLIC_KEY || parameters != Some(P256_CURVE) {
-        return Err("certificate does not contain a P-256 public key".to_owned());
-    }
-    let point = spki
-        .subject_public_key
-        .as_bytes()
-        .ok_or_else(|| "certificate P-256 public key is not byte-aligned".to_owned())?
-        .to_vec();
-    SoftwarePublicKey::Ec {
-        curve: EcCurve::P256,
-        uncompressed: point.clone(),
-    }
-    .validate()
-    .map_err(|_| "certificate contains an invalid P-256 public key".to_owned())?;
-    Ok(point)
 }
 
 enum PathUsage {
@@ -453,56 +430,6 @@ fn trust_anchors(certificates: &[Vec<u8>]) -> Result<Vec<TrustAnchor<'static>>, 
                 .map_err(|error| format!("trust certificate {} is unusable: {error}", index + 1))
         })
         .collect()
-}
-
-fn verify_signature(certificate: &Certificate, issuer: &Certificate) -> Result<(), String> {
-    let signature_algorithm = algorithm_identifier_contents(certificate.signature_algorithm())?;
-    let public_key_algorithm = algorithm_identifier_contents(
-        &issuer.tbs_certificate().subject_public_key_info().algorithm,
-    )?;
-    let algorithm = webpki::ALL_VERIFICATION_ALGS
-        .iter()
-        .copied()
-        .find(|algorithm| {
-            algorithm.signature_alg_id().as_ref() == signature_algorithm
-                && algorithm.public_key_alg_id().as_ref() == public_key_algorithm
-        })
-        .ok_or_else(|| "unsupported certificate signature algorithm".to_owned())?;
-    let issuer_der = CertificateDer::from(
-        issuer
-            .to_der()
-            .map_err(|error| format!("encode issuer: {error}"))?,
-    );
-    let issuer = EndEntityCert::try_from(&issuer_der)
-        .map_err(|error| format!("parse issuer public key: {error}"))?;
-    let message = certificate
-        .tbs_certificate()
-        .to_der()
-        .map_err(|error| format!("encode signed certificate body: {error}"))?;
-    let signature = certificate
-        .signature()
-        .as_bytes()
-        .ok_or_else(|| "certificate signature is not byte-aligned".to_owned())?;
-    issuer
-        .verify_signature(algorithm, &message, signature)
-        .map_err(|error| error.to_string())
-}
-
-fn algorithm_identifier_contents(
-    algorithm: &spki::AlgorithmIdentifierOwned,
-) -> Result<Vec<u8>, String> {
-    let mut encoded = algorithm
-        .oid
-        .to_der()
-        .map_err(|error| format!("encode algorithm OID: {error}"))?;
-    if let Some(parameters) = &algorithm.parameters {
-        encoded.extend(
-            parameters
-                .to_der()
-                .map_err(|error| format!("encode algorithm parameters: {error}"))?,
-        );
-    }
-    Ok(encoded)
 }
 
 #[cfg(test)]

@@ -40,7 +40,7 @@ required-features = ["native-hardware"]
 
 [features]
 default = ["native-hardware"]
-abi-tests = ["dep:p256", "dep:virtual-yubihsm-core"]
+abi-tests = ["dep:p256", "dep:virtual-yubihsm-core", "x509-cert/builder"]
 embedded-virtual-yubikey = ["dep:virtual-yubikey-core"]
 native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 
@@ -76,15 +76,16 @@ spki = { version = "0.8.0", features = ["alloc", "std"] }
 subtle = "2.6.1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
-x509-cert = { version = "0.3.0", default-features = false, features = ["builder", "std"] }
+x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
-ml-dsa = { version = "0.1.1", features = ["zeroize"] }
+ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "e06d2e28699428fbcc135c388516883bbb71f170", features = ["zeroize"] }
 num-bigint-dig = "0.8.6"
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 signature = "3.0.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+x509-cert = { version = "0.3.0", default-features = false, features = ["builder", "std"] }
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
@@ -95,5 +96,3 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 
 [patch.crates-io]
 hidapi = { path = "vendor/hidapi" }
-# Reduce ML-DSA matrix stack usage without changing public lattice types.
-ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "e06d2e28699428fbcc135c388516883bbb71f170" }
