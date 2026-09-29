@@ -16,6 +16,9 @@ The mapping is:
 | ML-KEM-512 | 62 |
 | ML-KEM-768 | 63 |
 | ML-KEM-1024 | 64 |
+| MLKEM768-P256 | 65 |
+| MLKEM768-X25519 | 66 |
+| MLKEM1024-P384 | 67 |
 
 A device contributes `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`,
 `CKM_ML_KEM_KEY_PAIR_GEN`, or `CKM_ML_KEM` to the slot mechanism list only when
@@ -37,3 +40,12 @@ ML-KEM encapsulation, and `0x3c` for ML-KEM decapsulation. Key creation derives
 these bits from the private and public templates. Persisted PKCS #11 metadata
 may narrow the native permissions and allowed mechanisms but cannot grant a
 capability absent from the HSM object.
+
+Algorithms 65–67 implement the exact specification profile in
+[Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md).
+They use `EncapsulateHybridKem` (`0x10`), `DecapsulateHybridKem` (`0x11`),
+and capability bits `0x3d` and `0x3e`. `PutAsymmetricKey` imports exactly the
+draft's inseparable 32-byte seed; `GetPublicKey` returns the combined public
+encoding. Their construction-specific mechanisms appear only when the device
+reports the corresponding algorithm, so physical YubiHSM firmware retains its
+ordinary mechanism surface.

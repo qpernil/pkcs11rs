@@ -127,6 +127,27 @@ pub(crate) fn operations(key: &TokenObject, m: CK_MECHANISM_TYPE) -> CK_FLAGS {
                 0
             }
         }
+        x if x == CKM_PKCS11RS_MLKEM768_P256 => {
+            if key.key_type == CKK_PKCS11RS_MLKEM768_P256 {
+                CKF_ENCAPSULATE | CKF_DECAPSULATE
+            } else {
+                0
+            }
+        }
+        x if x == CKM_PKCS11RS_MLKEM768_X25519 => {
+            if key.key_type == CKK_PKCS11RS_MLKEM768_X25519 {
+                CKF_ENCAPSULATE | CKF_DECAPSULATE
+            } else {
+                0
+            }
+        }
+        x if x == CKM_PKCS11RS_MLKEM1024_P384 => {
+            if key.key_type == CKK_PKCS11RS_MLKEM1024_P384 {
+                CKF_ENCAPSULATE | CKF_DECAPSULATE
+            } else {
+                0
+            }
+        }
         x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
             || x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE =>
         {

@@ -3370,6 +3370,9 @@ pub(crate) fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
         YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256 => CKK_AES as CK_KEY_TYPE,
         algorithm if yubihsm_ml_dsa(algorithm).is_some() => CKK_ML_DSA as CK_KEY_TYPE,
         algorithm if yubihsm_ml_kem(algorithm).is_some() => CKK_ML_KEM as CK_KEY_TYPE,
+        YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256 => CKK_PKCS11RS_MLKEM768_P256,
+        YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519 => CKK_PKCS11RS_MLKEM768_X25519,
+        YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384 => CKK_PKCS11RS_MLKEM1024_P384,
         algorithm if is_yubihsm_edwards(algorithm) => CKK_EC_EDWARDS as CK_KEY_TYPE,
         algorithm if is_yubihsm_montgomery(algorithm) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
         algorithm if is_yubihsm_rsa(algorithm) => CKK_RSA as CK_KEY_TYPE,
@@ -3385,6 +3388,9 @@ pub(crate) fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
             key_type,
             CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_SYMMETRIC
                 | CKK_YUBICO_YUBIHSM_AUTHENTICATION_KEY_ASYMMETRIC
+                | CKK_PKCS11RS_MLKEM768_P256
+                | CKK_PKCS11RS_MLKEM768_X25519
+                | CKK_PKCS11RS_MLKEM1024_P384
         )
 }
 
@@ -3393,6 +3399,12 @@ pub(crate) fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHA
         Some(CKM_ML_DSA_KEY_PAIR_GEN as _)
     } else if yubihsm_ml_kem(algorithm).is_some() {
         Some(CKM_ML_KEM_KEY_PAIR_GEN as _)
+    } else if let Some(construction) = yubihsm_hybrid_kem(algorithm) {
+        Some(match construction {
+            HybridKemConstruction::MlKem768P256 => CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+            HybridKemConstruction::MlKem768X25519 => CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            HybridKemConstruction::MlKem1024P384 => CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+        })
     } else if is_yubihsm_rsa(algorithm) {
         Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
     } else if is_yubihsm_montgomery(algorithm) {
@@ -3962,7 +3974,13 @@ fn apply_yubihsm_public_projection_metadata(
             (attribute, KeyAttributeValue::Boolean(value))
                 if attribute == u64::from(CKA_ENCAPSULATE) =>
             {
-                if *value && object.key_type != CKK_ML_KEM as CK_KEY_TYPE {
+                if *value
+                    && !matches!(object.key_type,
+                        x if x == CKK_ML_KEM as CK_KEY_TYPE
+                            || x == CKK_PKCS11RS_MLKEM768_P256
+                            || x == CKK_PKCS11RS_MLKEM768_X25519
+                            || x == CKK_PKCS11RS_MLKEM1024_P384)
+                {
                     return Err(CKR_DATA_INVALID.into());
                 }
                 object.encapsulate &= *value;
@@ -4941,6 +4959,9 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
     let native = match m {
         x if x == CKM_ML_DSA as CK_MECHANISM_TYPE => pair(cap(0x3a), CKF_SIGN),
         x if x == CKM_ML_KEM as CK_MECHANISM_TYPE => pair(cap(0x3c), CKF_DECAPSULATE),
+        CKM_PKCS11RS_MLKEM768_P256 | CKM_PKCS11RS_MLKEM768_X25519 | CKM_PKCS11RS_MLKEM1024_P384 => {
+            pair(cap(0x3e), CKF_DECAPSULATE)
+        }
         x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
             pair(cap(0x05), CKF_SIGN)
                 | pair(cap(0x09), CKF_DECRYPT)

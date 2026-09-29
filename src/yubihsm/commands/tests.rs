@@ -170,6 +170,8 @@ fn all_sample_commands() -> Vec<Command> {
         .unwrap(),
         Command::encapsulate_ml_kem(1),
         Command::decapsulate_ml_kem(1, &[0; 768]).unwrap(),
+        Command::encapsulate_hybrid_kem(1),
+        Command::decapsulate_hybrid_kem(1, &[0; 1120]).unwrap(),
     ];
     commands.sort_by_key(|command| command.code() as u8);
     commands
@@ -184,7 +186,7 @@ fn device_info_page_zero_uses_the_legacy_empty_request() {
 #[test]
 fn every_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
-    assert_eq!(commands.len(), 68);
+    assert_eq!(commands.len(), 70);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
     assert_eq!(
         commands

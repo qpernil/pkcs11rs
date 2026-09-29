@@ -1,234 +1,124 @@
 # Post-quantum hybrid key exchange
 
-PKCS11RS has two separate uses for post-quantum/traditional hybrid key
-exchange:
+PKCS11RS exposes three protocol-independent concrete hybrid PQ/T KEMs as
+inseparable composite keys. This surface is a private extension because PKCS
+#11 3.2 standardizes ML-KEM but does not assign hybrid KEM identifiers or
+object semantics.
 
-1. Connector TLS can negotiate a standardized TLS 1.3 hybrid group in the
-   Rustls software stack to protect connector traffic against
-   harvest-now/decrypt-later attacks.
-2. PKCS #11 consumers can use a hybrid KEM mechanism to create and use one
-   inseparable composite key through a software or hardware-backed slot.
+## Exact specification profile
 
-The first use does not depend on the second. Connector TLS keys are ephemeral
-transport state and need not be represented as PKCS #11 objects. The second
-use applies when an application needs a protocol-independent hybrid KEM, TLS
-offload, hardware-backed ephemeral state, or direct qualification of a slot's
-hybrid implementation.
+The implementation is pinned to the following revisions:
 
-## Current status
+- `draft-irtf-cfrg-concrete-hybrid-kems-04`, dated 6 July 2026, for the three
+  concrete constructions, key derivation, serialization, encapsulation,
+  decapsulation, labels, and SHA3-256 combiner;
+- `draft-irtf-cfrg-hybrid-kems-12` for the generic CG hybrid KEM framework;
+- `draft-connolly-cfrg-xwing-kem-10` for the byte-identical X-Wing
+  `MLKEM768-X25519` instance;
+- FIPS 203 for ML-KEM-768 and ML-KEM-1024;
+- FIPS 202 for SHAKE256 and SHA3-256;
+- SEC 1 version 2.0 uncompressed point encoding for P-256 and P-384; and
+- RFC 7748 for X25519, including rejection of a non-contributory agreement.
 
-PKCS11RS implements the PKCS #11 3.2 `CKK_ML_KEM` key type,
-`CKM_ML_KEM_KEY_PAIR_GEN`, and `CKM_ML_KEM` encapsulation and decapsulation
-mechanism. It does not currently expose a hybrid ML-KEM plus ECDH key type or
-mechanism.
+These are not the TLS concatenation groups from RFC 10024. Each construction
+has its own domain-separated combiner and returns a 32-byte shared secret.
+Connector TLS remains an independent Rustls concern.
 
-PKCS #11 3.2 standardizes ML-KEM but no post-quantum/traditional hybrid KEM.
-Until a PKCS #11 specification assigns portable identifiers and object
-semantics, hybrid support must use vendor-defined identifiers. Those
-identifiers must not be presented as standard PKCS #11 values.
+| Construction | Public key | Ciphertext | Private key | Output |
+| --- | ---: | ---: | ---: | ---: |
+| `MLKEM768-P256` | 1249 | 1153 | 32-byte seed | 32 |
+| `MLKEM768-X25519` | 1216 | 1120 | 32-byte seed | 32 |
+| `MLKEM1024-P384` | 1665 | 1665 | 32-byte seed | 32 |
 
-## Mechanism model
+Public keys are exactly `ek_PQ || ek_T`; ciphertexts are exactly
+`ct_PQ || ct_T`. The traditional public/ciphertext component is a 65-byte
+uncompressed P-256 point, 32-byte X25519 value, or 97-byte uncompressed P-384
+point. The private object stores the draft's single 32-byte seed. Both
+component private keys are derived internally and cannot be projected,
+selected, imported, or used independently.
 
-A hybrid KEM is exposed as one composite public/private key pair rather than
-two independently usable component-key handles. The public object contains
-the ML-KEM encapsulation key and the traditional ECDH public key. The private
-object owns both private components and does not permit either component to be
-used separately or with a different hybrid construction.
+For every construction, the 32-byte result is
+`SHA3-256(ss_PQ || ss_T || ct_T || ek_T || label)`. The labels are the ASCII
+bytes `MLKEM768-P256`, the six X-Wing bytes `5c 2e 2f 2f 5e 5c`, and the ASCII
+bytes `MLKEM1024-P384`, respectively. For `MLKEM768-X25519`, the 32-byte
+private seed is expanded with SHAKE256 to 96 bytes: the first 64 bytes are the
+FIPS 203 ML-KEM-768 seed and the last 32 bytes are the RFC 7748 X25519 private
+input. Encapsulation consumes 64 random bytes in the same component order:
+32 bytes for ML-KEM-768 and 32 bytes for the ephemeral X25519 private input.
+Thus its public key is the 1184-byte ML-KEM encapsulation key followed by the
+32-byte recipient X25519 public key, and its ciphertext is the 1088-byte
+ML-KEM ciphertext followed by the 32-byte ephemeral X25519 public key. This is
+the exact X-Wing construction used by the implementation.
 
-The normal PKCS #11 3.2 KEM API applies:
+## PKCS #11 identifiers and objects
 
-- `C_GenerateKeyPair` creates the composite key pair.
-- `C_EncapsulateKey` takes the composite public key, returns the composite
-  ciphertext, and creates the resulting secret-key object.
-- `C_DecapsulateKey` takes the composite private key and ciphertext and creates
-  the same secret-key object.
+`PKCS11RS_VENDOR_BASE` is `0x50530000`. The complete assigned surface is:
 
-ECDH is an internal component of the KEM. The composite operation is not
-exposed through `C_DeriveKey`, and the application does not retrieve and
-combine independent ML-KEM and ECDH shared secrets.
+| Construction | Key type | Key-pair generation | KEM operation |
+| --- | --- | --- | --- |
+| `MLKEM768-P256` | `CKK_PKCS11RS_MLKEM768_P256` = `CKK_VENDOR_DEFINED \| 0x50530010` | `CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN` = `CKM_VENDOR_DEFINED \| 0x50530010` | `CKM_PKCS11RS_MLKEM768_P256` = `CKM_VENDOR_DEFINED \| 0x50530011` |
+| `MLKEM768-X25519` | `CKK_PKCS11RS_MLKEM768_X25519` = `CKK_VENDOR_DEFINED \| 0x50530011` | `CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN` = `CKM_VENDOR_DEFINED \| 0x50530012` | `CKM_PKCS11RS_MLKEM768_X25519` = `CKM_VENDOR_DEFINED \| 0x50530013` |
+| `MLKEM1024-P384` | `CKK_PKCS11RS_MLKEM1024_P384` = `CKK_VENDOR_DEFINED \| 0x50530012` | `CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN` = `CKM_VENDOR_DEFINED \| 0x50530014` | `CKM_PKCS11RS_MLKEM1024_P384` = `CKM_VENDOR_DEFINED \| 0x50530015` |
 
-## General-purpose hybrid KEMs
+Generation mechanisms take no parameters and report
+`CKF_GENERATE_KEY_PAIR`. Operation mechanisms take no parameters and report
+`CKF_ENCAPSULATE | CKF_DECAPSULATE`. `C_EncapsulateKey` returns the complete
+construction ciphertext and creates the requested AES or generic-secret
+object. `C_DecapsulateKey` consumes that exact ciphertext and creates the same
+32-byte secret object. Key type and operation mechanism must identify the same
+construction; cross-construction use returns `CKR_KEY_TYPE_INCONSISTENT`.
 
-The protocol-independent candidates are the concrete CFRG hybrid KEMs:
+Public `CKA_VALUE` is the combined public encoding. Private `CKA_SEED` and an
+extractable private `CKA_VALUE` are the inseparable 32-byte seed. Imports
+accept exactly one of those private attributes and reject any other length.
+Software token persistence uses PKCS #8 with absent parameters and private
+OIDs `1.3.6.1.4.1.41482.10.1`, `.10.2`, and `.10.3` in construction order.
+`CKA_PUBLIC_KEY_INFO` uses the corresponding OID and the raw combined public
+key in the BIT STRING.
 
-| Construction | Components | Result |
-| --- | --- | --- |
-| `MLKEM768-P256` | ML-KEM-768 and P-256 | 32-byte combined secret |
-| `MLKEM768-X25519` | ML-KEM-768 and X25519 | 32-byte combined secret |
-| `MLKEM1024-P384` | ML-KEM-1024 and P-384 | 32-byte combined secret |
+## Backend availability
 
-These constructions include their own domain-separated hybrid combiner.
-`MLKEM768-P256`, for example, uses SHAKE256 during joint key generation and
-SHA3-256 to combine the component results. It is therefore a complete KEM and
-does not rely on a containing protocol to supply the missing KDF.
+Software slots expose all three pairs without `CKF_HW`. A PIV or YubiHSM slot
+exposes them only when the connector identifies the matching virtual extension;
+physical devices and older virtual profiles retain their prior mechanism set
+and never receive these private commands. A capable virtual-device mechanism
+reports `CKF_HW` because the complete private operation and both component keys
+remain inside that device.
 
-The CFRG definitions remain Internet-Drafts. Initial PKCS11RS identifiers and
-encodings must therefore be explicitly experimental and versioned or kept
-replaceable until the definitions become stable.
+The virtual PIV assignments are algorithms `E8`, `E9`, and `EA`. Generation
+returns `7F49 { 87 ek_PQ || ek_T }`; import uses tag `09` with exactly the
+32-byte seed; and `GENERAL AUTHENTICATE` takes
+`7C { 82 empty, 81 ct_PQ || ct_T }` and returns
+`7C { 82 secret }`, where the secret is 32 bytes. Generated key attestation
+uses private SPKI OIDs `1.3.6.1.4.1.41482.11.1`, `.11.2`, and `.11.3`.
 
-## TLS 1.3 hybrid mechanisms
+The virtual YubiHSM assignments are asymmetric algorithms `65`, `66`, and
+`67`; commands `EncapsulateHybridKem` (`0x10`) and
+`DecapsulateHybridKem` (`0x11`); and capabilities
+`encapsulate-hybrid-kem` (`0x3d`) and `decapsulate-hybrid-kem` (`0x3e`).
+Generation and import reuse the ordinary asymmetric object commands, with
+exactly the 32-byte seed on import. Attestation uses private SPKI OIDs
+`1.3.6.1.4.1.41482.12.1`, `.12.2`, and `.12.3`.
 
-RFC 10024 defines the TLS groups `X25519MLKEM768`,
-`SecP256r1MLKEM768`, and `SecP384r1MLKEM1024`. A PKCS #11 implementation can
-expose corresponding vendor mechanisms through the same encapsulation and
-decapsulation entry points:
+The device-side byte layouts, status mapping, and authorization rules are
+specified in the matching `virtual-yubikey` PIV conformance document and
+`virtual-yubihsm` virtual-extension document.
 
-- the client generates a session-only ephemeral composite key pair;
-- the server encapsulates to the client public key and returns the TLS server
-  key share plus a secret-key object;
-- the client decapsulates the server share and obtains an equivalent
-  secret-key object; and
-- the TLS implementation supplies that key to the TLS 1.3 key schedule.
+## Verification
 
-Unlike the general-purpose KEMs, the TLS mechanisms return the two component
-secrets in the order defined by RFC 10024. For `SecP256r1MLKEM768`, this is the
-64-byte value `ECDHE || ML-KEM`; for `X25519MLKEM768`, it is
-`ML-KEM || X25519`. TLS performs the HKDF processing and transcript binding.
-The raw concatenation is not a safe general-purpose shared key and must be
-identified as TLS-specific.
-
-TLS hybrid private keys should be nonpersistent session objects by default.
-A slot must not allow one composite private key to be reused across a TLS
-mechanism, a general-purpose hybrid KEM, or either standalone component
-algorithm. Mechanism-specific key types are the simplest enforcement model;
-an equally strong internal usage binding is acceptable if it remains visible
-and enforceable across persistence, import, copy, and unwrap operations.
-
-PKCS #11-backed TLS key exchange is a separate future integration concern. It
-should expose classical TLS groups such as X25519, P-256, and P-384 through the
-same provider abstraction as the hybrid groups rather than add a PQ-only TLS
-path. The adapter can normalize classical `C_DeriveKey` operations and hybrid
-encapsulation or decapsulation operations into the key-exchange result expected
-by the TLS stack, while TLS retains negotiation, transcript processing, and its
-key schedule. This common design also permits deployments to order, require,
-or fall back between classical and hybrid groups through one policy surface.
-
-The general-purpose hybrid KEM mechanisms do not depend on this TLS provider
-work and should be implemented and qualified independently. TLS-specific PKCS
-#11 mechanisms can be reconsidered when there is a concrete consumer and the
-classical and hybrid provider model has been designed together.
-
-## Mechanism reporting and backends
-
-A slot advertises a hybrid mechanism only when one backend can perform the
-complete construction with the required key-usage binding. A mechanism is
-reported with `CKF_HW` when the backend retains the sensitive composite key
-material and performs the secret operations, including when that backend is a
-virtual PIV applet or virtual YubiHSM. Combining a hardware component with an
-independent software component does not constitute the same hardware-backed
-composite key unless the backend defines and enforces the composite object's
-ownership and usage policy.
-
-The mechanism information uses `CKF_GENERATE_KEY_PAIR` for key generation and
-`CKF_ENCAPSULATE | CKF_DECAPSULATE` for the KEM operation. Encapsulation and
-decapsulation create secret-key objects rather than exporting the shared
-secret directly, subject to the ordinary output template and sensitivity
-rules.
-
-## Provisional YubiHSM extensions
-
-The virtual YubiHSM `firmware-full` profile is a suitable end-to-end backend
-for the experimental mechanisms. Its extension should remain explicitly
-provisional and make no compatibility claim for physical YubiHSM firmware.
-Algorithm identifiers, command identifiers, capability bits, object encodings,
-and attestation identifiers must stay in the project's private extension space
-until an applicable standard assigns them.
-
-A composite YubiHSM object owns both private components under one object ID,
-label, domain set, capability policy, origin, and lifecycle. Generation creates
-both components atomically. Import, when supported, must likewise accept one
-canonical composite private-key encoding and reject attempts to assemble a
-composite object from independently usable component objects. Public-key
-retrieval returns the canonical combined public encoding required by the
-selected construction.
-
-The YubiHSM command surface should expose complete hybrid encapsulation and
-decapsulation operations rather than returning independent component secrets
-for combination in PKCS11RS. General-purpose commands return the 32-byte output
-of the construction's internal KDF. TLS-specific commands return the ordered
-64-byte intermediate secret and the RFC 10024 peer share, leaving TLS HKDF and
-transcript binding to the TLS implementation. The algorithm attached to the
-object and command must prevent cross-use between these two forms.
-
-TLS hybrid keys are normally transient. Where the virtual YubiHSM protected
-session-object extension is available, PKCS11RS should map session-only TLS
-composite keys to it rather than consume persistent object IDs. Persistent
-hybrid objects support general-purpose KEM tests, explicit lifecycle
-qualification, and protocols that require a stable recipient key.
-
-Firmware capability discovery controls mechanism advertisement. Older or
-physical YubiHSMs that do not report the extension retain their existing
-mechanism set and never receive provisional commands. The connector continues
-to transport opaque YubiHSM frames and does not implement or terminate the
-hybrid construction.
-
-When implemented, the private extension must be documented consistently in
-PKCS11RS and `virtual-yubihsm`, including exact byte layouts, assigned values,
-capabilities, object semantics, error behavior, test vectors, and the draft or
-RFC revision implemented.
-
-## Provisional PIV extensions
-
-The virtual PIV applet can expose the same constructions as provisional PIV
-algorithm identifiers, following the existing private ML-DSA and ML-KEM
-extension model. One PIV key slot contains one inseparable composite key. It
-does not expose the ML-KEM and ECDH private components as separate PIV keys or
-allow either component to be selected by a standalone algorithm identifier.
-
-`GENERATE ASYMMETRIC KEY PAIR` creates both components atomically and returns a
-canonical combined public-key template. Private-key import, when enabled,
-accepts one canonical composite encoding and applies the same algorithm and
-slot policy as generation. `GENERAL AUTHENTICATE` carries the complete hybrid
-ciphertext or peer share and returns the construction's combined result; it
-does not return the two component secrets. The final TLV layout and algorithm
-values must be specified with the same exactness as the existing private
-ML-KEM extension. The current extended APDU and internal buffer model already
-used for ML-KEM is the applicable transport model for the larger hybrid
-public keys and ciphertexts.
-
-PKCS11RS can perform encapsulation from the projected composite public key
-without access to private card state, as it does for current PIV ML-KEM public
-operations. Decapsulation and every other operation involving the composite
-private key remain applet operations. A slot advertises the hybrid mechanism
-with `CKF_HW` when the private composite key resides in the PIV applet and the
-applet performs the complete private operation.
-
-Generated composite keys may use the existing PIV attestation command. Until
-standard composite KEM certificate identifiers and encodings are available,
-their SubjectPublicKeyInfo algorithm and public-key encoding remain private,
-provisional definitions and must not be represented as standard PIV or X.509
-algorithms. The attestation certificate can still bind the combined public key
-to the slot, applet, firmware, and policy under that explicitly experimental
-profile.
-
-Physical PIV cards that do not implement and advertise the private algorithm
-retain their existing mechanism set. When implemented, the PIV algorithm
-values, key templates, import format, `GENERAL AUTHENTICATE` TLVs, attestation
-encoding, APDU limits, and test vectors must be documented consistently in
-PKCS11RS and `virtual-yubikey`.
-
-## Validation requirements
-
-Implementation qualification must cover:
-
-- independent known-answer or interoperability vectors for every composite
-  encoding and combiner;
-- identical encapsulation and decapsulation secret-key values;
-- rejection of malformed component public keys and ciphertexts;
-- rejection of standalone or cross-mechanism use of component keys;
-- session-object destruction and failure cleanup;
-- mechanism flags, key types, attributes, copying, persistence, import, and
-  unwrap policy; and
-- PIV generation, import, extended-APDU operation, persistence, and
-  attestation for each advertised provisional algorithm;
-- TLS interoperability with RFC 10024 peers for TLS-specific mechanisms.
-
-Connector TLS policy, provider selection, fallback, and deployment concerns
-are documented separately in [PKCS11RS multi-device connector](connector.md#post-quantum-tls-status).
+The shared implementation is checked against the official draft-04 vector for
+each construction. Tests also cover generation, import, public projection,
+persistence, encapsulation/decapsulation equality, malformed traditional
+values, non-contributory X25519, cross-construction rejection, device
+capabilities, mechanism reporting, and generated-key attestation.
 
 ## References
 
 - [PKCS #11 Specification Version 3.2](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/pkcs11-spec-v3.2.html)
-- [RFC 10024: PQ/T Hybrid Key Agreement Mechanisms for TLS 1.3](https://www.rfc-editor.org/rfc/rfc10024.html)
-- [Concrete Hybrid PQ/T Key Encapsulation Mechanisms](https://datatracker.ietf.org/doc/draft-irtf-cfrg-concrete-hybrid-kems/)
-- [Generic Hybrid PQ/T Key Encapsulation Mechanisms](https://datatracker.ietf.org/doc/draft-irtf-cfrg-hybrid-kems/)
+- [Concrete Hybrid PQ/T Key Encapsulation Mechanisms, draft-04](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-concrete-hybrid-kems-04)
+- [Generic Hybrid PQ/T Key Encapsulation Mechanisms, draft-12](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hybrid-kems-12)
+- [X-Wing, draft-10](https://datatracker.ietf.org/doc/html/draft-connolly-cfrg-xwing-kem-10)
+- [FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)
+- [FIPS 202](https://csrc.nist.gov/pubs/fips/202/final)
+- [SEC 1 version 2.0](https://www.secg.org/sec1-v2.pdf)
+- [RFC 7748](https://www.rfc-editor.org/rfc/rfc7748)

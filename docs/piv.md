@@ -104,3 +104,13 @@ private-key import APDUs with SCP03 or SCP11 when confidentiality is required.
 `CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;
 the derived secret is returned as a sensitive generic secret object. This
 derive surface is an extension to the current YKCS11 mechanism list.
+
+The virtual PIV extension also exposes `MLKEM768-P256`,
+`MLKEM768-X25519`, and `MLKEM1024-P384` as algorithms `E8`, `E9`, and `EA`
+with the construction-specific vendor key types and mechanisms documented in
+[Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md).
+Generation and import use one inseparable 32-byte seed; import tag `09` never
+accepts component keys. Public projection and encapsulation run in the module,
+while decapsulation remains a PIV `GENERAL AUTHENTICATE` operation. These
+mechanisms are advertised only by connectors that identify the virtual PQC
+extension, never by a physical PIV card based only on its firmware version.

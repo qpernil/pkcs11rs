@@ -16,6 +16,19 @@ impl Command {
         Self::from_vec(CommandCode::DecapsulateMlKem, data)
     }
 
+    pub(crate) fn encapsulate_hybrid_kem(key_id: u16) -> Self {
+        Self {
+            code: CommandCode::EncapsulateHybridKem,
+            data: Zeroizing::new(key_id.to_be_bytes().to_vec()),
+        }
+    }
+
+    pub(crate) fn decapsulate_hybrid_kem(key_id: u16, ciphertext: &[u8]) -> Result<Self, Error> {
+        let mut data = key_id.to_be_bytes().to_vec();
+        data.extend_from_slice(ciphertext);
+        Self::from_vec(CommandCode::DecapsulateHybridKem, data)
+    }
+
     pub(crate) fn sign_ml_dsa(
         key_id: u16,
         parameters: &crate::MlDsaSignatureParameters,

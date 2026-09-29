@@ -603,6 +603,9 @@ pub(crate) fn generate_key_pair(
                     || x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN
+                    || x == CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN
+                    || x == CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN
             )
         {
             let (public_object, mut private_object) =
@@ -991,6 +994,18 @@ fn piv_generate_key_pair_parameters(
                 )
             }
         }
+        CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM768_P256,
+            piv::Algorithm::HybridMlKem768P256,
+        ),
+        CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM768_X25519,
+            piv::Algorithm::HybridMlKem768X25519,
+        ),
+        CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM1024_P384,
+            piv::Algorithm::HybridMlKem1024P384,
+        ),
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
     let public_object =
@@ -1235,6 +1250,26 @@ fn software_generate_key_pair(
             };
             (CKK_ML_KEM as CK_KEY_TYPE, material)
         }
+        x if matches!(
+            x,
+            CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN
+                | CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN
+                | CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN
+        ) =>
+        {
+            let construction = match x {
+                CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN => HybridKemConstruction::MlKem768P256,
+                CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN => HybridKemConstruction::MlKem768X25519,
+                _ => HybridKemConstruction::MlKem1024P384,
+            };
+            (
+                crate::object::hybrid_kem_key_type(construction),
+                SoftwarePrivateKeyMaterial::HybridKem(
+                    HybridKemPrivateKey::generate(construction)
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                ),
+            )
+        }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
     let public_material = private_material.public_key()?;
@@ -1425,6 +1460,18 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                 )
             }
         }
+        CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM768_P256,
+            YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256,
+        ),
+        CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM768_X25519,
+            YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+        ),
+        CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN => (
+            CKK_PKCS11RS_MLKEM1024_P384,
+            YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384,
+        ),
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
     validate_unique_template(public_template)?;

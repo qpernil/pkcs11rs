@@ -81,6 +81,7 @@ fn software_sign_mechanism_supported(
         },
         SoftwarePrivateKeyMaterial::Montgomery(_) => false,
         SoftwarePrivateKeyMaterial::MlKem(_) => false,
+        SoftwarePrivateKeyMaterial::HybridKem(_) => false,
     }
 }
 
@@ -94,6 +95,7 @@ fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, 
         },
         SoftwarePrivateKeyMaterial::Montgomery(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         SoftwarePrivateKeyMaterial::MlKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::HybridKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
@@ -167,6 +169,7 @@ fn software_sign(
         }
         SoftwarePrivateKeyMaterial::Signing(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         SoftwarePrivateKeyMaterial::MlKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::HybridKem(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
@@ -833,6 +836,11 @@ fn sign(
                     return Err(CKR_KEY_TYPE_INCONSISTENT.into());
                 }
                 piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                piv::Algorithm::HybridMlKem768P256
+                | piv::Algorithm::HybridMlKem768X25519
+                | piv::Algorithm::HybridMlKem1024P384 => {
+                    return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+                }
             },
             KeyMaterial::OpenPgpPrivate { algorithm, .. } => match algorithm {
                 OpenPgpAlgorithm::Rsa { .. } => match &operation.public_key {

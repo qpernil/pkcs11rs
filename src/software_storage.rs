@@ -1,9 +1,10 @@
 use crate::{
     CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, EcCurve, EdwardsCurve, Error, GcmParameters, KeyKind, KeyMaterial,
-    MlDsaParameterSet, MlDsaPrivateKey, MontgomeryCurve, SoftwareMontgomeryKey,
-    SoftwarePrivateKeyMaterial, SoftwarePrivateKeyMaterialExt, SoftwareSigningKey, TokenObject,
-    ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
+    CKR_PIN_LEN_RANGE, EcCurve, EdwardsCurve, Error, GcmParameters, HybridKemConstruction,
+    HybridKemPrivateKey, KeyKind, KeyMaterial, MlDsaParameterSet, MlDsaPrivateKey, MontgomeryCurve,
+    SoftwareMontgomeryKey, SoftwarePrivateKeyMaterial, SoftwarePrivateKeyMaterialExt,
+    SoftwareSigningKey, TokenObject, ec_curve_from_parameters, ec_curve_parameters,
+    secure_channel_crypto,
 };
 use der::{
     Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
@@ -77,6 +78,12 @@ const ML_DSA_87_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1
 const ML_KEM_512_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.1");
 const ML_KEM_768_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.2");
 const ML_KEM_1024_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.3");
+const HYBRID_MLKEM768_P256_OID: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.10.1");
+const HYBRID_MLKEM768_X25519_OID: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.10.2");
+const HYBRID_MLKEM1024_P384_OID: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.3.6.1.4.1.41482.10.3");
 const FRIENDLY_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.20");
 const LOCAL_KEY_ID_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
 // UUIDv5(URL namespace,
@@ -1847,6 +1854,24 @@ fn record_unique_id(reference: &ContentReference) -> String {
 pub(crate) fn material_to_pkcs8(
     material: &SoftwarePrivateKeyMaterial,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
+    if let SoftwarePrivateKeyMaterial::HybridKem(key) = material {
+        let oid = match key.construction() {
+            HybridKemConstruction::MlKem768P256 => HYBRID_MLKEM768_P256_OID,
+            HybridKemConstruction::MlKem768X25519 => HYBRID_MLKEM768_X25519_OID,
+            HybridKemConstruction::MlKem1024P384 => HYBRID_MLKEM1024_P384_OID,
+        };
+        let seed = key.seed();
+        let info = PrivateKeyInfoRef::new(
+            AlgorithmIdentifierRef {
+                oid,
+                parameters: None,
+            },
+            OctetStringRef::new(seed.as_ref()).map_err(|_| Error::from(CKR_DATA_INVALID))?,
+        );
+        let document =
+            SecretDocument::encode_msg(&info).map_err(|_| Error::from(CKR_DATA_INVALID))?;
+        return Ok(Zeroizing::new(document.as_bytes().to_vec()));
+    }
     let post_quantum = match material {
         SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(key)) => {
             key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
@@ -1936,6 +1961,23 @@ fn ec_pkcs8(curve: EcCurve, scalar: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> 
 
 fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Error> {
     let info = PrivateKeyInfoRef::from_der(encoded).map_err(|_| CKR_DATA_INVALID)?;
+    let construction = if info.algorithm.oid == HYBRID_MLKEM768_P256_OID {
+        Some(HybridKemConstruction::MlKem768P256)
+    } else if info.algorithm.oid == HYBRID_MLKEM768_X25519_OID {
+        Some(HybridKemConstruction::MlKem768X25519)
+    } else if info.algorithm.oid == HYBRID_MLKEM1024_P384_OID {
+        Some(HybridKemConstruction::MlKem1024P384)
+    } else {
+        None
+    };
+    if let Some(construction) = construction {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return HybridKemPrivateKey::from_seed_slice(construction, info.private_key.as_bytes())
+            .map(SoftwarePrivateKeyMaterial::HybridKem)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
     if info.algorithm.oid == ML_DSA_44_OID {
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
@@ -2254,6 +2296,18 @@ mod tests {
                     [7; 64],
                 ),
             ),
+            SoftwarePrivateKeyMaterial::HybridKem(HybridKemPrivateKey::from_seed(
+                HybridKemConstruction::MlKem768P256,
+                [7; 32],
+            )),
+            SoftwarePrivateKeyMaterial::HybridKem(HybridKemPrivateKey::from_seed(
+                HybridKemConstruction::MlKem768X25519,
+                [7; 32],
+            )),
+            SoftwarePrivateKeyMaterial::HybridKem(HybridKemPrivateKey::from_seed(
+                HybridKemConstruction::MlKem1024P384,
+                [7; 32],
+            )),
             SoftwarePrivateKeyMaterial::MlKem(
                 software_key_core::post_quantum::MlKemPrivateKey::from_seed(
                     software_key_core::post_quantum::MlKemParameterSet::MlKem768,
@@ -2294,6 +2348,9 @@ mod tests {
                     || info.algorithm.oid == ML_KEM_512_OID
                     || info.algorithm.oid == ML_KEM_768_OID
                     || info.algorithm.oid == ML_KEM_1024_OID
+                    || info.algorithm.oid == HYBRID_MLKEM768_P256_OID
+                    || info.algorithm.oid == HYBRID_MLKEM768_X25519_OID
+                    || info.algorithm.oid == HYBRID_MLKEM1024_P384_OID
                     || info.algorithm.oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1")
             );
         }

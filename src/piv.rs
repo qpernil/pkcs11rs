@@ -71,6 +71,9 @@ pub(crate) enum Algorithm {
     MlKem512 = 0xe5,
     MlKem768 = 0xe6,
     MlKem1024 = 0xe7,
+    HybridMlKem768P256 = 0xe8,
+    HybridMlKem768X25519 = 0xe9,
+    HybridMlKem1024P384 = 0xea,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +129,9 @@ impl Algorithm {
             0xe5 => Some(Self::MlKem512),
             0xe6 => Some(Self::MlKem768),
             0xe7 => Some(Self::MlKem1024),
+            0xe8 => Some(Self::HybridMlKem768P256),
+            0xe9 => Some(Self::HybridMlKem768X25519),
+            0xea => Some(Self::HybridMlKem1024P384),
             _ => None,
         }
     }
@@ -657,7 +663,10 @@ pub(crate) fn parse_metadata_public_key(
         | Algorithm::MlDsa87
         | Algorithm::MlKem512
         | Algorithm::MlKem768
-        | Algorithm::MlKem1024 => field(&fields, 0x87)
+        | Algorithm::MlKem1024
+        | Algorithm::HybridMlKem768P256
+        | Algorithm::HybridMlKem768X25519
+        | Algorithm::HybridMlKem1024P384 => field(&fields, 0x87)
             .filter(|value| !value.is_empty())
             .map(<[u8]>::to_vec)
             .map(MetadataPublicKey::Raw)
@@ -1038,6 +1047,9 @@ impl Client {
             Algorithm::EccP384 => 48,
             Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87 => 32,
             Algorithm::MlKem512 | Algorithm::MlKem768 | Algorithm::MlKem1024 => 64,
+            Algorithm::HybridMlKem768P256
+            | Algorithm::HybridMlKem768X25519
+            | Algorithm::HybridMlKem1024P384 => 32,
         };
         let mut request = Zeroizing::new(Vec::new());
         for (tag, component) in &key.components {
@@ -1238,6 +1250,9 @@ impl Client {
             Algorithm::MlKem512 => 768,
             Algorithm::MlKem768 => 1088,
             Algorithm::MlKem1024 => 1568,
+            Algorithm::HybridMlKem768P256 => 1153,
+            Algorithm::HybridMlKem768X25519 => 1120,
+            Algorithm::HybridMlKem1024P384 => 1665,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
         if ciphertext.len() != expected {
