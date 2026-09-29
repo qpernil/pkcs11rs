@@ -1204,10 +1204,12 @@ mod hardware_provisioning {
         dsa_private: CK_OBJECT_HANDLE,
         kem_public: CK_OBJECT_HANDLE,
         kem_private: CK_OBJECT_HANDLE,
+        hybrid_public: CK_OBJECT_HANDLE,
+        hybrid_private: CK_OBJECT_HANDLE,
     }
 
     fn cleanup_post_quantum_qualification_objects(session: CK_SESSION_HANDLE) {
-        for id in 0x7d00_u16..=0x7d03 {
+        for id in 0x7d00_u16..=0x7d05 {
             let mut id = id.to_be_bytes();
             let mut label = format!("pq-qualification-{id:02x?}").into_bytes();
             let mut template = [
@@ -1257,6 +1259,8 @@ mod hardware_provisioning {
                 self.dsa_private,
                 self.kem_public,
                 self.kem_private,
+                self.hybrid_public,
+                self.hybrid_private,
             ] {
                 let result = crate::api::C_DestroyObject(self.session, handle);
                 assert!(
@@ -1337,13 +1341,113 @@ mod hardware_provisioning {
             CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
             CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
         );
+        let mut mechanism = CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut id = (0x7d04_u16 + ordinal).to_be_bytes();
+        let mut yes = CK_TRUE as CK_BBOOL;
+        let mut no = CK_FALSE as CK_BBOOL;
+        let mut label = format!("pq-qualification-{id:02x?}").into_bytes();
+        let mut private_label = label.clone();
+        let mut public_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            scalar_attribute(CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE, &mut yes),
+        ];
+        let mut private_template = [
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut yes),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut no),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut private_label),
+            scalar_attribute(CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE, &mut yes),
+        ];
+        let mut hybrid_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut hybrid_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut hybrid_public,
+                &mut hybrid_private,
+            ),
+            CKR_OK as CK_RV
+        );
         PostQuantumKeys {
             session,
             dsa_public,
             dsa_private,
             kem_public,
             kem_private,
+            hybrid_public,
+            hybrid_private,
         }
+    }
+
+    fn exercise_kem_pair(
+        session: CK_SESSION_HANDLE,
+        mechanism_type: CK_MECHANISM_TYPE,
+        public_key: CK_OBJECT_HANDLE,
+        private_key: CK_OBJECT_HANDLE,
+        expected_ciphertext_length: usize,
+    ) {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut secret_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+        let mut no = CK_FALSE as CK_BBOOL;
+        let mut yes = CK_TRUE as CK_BBOOL;
+        let mut secret_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut secret_type),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut no),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut no),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut yes),
+        ];
+        let mut ciphertext = vec![0; expected_ciphertext_length];
+        let mut ciphertext_length = ciphertext.len() as CK_ULONG;
+        let mut encapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                session,
+                &mut mechanism,
+                public_key,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_length,
+                &mut encapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(ciphertext_length, expected_ciphertext_length as CK_ULONG);
+        let mut decapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                session,
+                &mut mechanism,
+                private_key,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                ciphertext_length,
+                &mut decapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            read_hardware_attribute(session, encapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            read_hardware_attribute(session, decapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        );
     }
 
     fn exercise_post_quantum_keys(slot: &(CK_SLOT_ID, String), keys: &PostQuantumKeys) {
@@ -1397,54 +1501,19 @@ mod hardware_provisioning {
             CKR_OK as CK_RV
         );
 
-        let mut kem_mechanism = CK_MECHANISM {
-            mechanism: CKM_ML_KEM as CK_MECHANISM_TYPE,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
-        };
-        let mut secret_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
-        let mut no = CK_FALSE as CK_BBOOL;
-        let mut yes = CK_TRUE as CK_BBOOL;
-        let mut secret_template = [
-            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut secret_type),
-            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut no),
-            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut no),
-            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut yes),
-        ];
-        let mut ciphertext = vec![0; 1_568];
-        let mut ciphertext_length = ciphertext.len() as CK_ULONG;
-        let mut encapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-        assert_eq!(
-            crate::api::C_EncapsulateKey(
-                session,
-                &mut kem_mechanism,
-                keys.kem_public,
-                secret_template.as_mut_ptr(),
-                secret_template.len() as CK_ULONG,
-                ciphertext.as_mut_ptr(),
-                &mut ciphertext_length,
-                &mut encapsulated_secret,
-            ),
-            CKR_OK as CK_RV
+        exercise_kem_pair(
+            session,
+            CKM_ML_KEM as CK_MECHANISM_TYPE,
+            keys.kem_public,
+            keys.kem_private,
+            1_568,
         );
-        assert_eq!(ciphertext_length, 1_568);
-        let mut decapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-        assert_eq!(
-            crate::api::C_DecapsulateKey(
-                session,
-                &mut kem_mechanism,
-                keys.kem_private,
-                secret_template.as_mut_ptr(),
-                secret_template.len() as CK_ULONG,
-                ciphertext.as_mut_ptr(),
-                ciphertext_length,
-                &mut decapsulated_secret,
-            ),
-            CKR_OK as CK_RV
-        );
-        assert_eq!(
-            read_hardware_attribute(session, encapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE),
-            read_hardware_attribute(session, decapsulated_secret, CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        exercise_kem_pair(
+            session,
+            crate::CKM_PKCS11RS_MLKEM768_X25519,
+            keys.hybrid_public,
+            keys.hybrid_private,
+            1_120,
         );
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     }
@@ -1552,7 +1621,7 @@ mod hardware_provisioning {
     }
 
     #[test]
-    #[ignore = "generates temporary ML-DSA-87 and ML-KEM-1024 keys on two virtual YubiHSMs through one HTTP connector"]
+    #[ignore = "generates temporary ML-DSA-87, ML-KEM-1024, and MLKEM768-X25519 keys on two virtual YubiHSMs through one HTTP connector"]
     fn post_quantum_yubihsm_clients_work_concurrently_through_connector() {
         if std::env::var(PQ_QUALIFICATION_ENABLE_ENV).as_deref() != Ok("1") {
             eprintln!("skipped PQ qualification; set {PQ_QUALIFICATION_ENABLE_ENV}=1");
