@@ -8219,6 +8219,9 @@ impl crate::Connector for GadgetConnector {
     fn product(&self) -> &str {
         "YubiKey Gadget CCID"
     }
+    fn supports_piv_pqc(&self) -> bool {
+        true
+    }
     fn major(&self) -> u8 {
         5
     }

@@ -228,6 +228,10 @@ impl Connector for EmbeddedVirtualYubiKeyConnector {
         "Embedded Virtual YubiKey"
     }
 
+    fn supports_piv_pqc(&self) -> bool {
+        true
+    }
+
     fn major(&self) -> u8 {
         0
     }

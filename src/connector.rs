@@ -34,6 +34,9 @@ pub(crate) trait Connector {
     fn apdu_capabilities(&self) -> ApduCapabilities {
         ApduCapabilities::EXTENDED
     }
+    fn supports_piv_pqc(&self) -> bool {
+        false
+    }
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit(self, command)
     }
@@ -536,6 +539,13 @@ impl Connector for CcidDeviceConnector {
         &self.identity.product
     }
 
+    fn supports_piv_pqc(&self) -> bool {
+        self.binding
+            .lock()
+            .ok()
+            .is_some_and(|binding| binding.current.supports_piv_pqc())
+    }
+
     fn name(&self) -> String {
         format!("YubiKey CCID #{}", self.identity.serial)
     }
@@ -870,6 +880,10 @@ impl Connector for PcscAppletConnector {
 
     fn product(&self) -> &str {
         self.base.product()
+    }
+
+    fn supports_piv_pqc(&self) -> bool {
+        self.base.supports_piv_pqc()
     }
 
     fn major(&self) -> u8 {
@@ -1257,6 +1271,9 @@ impl Connector for UsbConnector {
     }
     fn product(&self) -> &str {
         &self.product
+    }
+    fn supports_piv_pqc(&self) -> bool {
+        self.product.contains("Gadget")
     }
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer(), self.product(), self.serial)
