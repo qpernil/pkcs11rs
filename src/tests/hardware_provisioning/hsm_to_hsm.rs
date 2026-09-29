@@ -828,12 +828,19 @@ fn object_info(session: CK_SESSION_HANDLE, id: u16, object_type: u8) -> crate::Y
 }
 
 fn assert_cluster_replica(source: &crate::YubiHsmObjectInfo, target: &crate::YubiHsmObjectInfo) {
+    // Freshly enrolled members should have used this reserved ID the same
+    // number of times. Origin remains member-local because one copy was
+    // generated and the other imported.
     assert_eq!(target.id, source.id, "replica ID differs");
     assert_eq!(
         target.object_type, source.object_type,
         "replica type differs"
     );
     assert_eq!(target.length, source.length, "replica length differs");
+    assert_eq!(
+        target.sequence, source.sequence,
+        "fresh replica sequence differs"
+    );
     assert_eq!(target.label, source.label, "replica label differs");
     assert_eq!(target.domains, source.domains, "replica domains differ");
     assert_eq!(
@@ -1029,10 +1036,12 @@ fn bootstraps_two_yubihsms_online_with_rsa_then_aes_replication() {
         )
         .expect("RSA full-object import of the cluster wrap key failed");
         assert_imported_object(&imported, crate::YUBIHSM_WRAP_KEY, aes_id);
-        assert_cluster_replica(
-            &object_info(source_session, aes_id, crate::YUBIHSM_WRAP_KEY),
-            &object_info(target_session, aes_id, crate::YUBIHSM_WRAP_KEY),
+        let source_aes = object_info(source_session, aes_id, crate::YUBIHSM_WRAP_KEY);
+        let target_aes = object_info(target_session, aes_id, crate::YUBIHSM_WRAP_KEY);
+        eprintln!(
+            "AES cluster wrap metadata:\n  authority {source}: {source_aes:#?}\n  imported  {target}: {target_aes:#?}"
         );
+        assert_cluster_replica(&source_aes, &target_aes);
 
         // Native AES wrapping is the steady-state replication path after the
         // shared cluster key has been bootstrapped.
@@ -1071,18 +1080,20 @@ fn bootstraps_two_yubihsms_online_with_rsa_then_aes_replication() {
         )
         .expect("AES full-object import of the application key failed");
         assert_imported_object(&imported, crate::YUBIHSM_ASYMMETRIC_KEY, application_id);
-        assert_cluster_replica(
-            &object_info(
-                source_session,
-                application_id,
-                crate::YUBIHSM_ASYMMETRIC_KEY,
-            ),
-            &object_info(
-                target_session,
-                application_id,
-                crate::YUBIHSM_ASYMMETRIC_KEY,
-            ),
+        let source_application = object_info(
+            source_session,
+            application_id,
+            crate::YUBIHSM_ASYMMETRIC_KEY,
         );
+        let target_application = object_info(
+            target_session,
+            application_id,
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+        );
+        eprintln!(
+            "P-256 replica metadata:\n  authority {source}: {source_application:#?}\n  imported  {target}: {target_application:#?}"
+        );
+        assert_cluster_replica(&source_application, &target_application);
 
         let source_public = crate::YubiHsmPublicKey::parse(
             &command(
