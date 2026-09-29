@@ -796,6 +796,399 @@ fn initialize_cross_hsm(source: &str, target: &str, recreate_sessions: bool) {
     );
 }
 
+fn unused_cross_hsm_ids(
+    source: &[(u16, u8, u8)],
+    target: &[(u16, u8, u8)],
+    count: usize,
+) -> Vec<u16> {
+    let used: std::collections::HashSet<_> =
+        source.iter().chain(target).map(|(id, _, _)| *id).collect();
+    let ids: Vec<_> = (0xf000..=0xfffe)
+        .rev()
+        .filter(|id| !used.contains(id))
+        .take(count)
+        .collect();
+    assert_eq!(ids.len(), count, "not enough unused cross-HSM object IDs");
+    ids
+}
+
+fn object_info(session: CK_SESSION_HANDLE, id: u16, object_type: u8) -> crate::YubiHsmObjectInfo {
+    crate::YubiHsmObjectInfo::parse(
+        &command(
+            session,
+            &crate::YubiHsmCommand::get_object_info(id, object_type),
+        )
+        .unwrap_or_else(|error| {
+            panic!("failed to read object {object_type:02x}:{id:04x}: {error:?}")
+        }),
+    )
+    .unwrap_or_else(|error| {
+        panic!("invalid object metadata for {object_type:02x}:{id:04x}: {error:?}")
+    })
+}
+
+fn assert_cluster_replica(source: &crate::YubiHsmObjectInfo, target: &crate::YubiHsmObjectInfo) {
+    assert_eq!(target.id, source.id, "replica ID differs");
+    assert_eq!(
+        target.object_type, source.object_type,
+        "replica type differs"
+    );
+    assert_eq!(target.length, source.length, "replica length differs");
+    assert_eq!(target.label, source.label, "replica label differs");
+    assert_eq!(target.domains, source.domains, "replica domains differ");
+    assert_eq!(
+        target.algorithm, source.algorithm,
+        "replica algorithm differs"
+    );
+    assert_eq!(
+        target.capabilities, source.capabilities,
+        "replica capabilities differ"
+    );
+    assert_eq!(
+        target.delegated_capabilities, source.delegated_capabilities,
+        "replica delegated capabilities differ"
+    );
+}
+
+fn assert_imported_object(response: &[u8], object_type: u8, id: u16) {
+    assert_eq!(
+        response,
+        [object_type, id.to_be_bytes()[0], id.to_be_bytes()[1]],
+        "wrapped import returned a different object identity"
+    );
+}
+
+fn delete_labeled_object_if_present(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+    object_type: u8,
+    label: &str,
+) {
+    if !inventory(session)
+        .iter()
+        .any(|(candidate, kind, _)| *candidate == id && *kind == object_type)
+    {
+        return;
+    }
+    let info = object_info(session, id, object_type);
+    assert_eq!(
+        info.label, label,
+        "refusing to remove an unexpected object at {object_type:02x}:{id:04x}"
+    );
+    assert!(
+        command(
+            session,
+            &crate::YubiHsmCommand::delete_object(id, object_type)
+        )
+        .expect("failed to remove temporary cluster-bootstrap object")
+        .is_empty()
+    );
+}
+
+#[test]
+#[ignore = "bootstraps temporary cluster keys across two explicitly selected physical YubiHSMs"]
+fn bootstraps_two_yubihsms_online_with_rsa_then_aes_replication() {
+    const ENABLE: &str = "PKCS11RS_TEST_YUBIHSM_CLUSTER_BOOTSTRAP";
+    if std::env::var(ENABLE).as_deref() != Ok("1") {
+        eprintln!("skipped cluster bootstrap qualification; set {ENABLE}=1 to enable it");
+        return;
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = required("PKCS11RS_CROSS_HSM_SOURCE");
+    let target = required("PKCS11RS_CROSS_HSM_TARGET");
+    assert_ne!(source, target, "source and target must differ");
+    let source_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_SOURCE_PIN"));
+    let target_pin = crate::Zeroizing::new(required("PKCS11RS_CROSS_HSM_TARGET_PIN"));
+    initialize_cross_hsm(&source, &target, false);
+    let source_session = open(&source);
+    let target_session = open(&target);
+    login(source_session, &source_pin, &format!("source {source}"));
+    login(target_session, &target_pin, &format!("target {target}"));
+
+    let source_before = inventory(source_session);
+    let target_before = inventory(target_session);
+    let ids = unused_cross_hsm_ids(&source_before, &target_before, 3);
+    let rsa_id = ids[0];
+    let aes_id = ids[1];
+    let application_id = ids[2];
+    let rsa_label = "pkcs11rs cluster bootstrap RSA";
+    let aes_label = "pkcs11rs cluster AES wrap";
+    let application_label = "pkcs11rs cluster replica";
+
+    eprintln!(
+        "qualifying online bootstrap from authority {source} to joining member {target} with temporary IDs {rsa_id:04x}, {aes_id:04x}, {application_id:04x}"
+    );
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // The target creates the RSA private key. Only its public modulus is
+        // transferred to the source; no shared secret is provisioned out of
+        // band or exposed to this process.
+        let rsa_delegated = crate::yubihsm_capabilities(&[0x07, 0x0c, 0x0d, 0x10]);
+        let target_rsa = crate::YubiHsmDelegatedObjectParameters {
+            object: crate::YubiHsmObjectParameters {
+                id: rsa_id,
+                label: rsa_label,
+                domains: 1,
+                capabilities: crate::yubihsm_capabilities(&[0x0d]),
+                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+            },
+            delegated_capabilities: rsa_delegated,
+        };
+        let created = command(
+            target_session,
+            &crate::YubiHsmCommand::generate_wrap_key(&target_rsa).unwrap(),
+        )
+        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+        .expect("failed to generate the joining member's RSA wrap key");
+        assert_eq!(created, rsa_id);
+        let rsa_public = crate::YubiHsmPublicKey::parse(
+            &command(
+                target_session,
+                &crate::YubiHsmCommand::get_public_key(rsa_id, Some(crate::YUBIHSM_WRAP_KEY)),
+            )
+            .expect("failed to read the joining member's RSA public key"),
+        )
+        .expect("joining member returned an invalid RSA public key");
+        assert_eq!(rsa_public.algorithm, crate::YUBIHSM_ALGO_RSA_2048);
+        assert_eq!(rsa_public.key.len(), 256);
+
+        let source_public_rsa = crate::YubiHsmDelegatedObjectParameters {
+            object: crate::YubiHsmObjectParameters {
+                id: rsa_id,
+                label: rsa_label,
+                domains: 1,
+                capabilities: crate::yubihsm_capabilities(&[0x0c]),
+                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+            },
+            delegated_capabilities: rsa_delegated,
+        };
+        let installed = command(
+            source_session,
+            &crate::YubiHsmCommand::put_delegated_object(
+                crate::YubiHsmCommandCode::PutPublicWrapKey,
+                &source_public_rsa,
+                &rsa_public.key,
+            )
+            .unwrap(),
+        )
+        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+        .expect("failed to install the joining member's public wrap key");
+        assert_eq!(installed, rsa_id);
+
+        // Generate the cluster AES-CCM wrap key on the authority. It can
+        // replicate sign-capable, exportable application keys and is itself
+        // exportable only as a protected full object.
+        let aes_parameters = crate::YubiHsmDelegatedObjectParameters {
+            object: crate::YubiHsmObjectParameters {
+                id: aes_id,
+                label: aes_label,
+                domains: 1,
+                capabilities: crate::yubihsm_capabilities(&[0x0c, 0x0d, 0x10]),
+                algorithm: crate::YUBIHSM_ALGO_AES256_CCM_WRAP,
+            },
+            delegated_capabilities: crate::yubihsm_capabilities(&[0x07, 0x10]),
+        };
+        let created = command(
+            source_session,
+            &crate::YubiHsmCommand::generate_wrap_key(&aes_parameters).unwrap(),
+        )
+        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+        .expect("failed to generate the authority's AES cluster wrap key");
+        assert_eq!(created, aes_id);
+
+        let label_digest = crate::MessageDigest::Sha256.digest(b"");
+        let rsa_wrapped_aes = command(
+            source_session,
+            &crate::YubiHsmCommand::rsa_wrap(
+                crate::YubiHsmCommandCode::ExportRsaWrapped,
+                &crate::YubiHsmRsaWrapParameters {
+                    wrapping_key_id: rsa_id,
+                    object_type: crate::YUBIHSM_WRAP_KEY,
+                    object_id: aes_id,
+                    aes_algorithm: crate::YUBIHSM_ALGO_AES256,
+                    hash_algorithm: crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+                    mgf1_algorithm: crate::YUBIHSM_ALGO_MGF1_SHA256,
+                    label_digest: &label_digest,
+                },
+            )
+            .unwrap(),
+        )
+        .expect("RSA full-object export of the cluster wrap key failed");
+        assert!(!rsa_wrapped_aes.is_empty());
+        let imported = command(
+            target_session,
+            &crate::YubiHsmCommand::import_rsa_wrapped(
+                rsa_id,
+                crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+                crate::YUBIHSM_ALGO_MGF1_SHA256,
+                &rsa_wrapped_aes,
+                &label_digest,
+            )
+            .unwrap(),
+        )
+        .expect("RSA full-object import of the cluster wrap key failed");
+        assert_imported_object(&imported, crate::YUBIHSM_WRAP_KEY, aes_id);
+        assert_cluster_replica(
+            &object_info(source_session, aes_id, crate::YUBIHSM_WRAP_KEY),
+            &object_info(target_session, aes_id, crate::YUBIHSM_WRAP_KEY),
+        );
+
+        // Native AES wrapping is the steady-state replication path after the
+        // shared cluster key has been bootstrapped.
+        let application = crate::YubiHsmObjectParameters {
+            id: application_id,
+            label: application_label,
+            domains: 1,
+            capabilities: crate::yubihsm_capabilities(&[0x07, 0x10]),
+            algorithm: crate::YUBIHSM_ALGO_EC_P256,
+        };
+        let created = command(
+            source_session,
+            &crate::YubiHsmCommand::generate_object(
+                crate::YubiHsmCommandCode::GenerateAsymmetricKey,
+                &application,
+            )
+            .unwrap(),
+        )
+        .and_then(|response| crate::parse_yubihsm_object_id(&response))
+        .expect("failed to generate the authority's application key");
+        assert_eq!(created, application_id);
+        let aes_wrapped_application = command(
+            source_session,
+            &crate::YubiHsmCommand::export_wrapped(
+                aes_id,
+                crate::YUBIHSM_ASYMMETRIC_KEY,
+                application_id,
+                None,
+            ),
+        )
+        .expect("AES full-object export of the application key failed");
+        assert!(!aes_wrapped_application.is_empty());
+        let imported = command(
+            target_session,
+            &crate::YubiHsmCommand::import_wrapped(aes_id, &aes_wrapped_application).unwrap(),
+        )
+        .expect("AES full-object import of the application key failed");
+        assert_imported_object(&imported, crate::YUBIHSM_ASYMMETRIC_KEY, application_id);
+        assert_cluster_replica(
+            &object_info(
+                source_session,
+                application_id,
+                crate::YUBIHSM_ASYMMETRIC_KEY,
+            ),
+            &object_info(
+                target_session,
+                application_id,
+                crate::YUBIHSM_ASYMMETRIC_KEY,
+            ),
+        );
+
+        let source_public = crate::YubiHsmPublicKey::parse(
+            &command(
+                source_session,
+                &crate::YubiHsmCommand::get_public_key(
+                    application_id,
+                    Some(crate::YUBIHSM_ASYMMETRIC_KEY),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let target_public = crate::YubiHsmPublicKey::parse(
+            &command(
+                target_session,
+                &crate::YubiHsmCommand::get_public_key(
+                    application_id,
+                    Some(crate::YUBIHSM_ASYMMETRIC_KEY),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source_public, target_public, "replica public keys differ");
+        assert_eq!(source_public.algorithm, crate::YUBIHSM_ALGO_EC_P256);
+        assert_eq!(source_public.key.len(), 64);
+
+        let digest = crate::MessageDigest::Sha256.digest(b"pkcs11rs cluster replication proof");
+        for (member, session) in [(&source, source_session), (&target, target_session)] {
+            let der = command(
+                session,
+                &crate::YubiHsmCommand::key_data(
+                    crate::YubiHsmCommandCode::SignEcdsa,
+                    application_id,
+                    &digest,
+                )
+                .unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("{member}: replica signing failed: {error:?}"));
+            let signature = crate::piv_ecdsa_signature(&der, 32)
+                .unwrap_or_else(|error| panic!("{member}: invalid ECDSA signature: {error:?}"));
+            crate::verify_ecdsa(
+                crate::EcCurve::P256,
+                &source_public.key,
+                &digest,
+                &signature,
+            )
+            .unwrap_or_else(|error| panic!("{member}: replica signature failed: {error:?}"));
+        }
+
+        eprintln!(
+            "verified online RSA bootstrap, identical AES wrap-key policy, native full-object replication, and working P-256 replicas on {source} and {target}"
+        );
+    }));
+
+    let cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (session, id, object_type, label) in [
+            (
+                target_session,
+                application_id,
+                crate::YUBIHSM_ASYMMETRIC_KEY,
+                application_label,
+            ),
+            (
+                source_session,
+                application_id,
+                crate::YUBIHSM_ASYMMETRIC_KEY,
+                application_label,
+            ),
+            (target_session, aes_id, crate::YUBIHSM_WRAP_KEY, aes_label),
+            (source_session, aes_id, crate::YUBIHSM_WRAP_KEY, aes_label),
+            (
+                source_session,
+                rsa_id,
+                crate::YUBIHSM_PUBLIC_WRAP_KEY,
+                rsa_label,
+            ),
+            (target_session, rsa_id, crate::YUBIHSM_WRAP_KEY, rsa_label),
+        ] {
+            delete_labeled_object_if_present(session, id, object_type, label);
+        }
+        assert_eq!(
+            inventory(source_session),
+            source_before,
+            "source inventory differs after cluster-bootstrap cleanup"
+        );
+        assert_eq!(
+            inventory(target_session),
+            target_before,
+            "target inventory differs after cluster-bootstrap cleanup"
+        );
+        assert_eq!(crate::api::C_Logout(source_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_Logout(target_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(source_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(target_session), CKR_OK as CK_RV);
+        eprintln!("removed all temporary cluster-bootstrap objects; both inventories restored");
+    }));
+    finalize_for_test();
+    if let Err(error) = cleanup {
+        std::panic::resume_unwind(error);
+    }
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
 fn p256_public_key(
     session: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
