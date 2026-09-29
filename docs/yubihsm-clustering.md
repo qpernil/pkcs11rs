@@ -132,6 +132,21 @@ logical creation history determines PKCS #11 properties such as `CKA_LOCAL`;
 a replica imported under wrap must not cause the logical object to appear
 nonlocal merely because that particular copy has an imported device origin.
 
+Each cluster object also has a logical generation. In normal lockstep operation,
+the native YubiHSM `sequence` for its reserved ID should be equal across every
+current member: the ID has undergone the same number of create/delete/recreate
+cycles. Fresh enrollment therefore requires equal sequence, and an unexpected
+mismatch is strong evidence of divergent history or out-of-band mutation.
+
+Sequence equality is not by itself proof of equal key material or policy, and
+repair may be an explicit exception. Deleting and reimporting only a stale
+member can advance that member's native sequence while restoring the intended
+logical object. The cluster therefore records both its common logical
+generation and each member's native sequence. A repaired member with a
+different sequence may become current only after full-object provenance,
+metadata, and functional verification; the divergence remains visible in
+diagnostics instead of being silently treated as normal lockstep history.
+
 ## Logical PKCS #11 token
 
 ### Identity and presence
@@ -577,7 +592,9 @@ the RSA private wrap key inside the joining member, transfers only its public
 key, bootstraps an AES-256-CCM wrap key through RSA full-object wrapping, and
 uses native AES full-object wrapping to replicate a P-256 application key. It
 then verifies matching policy and working signatures on both members and
-removes every temporary object.
+removes every temporary object. Diagnostic output includes both members'
+metadata, including their member-local origin and sequence values, but never
+prints key material.
 
 Run it only with two test HSMs whose administrator credentials authorize the
 required generate, wrap, import, inspect, sign, and delete operations:
