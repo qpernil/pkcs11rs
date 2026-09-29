@@ -15,6 +15,7 @@ const PUBLIC_KEY_KIND_RSA: u64 = 1;
 const PUBLIC_KEY_KIND_EC: u64 = 2;
 const PUBLIC_KEY_KIND_ML_DSA: u64 = 3;
 const PUBLIC_KEY_KIND_ML_KEM: u64 = 4;
+const PUBLIC_KEY_KIND_HYBRID_KEM: u64 = 5;
 const BACKED_KEY_SCHEMA: &str = "pkcs11rs.backed-key";
 
 pub(crate) struct EncodedBackedObject {
@@ -215,6 +216,19 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
         } => (
             PUBLIC_KEY_KIND_ML_KEM,
             vec![u8::try_from(*parameter_set).map_err(|_| Error::from(CKR_DATA_INVALID))?],
+            public_key.clone(),
+            false,
+        ),
+        PublicKeyMaterial::HybridKem {
+            construction,
+            public_key,
+        } => (
+            PUBLIC_KEY_KIND_HYBRID_KEM,
+            vec![match construction {
+                HybridKemConstruction::MlKem768P256 => 1,
+                HybridKemConstruction::MlKem768X25519 => 2,
+                HybridKemConstruction::MlKem1024P384 => 3,
+            }],
             public_key.clone(),
             false,
         ),
@@ -673,6 +687,23 @@ fn decode_public_key_material(
             }
             KeyMaterial::Public(PublicKeyMaterial::MlKem {
                 parameter_set,
+                public_key: second,
+            })
+        }
+        PUBLIC_KEY_KIND_HYBRID_KEM if !prefix => {
+            let construction = match first.as_slice() {
+                [1] => HybridKemConstruction::MlKem768P256,
+                [2] => HybridKemConstruction::MlKem768X25519,
+                [3] => HybridKemConstruction::MlKem1024P384,
+                _ => return Err(CKR_DATA_INVALID.into()),
+            };
+            if key_type != crate::object::hybrid_kem_key_type(construction)
+                || second.len() != construction.public_key_length()
+            {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::HybridKem {
+                construction,
                 public_key: second,
             })
         }

@@ -22,6 +22,7 @@ use rsa::{
 #[cfg(test)]
 pub(crate) use software_key_core::software_signing::SignatureScheme;
 pub(crate) use software_key_core::{
+    hybrid_kem::{HybridKemConstruction, HybridKemPrivateKey},
     post_quantum::{MlDsaParameterSet, MlDsaPrivateKey},
     software_key_agreement::{MontgomeryCurve, SoftwareMontgomeryKey},
     software_signing::{EcCurve, EdwardsCurve, KeyKind, SoftwarePublicKey, SoftwareSigningKey},
@@ -251,6 +252,9 @@ mod yubihsm_algorithm {
     pub(super) const YUBIHSM_ALGO_ML_KEM_512: u8 = 62;
     pub(super) const YUBIHSM_ALGO_ML_KEM_768: u8 = 63;
     pub(super) const YUBIHSM_ALGO_ML_KEM_1024: u8 = 64;
+    pub(super) const YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256: u8 = 65;
+    pub(super) const YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519: u8 = 66;
+    pub(super) const YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384: u8 = 67;
 }
 use yubihsm_algorithm::*;
 
@@ -315,6 +319,18 @@ pub const CKM_PKCS11RS_FIDO_ASSERTION: CK_MECHANISM_TYPE =
 /// Atomically prefix an ECDH secret and apply a mandatory ANSI X9.63 KDF.
 pub const CKM_PKCS11RS_PREFIXED_ECDH_DERIVE: CK_MECHANISM_TYPE =
     CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0006;
+pub const CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0010;
+pub const CKM_PKCS11RS_MLKEM768_P256: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0011;
+pub const CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0012;
+pub const CKM_PKCS11RS_MLKEM768_X25519: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0013;
+pub const CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0014;
+pub const CKM_PKCS11RS_MLKEM1024_P384: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0015;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -330,6 +346,11 @@ pub struct CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
 /// Key type used by the importable previewSign registration object.
 pub const CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0001;
+pub const CKK_PKCS11RS_MLKEM768_P256: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0010;
+pub const CKK_PKCS11RS_MLKEM768_X25519: CK_KEY_TYPE =
+    CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0011;
+pub const CKK_PKCS11RS_MLKEM1024_P384: CK_KEY_TYPE =
+    CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0012;
 /// Canonical `PreviewSignRegistration` CBOR wrapper.
 pub const CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0001;
@@ -437,6 +458,8 @@ fn yubihsm_capabilities_to_attributes(
                 attributes.sign = yubihsm_capability(capabilities, 0x3a);
             } else if yubihsm_ml_kem(algorithm).is_some() {
                 attributes.decapsulate = yubihsm_capability(capabilities, 0x3c);
+            } else if yubihsm_hybrid_kem(algorithm).is_some() {
+                attributes.decapsulate = yubihsm_capability(capabilities, 0x3e);
             } else if is_yubihsm_edwards(algorithm) {
                 attributes.sign = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
@@ -459,6 +482,8 @@ fn yubihsm_capabilities_to_attributes(
                 attributes.verify = true;
             } else if yubihsm_ml_kem(algorithm).is_some() {
                 attributes.encapsulate = yubihsm_capability(capabilities, 0x3b);
+            } else if yubihsm_hybrid_kem(algorithm).is_some() {
+                attributes.encapsulate = yubihsm_capability(capabilities, 0x3d);
             } else if is_yubihsm_edwards(algorithm) {
                 attributes.verify = yubihsm_capability(capabilities, 0x08);
             } else if is_yubihsm_ec(algorithm) {
@@ -525,6 +550,14 @@ fn yubihsm_attributes_to_capabilities(
                 }
                 if attributes.decapsulate {
                     bits.push(0x3c);
+                }
+            }
+            if yubihsm_hybrid_kem(algorithm).is_some() {
+                if attributes.encapsulate {
+                    bits.push(0x3d);
+                }
+                if attributes.decapsulate {
+                    bits.push(0x3e);
                 }
             }
             if attributes.decrypt && is_yubihsm_rsa(algorithm) {
@@ -628,6 +661,14 @@ fn yubihsm_ml_kem(algorithm: u8) -> Option<software_key_core::post_quantum::MlKe
         _ => None,
     }
 }
+fn yubihsm_hybrid_kem(algorithm: u8) -> Option<HybridKemConstruction> {
+    match algorithm {
+        YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256 => Some(HybridKemConstruction::MlKem768P256),
+        YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519 => Some(HybridKemConstruction::MlKem768X25519),
+        YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384 => Some(HybridKemConstruction::MlKem1024P384),
+        _ => None,
+    }
+}
 
 fn yubihsm_has_virtual_extensions(algorithms: &[u8]) -> bool {
     algorithms.iter().any(|algorithm| {
@@ -642,6 +683,9 @@ fn yubihsm_has_virtual_extensions(algorithms: &[u8]) -> bool {
                 | YUBIHSM_ALGO_ML_KEM_512
                 | YUBIHSM_ALGO_ML_KEM_768
                 | YUBIHSM_ALGO_ML_KEM_1024
+                | YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256
+                | YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519
+                | YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384
         )
     })
 }

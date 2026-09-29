@@ -64,6 +64,9 @@ impl PivPublicKey {
             piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
                 CKK_ML_KEM as CK_KEY_TYPE
             }
+            piv::Algorithm::HybridMlKem768P256 => CKK_PKCS11RS_MLKEM768_P256,
+            piv::Algorithm::HybridMlKem768X25519 => CKK_PKCS11RS_MLKEM768_X25519,
+            piv::Algorithm::HybridMlKem1024P384 => CKK_PKCS11RS_MLKEM1024_P384,
         }
     }
 }
@@ -86,6 +89,15 @@ fn piv_pq_public_key_length(algorithm: piv::Algorithm) -> Option<usize> {
         piv::Algorithm::MlKem512 => Kem::MlKem512.public_key_length(),
         piv::Algorithm::MlKem768 => Kem::MlKem768.public_key_length(),
         piv::Algorithm::MlKem1024 => Kem::MlKem1024.public_key_length(),
+        piv::Algorithm::HybridMlKem768P256 => {
+            HybridKemConstruction::MlKem768P256.public_key_length()
+        }
+        piv::Algorithm::HybridMlKem768X25519 => {
+            HybridKemConstruction::MlKem768X25519.public_key_length()
+        }
+        piv::Algorithm::HybridMlKem1024P384 => {
+            HybridKemConstruction::MlKem1024P384.public_key_length()
+        }
         _ => return None,
     })
 }
@@ -130,7 +142,14 @@ pub(crate) fn piv_algorithm_supported(
     algorithm: piv::Algorithm,
     virtual_pqc: bool,
 ) -> bool {
-    if piv_pq_parameter_set(algorithm).is_some() {
+    if piv_pq_parameter_set(algorithm).is_some()
+        || matches!(
+            algorithm,
+            piv::Algorithm::HybridMlKem768P256
+                | piv::Algorithm::HybridMlKem768X25519
+                | piv::Algorithm::HybridMlKem1024P384
+        )
+    {
         return virtual_pqc;
     }
     !matches!(
@@ -238,6 +257,9 @@ pub(crate) fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::
         "2.16.840.1.101.3.4.4.1" => Some(piv::Algorithm::MlKem512),
         "2.16.840.1.101.3.4.4.2" => Some(piv::Algorithm::MlKem768),
         "2.16.840.1.101.3.4.4.3" => Some(piv::Algorithm::MlKem1024),
+        "1.3.6.1.4.1.41482.11.1" => Some(piv::Algorithm::HybridMlKem768P256),
+        "1.3.6.1.4.1.41482.11.2" => Some(piv::Algorithm::HybridMlKem768X25519),
+        "1.3.6.1.4.1.41482.11.3" => Some(piv::Algorithm::HybridMlKem1024P384),
         _ => None,
     }
 }
@@ -368,7 +390,10 @@ pub(crate) fn piv_sign_mechanism_supported(
         piv::Algorithm::X25519
         | piv::Algorithm::MlKem512
         | piv::Algorithm::MlKem768
-        | piv::Algorithm::MlKem1024 => false,
+        | piv::Algorithm::MlKem1024
+        | piv::Algorithm::HybridMlKem768P256
+        | piv::Algorithm::HybridMlKem768X25519
+        | piv::Algorithm::HybridMlKem1024P384 => false,
     }
 }
 
@@ -966,6 +991,31 @@ impl Slot for PivSlot {
                 1568,
                 CKF_GENERATE_KEY_PAIR as CK_FLAGS,
             );
+            for (operation, generation, size) in [
+                (
+                    CKM_PKCS11RS_MLKEM768_P256,
+                    CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+                    1249,
+                ),
+                (
+                    CKM_PKCS11RS_MLKEM768_X25519,
+                    CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+                    1216,
+                ),
+                (
+                    CKM_PKCS11RS_MLKEM1024_P384,
+                    CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+                    1665,
+                ),
+            ] {
+                add(
+                    operation,
+                    size,
+                    size,
+                    (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+                );
+                add(generation, size, size, CKF_GENERATE_KEY_PAIR as CK_FLAGS);
+            }
         }
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
@@ -1174,10 +1224,18 @@ impl Slot for PivSlot {
                     | piv::Algorithm::MlKem512
                     | piv::Algorithm::MlKem768
                     | piv::Algorithm::MlKem1024
+                    | piv::Algorithm::HybridMlKem768P256
+                    | piv::Algorithm::HybridMlKem768X25519
+                    | piv::Algorithm::HybridMlKem1024P384
             );
             let can_kem = matches!(
                 key.algorithm,
-                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024
+                piv::Algorithm::MlKem512
+                    | piv::Algorithm::MlKem768
+                    | piv::Algorithm::MlKem1024
+                    | piv::Algorithm::HybridMlKem768P256
+                    | piv::Algorithm::HybridMlKem768X25519
+                    | piv::Algorithm::HybridMlKem1024P384
             );
             let private = true;
             let local = key.origin == piv::ORIGIN_GENERATED;
@@ -1197,6 +1255,9 @@ impl Slot for PivSlot {
                 piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
                     CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                 }
+                piv::Algorithm::HybridMlKem768P256 => CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+                piv::Algorithm::HybridMlKem768X25519 => CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+                piv::Algorithm::HybridMlKem1024P384 => CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
             });
             let can_decrypt = is_rsa
                 && matches!(
@@ -1225,9 +1286,29 @@ impl Slot for PivSlot {
                 );
             let public_key = match &key.public_key {
                 PivPublicKey::Rsa(public_key) => PublicKeyMaterial::Rsa(public_key.clone()),
-                PivPublicKey::Raw(public_key) if can_kem => PublicKeyMaterial::MlKem {
-                    parameter_set: piv_pq_parameter_set(key.algorithm)
-                        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                PivPublicKey::Raw(public_key)
+                    if matches!(
+                        key.algorithm,
+                        piv::Algorithm::MlKem512
+                            | piv::Algorithm::MlKem768
+                            | piv::Algorithm::MlKem1024
+                    ) =>
+                {
+                    PublicKeyMaterial::MlKem {
+                        parameter_set: piv_pq_parameter_set(key.algorithm)
+                            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                        public_key: public_key.clone(),
+                    }
+                }
+                PivPublicKey::Raw(public_key) if can_kem => PublicKeyMaterial::HybridKem {
+                    construction: match key.algorithm {
+                        piv::Algorithm::HybridMlKem768P256 => HybridKemConstruction::MlKem768P256,
+                        piv::Algorithm::HybridMlKem768X25519 => {
+                            HybridKemConstruction::MlKem768X25519
+                        }
+                        piv::Algorithm::HybridMlKem1024P384 => HybridKemConstruction::MlKem1024P384,
+                        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                    },
                     public_key: public_key.clone(),
                 },
                 PivPublicKey::Raw(public_key)
@@ -1342,6 +1423,9 @@ impl Slot for PivSlot {
                 piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
                     CKK_ML_KEM as CK_KEY_TYPE
                 }
+                piv::Algorithm::HybridMlKem768P256 => CKK_PKCS11RS_MLKEM768_P256,
+                piv::Algorithm::HybridMlKem768X25519 => CKK_PKCS11RS_MLKEM768_X25519,
+                piv::Algorithm::HybridMlKem1024P384 => CKK_PKCS11RS_MLKEM1024_P384,
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),

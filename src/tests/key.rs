@@ -1,4 +1,10 @@
 use super::*;
+use crate::{
+    CKK_PKCS11RS_MLKEM768_P256, CKK_PKCS11RS_MLKEM768_X25519, CKK_PKCS11RS_MLKEM1024_P384,
+    CKM_PKCS11RS_MLKEM768_P256, CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+    CKM_PKCS11RS_MLKEM768_X25519, CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+    CKM_PKCS11RS_MLKEM1024_P384, CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+};
 
 #[path = "key/counter_kdf.rs"]
 mod counter_kdf;
@@ -10,6 +16,13 @@ fn generate_software_key_pair(
     mechanism_type: CK_MECHANISM_TYPE,
     parameters: Option<&mut [u8]>,
 ) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    let kem_generation = matches!(
+        mechanism_type,
+        x if x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            || x == CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN
+            || x == CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN
+            || x == CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN
+    );
     let mut public_template = Vec::new();
     // 2048 bits accommodates the fixed hash-length salt used by the combined
     // SHA-512 RSA-PSS mechanisms.
@@ -36,9 +49,7 @@ fn generate_software_key_pair(
     }
     let mut public_verify = CK_TRUE as CK_BBOOL;
     let mut public_encrypt = CK_TRUE as CK_BBOOL;
-    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-        && mechanism_type != CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-    {
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE && !kem_generation {
         public_template.push(scalar_attribute(
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             &mut public_verify,
@@ -51,7 +62,7 @@ fn generate_software_key_pair(
         ));
     }
     let mut encapsulate = CK_TRUE as CK_BBOOL;
-    if mechanism_type == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+    if kem_generation {
         public_template.push(scalar_attribute(
             CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
             &mut encapsulate,
@@ -62,9 +73,7 @@ fn generate_software_key_pair(
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut decrypt = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
-    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-        && mechanism_type != CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-    {
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE && !kem_generation {
         private_template.push(scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign));
     }
     if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
@@ -84,7 +93,7 @@ fn generate_software_key_pair(
         ));
     }
     let mut decapsulate = CK_TRUE as CK_BBOOL;
-    if mechanism_type == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+    if kem_generation {
         private_template.push(scalar_attribute(
             CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
             &mut decapsulate,
@@ -612,6 +621,131 @@ fn software_ml_kem_keygen_encapsulation_and_decapsulation_cover_all_parameter_se
             );
         });
     }
+    finalize_for_test();
+}
+
+#[test]
+fn software_concrete_hybrid_kems_round_trip_and_reject_cross_construction_use() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut keys = Vec::new();
+    for (generation, operation, key_type, public_length, ciphertext_length) in [
+        (
+            CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM768_P256,
+            CKK_PKCS11RS_MLKEM768_P256,
+            1249,
+            1153,
+        ),
+        (
+            CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM768_X25519,
+            CKK_PKCS11RS_MLKEM768_X25519,
+            1216,
+            1120,
+        ),
+        (
+            CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM1024_P384,
+            CKK_PKCS11RS_MLKEM1024_P384,
+            1665,
+            1665,
+        ),
+    ] {
+        let (public, private) = generate_software_key_pair(TEST_SESSION_HANDLE, generation, None);
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let public_object = context.resolve_object(public).unwrap().unwrap();
+            let private_object = context.resolve_object(private).unwrap().unwrap();
+            assert_eq!(public_object.key_type, key_type);
+            assert_eq!(private_object.key_type, key_type);
+            assert_eq!(
+                public_object.attribute_value(CKA_VALUE as _).unwrap().len(),
+                public_length
+            );
+            assert_eq!(
+                private_object.attribute_value(CKA_SEED as _).unwrap().len(),
+                32
+            );
+        });
+        let mut mechanism = CK_MECHANISM {
+            mechanism: operation,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut ciphertext = vec![0; ciphertext_length];
+        let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+        let mut encapsulated = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                public,
+                std::ptr::null_mut(),
+                0,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_len,
+                &mut encapsulated
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut decapsulated = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                private,
+                std::ptr::null_mut(),
+                0,
+                ciphertext.as_mut_ptr(),
+                ciphertext_len,
+                &mut decapsulated
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            assert_eq!(
+                context
+                    .resolve_object(encapsulated)
+                    .unwrap()
+                    .unwrap()
+                    .attribute_value(CKA_VALUE as _),
+                context
+                    .resolve_object(decapsulated)
+                    .unwrap()
+                    .unwrap()
+                    .attribute_value(CKA_VALUE as _)
+            );
+        });
+        keys.push((public, private, operation));
+    }
+
+    let mut wrong = CK_MECHANISM {
+        mechanism: keys[1].2,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut length = 1120 as CK_ULONG;
+    let mut ciphertext = vec![0; length as usize];
+    let mut secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_EncapsulateKey(
+            TEST_SESSION_HANDLE,
+            &mut wrong,
+            keys[0].0,
+            std::ptr::null_mut(),
+            0,
+            ciphertext.as_mut_ptr(),
+            &mut length,
+            &mut secret
+        ),
+        CKR_KEY_TYPE_INCONSISTENT as CK_RV
+    );
     finalize_for_test();
 }
 

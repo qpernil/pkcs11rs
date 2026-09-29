@@ -41,7 +41,7 @@ fn encapsulate_key(
     key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
     let mechanism = unsafe { _as_ref(mechanism) }?;
-    require_ml_kem_mechanism(mechanism)?;
+    require_kem_mechanism(mechanism)?;
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
     let ciphertext_len = unsafe { as_mut(ciphertext_len) }?;
@@ -60,7 +60,7 @@ fn encapsulate_key(
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         require_key_mechanism(&public, mechanism.mechanism)?;
         if public.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-            || public.key_type != CKK_ML_KEM as CK_KEY_TYPE
+            || public.key_type != kem_key_type(mechanism.mechanism)?
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -68,7 +68,7 @@ fn encapsulate_key(
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
         let public_material = public.projected_public_key()?;
-        let required = ml_kem_ciphertext_length(&public_material)?;
+        let required = kem_ciphertext_length(&public_material)?;
         if ciphertext.is_null() {
             *ciphertext_len = required as CK_ULONG;
             return Ok(());
@@ -80,11 +80,13 @@ fn encapsulate_key(
         let key_handle = unsafe { as_mut(key) }?;
         let output = unsafe { _from_raw_parts_mut(ciphertext, required) }?;
         let (encapsulated, shared) = if let KeyMaterial::YubiHsm { id, .. } = &public.material {
-            let response = Zeroizing::new(
-                ctx._get_session(session_handle)?
-                    .1
-                    .yubihsm_command(&YubiHsmCommand::encapsulate_ml_kem(*id))?,
-            );
+            let response = Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
+                &if mechanism.mechanism == CKM_ML_KEM as CK_MECHANISM_TYPE {
+                    YubiHsmCommand::encapsulate_ml_kem(*id)
+                } else {
+                    YubiHsmCommand::encapsulate_hybrid_kem(*id)
+                },
+            )?);
             if response.len() != required + ML_KEM_SHARED_SECRET_LENGTH {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -93,7 +95,7 @@ fn encapsulate_key(
                 Zeroizing::new(response[required..].to_vec()),
             )
         } else {
-            ml_kem_encapsulate(&public_material)?
+            kem_encapsulate(&public_material)?
         };
         let object = ml_kem_secret_object(templ, shared, flags, logged_in, mechanism.mechanism)?;
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
@@ -139,7 +141,7 @@ fn decapsulate_key(
     key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
     let mechanism = unsafe { _as_ref(mechanism) }?;
-    require_ml_kem_mechanism(mechanism)?;
+    require_kem_mechanism(mechanism)?;
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
     let ciphertext = unsafe { from_raw_parts(ciphertext, ciphertext_len as usize) }?;
@@ -159,7 +161,7 @@ fn decapsulate_key(
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         require_key_mechanism(&private, mechanism.mechanism)?;
         if private.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || private.key_type != CKK_ML_KEM as CK_KEY_TYPE
+            || private.key_type != kem_key_type(mechanism.mechanism)?
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -167,17 +169,22 @@ fn decapsulate_key(
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
         let shared = match &private.material {
-            KeyMaterial::SoftwarePrivate(material) => ml_kem_decapsulate(material, ciphertext)?,
+            KeyMaterial::SoftwarePrivate(material) => kem_decapsulate(material, ciphertext)?,
             KeyMaterial::YubiHsm { id, algorithm, .. } => {
-                let parameters = yubihsm_ml_kem(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-                if ciphertext.len() != parameters.ciphertext_length() {
+                let required = yubihsm_ml_kem(*algorithm)
+                    .map(|parameters| parameters.ciphertext_length())
+                    .or_else(|| yubihsm_hybrid_kem(*algorithm).map(|c| c.ciphertext_length()))
+                    .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if ciphertext.len() != required {
                     return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
                 }
-                let shared = Zeroizing::new(
-                    ctx._get_session(session_handle)?
-                        .1
-                        .yubihsm_command(&YubiHsmCommand::decapsulate_ml_kem(*id, ciphertext)?)?,
-                );
+                let shared = Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
+                    &if yubihsm_hybrid_kem(*algorithm).is_some() {
+                        YubiHsmCommand::decapsulate_hybrid_kem(*id, ciphertext)?
+                    } else {
+                        YubiHsmCommand::decapsulate_ml_kem(*id, ciphertext)?
+                    },
+                )?);
                 if shared.len() != ML_KEM_SHARED_SECRET_LENGTH {
                     return Err(CKR_DEVICE_ERROR.into());
                 }
@@ -202,8 +209,13 @@ fn decapsulate_key(
     })
 }
 
-fn require_ml_kem_mechanism(mechanism: &CK_MECHANISM) -> Result<(), Error> {
-    if mechanism.mechanism != CKM_ML_KEM as CK_MECHANISM_TYPE {
+fn require_kem_mechanism(mechanism: &CK_MECHANISM) -> Result<(), Error> {
+    if !matches!(mechanism.mechanism,
+        x if x == CKM_ML_KEM as CK_MECHANISM_TYPE
+            || x == CKM_PKCS11RS_MLKEM768_P256
+            || x == CKM_PKCS11RS_MLKEM768_X25519
+            || x == CKM_PKCS11RS_MLKEM1024_P384
+    ) {
         return Err(CKR_MECHANISM_INVALID.into());
     }
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
@@ -212,7 +224,17 @@ fn require_ml_kem_mechanism(mechanism: &CK_MECHANISM) -> Result<(), Error> {
     Ok(())
 }
 
-fn ml_kem_ciphertext_length(public: &PublicKeyMaterial) -> Result<usize, Error> {
+fn kem_key_type(mechanism: CK_MECHANISM_TYPE) -> Result<CK_KEY_TYPE, Error> {
+    match mechanism {
+        x if x == CKM_ML_KEM as CK_MECHANISM_TYPE => Ok(CKK_ML_KEM as CK_KEY_TYPE),
+        x if x == CKM_PKCS11RS_MLKEM768_P256 => Ok(CKK_PKCS11RS_MLKEM768_P256),
+        x if x == CKM_PKCS11RS_MLKEM768_X25519 => Ok(CKK_PKCS11RS_MLKEM768_X25519),
+        x if x == CKM_PKCS11RS_MLKEM1024_P384 => Ok(CKK_PKCS11RS_MLKEM1024_P384),
+        _ => Err(CKR_MECHANISM_INVALID.into()),
+    }
+}
+
+fn kem_ciphertext_length(public: &PublicKeyMaterial) -> Result<usize, Error> {
     match public {
         PublicKeyMaterial::MlKem { parameter_set, .. } => match *parameter_set {
             x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => Ok(768),
@@ -220,11 +242,25 @@ fn ml_kem_ciphertext_length(public: &PublicKeyMaterial) -> Result<usize, Error> 
             x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => Ok(1568),
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         },
+        PublicKeyMaterial::HybridKem { construction, .. } => Ok(construction.ciphertext_length()),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
-fn ml_kem_encapsulate(public: &PublicKeyMaterial) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), Error> {
+fn kem_encapsulate(public: &PublicKeyMaterial) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>), Error> {
+    if let PublicKeyMaterial::HybridKem {
+        construction,
+        public_key,
+    } = public
+    {
+        return software_key_core::hybrid_kem::hybrid_kem_encapsulate(*construction, public_key)
+            .map_err(|error| match error {
+                software_key_core::hybrid_kem::HybridKemError::RandomnessUnavailable => {
+                    CKR_RANDOM_NO_RNG.into()
+                }
+                _ => CKR_KEY_TYPE_INCONSISTENT.into(),
+            });
+    }
     let PublicKeyMaterial::MlKem {
         parameter_set,
         public_key,
@@ -254,12 +290,15 @@ fn ml_kem_encapsulate(public: &PublicKeyMaterial) -> Result<(Vec<u8>, Zeroizing<
     )
 }
 
-fn ml_kem_decapsulate(
+fn kem_decapsulate(
     private: &SoftwarePrivateKeyMaterial,
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     match private {
         SoftwarePrivateKeyMaterial::MlKem(key) => key
+            .decapsulate(ciphertext)
+            .map_err(|_| CKR_ENCRYPTED_DATA_LEN_RANGE.into()),
+        SoftwarePrivateKeyMaterial::HybridKem(key) => key
             .decapsulate(ciphertext)
             .map_err(|_| CKR_ENCRYPTED_DATA_LEN_RANGE.into()),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),

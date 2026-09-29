@@ -7300,6 +7300,17 @@ fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
                 touch_policy: 1,
                 origin: crate::piv::ORIGIN_GENERATED,
             },
+            crate::PivKey {
+                slot: crate::piv::Slot::Authentication,
+                algorithm: crate::piv::Algorithm::HybridMlKem768P256,
+                public_key: crate::PivPublicKey::Raw(vec![0x42; 1249]),
+                attestation: std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::LazyCache::Unattempted,
+                )),
+                pin_policy: 1,
+                touch_policy: 1,
+                origin: crate::piv::ORIGIN_GENERATED,
+            },
         ],
         certificates: Vec::new(),
         data_objects: Vec::new(),
@@ -7318,6 +7329,12 @@ fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
                 && m.flags & (CKF_DECAPSULATE | CKF_HW) as CK_FLAGS
                     == (CKF_DECAPSULATE | CKF_HW) as CK_FLAGS)
     );
+    assert!(mechanisms.iter().any(|m| {
+        m.type_ == crate::CKM_PKCS11RS_MLKEM768_P256
+            && m.flags & (CKF_ENCAPSULATE | CKF_DECAPSULATE | CKF_HW) as CK_FLAGS
+                == (CKF_ENCAPSULATE | CKF_DECAPSULATE | CKF_HW) as CK_FLAGS
+            && (m.min_key_size, m.max_key_size) == (1249, 1249)
+    }));
     let objects = crate::Slot::token_objects(&piv, 7).unwrap();
     let dsa = objects
         .iter()
@@ -7333,8 +7350,16 @@ fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
                 && object.key_type == CKK_ML_KEM as CK_KEY_TYPE
         })
         .unwrap();
+    let hybrid = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && object.key_type == crate::CKK_PKCS11RS_MLKEM768_P256
+        })
+        .unwrap();
     assert!(dsa.sign && !dsa.decapsulate);
     assert!(kem.decapsulate && !kem.sign);
+    assert!(hybrid.decapsulate && !hybrid.sign);
     assert_eq!(
         dsa.attribute_value(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE),
         Some((1 as CK_ULONG).to_ne_bytes().to_vec())
@@ -7351,6 +7376,18 @@ fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
         })
         .unwrap();
     assert!(kem_public.encapsulate && !kem_public.decapsulate);
+    let hybrid_public = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                && object.key_type == crate::CKK_PKCS11RS_MLKEM768_P256
+        })
+        .unwrap();
+    assert!(hybrid_public.encapsulate && !hybrid_public.decapsulate);
+    assert_eq!(
+        hybrid_public.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x42; 1249])
+    );
 }
 
 #[test]
@@ -7911,6 +7948,9 @@ fn yubihsm_post_quantum_mechanisms_follow_advertised_key_algorithms() {
         crate::YUBIHSM_ALGO_ML_DSA_44,
         crate::YUBIHSM_ALGO_ML_DSA_87,
         crate::YUBIHSM_ALGO_ML_KEM_768,
+        crate::YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256,
+        crate::YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+        crate::YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384,
     ]);
     let mechanism = |type_| {
         mechanisms
@@ -7938,6 +7978,21 @@ fn yubihsm_post_quantum_mechanisms_follow_advertised_key_algorithms() {
     );
     assert_ne!(dsa.flags & CKF_HW as CK_FLAGS, 0);
     assert_ne!(kem.flags & CKF_HW as CK_FLAGS, 0);
+    for (type_, key_size) in [
+        (crate::CKM_PKCS11RS_MLKEM768_P256, 1_249),
+        (crate::CKM_PKCS11RS_MLKEM768_X25519, 1_216),
+        (crate::CKM_PKCS11RS_MLKEM1024_P384, 1_665),
+    ] {
+        let hybrid = mechanism(type_);
+        assert_eq!(
+            (hybrid.min_key_size, hybrid.max_key_size),
+            (key_size, key_size)
+        );
+        assert_eq!(
+            hybrid.flags & (CKF_HW | CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+            (CKF_HW | CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS
+        );
+    }
 }
 
 #[test]
@@ -7959,14 +8014,38 @@ fn yubihsm_post_quantum_objects_preserve_capabilities_and_public_material() {
             CKA_DECAPSULATE,
             CKA_ENCAPSULATE,
         ),
+        (
+            crate::YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256,
+            crate::CKK_PKCS11RS_MLKEM768_P256,
+            1_249,
+            crate::yubihsm_capabilities(&[0x3d, 0x3e]),
+            CKA_DECAPSULATE,
+            CKA_ENCAPSULATE,
+        ),
+        (
+            crate::YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+            crate::CKK_PKCS11RS_MLKEM768_X25519,
+            1_216,
+            crate::yubihsm_capabilities(&[0x3d, 0x3e]),
+            CKA_DECAPSULATE,
+            CKA_ENCAPSULATE,
+        ),
+        (
+            crate::YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384,
+            crate::CKK_PKCS11RS_MLKEM1024_P384,
+            1_665,
+            crate::yubihsm_capabilities(&[0x3d, 0x3e]),
+            CKA_DECAPSULATE,
+            CKA_ENCAPSULATE,
+        ),
     ] {
         let info = crate::yubihsm::ObjectInfo {
             capabilities,
             id: 0x1250 + u16::from(algorithm),
-            length: if key_type == CKK_ML_DSA as CK_KEY_TYPE {
-                32
-            } else {
+            length: if key_type == CKK_ML_KEM as CK_KEY_TYPE {
                 64
+            } else {
+                32
             },
             domains: 1,
             object_type: crate::YUBIHSM_ASYMMETRIC_KEY,

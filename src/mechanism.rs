@@ -1,17 +1,22 @@
 use crate::pkcs11::*;
 use crate::{
-    CKM_PKCS11RS_FIDO_ASSERTION, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE, CKM_PKCS11RS_PREVIEW_SIGN,
-    CKM_PKCS11RS_PREVIEW_SIGN_DERIVE, CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
-    CKM_PKCS11RS_PROJECT_PUBLIC_KEY, CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP, Error,
-    SlotContext, TokenObject, YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP,
-    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
-    YUBIHSM_ALGO_AES192_CCM_WRAP, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP,
-    YUBIHSM_ALGO_EC_BP256, YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512,
-    YUBIHSM_ALGO_EC_ECDSA_SHA1, YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384,
-    YUBIHSM_ALGO_EC_ECDSA_SHA512, YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256,
-    YUBIHSM_ALGO_EC_P384, YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_ED25519,
-    YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256, YUBIHSM_ALGO_HMAC_SHA384,
-    YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512,
+    CKM_PKCS11RS_FIDO_ASSERTION, CKM_PKCS11RS_MLKEM768_P256,
+    CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN, CKM_PKCS11RS_MLKEM768_X25519,
+    CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN, CKM_PKCS11RS_MLKEM1024_P384,
+    CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN, CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+    CKM_PKCS11RS_PREVIEW_SIGN, CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+    CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN, CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+    CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP, Error, SlotContext, TokenObject,
+    YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_AES128,
+    YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES192_CCM_WRAP,
+    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP, YUBIHSM_ALGO_EC_BP256,
+    YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512, YUBIHSM_ALGO_EC_ECDSA_SHA1,
+    YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384, YUBIHSM_ALGO_EC_ECDSA_SHA512,
+    YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P384,
+    YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1,
+    YUBIHSM_ALGO_HMAC_SHA256, YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512,
+    YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256, YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+    YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512,
     YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096,
     YUBIHSM_ALGO_RSA_OAEP_SHA1, YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384,
     YUBIHSM_ALGO_RSA_OAEP_SHA512, YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1,
@@ -177,6 +182,12 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
         CKM_PKCS11RS_FIDO_ASSERTION,
         CKM_PKCS11RS_PREFIXED_ECDH_DERIVE,
+        CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+        CKM_PKCS11RS_MLKEM768_P256,
+        CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+        CKM_PKCS11RS_MLKEM768_X25519,
+        CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+        CKM_PKCS11RS_MLKEM1024_P384,
     )
 }
 
@@ -326,6 +337,18 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         max_key_size: 1568,
         flags: CKF_ENCAPSULATE as CK_FLAGS,
     });
+    for (type_, size) in [
+        (CKM_PKCS11RS_MLKEM768_P256, 1249),
+        (CKM_PKCS11RS_MLKEM768_X25519, 1216),
+        (CKM_PKCS11RS_MLKEM1024_P384, 1665),
+    ] {
+        mechanisms.push(MechanismDetails {
+            type_,
+            min_key_size: size,
+            max_key_size: size,
+            flags: CKF_ENCAPSULATE as CK_FLAGS,
+        });
+    }
     mechanisms.push(MechanismDetails {
         type_: CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
         min_key_size: 0,
@@ -387,6 +410,42 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
             type_: CKM_ML_KEM as CK_MECHANISM_TYPE,
             min_key_size: 800,
             max_key_size: 1568,
+            flags: (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+            min_key_size: 1249,
+            max_key_size: 1249,
+            flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM768_P256,
+            min_key_size: 1249,
+            max_key_size: 1249,
+            flags: (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            min_key_size: 1216,
+            max_key_size: 1216,
+            flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM768_X25519,
+            min_key_size: 1216,
+            max_key_size: 1216,
+            flags: (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+            min_key_size: 1665,
+            max_key_size: 1665,
+            flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS11RS_MLKEM1024_P384,
+            min_key_size: 1665,
+            max_key_size: 1665,
             flags: (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
         },
         MechanismDetails {
@@ -1085,6 +1144,41 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                     flags: flags as _,
                 });
             }
+        }
+    }
+    for (algorithm, size, generation, operation) in [
+        (
+            YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256,
+            1249,
+            CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM768_P256,
+        ),
+        (
+            YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+            1216,
+            CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM768_X25519,
+        ),
+        (
+            YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384,
+            1665,
+            CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+            CKM_PKCS11RS_MLKEM1024_P384,
+        ),
+    ] {
+        if algorithms.contains(&algorithm) {
+            mechanisms.push(MechanismDetails {
+                type_: generation,
+                min_key_size: size,
+                max_key_size: size,
+                flags: (CKF_HW | CKF_GENERATE_KEY_PAIR) as CK_FLAGS,
+            });
+            mechanisms.push(MechanismDetails {
+                type_: operation,
+                min_key_size: size,
+                max_key_size: size,
+                flags: (CKF_HW | CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+            });
         }
     }
     for (algorithm, type_) in [

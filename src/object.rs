@@ -7,11 +7,12 @@ use crate::pkcs11::*;
 use crate::{
     CKA_PKCS11RS_FIDO_RP_ID, CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
     CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_PKCS11RS_URI, CKA_YUBICO_HSMAUTH_RETRIES,
-    CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, Connector,
-    Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
-    PivClient, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
-    YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState, der_octet_string,
-    edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
+    CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY,
+    CKK_PKCS11RS_MLKEM768_P256, CKK_PKCS11RS_MLKEM768_X25519, CKK_PKCS11RS_MLKEM1024_P384,
+    Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient,
+    OpenPgpKeyRef, PivClient, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512, YUBIHSM_OPAQUE,
+    YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState,
+    der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
     is_yubihsm_edwards, is_yubihsm_montgomery, is_yubihsm_rsa, montgomery_curve_from_parameters,
     montgomery_curve_parameters, openpgp_signature_requires_context_specific_login,
     piv_algorithm_from_certificate, piv_effective_pin_policy, piv_public_key_from_certificate,
@@ -19,9 +20,8 @@ use crate::{
     yubihsm_ec_parameters,
 };
 use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
-#[cfg(test)]
-use software_key_core::{post_quantum::MlKemPrivateKey, software_signing::SignatureScheme};
 use software_key_core::{
+    hybrid_kem::HybridKemConstruction,
     post_quantum::{
         MlDsaParameterSet, MlKemParameterSet,
         ml_dsa_public_key_info as shared_ml_dsa_public_key_info,
@@ -30,6 +30,8 @@ use software_key_core::{
     software_private_key::SoftwarePrivateKey,
     software_signing::{KeyKind, SoftwarePublicKey as SharedPublicKey, SoftwareSigningKey},
 };
+#[cfg(test)]
+use software_key_core::{post_quantum::MlKemPrivateKey, software_signing::SignatureScheme};
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
 
@@ -89,6 +91,10 @@ pub(crate) enum PublicKeyMaterial {
         parameter_set: CK_ML_KEM_PARAMETER_SET_TYPE,
         public_key: Vec<u8>,
     },
+    HybridKem {
+        construction: HybridKemConstruction,
+        public_key: Vec<u8>,
+    },
 }
 
 pub(crate) type SoftwarePrivateKeyMaterial = SoftwarePrivateKey;
@@ -100,6 +106,7 @@ pub(crate) trait SoftwarePrivateKeyMaterialExt {
     fn private_value(&self) -> Option<Vec<u8>>;
     fn ml_dsa_seed(&self) -> Option<Vec<u8>>;
     fn ml_kem_seed(&self) -> Option<Vec<u8>>;
+    fn hybrid_kem_seed(&self) -> Option<Vec<u8>>;
 }
 
 impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
@@ -123,6 +130,7 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
             },
             Self::Montgomery(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             Self::MlKem(_) => CKK_ML_KEM as CK_KEY_TYPE,
+            Self::HybridKem(key) => hybrid_kem_key_type(key.construction()),
         }
     }
 
@@ -166,6 +174,10 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
                 parameter_set: local_ml_kem_parameter_set(key.parameter_set()),
                 public_key: key.public_key(),
             }),
+            Self::HybridKem(key) => Ok(PublicKeyMaterial::HybridKem {
+                construction: key.construction(),
+                public_key: key.public_key().map_err(|_| CKR_DATA_INVALID)?,
+            }),
         }
     }
 
@@ -174,6 +186,7 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
             Self::Signing(key) => key.private_value().map(|value| value.to_vec()),
             Self::Montgomery(key) => Some(key.serialized().to_vec()),
             Self::MlKem(key) => Some(key.expanded_private_key().to_vec()),
+            Self::HybridKem(key) => Some(key.seed().to_vec()),
         }
     }
 
@@ -189,6 +202,21 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
             Self::MlKem(key) => key.seed().map(|seed| seed.to_vec()),
             _ => None,
         }
+    }
+
+    fn hybrid_kem_seed(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::HybridKem(key) => Some(key.seed().to_vec()),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn hybrid_kem_key_type(construction: HybridKemConstruction) -> CK_KEY_TYPE {
+    match construction {
+        HybridKemConstruction::MlKem768P256 => CKK_PKCS11RS_MLKEM768_P256,
+        HybridKemConstruction::MlKem768X25519 => CKK_PKCS11RS_MLKEM768_X25519,
+        HybridKemConstruction::MlKem1024P384 => CKK_PKCS11RS_MLKEM1024_P384,
     }
 }
 
@@ -834,6 +862,13 @@ fn is_ml_kem_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     )
 }
 
+fn is_hybrid_kem_key_type(key_type: CK_KEY_TYPE) -> bool {
+    matches!(
+        key_type,
+        CKK_PKCS11RS_MLKEM768_P256 | CKK_PKCS11RS_MLKEM768_X25519 | CKK_PKCS11RS_MLKEM1024_P384
+    )
+}
+
 const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_CLASS as CK_ATTRIBUTE_TYPE,
     CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -1065,6 +1100,32 @@ pub(crate) fn ml_kem_public_key_info(
     shared_ml_kem_public_key_info(parameter_set, public_key).ok()
 }
 
+pub(crate) fn hybrid_kem_public_key_info(
+    construction: HybridKemConstruction,
+    public_key: &[u8],
+) -> Option<Vec<u8>> {
+    if public_key.len() != construction.public_key_length() {
+        return None;
+    }
+    let suffix = match construction {
+        HybridKemConstruction::MlKem768P256 => 1,
+        HybridKemConstruction::MlKem768X25519 => 2,
+        HybridKemConstruction::MlKem1024P384 => 3,
+    };
+    // 1.3.6.1.4.1.41482.10.{1,2,3}; parameters are absent.
+    let algorithm = der_tlv(
+        0x30,
+        &[
+            0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xc4, 0x0a, 0x0a, suffix,
+        ],
+    );
+    let mut info = algorithm;
+    let mut subject_public_key = vec![0];
+    subject_public_key.extend_from_slice(public_key);
+    info.extend(der_tlv(0x03, &subject_public_key));
+    Some(der_tlv(0x30, &info))
+}
+
 pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     matches!(
         attribute_type,
@@ -1210,6 +1271,9 @@ impl TokenObject {
                         x if x == CKK_ML_KEM as CK_KEY_TYPE => {
                             is_ml_kem_public_attribute(attribute_type)
                         }
+                        x if is_hybrid_kem_key_type(x) => {
+                            attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                        }
                         _ => false,
                     }
             }
@@ -1231,6 +1295,10 @@ impl TokenObject {
                         }
                         x if x == CKK_ML_KEM as CK_KEY_TYPE => {
                             is_ml_kem_private_attribute(attribute_type)
+                        }
+                        x if is_hybrid_kem_key_type(x) => {
+                            attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                                || attribute_type == CKA_SEED as CK_ATTRIBUTE_TYPE
                         }
                         _ => false,
                     }
@@ -1322,6 +1390,10 @@ impl TokenObject {
                 attribute_type,
                 x if x == CKA_SEED as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
             ),
+            x if is_hybrid_kem_key_type(x) => matches!(
+                attribute_type,
+                x if x == CKA_SEED as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            ),
             _ => false,
         }
     }
@@ -1375,6 +1447,10 @@ impl TokenObject {
                     parameter_set,
                     public_key,
                 } => ml_kem_public_key_info(*parameter_set, public_key),
+                PublicKeyMaterial::HybridKem {
+                    construction,
+                    public_key,
+                } => hybrid_kem_public_key_info(*construction, public_key),
             };
         }
         None
@@ -1422,6 +1498,21 @@ impl TokenObject {
                 }
                 Ok(PublicKeyMaterial::MlKem {
                     parameter_set: (*algorithm - YUBIHSM_ALGO_ML_KEM_512 + 1) as _,
+                    public_key: public_key.clone(),
+                })
+            }
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if crate::yubihsm_hybrid_kem(*algorithm).is_some() => {
+                let construction =
+                    crate::yubihsm_hybrid_kem(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if public_key.len() != construction.public_key_length() {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                Ok(PublicKeyMaterial::HybridKem {
+                    construction,
                     public_key: public_key.clone(),
                 })
             }
@@ -1871,9 +1962,10 @@ impl TokenObject {
                 }
             }
             x if x == CKA_SEED as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(key) => {
-                    key.ml_dsa_seed().or_else(|| key.ml_kem_seed())
-                }
+                KeyMaterial::SoftwarePrivate(key) => key
+                    .ml_dsa_seed()
+                    .or_else(|| key.ml_kem_seed())
+                    .or_else(|| key.hybrid_kem_seed()),
                 _ => None,
             },
             x if x == CKA_YUBICO_HSMAUTH_RETRIES => match &self.material {
@@ -1930,12 +2022,14 @@ impl TokenObject {
                     } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                         && self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
                         && (crate::yubihsm_ml_dsa(*algorithm).is_some()
-                            || crate::yubihsm_ml_kem(*algorithm).is_some()) =>
+                            || crate::yubihsm_ml_kem(*algorithm).is_some()
+                            || crate::yubihsm_hybrid_kem(*algorithm).is_some()) =>
                     {
                         Some(public_key.clone())
                     }
                     KeyMaterial::Public(PublicKeyMaterial::MlDsa { public_key, .. })
                     | KeyMaterial::Public(PublicKeyMaterial::MlKem { public_key, .. })
+                    | KeyMaterial::Public(PublicKeyMaterial::HybridKem { public_key, .. })
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
                         Some(public_key.clone())

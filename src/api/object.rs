@@ -457,6 +457,43 @@ fn piv_pq_private_import(
     })
 }
 
+fn piv_hybrid_private_import(
+    templ: &[CK_ATTRIBUTE],
+    key_type: CK_KEY_TYPE,
+) -> Result<piv::PrivateKeyImport, Error> {
+    if template_attribute(templ, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE).is_some()
+        || template_attribute(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE).is_some()
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let seed = required_template_value(templ, CKA_SEED as CK_ATTRIBUTE_TYPE)?;
+    let (construction, algorithm) = match key_type {
+        CKK_PKCS11RS_MLKEM768_P256 => (
+            HybridKemConstruction::MlKem768P256,
+            piv::Algorithm::HybridMlKem768P256,
+        ),
+        CKK_PKCS11RS_MLKEM768_X25519 => (
+            HybridKemConstruction::MlKem768X25519,
+            piv::Algorithm::HybridMlKem768X25519,
+        ),
+        CKK_PKCS11RS_MLKEM1024_P384 => (
+            HybridKemConstruction::MlKem1024P384,
+            piv::Algorithm::HybridMlKem1024P384,
+        ),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    let key = HybridKemPrivateKey::from_seed_slice(construction, &seed)
+        .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+    Ok(piv::PrivateKeyImport {
+        algorithm,
+        components: vec![(0x09, seed)],
+        public_key: MetadataPublicKey::Raw(
+            key.public_key()
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+        ),
+    })
+}
+
 fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     validate_unique_template(templ)?;
     let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
@@ -540,6 +577,11 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         }
     } else if key_type == CKK_ML_DSA as CK_KEY_TYPE || key_type == CKK_ML_KEM as CK_KEY_TYPE {
         piv_pq_private_import(templ, key_type)?
+    } else if matches!(
+        key_type,
+        CKK_PKCS11RS_MLKEM768_P256 | CKK_PKCS11RS_MLKEM768_X25519 | CKK_PKCS11RS_MLKEM1024_P384
+    ) {
+        piv_hybrid_private_import(templ, key_type)?
     } else {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
         let (algorithm, component_tag, public_key) = if key_type == CKK_EC as CK_KEY_TYPE {
@@ -1000,6 +1042,25 @@ fn yubihsm_import_command(
                 YUBIHSM_ASYMMETRIC_KEY,
             ))
         }
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::HybridKem(key))
+            if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
+        {
+            let algorithm = match key.construction() {
+                HybridKemConstruction::MlKem768P256 => YUBIHSM_ALGO_HYBRID_ML_KEM_768_P256,
+                HybridKemConstruction::MlKem768X25519 => YUBIHSM_ALGO_HYBRID_ML_KEM_768_X25519,
+                HybridKemConstruction::MlKem1024P384 => YUBIHSM_ALGO_HYBRID_ML_KEM_1024_P384,
+            };
+            let seed = key.seed();
+            Ok((
+                YubiHsmCommand::put_object(
+                    YubiHsmCommandCode::PutAsymmetricKey,
+                    &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
+                    seed.as_ref(),
+                )?,
+                CKO_PRIVATE_KEY as _,
+                YUBIHSM_ASYMMETRIC_KEY,
+            ))
+        }
         KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
             SoftwareSigningKey::Rsa(key),
         )) if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
@@ -1429,6 +1490,31 @@ fn build_imported_key_material(
             })
         }
         (class, key_type)
+            if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                && matches!(
+                    key_type,
+                    CKK_PKCS11RS_MLKEM768_P256
+                        | CKK_PKCS11RS_MLKEM768_X25519
+                        | CKK_PKCS11RS_MLKEM1024_P384
+                ) =>
+        {
+            let construction = match key_type {
+                CKK_PKCS11RS_MLKEM768_P256 => HybridKemConstruction::MlKem768P256,
+                CKK_PKCS11RS_MLKEM768_X25519 => HybridKemConstruction::MlKem768X25519,
+                _ => HybridKemConstruction::MlKem1024P384,
+            };
+            let public_key = components
+                .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            if public_key.len() != construction.public_key_length() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::HybridKem {
+                construction,
+                public_key: public_key.to_vec(),
+            })
+        }
+        (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                 && key_type == CKK_RSA as CK_KEY_TYPE =>
         {
@@ -1554,6 +1640,30 @@ fn build_imported_key_material(
             };
             let material = SoftwarePrivateKeyMaterial::MlKem(key);
             KeyMaterial::SoftwarePrivate(material)
+        }
+        (class, key_type)
+            if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && matches!(
+                    key_type,
+                    CKK_PKCS11RS_MLKEM768_P256
+                        | CKK_PKCS11RS_MLKEM768_X25519
+                        | CKK_PKCS11RS_MLKEM1024_P384
+                ) =>
+        {
+            let seed = components.remove(&(CKA_SEED as CK_ATTRIBUTE_TYPE));
+            let value = components.remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE));
+            if seed.is_some() == value.is_some() {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            let construction = match key_type {
+                CKK_PKCS11RS_MLKEM768_P256 => HybridKemConstruction::MlKem768P256,
+                CKK_PKCS11RS_MLKEM768_X25519 => HybridKemConstruction::MlKem768X25519,
+                _ => HybridKemConstruction::MlKem1024P384,
+            };
+            let bytes = seed.or(value).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let key = HybridKemPrivateKey::from_seed_slice(construction, &bytes)
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::HybridKem(key))
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };

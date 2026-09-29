@@ -355,6 +355,9 @@ For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 | `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_KEM_KEY_PAIR_GEN` | 800–1568 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_KEM` | 800–1568 bytes | `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
+| `CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM768_P256` | 1249 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
+| `CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM768_X25519` | 1216 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
+| `CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM1024_P384` | 1665 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
 | `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
@@ -418,6 +421,18 @@ but the 2.40, 3.0, and 3.1 tables have no KEM operation slots. Persistent
 generated keys use the standard ML-KEM PKCS #8 seed encoding inside the
 software token's existing encrypted private-key record; public ML-KEM objects
 use the existing software-backed public-object record.
+
+### Concrete hybrid KEMs
+
+The three vendor key types and six mechanisms implement exactly the profile in
+[Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md):
+concrete-hybrid-kems draft-04, hybrid-kems draft-12, X-Wing draft-10,
+FIPS 203, FIPS 202, SEC 1 version 2.0, and RFC 7748. Generation takes no
+parameter. Public `CKA_VALUE` is the construction's combined public encoding;
+private `CKA_SEED` and extractable private `CKA_VALUE` are the inseparable
+32-byte seed. Software persistence uses private OIDs
+`1.3.6.1.4.1.41482.10.1` through `.10.3`, absent parameters, and the combined
+public encoding in `CKA_PUBLIC_KEY_INFO`.
 
 ### PBKDF2 parameters
 
