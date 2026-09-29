@@ -374,7 +374,7 @@ pub(crate) fn piv_sign_mechanism_supported(
 
 impl PivSlot {
     fn supports_pq(&self) -> bool {
-        self.connector.product().contains("Gadget")
+        self.connector.supports_piv_pqc()
     }
     pub(crate) fn new_with_device(
         connector: Rc<dyn Connector>,

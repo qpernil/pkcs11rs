@@ -4117,6 +4117,22 @@ mod discovery_tests {
             assert!(kinds.contains(&crate::SlotKind::Ccid(application)));
         }
         assert!(kinds.contains(&crate::SlotKind::Fido2));
+
+        let piv = slots
+            .values()
+            .find(|slot| {
+                slot.lock().unwrap().slot.kind() == crate::SlotKind::Ccid(CcidApplication::Piv)
+            })
+            .unwrap();
+        let mechanisms = piv.lock().unwrap().slot.mechanisms();
+        for mechanism in [
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKM_ML_DSA as CK_MECHANISM_TYPE,
+            CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKM_ML_KEM as CK_MECHANISM_TYPE,
+        ] {
+            assert!(mechanisms.iter().any(|details| details.type_ == mechanism));
+        }
     }
 
     #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
