@@ -449,14 +449,17 @@ rendering its object inventory. Parallel helpers provide canonical `CKM_*`,
 `CKR_*`, `CKA_*`, and `CKP_*` names for mechanisms, return values, attribute
 types, and profile IDs. Deprecated aliases resolve to their current canonical
 names, and every returned string remains owned by the library for the lifetime
-of the process.
+of the process. Each refresh reports ML-DSA and ML-KEM advertisement and
+`CKF_HW` state on every present slot, then generates or reuses and exercises the
+corresponding persistent PQC keypairs wherever the required mechanisms are
+available.
 
 The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
 storage, and diagnostics guidance for both Swift and Objective-C applications.
 The [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke) demonstrates
-direct calls to the same statically linked C ABI with synchronized discovery,
-software-token, object-inventory, and YubiHSM Auth coverage.
+direct calls to the same statically linked C ABI with persistent-software-token,
+object-inventory, and YubiHSM Auth coverage.
 
 ### Asynchronous multi-device connector
 

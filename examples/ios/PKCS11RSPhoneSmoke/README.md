@@ -32,8 +32,9 @@ if every target succeeded. A conflict is never overwritten or deleted.
 For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
 [iOS integration guide](../../../docs/ios-integration.md). The Objective-C
-smoke app exercises the same functional flow through the C ABI; this document
-describes the shared behavior from the Swift client's perspective.
+smoke app is a separate C-ABI example and retains its persistent-software-token
+test flow. This document describes the Swift client's hardware and remote-token
+coverage.
 
 The inventory report follows authentication dependency order. It shows ordinary
 source slots first, including the Secure Enclave login and its authenticated
@@ -94,49 +95,47 @@ Auth. The PIV entry is therefore a CryptoTokenKit bootstrap requirement, not a
 requirement that the operation or card use PIV. A short PIV AID suitable for an
 APDU partial SELECT does not satisfy this requirement.
 
-The JSON also configures a persistent software token named `iPhone smoke` and
-places its storage below the app's Application Support directory. On first use,
-the app recognizes exactly that owned slot by its `Software token` model and
-`iPhone smoke` label, then uses the standard `CKF_TOKEN_INITIALIZED` and
-`CKF_USER_PIN_INITIALIZED` flags to decide whether `C_InitToken` or the SO
-login/`C_InitPIN` sequence is needed. Both profiles use the prototype PIN
-`password`. These initialization calls are never applied to discovered
-hardware. Before enumerating the software token's objects, the app logs in and
-searches for three persistent keypairs: X25519 with stable ID
-`iphone-smoke-x25519`, ML-DSA-87 with stable ID `iphone-smoke-ml-dsa-87`, and
-ML-KEM-1024 with stable ID `iphone-smoke-ml-kem-1024`. If a pair is absent, the
-app generates it as two token objects and reports the key-generation time. On
-every refresh it performs an X25519 self-agreement by deriving from the private
-key and its own public `CKA_EC_POINT`, validates the resulting 32-byte shared
-secret as nonzero, and reports the `C_DeriveKey` time. This is a compact
-functional and performance smoke test, not a model of a two-party protocol. The
-app also uses
-`C_GenerateRandom` to create a fresh 32-byte message, signs it with ML-DSA,
-verifies the signature, and reports both operation times and the signature
-length. Finally, it calls the PKCS #11 3.2 `C_EncapsulateKey` and
-`C_DecapsulateKey` entry points with the ML-KEM pair, checks that they produced
-the same 32-byte shared secret, and reports both operation times and the
-ciphertext length. It then enumerates the authenticated software session so
-both halves of all three persistent keypairs appear in Inventory. Later
-refreshes and process launches reuse the pairs while repeating all three
-functional tests.
+The Swift app intentionally configures no software slot. Every refresh queries
+all four post-quantum mechanisms on every token-present slot:
+`CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_ML_KEM_KEY_PAIR_GEN`, and
+`CKM_ML_KEM`. The report includes the complete mechanism flags, the decoded
+`CKF_HW` value, the key-size range, and whether the operation-specific flags
+needed by the smoke test are present. Unsupported mechanisms and incomplete
+flag sets are reported explicitly instead of being silently skipped. This
+makes the same inventory qualify both mechanism advertisement and behavior on
+PIV, YubiHSM, and any other provider that exposes the standard PKCS #11
+post-quantum mechanisms.
 
-Each generation measurement surrounds the complete `C_GenerateKeyPair` call,
-including encrypted token-object persistence. Random-message generation occurs
-before the sign timer. X25519 timing surrounds only `C_DeriveKey`; reading the
-public point happens before it, and validating the derived secret happens
-afterward. The sign measurement includes `C_SignInit`, the standard
-signature-length query, and the output-producing `C_Sign`; the verify
-measurement includes `C_VerifyInit` and `C_Verify`. ML-KEM encapsulation timing
-includes the standard ciphertext-length query and the output-producing
-`C_EncapsulateKey`; decapsulation timing surrounds `C_DecapsulateKey`. The
-shared-secret attribute reads and comparison occur after those timers. The
-X25519 output template and both ML-KEM output templates request a 32-byte
-`CKK_GENERIC_SECRET` with `CKA_TOKEN` false, `CKA_SENSITIVE` false, and
-`CKA_EXTRACTABLE` true so this smoke client can read and validate `CKA_VALUE`.
-These are session objects: successful checks destroy them explicitly, and
-closing the session cleans them up on an earlier failure. Only the three
-keypairs are persistent.
+When a slot advertises ML-DSA key generation, signing, and verification, the app
+creates or reuses a persistent ML-DSA-87 keypair. It generates a fresh 32-byte
+message, signs and verifies it, and reports generation, signing, and
+verification timing plus the signature length. When a slot advertises ML-KEM
+key generation, encapsulation, and decapsulation, the app similarly creates or
+reuses ML-KEM-1024, calls the PKCS #11 3.2 `C_EncapsulateKey` and
+`C_DecapsulateKey` entry points, and reports timing and ciphertext length. The
+two resulting 32-byte `CKK_GENERIC_SECRET` session objects are deliberately
+nonsensitive and extractable so the test can compare `CKA_VALUE`; successful
+checks destroy them explicitly, and closing the session cleans them up after an
+earlier failure.
+
+The test uses stable provider-appropriate identifiers so later refreshes reuse
+the generated pairs: PIV retired slots `0x82` and `0x83`, YubiHSM object IDs
+`0x7e20` and `0x7e21`, and descriptive byte-string IDs for other providers.
+PQC operations run after the authentication already available to the app.
+YubiHSMs use the authenticated wildcard-login session described below; other
+slots use an authenticated retained session when one exists and otherwise an
+ordinary read/write session. A provider that advertises a mechanism but rejects
+key generation or use because authentication, authorization, templates, or the
+implementation is incomplete is shown as an advertised-mechanism failure. This
+distinction is an intentional part of the smoke test.
+
+Each generation measurement surrounds the complete `C_GenerateKeyPair` call.
+Random-message generation occurs before the signing timer. Signing timing
+includes `C_SignInit`, the standard signature-length query, and the
+output-producing `C_Sign`; verification includes `C_VerifyInit` and `C_Verify`.
+ML-KEM encapsulation includes the standard ciphertext-length query and the
+output-producing `C_EncapsulateKey`; decapsulation timing surrounds
+`C_DecapsulateKey`. The shared-secret reads and comparison occur afterward.
 
 After every public object inventory is complete, the app prepares the explicit
 credential-source set for its wildcard logins. It opens and logs in a retained
@@ -163,22 +162,21 @@ interactive NFC discovery. A USB view of an NFC-discovered serial therefore
 rebinds its existing slots before their refresh can request NFC reacquisition.
 The module still discovers every smart-card credential provider before YubiHSM
 slots. The final display preserves discovery order within each group but places
-YubiHSM slots after software and YubiKey applet slots.
+YubiHSM slots after the ordinary applet and platform slots.
 
 If discovery produces no YubiHSM Auth credential over any transport, the
 inventory says so explicitly and notes that an interactive prompt may have been
 canceled, a reader may be unavailable, or a presented token may not support the
 applet. Credential discovery failure remains nonfatal so the app can still
-display its software and YubiHSM slots.
+display the other available slots.
 
 An unreachable configured YubiHSM endpoint is an isolated discovery failure:
 pkcs11rs records the failed endpoint and its outcome in Unified Logging, omits
 any remote token that is not currently present, and continues returning the
-persistent software token and available local CCID slots. A failure querying
-one returned slot is likewise reported on that slot without aborting the
-remaining inventory. Foregrounding the app retries remote discovery, so
-recovery does not require reinitializing the module or recreating the software
-token.
+available local CCID and platform slots. A failure querying one returned slot
+is likewise reported on that slot without aborting the remaining inventory.
+Foregrounding the app retries remote discovery without reinitializing the
+module.
 
 The app does not enumerate or register readers before `C_Initialize`. During
 every `C_GetSlotList`, normal hardware discovery asks the Rust-native iOS
@@ -228,12 +226,16 @@ failures include the session ID and Apple's error domain, code, and description.
 These records distinguish a module-requested close from an externally invalidated
 session; an error reported after the UI disappears can be a consequence of
 system dismissal rather than its cause. They contain no PINs or APDU payloads.
-The app does not modify objects on attached hardware. Its explicit YubiHSM Auth
-inspection login authenticates but remains read-only. Private hardware objects
-that require login are absent from the public-session view and may appear in
-the authenticated view. The named software slot is the deliberate exception:
-the app initializes it when necessary and creates and exercises the persistent
-X25519, ML-DSA-87, and ML-KEM-1024 keypairs described above.
+The PQC smoke test is deliberately mutating: on every capable, sufficiently
+authorized slot, it creates persistent ML-DSA-87 and ML-KEM-1024 keypairs when
+their stable test identifiers are absent. Those identifiers are owned by the
+smoke test: before provisioning a missing or incomplete pair, it deletes every
+object already using the identifier and then generates the expected pair. Do
+not run this app against a production token unless those object IDs are
+reserved for this destructive provisioning behavior. Other inventory and
+YubiHSM Auth inspection operations remain read-only. Private objects that
+require login are absent from the public view and may appear in the
+authenticated view.
 
 USB discovery requires a physical iPhone or iPad with a CCID-enabled key
 attached directly or through a USB-C adapter. NFC discovery likewise requires
@@ -308,10 +310,9 @@ buffer lifetimes and cleanup.
 The generic package should remain usable with other conforming PKCS #11
 modules. A small optional pkcs11rs extension may provide typed construction of
 named, provider-independent wildcard, YubiHSM Auth, and platform login
-selectors. Refactoring this smoke app
-onto the wrapper would validate the package against software,
-USB CCID, NFC CryptoTokenKit, and remote YubiHSM slots before presenting it as
-a general client library.
+selectors. Refactoring both smoke apps onto the wrapper would validate the
+package against software, USB CCID, NFC CryptoTokenKit, and remote YubiHSM slots
+before presenting it as a general client library.
 
 The checked-in Xcode project contains the maintainer's development team for
 automatic signing. Select a different development team in Xcode when building

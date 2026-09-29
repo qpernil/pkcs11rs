@@ -302,21 +302,19 @@ are deliberately prototype-only.
 Two checked-in UIKit applications use the same XCFramework and direct C ABI:
 
 - [Swift iPhone smoke test](../examples/ios/PKCS11RSPhoneSmoke/README.md) and
-  [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) provide
-  synchronized functional coverage through their respective language bindings.
-  Both cover USB CCID, NFC, persistent software-token initialization,
-  X25519 key generation and timed self-agreement, ML-DSA-87 key generation and
-  timed sign/verify, ML-KEM-1024 key generation and timed
-  encapsulation/decapsulation, remote YubiHSM discovery, explicit YubiHSM Auth
-  public-key matching and login, object inventory, debug Unified Logging, and
-  long-lived application behavior. Each refresh validates a nonzero,
-  session-only 32-byte X25519 secret, signs and verifies a fresh 32-byte value
-  from `C_GenerateRandom`, then uses the PKCS #11 3.2 KEM entry points and
-  compares
-  their session-only 32-byte generic secrets through `CKA_VALUE`. The tests make
-  these derived secrets extractable solely for validation and do not persist
-  them. The first explicit refresh starts slot discovery in both apps so NFC UI
-  is not presented automatically at launch.
+  [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) exercise
+  the same direct C ABI with complementary scopes. The Swift app configures no
+  software slot. It inventories USB CCID, NFC, platform, and remote YubiHSM
+  slots; reports ML-DSA and ML-KEM mechanism flags including `CKF_HW`; and
+  generates, reuses, and exercises ML-DSA-87 and ML-KEM-1024 on every slot that
+  advertises the required operations. Failures after successful advertisement
+  remain visible so the report qualifies implementation as well as discovery.
+  The Objective-C app retains persistent software-token initialization, X25519
+  self-agreement, ML-DSA sign/verify, and ML-KEM
+  encapsulation/decapsulation coverage. Both examples cover remote YubiHSM
+  discovery, YubiHSM Auth matching and login, object inventory, debug Unified
+  Logging, and long-lived application behavior. The first explicit refresh
+  starts slot discovery, so NFC UI is not presented automatically at launch.
 
 Build the XCFramework before opening either Xcode project. Both projects contain
 the maintainer's development team for automatic device signing; select a
