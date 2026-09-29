@@ -108,6 +108,10 @@ software mechanism list for session keys.
   trust, allowing both the network service and the HSM itself to be
   authenticated. See
   [YubiHSM device trust](docs/yubihsm-auth.md#asymmetric-device-key-trust).
+- A proposed [YubiHSM cluster-backed slot](docs/yubihsm-clustering.md) can
+  present explicitly configured compatible HSMs as one logical token while
+  retaining an end-to-end secure session to each selected member. Unclaimed
+  discovered devices remain ordinary direct slots.
 
 ### Platform-protected login
 
