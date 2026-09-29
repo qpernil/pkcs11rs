@@ -48,12 +48,13 @@ X25519, and 56 raw bytes for X448.
 
 ## Availability and key policy
 
-The common software mechanism set includes this operation. Software, host,
-PIV/OpenPGP, and physical YubiHSM ECDH keys can use it when their per-key
-permissions allow ECDH. A YubiHSM slot lists the mechanism when it supports an
-eligible curve. Whether a particular YubiHSM key uses the native command or
-provider-side composition is determined by its capability bits, not by an
-algorithm marker. The supported curves are P-224, P-256, P-384, P-521,
+The full software provider includes this operation. A device slot adds it only
+when the backend advertises ordinary ECDH, so host, PIV/OpenPGP, and physical
+YubiHSM ECDH keys can use it when their per-key permissions allow ECDH. A
+YubiHSM slot lists the mechanism when it supports an eligible curve. Whether a
+particular YubiHSM key uses the native command or provider-side composition is
+determined by its capability bits, not by an algorithm marker. The supported
+curves are P-224, P-256, P-384, P-521,
 secp256k1, Brainpool P-256, P-384, P-512, X25519, and X448.
 
 The HSM command requires the separate `derive-ecdh-kdf` capability bit `0x38`
@@ -75,7 +76,8 @@ ordinary host software secret key owned by the creating PKCS #11 session. The
 template can select a supported generic-secret, AES, 3DES, or HMAC type and its
 usage, sensitivity, and extractability policy. With no policy attributes, the
 result is a public, nonsensitive, extractable generic-secret session object.
-It can be copied and used by the common software operations. Closing its
+It can be copied and used by the secret-consuming operations selected for that
+slot. Closing its
 creator destroys it; logout also destroys it when `CKA_PRIVATE=CK_TRUE`.
 Persistent derived software keys require a backend that supports encrypted
 software-key storage; YubiHSM slots reject that request.
@@ -209,8 +211,10 @@ provider retains the native session while dependent PKCS #11 handles exist,
 then invalidates those handles when their backing session is lost.
 
 `CKA_TOKEN=CK_FALSE` alone does not promise device residence. Physical YubiHSM
-firmware uses the common host software session layer for outputs that it cannot
-hold. A virtual device advertising actual virtual key algorithms uses explicit
+firmware uses the shared host session-object layer for outputs that it cannot
+hold. Prefixed ECDH still reports `CKF_HW` when the long-term private key and
+private ECDH operation remain in the device, even if pkcs11rs performs the KDF
+framing. A virtual device advertising actual virtual key algorithms uses explicit
 native placement for the supported graph and reports those mechanisms with `CKF_HW`. Readable
 outputs needing software-only operations are materialized once; protected
 outputs are never downgraded. Established channels use local working bytes.

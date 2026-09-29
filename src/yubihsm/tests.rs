@@ -4,16 +4,16 @@ use super::*;
 use crate::{
     CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_RV, CK_TOKEN_INFO, CKA_LABEL,
     CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
-    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_AUTHENTICATION_TOKEN, CKP_BASELINE_PROVIDER,
-    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
-    CKR_USER_NOT_LOGGED_IN, KeyMaterial, Slot, TokenObject, YUBIHSM_ALGO_AES128,
-    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
-    YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_ED448,
-    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_X448, YUBIHSM_ALGO_X25519,
-    YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY,
-    YUBIHSM_WRAP_KEY, YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig,
-    YubiHsmSessionRole, YubiHsmSlot, configured_yubihsm_public_discovery_credential,
+    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
+    CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, KeyMaterial, Slot, TokenObject,
+    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
+    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_ED448, YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+    YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_X448,
+    YUBIHSM_ALGO_X25519, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY, YubiHsmDiscoveryCache, YubiHsmObjectKey,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot,
+    configured_yubihsm_public_discovery_credential,
     key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
     parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command,
 };
@@ -3306,11 +3306,7 @@ fn yubihsm_without_public_discovery_configuration_exposes_provider_profiles_only
         .collect::<HashSet<_>>();
     assert_eq!(
         profile_ids,
-        HashSet::from([
-            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
-        ])
+        HashSet::from([CKP_BASELINE_PROVIDER as CK_PROFILE_ID])
     );
     assert!(
         objects
@@ -4066,8 +4062,6 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
         profile_ids,
         HashSet::from([
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
             CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID,
         ])
     );
@@ -6929,7 +6923,7 @@ fn target_authentication_key_types_do_not_advertise_native_hsmauth() {
 }
 
 #[test]
-fn software_private_export_on_hardware_slots_requires_login_and_extractability() {
+fn hardware_slots_reject_unrelated_software_private_key_import() {
     use crate::pkcs11_auth::Pkcs11Auth;
     use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
     use crate::*;
@@ -6950,74 +6944,17 @@ fn software_private_export_on_hardware_slots_requires_login_and_extractability()
         .unwrap()
         .serialized()
         .unwrap();
-    let mut exported_key = 0;
-    let password = b"export password";
-    for extractable in [false, true] {
-        let key = session
-            .create(
-                TokenObjectTemplate {
-                    extractable: Some(extractable),
-                    ..crate::pkcs11_auth::ec_template()
-                },
-                &[
-                    (CKA_VALUE, &value),
-                    (CKA_EC_PARAMS, crate::pkcs11_auth::P256_PARAMS),
-                ],
-            )
-            .unwrap();
-        let mut length = 0;
-        let rv = session.call(|| {
-            api::PKCS11RS_SoftwareExportPrivateKey(
-                session.handle,
-                key,
-                password.as_ptr(),
-                password.len() as _,
-                std::ptr::null_mut(),
-                &mut length,
-            )
-        });
-        assert_eq!(
-            rv,
-            if extractable {
-                CKR_OK
-            } else {
-                CKR_KEY_UNEXTRACTABLE
-            } as CK_RV
-        );
-        if extractable {
-            assert!(length > 0);
-            let mut encrypted = vec![0; length as usize];
-            assert_eq!(
-                session.call(|| api::PKCS11RS_SoftwareExportPrivateKey(
-                    session.handle,
-                    key,
-                    password.as_ptr(),
-                    password.len() as _,
-                    encrypted.as_mut_ptr(),
-                    &mut length,
-                )),
-                CKR_OK as CK_RV
-            );
-            assert_eq!(encrypted[0], 0x30);
-            exported_key = key;
-        }
-    }
-    assert_eq!(
-        session.call(|| api::C_Logout(session.handle)),
-        CKR_OK as CK_RV
-    );
-    let mut length = 0;
-    assert_eq!(
-        session.call(|| api::PKCS11RS_SoftwareExportPrivateKey(
-            session.handle,
-            exported_key,
-            password.as_ptr(),
-            password.len() as _,
-            std::ptr::null_mut(),
-            &mut length,
-        )),
-        CKR_USER_NOT_LOGGED_IN as CK_RV
-    );
+    let attributes: [(u32, &[u8]); 2] = [
+        (CKA_VALUE, value.as_ref()),
+        (CKA_EC_PARAMS, crate::pkcs11_auth::P256_PARAMS),
+    ];
+    assert!(matches!(
+        session.create(
+            crate::pkcs11_auth::ec_template(),
+            &attributes,
+        ),
+        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    ));
 }
 
 #[test]

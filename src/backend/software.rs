@@ -310,6 +310,14 @@ impl Slot for SoftwareSlot {
         true
     }
 
+    fn supports_software_keys(&self) -> bool {
+        true
+    }
+
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::Full
+    }
+
     fn refresh_token_objects_after_login(&self) -> bool {
         true
     }

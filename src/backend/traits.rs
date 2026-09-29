@@ -1,5 +1,12 @@
 use crate::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SoftwareMechanismScope {
+    None,
+    Composition,
+    Full,
+}
+
 pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_ID) -> TokenObject {
     let label = match profile_id as u32 {
         CKP_BASELINE_PROVIDER => "PKCS #11 Baseline Provider",
@@ -472,9 +479,15 @@ pub(crate) trait Slot {
     fn destroy_software_private_object(&mut self, _unique_id: &str) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    /// Whether the common object layer may import software private/secret keys.
+    /// Whether the common object layer may import arbitrary software
+    /// private/secret session keys. Native token-key imports are independent.
     fn supports_software_keys(&self) -> bool {
-        true
+        false
+    }
+    /// How much of the host software provider belongs in this slot's public
+    /// mechanism surface.
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::Composition
     }
     /// Select host software mechanisms independently of native capabilities.
     fn software_mechanism_enabled(&self, _mechanism: CK_MECHANISM_TYPE) -> bool {
@@ -493,12 +506,184 @@ pub(crate) trait Slot {
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
-        let software_mechanisms = software_private_mechanisms()
-            .into_iter()
-            .chain(software_secret_mechanisms())
-            .chain(software_public_mechanisms())
-            .chain(SOFTWARE_DIGEST_MECHANISMS);
-        for software in software_mechanisms.filter(|mechanism| {
+        let scope = self.software_mechanism_scope();
+        if scope == SoftwareMechanismScope::None {
+            return mechanisms;
+        }
+
+        let mut software_mechanisms = Vec::new();
+        match scope {
+            SoftwareMechanismScope::None => {}
+            SoftwareMechanismScope::Full => {
+                software_mechanisms.extend(software_private_mechanisms());
+                software_mechanisms.extend(software_secret_mechanisms());
+                software_mechanisms.extend(software_public_mechanisms());
+                software_mechanisms.extend(SOFTWARE_DIGEST_MECHANISMS);
+            }
+            SoftwareMechanismScope::Composition => {
+                // Standalone digests neither consume nor create key material,
+                // so they are safe common operations on every cryptographic
+                // slot. They remain software mechanisms unless a backend
+                // advertises and merges a native implementation.
+                software_mechanisms.extend(SOFTWARE_DIGEST_MECHANISMS);
+
+                // These mechanisms are provider-side framing around a native
+                // private-key primitive. The private operation still terminates
+                // in the backend, so they belong to that backend's slot.
+                let private = software_private_mechanisms();
+                let public = software_public_mechanisms();
+                let mut add_composites =
+                    |base: CK_MECHANISM_TYPE, candidates: &[CK_MECHANISM_TYPE]| {
+                        let Some(native) =
+                            mechanisms.iter().find(|mechanism| mechanism.type_ == base)
+                        else {
+                            return;
+                        };
+                        if native.flags & CKF_SIGN as CK_FLAGS == 0 {
+                            return;
+                        }
+                        for type_ in candidates {
+                            if let Some(mut detail) = private
+                                .iter()
+                                .find(|mechanism| mechanism.type_ == *type_)
+                                .cloned()
+                            {
+                                detail.min_key_size = native.min_key_size;
+                                detail.max_key_size = native.max_key_size;
+                                detail.flags = (detail.flags & CKF_SIGN as CK_FLAGS)
+                                    | (native.flags & CKF_HW as CK_FLAGS);
+                                software_mechanisms.push(detail);
+                            }
+                            if let Some(mut detail) = public
+                                .iter()
+                                .find(|mechanism| mechanism.type_ == *type_)
+                                .cloned()
+                            {
+                                detail.min_key_size = native.min_key_size;
+                                detail.max_key_size = native.max_key_size;
+                                detail.flags = (detail.flags & CKF_VERIFY as CK_FLAGS)
+                                    | (native.flags & CKF_HW as CK_FLAGS);
+                                software_mechanisms.push(detail);
+                            }
+                        }
+                    };
+                add_composites(
+                    CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+                    &HASHED_RSA_PKCS_MECHANISMS,
+                );
+                add_composites(
+                    CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+                    &HASHED_RSA_PSS_MECHANISMS,
+                );
+                add_composites(CKM_ECDSA as CK_MECHANISM_TYPE, &HASHED_ECDSA_MECHANISMS);
+
+                // Literal-prefix ECDH is the middle YubiHSM-auth source path:
+                // the backend performs the private ECDH operation while the
+                // provider frames the prefix and KDF inputs.
+                if let Some(native) = mechanisms.iter().find(|mechanism| {
+                    mechanism.type_ == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
+                        && mechanism.flags & CKF_DERIVE as CK_FLAGS != 0
+                }) {
+                    if let Some(mut prefixed) = private
+                        .iter()
+                        .find(|mechanism| mechanism.type_ == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE)
+                        .cloned()
+                    {
+                        prefixed.min_key_size = native.min_key_size;
+                        prefixed.max_key_size = native.max_key_size;
+                        prefixed.flags |= native.flags & CKF_HW as CK_FLAGS;
+                        software_mechanisms.push(prefixed);
+                    }
+                    // YubiHSM-auth always needs a one-use P-256 client key.
+                    // Device slots with native key generation already expose
+                    // it; host ECDH slots use this deliberately scoped software
+                    // generation path.
+                    if !mechanisms.iter().any(|mechanism| {
+                        mechanism.type_ == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    }) && native.min_key_size <= 256
+                        && native.max_key_size >= 256
+                        && let Some(mut generation) = private
+                            .iter()
+                            .find(|mechanism| {
+                                mechanism.type_ == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                            })
+                            .cloned()
+                    {
+                        generation.min_key_size = 256;
+                        generation.max_key_size = 256;
+                        software_mechanisms.push(generation);
+                    }
+                }
+
+                // Public operations complement a private operation already
+                // exposed by the backend. They never introduce an unrelated
+                // algorithm or widen the backend's key-size range.
+                for mut software in public {
+                    if software.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY {
+                        if self.supports_public_projection() {
+                            software_mechanisms.push(software);
+                        }
+                        continue;
+                    }
+                    let Some(native) = mechanisms
+                        .iter()
+                        .find(|mechanism| mechanism.type_ == software.type_)
+                    else {
+                        continue;
+                    };
+                    let mut operations = 0;
+                    if native.flags & CKF_SIGN as CK_FLAGS != 0 {
+                        operations |= software.flags & CKF_VERIFY as CK_FLAGS;
+                    }
+                    if native.flags & CKF_DECRYPT as CK_FLAGS != 0 {
+                        operations |= software.flags & CKF_ENCRYPT as CK_FLAGS;
+                    }
+                    if native.flags & CKF_DECAPSULATE as CK_FLAGS != 0 {
+                        operations |= software.flags & CKF_ENCAPSULATE as CK_FLAGS;
+                    }
+                    if operations != 0 {
+                        let operation_flags = (CKF_ENCRYPT
+                            | CKF_DECRYPT
+                            | CKF_SIGN
+                            | CKF_VERIFY
+                            | CKF_ENCAPSULATE
+                            | CKF_DECAPSULATE)
+                            as CK_FLAGS;
+                        software.flags = operations | (software.flags & !operation_flags);
+                        software.min_key_size = native.min_key_size;
+                        software.max_key_size = native.max_key_size;
+                        software_mechanisms.push(software);
+                    }
+                }
+
+                // ECDH, KEM decapsulation and native KDFs can deliberately
+                // publish a host-held session secret. Expose operations that
+                // consume or further derive such a key, but not independent
+                // software key generation, password derivation, or asymmetric
+                // private-key operations.
+                let produces_session_secret = mechanisms.iter().any(|mechanism| {
+                    mechanism.type_ != CKM_PKCS11RS_PROJECT_PUBLIC_KEY
+                        && mechanism.type_ != CKM_PKCS11RS_PREVIEW_SIGN_DERIVE
+                        && mechanism.flags & (CKF_DERIVE | CKF_DECAPSULATE | CKF_UNWRAP) as CK_FLAGS
+                            != 0
+                });
+                if produces_session_secret {
+                    software_mechanisms.extend(software_secret_mechanisms().into_iter().filter(
+                        |mechanism| {
+                            mechanism.flags & CKF_GENERATE as CK_FLAGS == 0
+                                && !matches!(
+                                    mechanism.type_,
+                                    x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                                        || x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE
+                                        || x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE
+                                )
+                        },
+                    ));
+                }
+            }
+        }
+
+        for software in software_mechanisms.into_iter().filter(|mechanism| {
             self.software_mechanism_enabled(mechanism.type_)
                 && (mechanism.type_ != CKM_PKCS11RS_PROJECT_PUBLIC_KEY
                     || self.supports_public_projection())

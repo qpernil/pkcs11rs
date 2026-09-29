@@ -27,6 +27,14 @@ impl Slot for AbiTestSlot {
         true
     }
 
+    fn supports_software_keys(&self) -> bool {
+        true
+    }
+
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::Full
+    }
+
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         MECHANISMS.to_vec()
     }
@@ -440,6 +448,10 @@ impl Slot for AbiScp03Slot {
 
     fn supports_public_projection(&self) -> bool {
         false
+    }
+
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::None
     }
 
     fn name(&self) -> String {

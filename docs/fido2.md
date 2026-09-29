@@ -1,9 +1,10 @@
 # FIDO2 support
 
-The slot also provides the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
-Its advertised mechanisms combine native capabilities with the filtered
-software list. Device operations and token objects retain the native limits
-described below.
+The slot uses the [selective composition layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
+Its mechanism list contains the FIDO operations, their directly associated
+public behavior, public projection, and the common standalone keyless digests.
+It does not inherit unrelated software key generation, keyed signing, or
+symmetric cryptography.
 
 ## Verified transport boundaries
 

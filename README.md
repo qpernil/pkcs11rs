@@ -4,8 +4,10 @@
 
 `pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
 applications, YubiHSM devices, and explicitly configured in-memory software
-tokens. Ordinary slots support common software session objects and keys;
-the native HSM Auth slot exposes its dedicated credential operation.
+tokens. Device-backed slots expose only software operations that directly
+complete a native operation or consume a secret produced by that backend;
+named software slots provide the complete software mechanism set. The native
+HSM Auth and Issuer Security Domain slots expose only their management roles.
 Operations with hardware-held private keys remain on the device. Dedicated
 software slots also support encrypted persistent keys, data, and certificates when local token storage
 is configured. See the [shared session layer](docs/architecture.md#shared-software-session-objects-and-mechanism-discovery).
@@ -195,20 +197,18 @@ Every present slot advertises a public, immutable, token-resident
 `CKP_BASELINE_PROVIDER` object. Additional `CKO_PROFILE` objects describe the
 slot's combined native and software session capabilities:
 
-| Slot | Profiles with the default software mechanism set |
+| Slot | Profiles |
 | --- | --- |
-| Secure Enclave | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
+| Secure Enclave | Baseline, Public Certificates Token |
 | Software, including temporary direct-auth slots | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
-| PIV, OpenPGP | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
-| YubiHSM | Baseline, Extended Provider, Authentication Token; Public Certificates Token when public discovery is configured |
-| FIDO2, Issuer Security Domain | Baseline, Extended Provider, Authentication Token; Public Certificates Token when token backing storage is enabled |
-| YubiKey HSM Auth | Baseline; Public Certificates Token when token backing storage is enabled |
+| PIV, OpenPGP | Baseline, Authentication Token, Public Certificates Token |
+| YubiHSM | Baseline; Authentication Token when RSA-2048 SHA-256 signing is exposed; Extended Provider only when the actual native/composed surface satisfies it; Public Certificates Token when public discovery is configured |
+| FIDO2, Issuer Security Domain, YubiKey HSM Auth | Baseline; Public Certificates Token when token backing storage is enabled |
 
 Extended Provider requires login support, including `C_LoginUser`, and the
 SHA-512/RSA operations required by its mandatory OASIS test. Authentication
 Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
-Eligibility uses the merged mechanism list, including the slot's filtered
-software mechanisms. HSM Auth exposes native authentication credentials
+Eligibility uses the native and selectively composed mechanism list. HSM Auth exposes native authentication credentials
 through dedicated credential key types; it has no software key operations or
 USER login. Secure Enclave login accepts only an omitted or explicitly empty
 PIN; OS authorization still controls native key use.
@@ -231,10 +231,14 @@ retain their capability claim even when empty or provisioned with private
 certificates; their encrypted storage and configured public-discovery behavior
 are unchanged. Platform certificate lookup is intrinsic to the enabled slot.
 
-The common software layer provides `CKM_RSA_PKCS` wrap/unwrap on session keys,
-including on physical YubiHSM slots. Native token-key operations remain limited
-by device capabilities. A merged mechanism's `CKF_HW` flag does not imply that
-every advertised operation or key size is supported by hardware. See
+The device-slot composition layer adds standalone keyless digests plus
+backend-linked operations: public counterparts, composite hashing, the
+YubiHSM-auth ECDH paths, and consumers for backend-produced session secrets.
+Native token-key operations remain limited by device capabilities. A merged
+mechanism's `CKF_HW` flag does not imply that every advertised operation is
+native. Composite hashing and prefixed ECDH also
+carry `CKF_HW` when their security-sensitive private-key operation terminates
+in the backend; consumers of a materialized host secret do not. See
 [profile test execution and qualification](conformance/README.md).
 
 ## Threading
@@ -1320,9 +1324,11 @@ key explicitly.
 The module has typed software private-key implementations for RSA, NIST P-224,
 P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,
 brainpoolP512r1, Ed25519, Ed448, X25519, and X448. Ordinary slots expose these
-through their filtered software mechanism list for session objects; native HSM
-Auth slots exclude software keys. Shared public-key implementations support
-projected and imported public objects.
+only when they belong to the slot's native or selectively composed mechanism
+surface. Named software slots expose the complete set; device slots do not gain
+unrelated software key algorithms, and management-only slots exclude software
+cryptography. Shared public-key implementations support projected and imported
+public objects.
 A private template with `CKA_TOKEN=CK_TRUE` never falls back to software
 session storage. Encrypted persistent software private keys exist only in an
 explicitly named software slot with `PKCS11RS_TOKEN_STORAGE` configured.

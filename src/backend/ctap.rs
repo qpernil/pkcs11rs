@@ -1727,17 +1727,20 @@ mod tests {
         assert_eq!(mechanisms[0].type_, CKM_PKCS11RS_FIDO_ASSERTION);
         assert_eq!(mechanisms[0].flags, (CKF_HW | CKF_SIGN) as CK_FLAGS);
         let mechanisms = slot.mechanisms();
-        for supported in HASHED_RSA_PKCS_MECHANISMS
-            .into_iter()
-            .chain(HASHED_RSA_PSS_MECHANISMS)
-            .chain(HASHED_ECDSA_MECHANISMS)
-        {
-            assert!(
-                mechanisms
-                    .iter()
-                    .any(|mechanism| mechanism.type_ == supported)
-            );
+        assert!(mechanisms.iter().any(|mechanism| {
+            mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY
+                && mechanism.flags == CKF_DERIVE as CK_FLAGS
+        }));
+        for digest in SOFTWARE_DIGEST_MECHANISMS {
+            assert!(mechanisms.iter().any(|mechanism| {
+                mechanism.type_ == digest.type_ && mechanism.flags == CKF_DIGEST as CK_FLAGS
+            }));
         }
+        assert!(!mechanisms.iter().any(|mechanism| {
+            HASHED_RSA_PKCS_MECHANISMS.contains(&mechanism.type_)
+                || HASHED_RSA_PSS_MECHANISMS.contains(&mechanism.type_)
+                || HASHED_ECDSA_MECHANISMS.contains(&mechanism.type_)
+        }));
     }
 
     #[test]

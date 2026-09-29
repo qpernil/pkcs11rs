@@ -40,15 +40,16 @@ by discovery. Multiple certificates for one key have distinct stable object
 identities. The slot exposes only certificates matching its managed keys.
 
 Native keys support P-256 `CKM_ECDH1_DERIVE` and its cofactor variant (P-256 has
-cofactor one). Native mechanism entries are merged with the common software
-mechanisms using the ordinary slot rules. ECDH produces a software session
-object; the common layer handles X9.63 KDFs and subsequent composition, hash,
-counter-KDF, and symmetric operations. The Secure Enclave retains the private
-key, but Apple's ECDH API returns the shared secret to module memory. Sensitive
-buffers are zeroizing; PKCS #11 object policy determines whether a client may
-read a derived value.
+cofactor one). The selective composition layer adds prefixed ECDH, one-use P-256
+software generation for YubiHSM authentication, and KDF, digest-key, MAC, and
+symmetric consumers for the resulting software session secret. The Secure
+Enclave retains the private key, but Apple's ECDH API returns the shared secret
+to module memory. Sensitive buffers are zeroizing; PKCS #11 object policy
+determines whether a client may read a derived value.
 
-The slot also supports the ordinary software session keys and data objects.
+The slot supports common session data and certificates plus software secret
+objects produced by its ECDH composition paths. It does not accept arbitrary
+software private or secret session-key imports.
 Persistent provisioning uses the existing `platform-credential` management
 API and tools; this slot does not implement token-key generation, import,
 deletion, or attribute updates through Cryptoki. It advertises write-protected
@@ -71,12 +72,10 @@ managed-key inventory. A retained Apple key checks that its managed key still
 exists with the same public identity before ECDH; deletion or replacement
 invalidates further use. No password is cached to recover OS authorization.
 
-The slot advertises Baseline, Extended Provider, Authentication Token, and
-Public Certificates Token with the default software mechanism set. Extended
-Provider and Authentication Token include software session-key operations.
-Native keys support ECDH, not signing. Certificate lookup has no separate
-configuration switch, and the profile claim does not depend on a matching
-certificate being installed.
+The slot advertises Baseline and Public Certificates Token. Native keys support
+ECDH, not the RSA operations required by Extended Provider or Authentication
+Token. Certificate lookup has no separate configuration switch, and the
+profile claim does not depend on a matching certificate being installed.
 
 ## Authentication consumer
 
