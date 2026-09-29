@@ -639,6 +639,9 @@ impl Slot for OpenPgpSlot {
                 CKF_DERIVE as CK_FLAGS,
             );
         }
+        for mechanism in &mut mechanisms {
+            mechanism.flags |= CKF_HW as CK_FLAGS;
+        }
         mechanisms
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {

@@ -28,12 +28,18 @@ not execution location.
 
 ## Implemented foundation
 
-Ordinary slot kinds share common software session objects: software, YubiHSM, PIV,
-OpenPGP, FIDO2, and platform ECDH. Supported software keys, data objects, derivation outputs,
-and operations use this common layer. A software slot has no native mechanisms;
-each hardware slot's native list is merged with a filtered software list.
-The union combines operation flags and size ranges and preserves native
-`CKF_HW`; this does not establish where a particular operation executes.
+Ordinary slot kinds share the session-object lifecycle, but they do not expose
+the same mechanism set. A named software slot exposes the full software
+provider. Device slots add standalone keyless digests and operations that
+compose with their native capabilities: public counterparts and hashed framing
+for native private-key operations, prefixed ECDH, and consumers for session
+secrets produced by the backend. They reject unrelated software private- and
+secret-key imports.
+Management-only slots add no software cryptographic mechanisms. Composed
+hashed-signature and prefixed-ECDH modes inherit `CKF_HW` when their long-term
+private-key operation remains in the backend. A merged mechanism retains that
+flag; PKCS #11 cannot distinguish individual operation bits within one
+mechanism entry.
 
 Public PKCS #11 entry points implement protected concatenation, bit extraction,
 SHA-256 key derivation, and AES-CMAC SP 800-108 counter KDF. Existing ECDH,
@@ -352,8 +358,9 @@ raw-ECDH fallback; closing the
 target login releases the source session and its transient objects while leaving
 the persistent credential intact.
 
-A readable native result that requests a software-only operation is read once
-and materialized as a common software session object. Protected outputs are
+A readable native result that requests one of the advertised composition
+operations is read once and materialized as a shared software session object.
+Protected outputs are
 never downgraded. Only final working keys are read into the client, and the
 provider needs no per-message AES/CMAC traffic for this client workflow.
 
@@ -361,7 +368,7 @@ provider needs no per-message AES/CMAC traffic for this client workflow.
 
 Explore adapting a separately loaded PKCS #11 module as an authentication
 source. Represent each selected external slot as an external-backed `Slot` with
-the common pkcs11rs software overlay, so `Pkcs11Auth` can use the same operation
+the selective pkcs11rs composition layer, so `Pkcs11Auth` can use the same operation
 graph as it does for built-in PIV, OpenPGP, platform, software, and YubiHSM slots.
 The external slot retains its token identity, login state, persistent objects,
 and native operations. Locally generated keys and explicitly readable derived
@@ -396,7 +403,7 @@ objects in that module. A limited source such as a PIV
 module may instead produce an explicitly readable raw ECDH result; the adapter
 materializes it as a local, protected software session object and completes
 concatenation, X9.63 SHA-256, extraction, and receipt verification through the
-common overlay. Generate the independent ephemeral agreement locally so the
+selective composition surface. Generate the independent ephemeral agreement locally so the
 external module needs to operate only on its long-term credential. Destroy and
 zeroize the transferred agreement immediately after materialization, and repeat
 ECDH rather than retain it for channel recreation.
@@ -411,8 +418,8 @@ key's policy or retry a different path after an operational failure.
 For explicitly named AES-128 pairs (`<name>.enc` and `<name>.mac`), prefer
 `CKM_SP800_108_COUNTER_KDF`, with the implemented AES-ECB construction as the
 alternative when the key permits encryption. An external adapter must supply
-the required native operations and capability checks; the common overlay
-supplies its ordinary software session operations. The loader itself remains
+the required native operations and capability checks; the composition layer
+supplies only the session-secret consumers selected by those capabilities. The loader itself remains
 future work.
 
 Select a permitted path before execution; an operational failure must not

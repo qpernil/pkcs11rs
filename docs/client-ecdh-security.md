@@ -92,13 +92,15 @@ active Authentication Key.
 The final path requires `CKM_ECDH1_DERIVE` on the long-term credential. The
 provider requests a readable raw agreement, immediately materializes it as a
 zeroizing local session object, and performs the remaining concatenation,
-X9.63 SHA-256, extraction, and receipt verification with the module's common
-mechanisms.
+X9.63 SHA-256, extraction, and receipt verification with the module's selected
+composition mechanisms.
 
 Mechanism discovery chooses the path; backend names do not. `CKF_HW` describes
-native coverage for discovery and diagnostics, but the selector relies on the
-active provider-session capability and per-key operation policy because a
-merged slot mechanism can contain both hardware and software operations.
+whether the security-sensitive private-key operation keeps the long-term secret
+in the backend, including prefixed ECDH with provider-side framing. The selector
+still relies on the active provider-session capability and per-key operation
+policy because a merged slot mechanism can contain both hardware and software
+operations.
 
 ### Physical YubiHSM firmware
 
@@ -107,14 +109,18 @@ A physical YubiHSM exposes its standard P-256 `DeriveEcdh` operation through
 `SessionObject` command or its volatile handles. It also does not implement
 `DeriveEcdhKdf`.
 
-For such a device, pkcs11rs generates the ephemeral P-256 key in its common
-software session layer, asks the YubiHSM to perform ECDH with the protected
+For such a device, pkcs11rs generates the ephemeral P-256 key through the
+slot's scoped composition mechanism, asks the YubiHSM to perform ECDH with the protected
 long-term private key, receives the raw static agreement, and performs
 concatenation, X9.63 SHA-256, key extraction, and receipt verification in the
 module. These module operations expose standard PKCS #11 session-object
 behavior to the authentication code, but they do not imply that those objects
 reside in physical YubiHSM memory. The long-term private scalar remains in the
 YubiHSM; the agreements and final working keys enter zeroizing host memory.
+The same explicit `CKA_TOKEN=CK_FALSE` session-key path is available when an
+ECDH-capable source slot also advertises native persistent EC generation. That
+one-use client key is the sole software asymmetric-generation exception in a
+composition slot.
 
 ## Protocol use
 

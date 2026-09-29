@@ -1,9 +1,14 @@
 # YubiKey OpenPGP client
 
-The slot also provides the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
-Its advertised mechanisms combine native capabilities with the filtered
-software list. Device operations and token objects retain the native limits
-described below.
+The slot uses the [selective composition layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
+It adds public-side operations, composite hashing, YubiHSM-auth ECDH support,
+and consumers for secrets returned by ECDH. It does not expose unrelated
+software algorithms, private-key generation, or secret-key generation. Device
+operations and token objects retain the native limits described below. Native
+mechanisms and composed hashed-signature or prefixed-ECDH modes carry `CKF_HW`
+when the long-term private-key operation remains in the applet. Operations on a
+materialized host secret do not. A merged mechanism retains `CKF_HW` when at
+least one operation has a hardware-held secret path.
 
 The OpenPGP client exposes the YubiKey OpenPGP smart-card applet as a PKCS #11
 slot over native CCID transport. Common CCID discovery

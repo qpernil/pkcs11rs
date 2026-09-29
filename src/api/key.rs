@@ -497,6 +497,7 @@ pub(crate) fn generate_key_pair(
         let public_token =
             optional_bool_template_attribute(public_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
                 .unwrap_or(false);
+        let software_scope = ctx.get_slot(slot_id)?.software_mechanism_scope();
         if !private_token
             && !public_token
             && mechanism.mechanism == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
@@ -578,7 +579,22 @@ pub(crate) fn generate_key_pair(
                 return Ok(());
             }
         }
-        if (!private_token || ctx.get_slot(slot_id)?.stores_software_token_keys())
+        let scoped_composition_generation = !private_token
+            && !public_token
+            && software_scope == SoftwareMechanismScope::Composition
+            && mechanism.mechanism == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE;
+        if scoped_composition_generation {
+            let parameters =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if parameters.as_slice() != crate::pkcs11_auth::P256_PARAMS {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+        }
+        let software_generation = (!private_token
+            && software_scope == SoftwareMechanismScope::Full)
+            || scoped_composition_generation
+            || (private_token && ctx.get_slot(slot_id)?.stores_software_token_keys());
+        if software_generation
             && matches!(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE

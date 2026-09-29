@@ -66,10 +66,12 @@ ownership, card derivation, and native virtual-HSM support.
 
 ## Slot layout
 
-YubiHSM slots provide the [common software session-object layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
-Session-key creation and operations use host software; persistent device keys
-retain the native capabilities and authentication requirements described here.
-Mechanism discovery merges the native list with the filtered software list.
+YubiHSM slots use the [selective composition layer](architecture.md#shared-software-session-objects-and-mechanism-discovery).
+It retains public-side operations, composite signatures, the three ordered
+YubiHSM-auth client paths, and consumers for readable session secrets. It does
+not turn each YubiHSM slot into a general software provider. Persistent device
+keys retain the native capabilities and authentication requirements described
+here.
 
 The module exposes one slot for every selectable CCID applet, one slot for
 every physical YubiHSM USB device, and one slot for every device enumerated by
@@ -249,13 +251,13 @@ corresponding `CKA_PROFILE_ID`:
 | `CKP_AUTHENTICATION_TOKEN` | The merged mechanism set supports RSA-2048 `CKM_SHA256_RSA_PKCS` signing |
 | `CKP_PUBLIC_CERTIFICATES_TOKEN` | Public discovery is configured for that slot |
 
-Profile eligibility uses the merged native and software session mechanisms.
-The common software layer supplies RSA-2048 signing and `CKM_RSA_PKCS`
-wrap/unwrap on session keys, including on physical YubiHSM slots. This satisfies
-the mechanism requirements of the mandatory Extended Provider and Authentication
-Token cases. Native token-key operations still depend on device capabilities;
-merged `CKF_HW` flags do not promise hardware support for every operation or
-key size. Public Certificates eligibility requires public-discovery
+Profile eligibility uses the native and selectively composed mechanism set.
+Authentication Token is present only when that set contains RSA-2048
+`CKM_SHA256_RSA_PKCS` signing. Extended Provider additionally requires the
+complete mandated RSA and digest surface and is not supplied merely by a
+generic software overlay. Native token-key operations still depend on device
+capabilities; a merged `CKF_HW` flag does not promise a native implementation
+for every operation. Public Certificates eligibility requires public-discovery
 configuration, independently of the current objects or discovery result.
 See [profile qualification](../conformance/README.md).
 

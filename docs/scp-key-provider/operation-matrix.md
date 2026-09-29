@@ -142,7 +142,7 @@ The client first uses the native protected session-object graph when the source
 session and both private keys permit it. Otherwise it selects
 `CKM_PKCS11RS_PREFIXED_ECDH_DERIVE` when the static key permits that mechanism.
 The final path uses ordinary `CKD_NULL` ECDH and performs composition and
-SHA-256 through the common module mechanisms. Operational errors do not cause
+SHA-256 through the slot's selected composition mechanisms. Operational errors do not cause
 fallback. Direct authentication and recreation make the same selection and
 recompute both agreements for every handshake.
 

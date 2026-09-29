@@ -4,7 +4,7 @@ use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[test]
-fn host_profiles_include_login_and_software_operations() {
+fn host_profiles_reflect_the_native_and_composition_surface() {
     let slot = HostSlot::with_keys(Vec::new());
     let ids: Vec<_> = slot
         .profile_objects(1)
@@ -20,8 +20,6 @@ fn host_profiles_include_login_and_software_operations() {
         ids,
         [
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
             CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
         ]
     );

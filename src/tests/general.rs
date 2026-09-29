@@ -1013,7 +1013,7 @@ fn switching_logged_in_ccid_slots_keeps_sessions_but_makes_the_old_slot_public()
 }
 
 #[test]
-fn production_slot_profiles_include_common_operations_and_single_user_login() {
+fn production_slot_profiles_follow_each_slots_actual_mechanism_surface() {
     let connector = || -> std::rc::Rc<dyn crate::Connector> {
         std::rc::Rc::new(SelectableConnector {
             present: std::sync::atomic::AtomicBool::new(true),
@@ -1021,13 +1021,19 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
             serial: "PROFILE0001",
         })
     };
-    let slots: Vec<(Box<dyn crate::Slot>, bool)> = vec![
+    let slots: Vec<(Box<dyn crate::Slot>, Vec<CK_PROFILE_ID>, bool)> = vec![
         (
             Box::new(crate::SoftwareSlot::new("profiles".into(), 0)),
+            vec![
+                CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
+                CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
+                CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
+            ],
             true,
         ),
         (
             Box::new(crate::backend::host::HostSlot::with_keys(Vec::new())),
+            vec![CKP_BASELINE_PROVIDER as CK_PROFILE_ID],
             true,
         ),
         (
@@ -1035,6 +1041,7 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 connector(),
                 crate::hsmauth::AID.to_vec(),
             )),
+            vec![CKP_BASELINE_PROVIDER as CK_PROFILE_ID],
             false,
         ),
         (
@@ -1042,6 +1049,7 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 connector(),
                 vec![0xa0],
             )),
+            vec![CKP_BASELINE_PROVIDER as CK_PROFILE_ID],
             false,
         ),
         (
@@ -1049,6 +1057,7 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 connector(),
                 crate::ctap::FIDO2_AID.to_vec(),
             )),
+            vec![CKP_BASELINE_PROVIDER as CK_PROFILE_ID],
             false,
         ),
         (
@@ -1056,6 +1065,10 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 connector(),
                 crate::openpgp::OPENPGP_AID.to_vec(),
             )),
+            vec![
+                CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
+                CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
+            ],
             true,
         ),
         (
@@ -1064,10 +1077,14 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 crate::piv::PIV_AID.to_vec(),
                 std::sync::Arc::new(crate::device::DeviceContext::test()),
             )),
+            vec![
+                CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
+                CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
+            ],
             true,
         ),
     ];
-    for (mut slot, certificates) in slots {
+    for (mut slot, mut expected, certificates) in slots {
         assert!(slot.supports_login_user(), "{:?}", slot.kind());
         let ids: Vec<_> = slot
             .profile_objects(1)
@@ -1079,14 +1096,6 @@ fn production_slot_profiles_include_common_operations_and_single_user_login() {
                 profile_id
             })
             .collect();
-        let mut expected = vec![
-            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
-        ];
-        if slot.kind() == crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) {
-            expected.truncate(1);
-        }
         if certificates {
             expected.push(CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID);
         }
@@ -1345,7 +1354,7 @@ fn openpgp_generated_key_algorithms_report_key_pair_generation_mechanisms() {
 }
 
 #[test]
-fn openpgp_mechanisms_combine_native_and_common_software_operations() {
+fn openpgp_mechanisms_keep_native_operations_and_selected_composition() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
     let mechanisms = crate::Slot::mechanisms(&slot);
@@ -1369,7 +1378,7 @@ fn openpgp_mechanisms_combine_native_and_common_software_operations() {
         .unwrap();
     assert_eq!(
         raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
-        (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
     );
     for mechanism_type in [
         CKM_SHA256_RSA_PKCS,
@@ -1442,7 +1451,11 @@ fn composite_signing_advertisement_is_exact_for_every_general_slot_family() {
 
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let openpgp = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
-    assert_exact(crate::Slot::mechanisms(&openpgp), &all);
+    let openpgp_expected = crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_ECDSA_MECHANISMS)
+        .collect::<Vec<_>>();
+    assert_exact(crate::Slot::mechanisms(&openpgp), &openpgp_expected);
 
     let base = std::sync::Arc::new(SelectableConnector {
         present: std::sync::atomic::AtomicBool::new(true),
@@ -1799,43 +1812,7 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert_eq!(token_info.ulMaxPinLen, 0);
     assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
     let mechanisms = crate::Slot::mechanisms(&slot);
-    for expected in crate::SOFTWARE_DIGEST_MECHANISMS {
-        let advertised = mechanisms
-            .iter()
-            .find(|mechanism| mechanism.type_ == expected.type_)
-            .expect("provider-wide digest mechanism");
-        assert_eq!(advertised.flags, CKF_DIGEST as CK_FLAGS);
-        assert_eq!((advertised.min_key_size, advertised.max_key_size), (0, 0));
-    }
-    for supported in crate::software_public_mechanisms()
-        .into_iter()
-        .filter(|mechanism| mechanism.type_ != crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
-    {
-        assert!(
-            mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == supported.type_)
-        );
-    }
-    assert!(
-        !mechanisms
-            .iter()
-            .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
-    );
-    for private_only in [
-        CKM_RSA_PKCS_KEY_PAIR_GEN,
-        CKM_EC_KEY_PAIR_GEN,
-        CKM_EC_EDWARDS_KEY_PAIR_GEN,
-        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
-        CKM_ECDH1_DERIVE,
-        CKM_ECDH1_COFACTOR_DERIVE,
-    ] {
-        assert!(
-            mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == private_only as CK_MECHANISM_TYPE)
-        );
-    }
+    assert!(mechanisms.is_empty());
     let pinentry = crate::pinentry::Pinentry::unconfigured();
     assert!(crate::Slot::login(&mut slot, Some(&[]), &pinentry).is_ok());
     crate::Slot::set_login_role(&slot, Some(crate::LoginRole::User)).unwrap();
@@ -2132,6 +2109,7 @@ pub fn authentication_loss_cancels_active_private_signing() {
             login_active: Some(login_active.clone()),
             stores_software_token_keys: false,
             kind: crate::SlotKind::Synthetic,
+            software_scope: crate::SoftwareMechanismScope::Full,
             software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),
@@ -3617,6 +3595,7 @@ pub fn open_session_refreshes_token_presence() {
             login_active: None,
             stores_software_token_keys: false,
             kind: crate::SlotKind::Synthetic,
+            software_scope: crate::SoftwareMechanismScope::Full,
             software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),
@@ -3926,6 +3905,7 @@ pub fn get_slot_list_refreshes_registered_slot_presence() {
             login_active: None,
             stores_software_token_keys: false,
             kind: crate::SlotKind::Synthetic,
+            software_scope: crate::SoftwareMechanismScope::Full,
             software_allowlist: None,
             mechanisms: crate::MECHANISMS.to_vec(),
             token_objects: Vec::new(),

@@ -145,7 +145,8 @@ pub(crate) fn create_object(
         if matches!(
             object.material,
             KeyMaterial::SoftwareSecret(_) | KeyMaterial::SoftwarePrivate(_)
-        ) && !ctx.get_slot(slot_id)?.supports_software_keys()
+        ) && !object.token
+            && !ctx.get_slot(slot_id)?.supports_software_keys()
         {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
@@ -2952,10 +2953,15 @@ mod tests {
     #[test]
     fn piv_post_quantum_private_import_uses_seed_and_parameter_set() {
         for (key_type, parameter, length, algorithm) in [
-            (CKK_ML_DSA as CK_KEY_TYPE, 1u64, 32, piv::Algorithm::MlDsa44),
+            (
+                CKK_ML_DSA as CK_KEY_TYPE,
+                1 as CK_ULONG,
+                32,
+                piv::Algorithm::MlDsa44,
+            ),
             (
                 CKK_ML_KEM as CK_KEY_TYPE,
-                2u64,
+                2 as CK_ULONG,
                 64,
                 piv::Algorithm::MlKem768,
             ),

@@ -5845,7 +5845,6 @@ class Pkcs11AbiTests(unittest.TestCase):
             },
             ABI_TEST_PIV_SLOT_ID: {
                 CKP_BASELINE_PROVIDER,
-                CKP_EXTENDED_PROVIDER,
                 CKP_AUTHENTICATION_TOKEN,
                 CKP_PUBLIC_CERTIFICATES_TOKEN,
             },
@@ -6374,7 +6373,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_advertises_software_signing_without_enabling_token_keys(
+    def test_abi_yubihsm_advertises_composed_hardware_signing_without_enabling_token_keys(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -6407,7 +6406,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        self.assertEqual(info.flags & CKF_HW, 0)
+        self.assertEqual(info.flags & CKF_HW, CKF_HW)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -6798,7 +6797,7 @@ fn main() {
                 else:
                     os.environ["PKCS11RS_PINENTRY"] = previous
 
-    def test_yubihsm_session_key_pair_generation_obeys_session_lifetime(self) -> None:
+    def test_yubihsm_rejects_unrelated_software_session_key_pair_generation(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(
             ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
@@ -6835,29 +6834,8 @@ fn main() {
                 ctypes.byref(public_key),
                 ctypes.byref(private_key),
             ),
-            CKR_OK,
+            CKR_TEMPLATE_INCONSISTENT,
         )
-        self.assertNotEqual(public_key.value, 0)
-        self.assertNotEqual(private_key.value, 0)
-        for key in (public_key, private_key):
-            token = CK_BYTE(1)
-            attribute = CK_ATTRIBUTE(
-                CKA_TOKEN, ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
-                ctypes.sizeof(token),
-            )
-            self.assertEqual(
-                self.lib.C_GetAttributeValue(session, key, ctypes.byref(attribute), 1),
-                CKR_OK,
-            )
-            self.assertEqual(token.value, 0)
-        self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
-        reopened = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
-        size = CK_ULONG()
-        for key in (public_key, private_key):
-            self.assertEqual(
-                self.lib.C_GetObjectSize(reopened, key, ctypes.byref(size)),
-                CKR_OBJECT_HANDLE_INVALID,
-            )
 
     def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -9757,7 +9735,7 @@ fn main() {
         self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 4096))
         self.assertEqual(info.flags & CKF_GENERATE, CKF_GENERATE)
 
-    def test_all_present_slots_execute_provider_digest_mechanisms(self) -> None:
+    def test_all_present_slots_execute_their_advertised_digest_mechanisms(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         digests = {
             CKM_SHA_1: hashlib.sha1,
@@ -9782,9 +9760,29 @@ fn main() {
         data_bytes = b"abc"
         data = (CK_BYTE * len(data_bytes))(*data_bytes)
         for slot_id in slots:
+            mechanism_count = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GetMechanismList(
+                    slot_id,
+                    None,
+                    ctypes.byref(mechanism_count),
+                ),
+                CKR_OK,
+            )
+            mechanism_list = (CK_ULONG * mechanism_count.value)()
+            self.assertEqual(
+                self.lib.C_GetMechanismList(
+                    slot_id,
+                    mechanism_list,
+                    ctypes.byref(mechanism_count),
+                ),
+                CKR_OK,
+            )
+            advertised_digests = set(mechanism_list) & set(digests)
             session = self.open_slot_session(slot_id)
             try:
-                for mechanism_type, constructor in digests.items():
+                for mechanism_type in advertised_digests:
+                    constructor = digests[mechanism_type]
                     with self.subTest(slot_id=slot_id, mechanism=mechanism_type):
                         mechanism = CK_MECHANISM(mechanism_type, None, 0)
                         self.assertEqual(
@@ -9820,21 +9818,10 @@ fn main() {
             finally:
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
 
-    def test_issuer_security_domain_slots_advertise_software_capabilities(
+    def test_issuer_security_domain_slots_advertise_no_crypto_mechanisms(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        expected = {
-            CKM_SHA_1,
-            CKM_SHA224,
-            CKM_SHA256,
-            CKM_SHA384,
-            CKM_SHA512,
-            CKM_SHA3_224,
-            CKM_SHA3_256,
-            CKM_SHA3_384,
-            CKM_SHA3_512,
-        }
         for slot_id in (ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID):
             with self.subTest(slot_id=slot_id):
                 count = CK_ULONG()
@@ -9855,16 +9842,8 @@ fn main() {
                     ),
                     CKR_OK,
                 )
-                self.assertTrue(expected.issubset(mechanisms))
-                for mechanism_type in mechanisms:
-                    info = CK_MECHANISM_INFO()
-                    self.assertEqual(
-                        self.lib.C_GetMechanismInfo(
-                            slot_id, mechanism_type, ctypes.byref(info)
-                        ),
-                        CKR_OK,
-                    )
-                    self.assertEqual(info.flags & CKF_HW, 0)
+                self.assertEqual(count.value, 0)
+                self.assertEqual(list(mechanisms), [])
 
     def test_generate_random_validates_initialization_and_session(self) -> None:
         random_data = (CK_BYTE * 16)()

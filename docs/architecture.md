@@ -29,16 +29,21 @@ MODULE_CONTEXT: RwLock<Option<ModuleContext>>
 
 ## Shared software session objects and mechanism discovery
 
-Ordinary slots have a common host software layer, including named software, YubiHSM,
-PIV, OpenPGP, and FIDO2 slots. `CKA_TOKEN=CK_FALSE` (the default) creates session
-objects: generic data, X.509 certificates, public keys, asymmetric private keys, and supported secret
-keys. Import, generation, derivation, copy, and unwrap publish host-held key
-material through the shared object lifecycle. The creator session owns each
-object; other sessions on that slot can see it subject to login policy. Closing
-the creator destroys it, and logout destroys private session objects. Another
-slot cannot access it. Secret material uses zeroizing storage. The native-only
-HSM Auth slot excludes software private/secret key imports and mechanisms;
-public data, certificate storage, and credential metadata remain available.
+All slots share the session-object lifecycle, but they do not all expose the
+complete software cryptographic provider. `CKA_TOKEN=CK_FALSE` (the default)
+creates generic data, X.509 certificates, public projections, and the
+host-held secret results deliberately produced by native derivation,
+decapsulation, or unwrap operations. The creator session owns each object;
+other sessions on that slot can see it subject to login policy. Closing the
+creator destroys it, and logout destroys private session objects. Another slot
+cannot access it. Secret material uses zeroizing storage.
+
+Named software slots expose the complete software mechanism set and accept
+arbitrary software private and secret session keys. Device and applet slots use
+the composition scope described below and reject unrelated software private or
+secret session-key imports. Native token-key imports remain available when the
+backend supports them. HSM Auth and Issuer Security Domain are management-only
+slots and expose no software cryptographic mechanisms.
 
 Generic operation routing uses advertised mechanisms, object material, and
 backend capabilities. Software-token persistence uses
@@ -121,20 +126,41 @@ software tokens use their encrypted store for supported persistent keys.
 Operations dispatch from the key's actual material: device-held keys use their
 backend, while host-held keys use the software implementation.
 
-Mechanism discovery merges two lists by mechanism ID:
+Mechanism discovery starts with the slot's native `backend_mechanisms()` list
+and applies one of three host-software scopes:
 
-1. The slot's native `backend_mechanisms()` list.
-2. The common maximum software list, filtered by the slot's
-   `software_mechanism_enabled()` policy (all enabled by default).
+1. `Full` adds the complete software private, secret, public, and digest set;
+   only named software slots and explicit test providers use it.
+2. `Composition`, the device/applet default, adds only mechanisms connected to
+   a backend data flow plus standalone keyless digests: public operations
+   paired with native private operations, composite hashed signatures, public
+   projection, prefixed ECDH, the P-256 ephemeral generation needed by YubiHSM
+   authentication, and consumers for session secrets produced by the backend.
+3. `None` adds nothing and is used by management-only slots.
 
-The merge deduplicates IDs, takes the minimum and maximum supported key sizes,
-and combines operation flags. Software-only entries omit `CKF_HW`; merged
-entries retain the native flag. These are total slot capabilities, not a
-hardware-only capability query: one PKCS #11 range and flags field cannot
-express separate hardware/software limits or holes in supported sizes. A token
-request or operation with an existing key still undergoes backend and key
-validation. The filter is an internal per-slot advertisement policy, not a
-JSON/environment option or a security boundary for software execution.
+The composition scope does not introduce an unrelated keyed algorithm or widen
+a native asymmetric key-size range. Standalone SHA-1, SHA-2, and SHA-3 digests
+are available on every cryptographic slot and never carry `CKF_HW` when supplied
+by the common provider. Secret consumers are added only when
+the backend advertises a derivation, decapsulation, or unwrap operation that can
+produce a session secret. They include KDF, digest-key, MAC, and symmetric
+operations, but not independent secret generation or password-based key
+derivation. The merge deduplicates IDs and combines operation flags.
+Entries that operate entirely on host-held material omit `CKF_HW`. A composed
+hashed signature or prefixed ECDH entry inherits `CKF_HW` when its
+security-sensitive private-key operation terminates in the backend, even when
+pkcs11rs performs hashing or framing. A merged entry likewise retains the
+native flag. These are total slot capabilities: one PKCS #11 range and flags
+field cannot express separate native and composed operations. Every request
+still undergoes backend and per-key validation.
+
+The scoped P-256 generation used by YubiHSM authentication is deliberately a
+session-key exception: it may create a one-use host key even when the same slot
+also supports native persistent EC generation. `CKF_HW` on the merged
+`CKM_EC_KEY_PAIR_GEN` entry describes the native slot capability, not every
+template-selectable placement; `CKA_TOKEN=CK_FALSE` is the explicit ephemeral
+host mode. No other software asymmetric generation is admitted by composition
+scope.
 
 ### Per-key mechanism discovery
 
@@ -288,20 +314,21 @@ ownership, login role, and object-handle bookkeeping. The main `Slot` trait
 supplies object operations and backend capabilities. Its implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
-Backend mechanism lists describe complete slot operations. An operation may
-combine software preprocessing, such as hashing, with a hardware private-key
-command. Every present slot exposes the provider-wide standalone SHA-1,
-SHA-2, and SHA-3 digest mechanisms because those operations do not use token
-key material. Their mechanism flags do not include `CKF_HW`. Composite
-mechanisms remain backend-specific because they operate on keys in the slot.
-Software public-key processing adds a
+Backend mechanism lists describe native slot operations. The composition
+scope may add software preprocessing, such as hashing, around a backend
+private-key command. It also supplies standalone keyless digests. The resulting
+composite mechanism carries `CKF_HW` when
+the private-key command is native because the long-term secret never leaves
+the backend. Standalone digest mechanisms are keyless common operations; their
+mechanism flags do not include `CKF_HW`. `C_DigestKey` can additionally consume
+a session secret produced by the backend. Software public-key processing adds a
 public-operation flag only to a mechanism already exposed with its paired private operation:
 `CKF_SIGN` enables `CKF_VERIFY`, and `CKF_DECRYPT` enables `CKF_ENCRYPT`. It does
 not introduce a mechanism that the backend's private keys cannot perform. The
 public-projection mechanism remains available because it is itself an operation
-on a private key. Generic software private-key support is an explicit slot
-capability and is disabled for all
-hardware and applet slots.
+on a private key. Generic software private-key support remains confined to
+named software slots. The one exception is scoped P-256 ephemeral generation
+for the YubiHSM-auth client construction on an ECDH-capable slot.
 
 Digest output-length queries and short-buffer calls use the algorithm's fixed
 digest size without copying accumulated input or computing a hash. They leave

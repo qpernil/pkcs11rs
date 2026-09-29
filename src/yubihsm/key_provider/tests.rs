@@ -419,6 +419,15 @@ impl Slot for WithoutMechanismSlot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.0.get_token_info(info)
     }
+    fn stores_software_token_keys(&self) -> bool {
+        self.0.stores_software_token_keys()
+    }
+    fn supports_software_keys(&self) -> bool {
+        self.0.supports_software_keys()
+    }
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        self.0.software_mechanism_scope()
+    }
     fn software_mechanism_enabled(&self, mechanism: CK_MECHANISM_TYPE) -> bool {
         mechanism != self.1
     }

@@ -234,6 +234,9 @@ impl Slot for HsmAuthSlot {
     fn supports_software_keys(&self) -> bool {
         false
     }
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::None
+    }
     fn software_mechanism_enabled(&self, _mechanism: CK_MECHANISM_TYPE) -> bool {
         false
     }
@@ -688,6 +691,9 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn supports_public_projection(&self) -> bool {
         false
+    }
+    fn software_mechanism_scope(&self) -> SoftwareMechanismScope {
+        SoftwareMechanismScope::None
     }
     fn name(&self) -> String {
         format!("{} Issuer SD", self.connector.name())

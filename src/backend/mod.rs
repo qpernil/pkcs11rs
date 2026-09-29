@@ -52,7 +52,8 @@ pub(crate) use piv::{
 };
 pub(crate) use software::SoftwareSlot;
 pub(crate) use traits::{
-    BackendSession, ClientAuthSearchTier, Slot, SlotKind, apply_device_versions, session_state,
+    BackendSession, ClientAuthSearchTier, Slot, SlotKind, SoftwareMechanismScope,
+    apply_device_versions, session_state,
 };
 pub(crate) use yubihsm::{
     NativeHsmAuth, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
