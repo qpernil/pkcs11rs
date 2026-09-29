@@ -394,6 +394,7 @@ pub(crate) struct CcidReader {
     pub(crate) connector: SharedConnector,
     pub(crate) reader_state: Arc<PcscReaderState>,
     pub(crate) inventory_presence: Option<Arc<AtomicBool>>,
+    pub(crate) embedded_id: Option<String>,
 }
 
 pub(crate) struct CcidProvider {
@@ -441,6 +442,7 @@ impl CcidProvider {
                     connector: connector as SharedConnector,
                     reader_state,
                     inventory_presence,
+                    embedded_id: None,
                 })
             })
             .collect();

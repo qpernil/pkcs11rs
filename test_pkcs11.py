@@ -832,7 +832,18 @@ class EmbeddedVirtualYubiKeyAbiTests(unittest.TestCase):
         return bytes(value)
 
     def test_resident_fido_assertion_requires_per_operation_login(self) -> None:
-        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        configuration = ctypes.create_string_buffer(
+            b'{"version":1,"hardware":{"discovery":false},'
+            b'"embedded":{"readers":[{"id":"abi-fido",'
+            b'"name":"Embedded FIDO ABI Reader","serial":1,'
+            b'"applets":["fido2"]}]}}'
+        )
+        init_args = CK_C_INITIALIZE_ARGS()
+        init_args.pReserved = ctypes.cast(configuration, ctypes.c_void_p)
+        self.assertEqual(
+            self.lib.C_Initialize(ctypes.byref(init_args)),
+            CKR_OK,
+        )
         slot_count = CK_ULONG()
         self.assertEqual(
             self.lib.C_GetSlotList(1, None, ctypes.byref(slot_count)),

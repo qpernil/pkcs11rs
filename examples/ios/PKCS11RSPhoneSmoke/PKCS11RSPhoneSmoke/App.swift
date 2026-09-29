@@ -80,6 +80,15 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "storage": [
             "tokens": tokenStoragePath,
         ],
+        "embedded": [
+            "readers": [[
+                "id": "iphone-smoke",
+                "name": "pkcs11rs embedded CCID reader",
+                "serial": 1,
+                "persistent": true,
+                "applets": ["piv", "fido2"],
+            ]],
+        ],
         "platform": ["enabled": true],
         "yubihsm": [
             "urls": [url],
@@ -1185,6 +1194,89 @@ private func unauthenticatedPostQuantumSmoke(
     return lines
 }
 
+private func embeddedPostQuantumSmoke(
+    slot: CK_SLOT_ID,
+    tokenLabel: String,
+    support: PostQuantumSupport
+) -> [String] {
+    guard support.any else { return [] }
+    var session = CK_SESSION_HANDLE()
+    let open = C_OpenSession(
+        slot,
+        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+        nil,
+        nil,
+        &session
+    )
+    guard open == CKR_OK else {
+        return [
+            "",
+            "PQC functional smoke test:",
+            "  C_OpenSession(RW) failed: \(returnValueDescription(open))",
+        ]
+    }
+
+    var lines = [String]()
+    if tokenLabel.hasPrefix("PIV #") {
+        var managementKey = Array(
+            "010203040506070801020304050607080102030405060708".utf8
+        )
+        let managementLogin = managementKey.withUnsafeMutableBufferPointer { buffer in
+            C_Login(
+                session,
+                CK_USER_TYPE(CKU_SO),
+                buffer.baseAddress,
+                CK_ULONG(buffer.count)
+            )
+        }
+        guard managementLogin == CKR_OK || managementLogin == CKR_USER_ALREADY_LOGGED_IN else {
+            _ = C_CloseSession(session)
+            return [
+                "",
+                "PQC functional smoke test:",
+                "  PIV management login failed: \(returnValueDescription(managementLogin))",
+            ]
+        }
+        // Generation is a management operation. The normal exercise below
+        // reuses complete pairs after switching to the user role.
+        _ = exercisePostQuantumMechanisms(
+            session: session,
+            tokenLabel: tokenLabel,
+            support: support
+        )
+        _ = C_Logout(session)
+    }
+
+    var pin = Array("123456".utf8)
+    let userLogin = pin.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            CK_USER_TYPE(CKU_USER),
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+    if userLogin == CKR_OK || userLogin == CKR_USER_ALREADY_LOGGED_IN {
+        lines = exercisePostQuantumMechanisms(
+            session: session,
+            tokenLabel: tokenLabel,
+            support: support
+        )
+        _ = C_Logout(session)
+    } else {
+        lines = [
+            "",
+            "PQC functional smoke test:",
+            "  user login failed: \(returnValueDescription(userLogin))",
+        ]
+    }
+    let close = C_CloseSession(session)
+    if close != CKR_OK {
+        lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
+    }
+    return lines
+}
+
 private func publicObjectInventory(
     slot: CK_SLOT_ID
 ) -> ObjectInventory {
@@ -1560,6 +1652,15 @@ private final class ModuleInspector {
                 if let authenticatedSession {
                     lines.append(contentsOf: exercisePostQuantumMechanisms(
                         session: authenticatedSession,
+                        tokenLabel: inventory.tokenLabel,
+                        support: support
+                    ))
+                } else if inventory.description.contains("pkcs11rs embedded CCID reader")
+                    && (inventory.tokenLabel.hasPrefix("PIV #")
+                        || inventory.tokenLabel.hasPrefix("FIDO2 #"))
+                {
+                    lines.append(contentsOf: embeddedPostQuantumSmoke(
+                        slot: inventory.slot,
                         tokenLabel: inventory.tokenLabel,
                         support: support
                     ))

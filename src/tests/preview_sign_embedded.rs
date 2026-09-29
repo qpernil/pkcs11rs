@@ -1,16 +1,20 @@
 use crate::pkcs11::*;
 use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
+#[cfg(unix)]
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(unix)]
 static NEXT_STORAGE_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(unix)]
 struct TestFidoStorage {
     root: PathBuf,
 }
 
+#[cfg(unix)]
 impl TestFidoStorage {
     fn new() -> Self {
         let id = NEXT_STORAGE_DIRECTORY.fetch_add(1, Ordering::Relaxed);
@@ -27,14 +31,21 @@ impl TestFidoStorage {
             "version": 1,
             "hardware": {"discovery": false},
             "yubihsm": {"urls": []},
-            "storage": {"tokens": self.root.to_string_lossy()}
+            "storage": {"tokens": self.root.to_string_lossy()},
+            "embedded": {"readers": [{
+                "id": "preview-sign",
+                "name": "Embedded CCID previewSign reader",
+                "serial": 1,
+                "persistent": true,
+                "applets": ["fido2"]
+            }]}
         }))
     }
 
     fn embedded_objects(&self) -> PathBuf {
         self.root
             .join("tokens-v1")
-            .join("yubico-serial-454d42454444454430303031")
+            .join("yubico-serial-31")
             .join("fido2")
             .join("objects")
     }
@@ -44,10 +55,17 @@ fn initialize_embedded() -> CK_RV {
     super::initialize_with_configuration(serde_json::json!({
         "version": 1,
         "hardware": {"discovery": false},
-        "yubihsm": {"urls": []}
+        "yubihsm": {"urls": []},
+        "embedded": {"readers": [{
+            "id": "preview-sign",
+            "name": "Embedded CCID previewSign reader",
+            "serial": 1,
+            "applets": ["fido2"]
+        }]}
     }))
 }
 
+#[cfg(unix)]
 impl Drop for TestFidoStorage {
     fn drop(&mut self) {
         let _ = crate::api::C_Finalize(std::ptr::null_mut());
@@ -102,6 +120,7 @@ fn read_attribute(
     value
 }
 
+#[cfg(unix)]
 fn open_logged_in_embedded(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
     assert_eq!(storage.initialize(), CKR_OK as CK_RV);
     let mut count = 0;
@@ -709,6 +728,7 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
 }
 
 #[test]
+#[cfg(unix)]
 fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
@@ -977,6 +997,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
 }
 
 #[test]
+#[cfg(unix)]
 fn corrupt_local_fido_storage_fails_discovery_closed() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
@@ -993,8 +1014,9 @@ fn corrupt_local_fido_storage_fails_discovery_closed() {
     let mut count = 0;
     assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count,),
-        CKR_DEVICE_ERROR as CK_RV
+        CKR_OK as CK_RV
     );
+    assert_eq!(count, 0);
 }
 
 #[test]

@@ -274,6 +274,8 @@ fn build_ios_slice(
         .arg("pkcs11rs")
         .arg("--lib")
         .arg("--no-default-features")
+        .arg("--features")
+        .arg("embedded-virtual-yubikey")
         .arg("--target")
         .arg(target);
     if release {

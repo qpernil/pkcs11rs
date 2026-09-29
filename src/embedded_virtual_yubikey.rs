@@ -1,14 +1,21 @@
 use crate::{ApduCapabilities, CKR_DEVICE_ERROR, Connector, Error};
-#[cfg(not(feature = "abi-tests"))]
-use std::sync::OnceLock;
+#[cfg(unix)]
+use software_key_core::state_persistence::{
+    PersistenceMode, StateLock, StatePersistence, StatePersistenceHandle,
+};
+#[cfg(unix)]
+use std::io;
 use std::{
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use virtual_yubikey_core::{DeviceProfile, FidoConfiguration, VirtualYubiKey};
+use virtual_yubikey_core::{AppletConfiguration, DeviceProfile, FidoConfiguration, VirtualYubiKey};
 
+#[cfg(test)]
 const EMBEDDED_SERIAL: u32 = 1;
 
+#[cfg(test)]
 fn device(configuration: FidoConfiguration) -> VirtualYubiKey {
     VirtualYubiKey::with_fido_configuration(
         DeviceProfile::yubikey_5_8_ccid(EMBEDDED_SERIAL),
@@ -23,77 +30,188 @@ fn protocol_one_configuration() -> FidoConfiguration {
         .with_permissioned_pin_uv_auth_tokens(false)
 }
 
-#[cfg(not(feature = "abi-tests"))]
-static PROCESS_EMBEDDED_STATE: OnceLock<Arc<Mutex<VirtualYubiKey>>> = OnceLock::new();
+#[cfg(unix)]
+struct PersistentEmbeddedState {
+    handle: StatePersistenceHandle<VirtualYubiKey>,
+    _persistence: StatePersistence<VirtualYubiKey>,
+    _lock: StateLock,
+}
 
-/// An embedded virtual YubiKey FIDO2 applet visible through a pkcs11rs build
+/// An embedded virtual YubiKey CCID reader visible through a pkcs11rs build
 /// compiled with the `embedded-virtual-yubikey` feature.
-#[derive(Debug)]
 pub(crate) struct EmbeddedVirtualYubiKeyConnector {
+    name: String,
     state: Arc<Mutex<VirtualYubiKey>>,
+    #[cfg(unix)]
+    persistent: Option<Arc<PersistentEmbeddedState>>,
+}
+
+impl std::fmt::Debug for EmbeddedVirtualYubiKeyConnector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmbeddedVirtualYubiKeyConnector")
+            .field("name", &self.name)
+            .field("persistent", &{
+                #[cfg(unix)]
+                {
+                    self.persistent.is_some()
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            })
+            .finish_non_exhaustive()
+    }
 }
 
 impl EmbeddedVirtualYubiKeyConnector {
+    pub(crate) fn configured(
+        name: String,
+        serial: u32,
+        applets: AppletConfiguration,
+        persistent_root: Option<PathBuf>,
+    ) -> Result<Self, Error> {
+        let profile = DeviceProfile {
+            applets,
+            ..DeviceProfile::yubikey_5_8_ccid(serial)
+        };
+        let configuration = FidoConfiguration::default();
+        let Some(root) = persistent_root else {
+            return Ok(Self {
+                name,
+                state: Arc::new(Mutex::new(VirtualYubiKey::with_fido_configuration(
+                    profile,
+                    configuration,
+                ))),
+                #[cfg(unix)]
+                persistent: None,
+            });
+        };
+
+        #[cfg(not(unix))]
+        {
+            let _ = root;
+            return Err(crate::CKR_ARGUMENTS_BAD.into());
+        }
+
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(&root)?;
+            let lock = StateLock::acquire(root.join("state.lock"))?;
+            let state_path = root.join("state.cbor");
+            let (state, created) = match std::fs::read(&state_path) {
+                Ok(encoded) => (
+                    VirtualYubiKey::from_persistent_state(profile, configuration, &encoded)
+                        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
+                    false,
+                ),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (
+                    VirtualYubiKey::with_fido_configuration(profile, configuration),
+                    true,
+                ),
+                Err(error) => return Err(error.into()),
+            };
+            let persistence = StatePersistence::start(
+                state,
+                state_path,
+                PersistenceMode::Batched(Duration::from_millis(250)),
+                |state| state.persistent_state().map_err(io::Error::other),
+                || tracing::error!("embedded virtual YubiKey persistence failed"),
+            )?;
+            let handle = persistence.handle();
+            if created {
+                handle.record_mutation()?.wait()?;
+                persistence.flush()?;
+            }
+            let state = handle.state().clone();
+            Ok(Self {
+                name,
+                state,
+                persistent: Some(Arc::new(PersistentEmbeddedState {
+                    handle,
+                    _persistence: persistence,
+                    _lock: lock,
+                })),
+            })
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn restore_persistent_state(&self, profile: DeviceProfile) {
         let mut state = self.state.lock().unwrap();
-        *state = VirtualYubiKey::from_persistent_states(
-            profile,
-            &state.piv_persistent_state().unwrap(),
-            &state.hsmauth_persistent_state().unwrap(),
-            &state.security_domain_persistent_state().unwrap(),
-        )
-        .unwrap();
+        let encoded = state.persistent_state().unwrap();
+        *state =
+            VirtualYubiKey::from_persistent_state(profile, FidoConfiguration::default(), &encoded)
+                .unwrap();
     }
 
     #[cfg(test)]
     pub(crate) fn from_device(device: VirtualYubiKey) -> Self {
         Self {
+            name: "Embedded Virtual YubiKey".to_owned(),
             state: Arc::new(Mutex::new(device)),
+            #[cfg(unix)]
+            persistent: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new() -> Result<Self, Error> {
         Ok(Self {
+            name: "Embedded Virtual YubiKey".to_owned(),
             state: Arc::new(Mutex::new(device(FidoConfiguration::default()))),
+            #[cfg(unix)]
+            persistent: None,
         })
-    }
-
-    #[cfg(not(feature = "abi-tests"))]
-    pub(crate) fn process_device() -> Result<Self, Error> {
-        let state = PROCESS_EMBEDDED_STATE
-            .get_or_init(|| Arc::new(Mutex::new(device(FidoConfiguration::default()))))
-            .clone();
-        state
-            .lock()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-            .reset();
-        Ok(Self { state })
     }
 
     #[cfg(test)]
     pub(crate) fn protocol_one_only() -> Result<Self, Error> {
         Ok(Self {
+            name: "Embedded Virtual YubiKey".to_owned(),
             state: Arc::new(Mutex::new(device(protocol_one_configuration()))),
+            #[cfg(unix)]
+            persistent: None,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn protocol_one_without_pin() -> Result<Self, Error> {
         Ok(Self {
+            name: "Embedded Virtual YubiKey".to_owned(),
             state: Arc::new(Mutex::new(device(
                 protocol_one_configuration().without_pin(),
             ))),
+            #[cfg(unix)]
+            persistent: None,
         })
     }
 
     fn exchange(&self, encoded: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(self
+        let mut state = self
             .state
             .lock()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-            .transmit(encoded))
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let response = state.transmit(encoded);
+        let persistent_change = state.take_persistent_change();
+        #[cfg(unix)]
+        let receipt = if persistent_change {
+            self.persistent
+                .as_ref()
+                .map(|persistent| persistent.handle.record_mutation())
+                .transpose()?
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let _ = persistent_change;
+        drop(state);
+        #[cfg(unix)]
+        if let Some(receipt) = receipt {
+            receipt.wait()?;
+        }
+        Ok(response)
     }
 }
 
@@ -107,7 +225,7 @@ impl Connector for EmbeddedVirtualYubiKeyConnector {
     }
 
     fn product(&self) -> &str {
-        "Embedded Virtual YubiKey FIDO2"
+        "Embedded Virtual YubiKey"
     }
 
     fn major(&self) -> u8 {
@@ -123,7 +241,7 @@ impl Connector for EmbeddedVirtualYubiKeyConnector {
     }
 
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
-        None
+        Some((5, 8, 0))
     }
 
     fn is_present(&self) -> bool {
@@ -136,6 +254,10 @@ impl Connector for EmbeddedVirtualYubiKeyConnector {
 
     fn apdu_capabilities(&self) -> ApduCapabilities {
         ApduCapabilities::SHORT_ONLY
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     fn transmit<'a>(
@@ -164,7 +286,7 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
-    fn embedded_device_selects_only_fido_and_answers_get_info_through_ccid() {
+    fn embedded_connector_answers_fido_get_info_through_ccid() {
         let connector = Rc::new(EmbeddedVirtualYubiKeyConnector::new().unwrap());
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let info = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)))

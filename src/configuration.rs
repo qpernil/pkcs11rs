@@ -32,6 +32,8 @@ pub(crate) struct JsonConfiguration {
     #[serde(default)]
     software: JsonSoftwareConfiguration,
     #[serde(default)]
+    embedded: JsonEmbeddedConfiguration,
+    #[serde(default)]
     platform: JsonPlatformConfiguration,
     #[serde(default)]
     yubihsm: JsonYubiHsmConfiguration,
@@ -87,6 +89,23 @@ struct JsonSoftwareConfiguration {
 struct JsonSoftwareSlotConfiguration {
     name: String,
     discovery_pin: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonEmbeddedConfiguration {
+    readers: Option<Vec<JsonEmbeddedReaderConfiguration>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonEmbeddedReaderConfiguration {
+    id: String,
+    name: String,
+    serial: u32,
+    #[serde(default)]
+    persistent: bool,
+    applets: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -240,6 +259,8 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) token_storage: Option<OsString>,
     pub(crate) fido2_storage: Option<OsString>,
     pub(crate) software_slots: Vec<String>,
+    #[cfg_attr(not(feature = "embedded-virtual-yubikey"), allow(dead_code))]
+    pub(crate) embedded_readers: Vec<EmbeddedReaderConfiguration>,
     pub(crate) platform_enabled: bool,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     pub(crate) yubihsm_urls: Vec<String>,
@@ -253,6 +274,15 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) ccid_aids: CcidAidConfiguration,
     pub(crate) nfc_discovery: bool,
     pub(crate) secure_channels: SecureChannelConfiguration,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EmbeddedReaderConfiguration {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) serial: u32,
+    pub(crate) persistent: bool,
+    pub(crate) applets: Vec<CcidApplication>,
 }
 
 pub(crate) struct CcidAidConfiguration {
@@ -413,6 +443,16 @@ impl ModuleConfiguration {
                 &mut environment,
             )?)
             .unwrap_or(false);
+        let token_storage = resolve_os(
+            explicit.storage.tokens,
+            "PKCS11RS_TOKEN_STORAGE",
+            &mut environment,
+        )?;
+        let fido2_storage = resolve_os(
+            explicit.storage.fido2_compatibility,
+            "PKCS11RS_FIDO2_STORAGE",
+            &mut environment,
+        )?;
         let yubihsm_recreate_sessions = explicit
             .yubihsm
             .recreate_sessions
@@ -432,6 +472,13 @@ impl ModuleConfiguration {
             })
             .collect();
         let software_slots = software_slots.into_iter().map(|slot| slot.name).collect();
+        let embedded_readers = resolve_embedded_readers(explicit.embedded.readers)?;
+        if !embedded_readers.is_empty() && !cfg!(feature = "embedded-virtual-yubikey") {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        if embedded_readers.iter().any(|reader| reader.persistent) && token_storage.is_none() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
 
         let yubihsm_urls = match explicit.yubihsm.urls {
             Some(urls) => validate_urls(urls)?,
@@ -520,17 +567,10 @@ impl ModuleConfiguration {
             hardware_discovery,
             discovery_refresh_interval,
             slot_serials,
-            token_storage: resolve_os(
-                explicit.storage.tokens,
-                "PKCS11RS_TOKEN_STORAGE",
-                &mut environment,
-            )?,
-            fido2_storage: resolve_os(
-                explicit.storage.fido2_compatibility,
-                "PKCS11RS_FIDO2_STORAGE",
-                &mut environment,
-            )?,
+            token_storage,
+            fido2_storage,
             software_slots,
+            embedded_readers,
             platform_enabled,
             software_discovery_pins,
             yubihsm_urls,
@@ -567,6 +607,44 @@ impl ModuleConfiguration {
             secure_channels: SecureChannelConfiguration { scp03, scp11 },
         })
     }
+}
+
+fn resolve_embedded_readers(
+    explicit: Option<Vec<JsonEmbeddedReaderConfiguration>>,
+) -> Result<Vec<EmbeddedReaderConfiguration>, Error> {
+    let readers = explicit.unwrap_or_default();
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    let mut serials = HashSet::new();
+    readers
+        .into_iter()
+        .map(|reader| {
+            let id = reader.id.trim();
+            let name = reader.name.trim();
+            if id.is_empty()
+                || id.len() > 64
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                || name.is_empty()
+                || name.len() > 128
+                || reader.serial == 0
+                || !ids.insert(id.to_owned())
+                || !names.insert(name.to_owned())
+                || !serials.insert(reader.serial)
+            {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            let applets = parse_applications(reader.applets)?;
+            Ok(EmbeddedReaderConfiguration {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                serial: reader.serial,
+                persistent: reader.persistent,
+                applets,
+            })
+        })
+        .collect()
 }
 
 struct ResolvedSoftwareSlot {
@@ -1084,6 +1162,56 @@ mod tests {
         assert_eq!(
             configuration.software_discovery_pins["build signing"].as_slice(),
             b"a sufficiently long pin"
+        );
+    }
+
+    #[cfg(feature = "embedded-virtual-yubikey")]
+    #[test]
+    fn embedded_readers_are_explicit_and_validate_identity_and_persistence() {
+        let configuration = resolve(
+            Some(json(
+                r#"{
+                    "version": 1,
+                    "storage": {"tokens": "/tmp/pkcs11rs-embedded-test"},
+                    "embedded": {"readers": [
+                        {"id": "phone", "name": "Embedded CCID 0", "serial": 1,
+                         "persistent": true, "applets": ["piv", "fido2"]},
+                        {"id": "test-2", "name": "Embedded CCID 1", "serial": 2,
+                         "applets": ["openpgp", "hsmauth", "issuer-sd"]}
+                    ]}
+                }"#,
+            )),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(configuration.embedded_readers.len(), 2);
+        assert_eq!(
+            configuration.embedded_readers[0].applets,
+            [CcidApplication::Piv, CcidApplication::Fido2]
+        );
+        assert!(configuration.embedded_readers[0].persistent);
+
+        for encoded in [
+            r#"{"version":1,"embedded":{"readers":[{"id":"bad/id","name":"reader","serial":1,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":0,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"persistent":true,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"applets":[]}]}}"#,
+        ] {
+            assert!(resolve(Some(json(encoded)), &[]).is_err());
+        }
+    }
+
+    #[cfg(not(feature = "embedded-virtual-yubikey"))]
+    #[test]
+    fn embedded_reader_configuration_requires_compile_time_support() {
+        assert!(
+            resolve(
+                Some(json(
+                    r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"applets":["piv"]}]}}"#,
+                )),
+                &[],
+            )
+            .is_err()
         );
     }
 
