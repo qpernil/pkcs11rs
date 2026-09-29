@@ -2,9 +2,12 @@
 
 use crate::secure_channel_crypto::{Direction, aes_ecb};
 use crate::{
-    CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED,
-    CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
-    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector, ResponseApdu, error::Error,
+    CK_HEDGE_TYPE, CKH_DETERMINISTIC_REQUIRED, CKH_HEDGE_PREFERRED, CKH_HEDGE_REQUIRED,
+    CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_LEN_RANGE,
+    CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE,
+    CKR_KEY_TYPE_INCONSISTENT, CKR_MECHANISM_PARAM_INVALID, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
+    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector, MlDsaSignatureParameters,
+    ResponseApdu, error::Error,
 };
 use flate2::{Compression, read::GzDecoder, read::ZlibDecoder, write::GzEncoder};
 use std::io::{Read, Write};
@@ -62,6 +65,12 @@ pub(crate) enum Algorithm {
     EccP384 = 0x14,
     Ed25519 = 0xe0,
     X25519 = 0xe1,
+    MlDsa44 = 0xe2,
+    MlDsa65 = 0xe3,
+    MlDsa87 = 0xe4,
+    MlKem512 = 0xe5,
+    MlKem768 = 0xe6,
+    MlKem1024 = 0xe7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -111,6 +120,12 @@ impl Algorithm {
             0x14 => Some(Self::EccP384),
             0xe0 => Some(Self::Ed25519),
             0xe1 => Some(Self::X25519),
+            0xe2 => Some(Self::MlDsa44),
+            0xe3 => Some(Self::MlDsa65),
+            0xe4 => Some(Self::MlDsa87),
+            0xe5 => Some(Self::MlKem512),
+            0xe6 => Some(Self::MlKem768),
+            0xe7 => Some(Self::MlKem1024),
             _ => None,
         }
     }
@@ -637,6 +652,16 @@ pub(crate) fn parse_metadata_public_key(
             .map(<[u8]>::to_vec)
             .map(MetadataPublicKey::Raw)
             .ok_or_else(|| CKR_DATA_INVALID.into()),
+        Algorithm::MlDsa44
+        | Algorithm::MlDsa65
+        | Algorithm::MlDsa87
+        | Algorithm::MlKem512
+        | Algorithm::MlKem768
+        | Algorithm::MlKem1024 => field(&fields, 0x87)
+            .filter(|value| !value.is_empty())
+            .map(<[u8]>::to_vec)
+            .map(MetadataPublicKey::Raw)
+            .ok_or_else(|| CKR_DATA_INVALID.into()),
     }
 }
 
@@ -1011,10 +1036,15 @@ impl Client {
             Algorithm::Rsa4096 => 256,
             Algorithm::EccP256 | Algorithm::Ed25519 | Algorithm::X25519 => 32,
             Algorithm::EccP384 => 48,
+            Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87 => 32,
+            Algorithm::MlKem512 | Algorithm::MlKem768 | Algorithm::MlKem1024 => 64,
         };
         let mut request = Zeroizing::new(Vec::new());
         for (tag, component) in &key.components {
             if component.is_empty() || component.len() > element_length {
+                return Err(CKR_KEY_SIZE_RANGE.into());
+            }
+            if *tag == 0x09 && component.len() != element_length {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
             let mut padded = Zeroizing::new(vec![0; element_length]);
@@ -1131,6 +1161,7 @@ impl Client {
         slot: Slot,
         algorithm: Algorithm,
         input: &[u8],
+        ml_dsa: Option<&MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, Error> {
         if let Some(length) = algorithm.rsa_input_length() {
             if input.len() != length {
@@ -1140,10 +1171,35 @@ impl Client {
             if input.len() > length {
                 return Err(CKR_DATA_LEN_RANGE.into());
             }
-        } else if algorithm != Algorithm::Ed25519 {
+        } else if !matches!(
+            algorithm,
+            Algorithm::Ed25519 | Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87
+        ) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        self.general_authenticate(connector, slot, algorithm, 0x81, input)
+        let mut extra = Vec::new();
+        if let Some(parameters) = ml_dsa {
+            if !matches!(
+                algorithm,
+                Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87
+            ) || parameters.context.len() > 255
+            {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            if !parameters.context.is_empty() {
+                extra.extend_from_slice(&encode_tlv(0x88, &parameters.context)?);
+            }
+            let hedge = match parameters.hedge_variant {
+                x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => None,
+                x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => Some(2),
+                x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => Some(3),
+                _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+            };
+            if let Some(hedge) = hedge {
+                extra.extend_from_slice(&encode_tlv(0x89, &[hedge])?);
+            }
+        }
+        self.general_authenticate(connector, slot, algorithm, 0x81, input, &extra)
     }
 
     pub(crate) fn decipher(
@@ -1168,7 +1224,31 @@ impl Client {
         } else {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         };
-        self.general_authenticate(connector, slot, algorithm, tag, input)
+        self.general_authenticate(connector, slot, algorithm, tag, input, &[])
+    }
+
+    pub(crate) fn decapsulate(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+        algorithm: Algorithm,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let expected = match algorithm {
+            Algorithm::MlKem512 => 768,
+            Algorithm::MlKem768 => 1088,
+            Algorithm::MlKem1024 => 1568,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        if ciphertext.len() != expected {
+            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+        }
+        let shared =
+            self.general_authenticate(connector, slot, algorithm, 0x81, ciphertext, &[])?;
+        if shared.len() != 32 {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(shared)
     }
 
     fn general_authenticate(
@@ -1178,9 +1258,11 @@ impl Client {
         algorithm: Algorithm,
         input_tag: u32,
         input: &[u8],
+        extra: &[u8],
     ) -> Result<Vec<u8>, Error> {
         let mut dynamic = encode_tlv(0x82, &[])?;
         dynamic.extend_from_slice(&encode_tlv(input_tag, input)?);
+        dynamic.extend_from_slice(extra);
         let request = encode_tlv(0x7c, &dynamic)?;
         let response = self.command(
             connector,

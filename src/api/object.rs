@@ -390,6 +390,8 @@ fn piv_private_template_object(
                     || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
                     || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
                     || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                    || x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+                    || x == CKA_SEED as CK_ATTRIBUTE_TYPE
                     || x == CKA_YUBICO_TOUCH_POLICY
                     || x == CKA_YUBICO_PIN_POLICY)
         })
@@ -398,7 +400,64 @@ fn piv_private_template_object(
     piv_key_pair_object(&filtered, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, key_type)
 }
 
+fn piv_pq_private_import(
+    templ: &[CK_ATTRIBUTE],
+    key_type: CK_KEY_TYPE,
+) -> Result<piv::PrivateKeyImport, Error> {
+    if template_attribute(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE).is_some() {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let parameter = read_ulong_template_attribute(
+        template_attribute(templ, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
+            .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+    )
+    .map_err(Error::from)?;
+    let seed = required_template_value(templ, CKA_SEED as CK_ATTRIBUTE_TYPE)?;
+    let (algorithm, public) = if key_type == CKK_ML_DSA as CK_KEY_TYPE {
+        let parameter_set = match parameter {
+            1 => MlDsaParameterSet::MlDsa44,
+            2 => MlDsaParameterSet::MlDsa65,
+            3 => MlDsaParameterSet::MlDsa87,
+            _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        };
+        let key =
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::MlDsa(parameter_set), &seed)
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+        let SoftwarePublicKey::MlDsa { public_key, .. } = key.public_key() else {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        };
+        let algorithm = match parameter {
+            1 => piv::Algorithm::MlDsa44,
+            2 => piv::Algorithm::MlDsa65,
+            _ => piv::Algorithm::MlDsa87,
+        };
+        (algorithm, public_key)
+    } else {
+        let parameter_set = match parameter {
+            1 => software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+            2 => software_key_core::post_quantum::MlKemParameterSet::MlKem768,
+            3 => software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+            _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        };
+        let key =
+            software_key_core::post_quantum::MlKemPrivateKey::from_seed_slice(parameter_set, &seed)
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+        let algorithm = match parameter {
+            1 => piv::Algorithm::MlKem512,
+            2 => piv::Algorithm::MlKem768,
+            _ => piv::Algorithm::MlKem1024,
+        };
+        (algorithm, key.public_key())
+    };
+    Ok(piv::PrivateKeyImport {
+        algorithm,
+        components: vec![(0x09, seed)],
+        public_key: MetadataPublicKey::Raw(public),
+    })
+}
+
 fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
+    validate_unique_template(templ)?;
     let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
         .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
@@ -478,6 +537,8 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
                 exponent: key.e().to_bytes_be(),
             },
         }
+    } else if key_type == CKK_ML_DSA as CK_KEY_TYPE || key_type == CKK_ML_KEM as CK_KEY_TYPE {
+        piv_pq_private_import(templ, key_type)?
     } else {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
         let (algorithm, component_tag, public_key) = if key_type == CKK_EC as CK_KEY_TYPE {
@@ -2886,6 +2947,40 @@ mod tests {
         ];
         let error = imported_data_object_id(&template).unwrap_err();
         assert_eq!(CK_RV::from(error), CKR_TEMPLATE_INCONSISTENT as CK_RV);
+    }
+
+    #[test]
+    fn piv_post_quantum_private_import_uses_seed_and_parameter_set() {
+        for (key_type, parameter, length, algorithm) in [
+            (CKK_ML_DSA as CK_KEY_TYPE, 1u64, 32, piv::Algorithm::MlDsa44),
+            (
+                CKK_ML_KEM as CK_KEY_TYPE,
+                2u64,
+                64,
+                piv::Algorithm::MlKem768,
+            ),
+        ] {
+            let mut class = (CKO_PRIVATE_KEY as CK_ULONG).to_ne_bytes();
+            let mut key_type = key_type.to_ne_bytes();
+            let mut parameter = parameter.to_ne_bytes();
+            let mut seed = vec![0x42; length];
+            let mut token = [CK_TRUE as CK_BBOOL];
+            let mut id = [piv::Slot::Signature.cka_id()];
+            let template = [
+                attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter),
+                attribute(CKA_SEED as CK_ATTRIBUTE_TYPE, &mut seed),
+                attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+                attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            ];
+            let PivImport::Private { key, .. } = piv_private_import(&template).unwrap() else {
+                unreachable!();
+            };
+            assert_eq!(key.algorithm, algorithm);
+            assert_eq!(key.components[0].0, 0x09);
+            assert_eq!(key.components[0].1.len(), length);
+        }
     }
 
     #[test]

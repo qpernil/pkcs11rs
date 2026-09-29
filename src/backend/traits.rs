@@ -740,6 +740,7 @@ pub(crate) trait BackendSession {
         _algorithm: piv::Algorithm,
         _input: &[u8],
         _pin_policy: u8,
+        _ml_dsa: Option<&MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -748,6 +749,15 @@ pub(crate) trait BackendSession {
         _slot: piv::Slot,
         _algorithm: piv::Algorithm,
         _input: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn piv_decapsulate(
+        &self,
+        _slot: piv::Slot,
+        _algorithm: piv::Algorithm,
+        _ciphertext: &[u8],
         _pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())

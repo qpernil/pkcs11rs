@@ -300,6 +300,7 @@ fn chains_large_general_authenticate_commands() {
             Slot::Signature,
             Algorithm::Rsa2048,
             &[0x33; 256],
+            None,
         )
         .unwrap();
     assert_eq!(output, [0x5a; 16]);
@@ -308,6 +309,58 @@ fn chains_large_general_authenticate_commands() {
     assert_eq!(commands[0][0], 0x10);
     assert_eq!(commands[0][1], INS_AUTHENTICATE);
     assert_eq!(commands[1][0], 0);
+}
+
+#[test]
+fn ml_dsa_signing_encodes_context_and_hedging_options() {
+    let connector = ScriptedConnector::new(vec![response(
+        &encode_tlv(0x7c, &encode_tlv(0x82, &[0x5a; 8]).unwrap()).unwrap(),
+        STATUS_SUCCESS,
+    )]);
+    let options = MlDsaSignatureParameters {
+        hedge_variant: CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE,
+        context: b"context".to_vec(),
+    };
+    assert_eq!(
+        Client
+            .sign(
+                &connector,
+                Slot::Signature,
+                Algorithm::MlDsa44,
+                b"message",
+                Some(&options)
+            )
+            .unwrap(),
+        [0x5a; 8],
+    );
+    let command = &connector.commands.borrow()[0];
+    assert!(
+        command
+            .windows(9)
+            .any(|window| window == b"\x88\x07context")
+    );
+    assert!(
+        command
+            .windows(3)
+            .any(|window| window == [0x89, 0x01, 0x03])
+    );
+}
+
+#[test]
+fn parses_provisional_pq_public_key_metadata() {
+    for (algorithm, length) in [
+        (Algorithm::MlDsa44, 1312),
+        (Algorithm::MlDsa65, 1952),
+        (Algorithm::MlDsa87, 2592),
+        (Algorithm::MlKem512, 800),
+        (Algorithm::MlKem768, 1184),
+        (Algorithm::MlKem1024, 1568),
+    ] {
+        let encoded = encode_tlv(0x87, &vec![0x42; length]).unwrap();
+        assert!(
+            matches!(parse_metadata_public_key(algorithm, &encoded).unwrap(), MetadataPublicKey::Raw(key) if key.len() == length)
+        );
+    }
 }
 
 #[test]
