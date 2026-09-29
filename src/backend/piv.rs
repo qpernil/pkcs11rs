@@ -58,8 +58,36 @@ impl PivPublicKey {
             piv::Algorithm::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
             piv::Algorithm::X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => CKK_EC as CK_KEY_TYPE,
+            piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87 => {
+                CKK_ML_DSA as CK_KEY_TYPE
+            }
+            piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
+                CKK_ML_KEM as CK_KEY_TYPE
+            }
         }
     }
+}
+
+pub(crate) fn piv_pq_parameter_set(algorithm: piv::Algorithm) -> Option<CK_ULONG> {
+    match algorithm {
+        piv::Algorithm::MlDsa44 | piv::Algorithm::MlKem512 => Some(1),
+        piv::Algorithm::MlDsa65 | piv::Algorithm::MlKem768 => Some(2),
+        piv::Algorithm::MlDsa87 | piv::Algorithm::MlKem1024 => Some(3),
+        _ => None,
+    }
+}
+
+fn piv_pq_public_key_length(algorithm: piv::Algorithm) -> Option<usize> {
+    use software_key_core::post_quantum::{MlDsaParameterSet as Dsa, MlKemParameterSet as Kem};
+    Some(match algorithm {
+        piv::Algorithm::MlDsa44 => Dsa::MlDsa44.public_key_length(),
+        piv::Algorithm::MlDsa65 => Dsa::MlDsa65.public_key_length(),
+        piv::Algorithm::MlDsa87 => Dsa::MlDsa87.public_key_length(),
+        piv::Algorithm::MlKem512 => Kem::MlKem512.public_key_length(),
+        piv::Algorithm::MlKem768 => Kem::MlKem768.public_key_length(),
+        piv::Algorithm::MlKem1024 => Kem::MlKem1024.public_key_length(),
+        _ => return None,
+    })
 }
 
 pub(crate) fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
@@ -97,7 +125,14 @@ pub(crate) fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u
     }
 }
 
-pub(crate) fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> bool {
+pub(crate) fn piv_algorithm_supported(
+    version: piv::Version,
+    algorithm: piv::Algorithm,
+    virtual_pqc: bool,
+) -> bool {
+    if piv_pq_parameter_set(algorithm).is_some() {
+        return virtual_pqc;
+    }
     !matches!(
         algorithm,
         piv::Algorithm::Rsa3072
@@ -168,6 +203,11 @@ pub(crate) fn piv_public_key_from_metadata(
             }
             Ok(PivPublicKey::Raw(key))
         }
+        (algorithm, MetadataPublicKey::Raw(key))
+            if piv_pq_public_key_length(algorithm) == Some(key.len()) =>
+        {
+            Ok(PivPublicKey::Raw(key))
+        }
         _ => Err(CKR_DATA_INVALID.into()),
     }
 }
@@ -192,6 +232,12 @@ pub(crate) fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::
         },
         "1.3.101.112" => Some(piv::Algorithm::Ed25519),
         "1.3.101.110" => Some(piv::Algorithm::X25519),
+        "2.16.840.1.101.3.4.3.17" => Some(piv::Algorithm::MlDsa44),
+        "2.16.840.1.101.3.4.3.18" => Some(piv::Algorithm::MlDsa65),
+        "2.16.840.1.101.3.4.3.19" => Some(piv::Algorithm::MlDsa87),
+        "2.16.840.1.101.3.4.4.1" => Some(piv::Algorithm::MlKem512),
+        "2.16.840.1.101.3.4.4.2" => Some(piv::Algorithm::MlKem768),
+        "2.16.840.1.101.3.4.4.3" => Some(piv::Algorithm::MlKem1024),
         _ => None,
     }
 }
@@ -246,6 +292,14 @@ pub(crate) fn piv_public_key_from_certificate(
             }
             if certificate_key.len() != 32 {
                 return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Raw(certificate_key))
+        }
+        algorithm => {
+            if piv_algorithm_from_certificate(certificate_der) != Some(algorithm)
+                || piv_pq_public_key_length(algorithm) != Some(certificate_key.len())
+            {
+                return Err(CKR_DATA_INVALID.into());
             }
             Ok(PivPublicKey::Raw(certificate_key))
         }
@@ -308,11 +362,20 @@ pub(crate) fn piv_sign_mechanism_supported(
             )
         }
         piv::Algorithm::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
-        piv::Algorithm::X25519 => false,
+        piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87 => {
+            mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE
+        }
+        piv::Algorithm::X25519
+        | piv::Algorithm::MlKem512
+        | piv::Algorithm::MlKem768
+        | piv::Algorithm::MlKem1024 => false,
     }
 }
 
 impl PivSlot {
+    fn supports_pq(&self) -> bool {
+        self.connector.product().contains("Gadget")
+    }
     pub(crate) fn new_with_device(
         connector: Rc<dyn Connector>,
         application_aid: Vec<u8>,
@@ -662,7 +725,9 @@ impl Slot for PivSlot {
                 let algorithm = metadata
                     .algorithm
                     .and_then(piv::Algorithm::from_id)
-                    .filter(|algorithm| piv_algorithm_supported(self.version, *algorithm))?;
+                    .filter(|algorithm| {
+                        piv_algorithm_supported(self.version, *algorithm, self.supports_pq())
+                    })?;
                 let public_key = metadata
                     .public_key
                     .as_deref()
@@ -686,7 +751,7 @@ impl Slot for PivSlot {
                 .as_deref()
                 .and_then(piv_algorithm_from_certificate);
             if let (Some(algorithm), Some(value)) = (certificate_algorithm, certificate.clone())
-                && piv_algorithm_supported(self.version, algorithm)
+                && piv_algorithm_supported(self.version, algorithm, self.supports_pq())
             {
                 self.certificates.push(PivCertificate {
                     slot,
@@ -703,7 +768,7 @@ impl Slot for PivSlot {
             } else if let (Some(certificate), Some(algorithm)) =
                 (certificate.as_deref(), certificate_algorithm)
             {
-                if !piv_algorithm_supported(self.version, algorithm) {
+                if !piv_algorithm_supported(self.version, algorithm, self.supports_pq()) {
                     continue;
                 }
                 let Ok(public_key) = piv_public_key_from_certificate(algorithm, certificate) else {
@@ -876,6 +941,32 @@ impl Slot for PivSlot {
                 CKF_GENERATE_KEY_PAIR as CK_FLAGS,
             );
         }
+        if self.supports_pq() {
+            add(
+                CKM_ML_DSA as CK_MECHANISM_TYPE,
+                1312,
+                2592,
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            );
+            add(
+                CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                1312,
+                2592,
+                CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+            );
+            add(
+                CKM_ML_KEM as CK_MECHANISM_TYPE,
+                800,
+                1568,
+                (CKF_ENCAPSULATE | CKF_DECAPSULATE) as CK_FLAGS,
+            );
+            add(
+                CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                800,
+                1568,
+                CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+            );
+        }
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
             min_key_size: if firmware_5_7 { 255 } else { 256 },
@@ -914,7 +1005,7 @@ impl Slot for PivSlot {
         if !self.management_authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !piv_algorithm_supported(self.reported_version(), algorithm) {
+        if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
             return Err(CKR_MECHANISM_INVALID.into());
         }
         let public_key = PivClient.generate_key_pair(
@@ -947,7 +1038,7 @@ impl Slot for PivSlot {
         if !self.management_authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !piv_algorithm_supported(self.reported_version(), key.algorithm) {
+        if !piv_algorithm_supported(self.reported_version(), key.algorithm, self.supports_pq()) {
             return Err(CKR_MECHANISM_INVALID.into());
         }
         PivClient.import_private_key(
@@ -975,7 +1066,7 @@ impl Slot for PivSlot {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let algorithm = piv_algorithm_from_certificate(certificate).ok_or(CKR_DATA_INVALID)?;
-        if !piv_algorithm_supported(self.reported_version(), algorithm) {
+        if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
         let data = PivClient.put_certificate(self.connector.as_ref(), slot, certificate)?;
@@ -1027,7 +1118,7 @@ impl Slot for PivSlot {
         if let Some(slot) = piv::data_object_mapping(object_id).and_then(|mapping| mapping.slot) {
             let certificate = piv::decode_certificate_object(value)?;
             let algorithm = piv_algorithm_from_certificate(&certificate).ok_or(CKR_DATA_INVALID)?;
-            if !piv_algorithm_supported(self.reported_version(), algorithm) {
+            if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             }
             PivClient.put_data(self.connector.as_ref(), object_id, value)?;
@@ -1074,7 +1165,17 @@ impl Slot for PivSlot {
             let private_label = public_label.clone();
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
-            let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);
+            let can_sign = !matches!(
+                key.algorithm,
+                piv::Algorithm::X25519
+                    | piv::Algorithm::MlKem512
+                    | piv::Algorithm::MlKem768
+                    | piv::Algorithm::MlKem1024
+            );
+            let can_kem = matches!(
+                key.algorithm,
+                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024
+            );
             let private = true;
             let local = key.origin == piv::ORIGIN_GENERATED;
             let key_gen_mechanism = local.then_some(match key.algorithm {
@@ -1087,6 +1188,12 @@ impl Slot for PivSlot {
                 }
                 piv::Algorithm::Ed25519 => CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
                 piv::Algorithm::X25519 => CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87 => {
+                    CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                }
+                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
+                    CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                }
             });
             let can_decrypt = is_rsa
                 && matches!(
@@ -1115,6 +1222,23 @@ impl Slot for PivSlot {
                 );
             let public_key = match &key.public_key {
                 PivPublicKey::Rsa(public_key) => PublicKeyMaterial::Rsa(public_key.clone()),
+                PivPublicKey::Raw(public_key) if can_kem => PublicKeyMaterial::MlKem {
+                    parameter_set: piv_pq_parameter_set(key.algorithm)
+                        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                    public_key: public_key.clone(),
+                },
+                PivPublicKey::Raw(public_key)
+                    if matches!(
+                        key.algorithm,
+                        piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87
+                    ) =>
+                {
+                    PublicKeyMaterial::MlDsa {
+                        parameter_set: piv_pq_parameter_set(key.algorithm)
+                            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                        public_key: public_key.clone(),
+                    }
+                }
                 PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
                     PublicKeyMaterial::Ec {
                         parameters: piv_ec_parameters(key.algorithm)
@@ -1147,7 +1271,7 @@ impl Slot for PivSlot {
                 derive: false,
                 wrap: false,
                 unwrap: false,
-                encapsulate: false,
+                encapsulate: can_kem,
                 decapsulate: false,
                 sensitive: false,
                 extractable: true,
@@ -1183,7 +1307,7 @@ impl Slot for PivSlot {
                 wrap: false,
                 unwrap: false,
                 encapsulate: false,
-                decapsulate: false,
+                decapsulate: can_kem,
                 sensitive: true,
                 extractable: false,
                 always_sensitive: true,
@@ -1209,6 +1333,12 @@ impl Slot for PivSlot {
                 piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => CKK_EC as CK_KEY_TYPE,
                 piv::Algorithm::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
                 piv::Algorithm::X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+                piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87 => {
+                    CKK_ML_DSA as CK_KEY_TYPE
+                }
+                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
+                    CKK_ML_KEM as CK_KEY_TYPE
+                }
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
@@ -1388,11 +1518,12 @@ impl BackendSession for PivSession {
         algorithm: piv::Algorithm,
         input: &[u8],
         pin_policy: u8,
+        ml_dsa: Option<&MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, Error> {
         if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
+        let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input, ml_dsa);
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
         {
             self.authenticated.set(false);
@@ -1410,6 +1541,23 @@ impl BackendSession for PivSession {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
+            self.authenticated.set(false);
+        }
+        result
+    }
+    fn piv_decapsulate(
+        &self,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        ciphertext: &[u8],
+        pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
+        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let result = PivClient.decapsulate(self.connector.as_ref(), slot, algorithm, ciphertext);
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
         {
             self.authenticated.set(false);

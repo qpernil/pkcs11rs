@@ -938,6 +938,43 @@ fn piv_generate_key_pair_parameters(
             CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             piv_generation_25519_algorithm(public_template, piv::Algorithm::X25519)?,
         ),
+        x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            || x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE =>
+        {
+            let parameter = read_ulong_template_attribute(
+                template_attribute(public_template, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            if !(1..=3).contains(&parameter) {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            if let Some(attribute) =
+                template_attribute(private_template, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
+                && read_ulong_template_attribute(attribute).map_err(Error::from)? != parameter
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+                (
+                    CKK_ML_DSA as CK_KEY_TYPE,
+                    match parameter {
+                        1 => piv::Algorithm::MlDsa44,
+                        2 => piv::Algorithm::MlDsa65,
+                        _ => piv::Algorithm::MlDsa87,
+                    },
+                )
+            } else {
+                (
+                    CKK_ML_KEM as CK_KEY_TYPE,
+                    match parameter {
+                        1 => piv::Algorithm::MlKem512,
+                        2 => piv::Algorithm::MlKem768,
+                        _ => piv::Algorithm::MlKem1024,
+                    },
+                )
+            }
+        }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
     let public_object =

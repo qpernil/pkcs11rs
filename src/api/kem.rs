@@ -183,6 +183,17 @@ fn decapsulate_key(
                 }
                 shared
             }
+            KeyMaterial::PivPrivate {
+                slot,
+                algorithm,
+                pin_policy,
+                ..
+            } => Zeroizing::new(ctx._get_session(session_handle)?.1.piv_decapsulate(
+                *slot,
+                *algorithm,
+                ciphertext,
+                *pin_policy,
+            )?),
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
         let object = ml_kem_secret_object(templ, shared, flags, logged_in, mechanism.mechanism)?;

@@ -7206,6 +7206,11 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
     );
     assert_eq!((piv_ecdh.min_key_size, piv_ecdh.max_key_size), (224, 521));
+    assert!(
+        !crate::Slot::backend_mechanisms(&piv)
+            .iter()
+            .any(|mechanism| mechanism.type_ == CKM_ML_DSA as CK_MECHANISM_TYPE)
+    );
 
     let openpgp = crate::OpenPgpSlot {
         connector,
@@ -7249,6 +7254,97 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         (openpgp_ecdh.min_key_size, openpgp_ecdh.max_key_size),
         (224, 521)
     );
+}
+
+#[test]
+fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(GadgetConnector);
+    let piv = crate::PivSlot {
+        connector,
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
+        application_aid: crate::piv::PIV_AID.to_vec(),
+        slot_description: None,
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: crate::piv::Version {
+            major: 5,
+            minor: 8,
+            patch: 0,
+        },
+        serial: String::from("TEST0001"),
+        keys: vec![
+            crate::PivKey {
+                slot: crate::piv::Slot::Signature,
+                algorithm: crate::piv::Algorithm::MlDsa44,
+                public_key: crate::PivPublicKey::Raw(vec![0x42; 1312]),
+                attestation: std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::LazyCache::Unattempted,
+                )),
+                pin_policy: 1,
+                touch_policy: 1,
+                origin: crate::piv::ORIGIN_GENERATED,
+            },
+            crate::PivKey {
+                slot: crate::piv::Slot::KeyManagement,
+                algorithm: crate::piv::Algorithm::MlKem768,
+                public_key: crate::PivPublicKey::Raw(vec![0x42; 1184]),
+                attestation: std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::LazyCache::Unattempted,
+                )),
+                pin_policy: 1,
+                touch_policy: 1,
+                origin: crate::piv::ORIGIN_GENERATED,
+            },
+        ],
+        certificates: Vec::new(),
+        data_objects: Vec::new(),
+    };
+    let mechanisms = crate::Slot::backend_mechanisms(&piv);
+    assert!(
+        mechanisms
+            .iter()
+            .any(|m| m.type_ == CKM_ML_DSA as CK_MECHANISM_TYPE
+                && m.flags & CKF_SIGN as CK_FLAGS != 0)
+    );
+    assert!(
+        mechanisms
+            .iter()
+            .any(|m| m.type_ == CKM_ML_KEM as CK_MECHANISM_TYPE
+                && m.flags & CKF_DECAPSULATE as CK_FLAGS != 0)
+    );
+    let objects = crate::Slot::token_objects(&piv, 7).unwrap();
+    let dsa = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && object.key_type == CKK_ML_DSA as CK_KEY_TYPE
+        })
+        .unwrap();
+    let kem = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && object.key_type == CKK_ML_KEM as CK_KEY_TYPE
+        })
+        .unwrap();
+    assert!(dsa.sign && !dsa.decapsulate);
+    assert!(kem.decapsulate && !kem.sign);
+    assert_eq!(
+        dsa.attribute_value(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE),
+        Some(1u64.to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        kem.attribute_value(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE),
+        Some(2u64.to_ne_bytes().to_vec())
+    );
+    let kem_public = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                && object.key_type == CKK_ML_KEM as CK_KEY_TYPE
+        })
+        .unwrap();
+    assert!(kem_public.encapsulate && !kem_public.decapsulate);
 }
 
 #[test]
@@ -8105,6 +8201,41 @@ struct CompositeHardwareSigningSession {
 #[derive(Debug)]
 struct FailingConnector;
 
+#[derive(Debug)]
+struct GadgetConnector;
+
+impl crate::Connector for GadgetConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiKey Gadget CCID"
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        8
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn transmit<'a>(
+        &self,
+        _send: &[u8],
+        _receive: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::error::Error> {
+        Err(CKR_DEVICE_ERROR.into())
+    }
+}
+
 impl crate::Connector for FailingConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -8499,6 +8630,7 @@ impl crate::BackendSession for PivSigningTestSession {
         algorithm: crate::piv::Algorithm,
         input: &[u8],
         _pin_policy: u8,
+        _ml_dsa: Option<&crate::MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, crate::error::Error> {
         assert_eq!(slot, crate::piv::Slot::Signature);
         assert_eq!(algorithm, crate::piv::Algorithm::Rsa1024);
@@ -8530,6 +8662,7 @@ impl crate::BackendSession for CompositeHardwareSigningSession {
         algorithm: crate::piv::Algorithm,
         input: &[u8],
         _pin_policy: u8,
+        _ml_dsa: Option<&crate::MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, crate::error::Error> {
         match algorithm {
             crate::piv::Algorithm::Rsa2048 => crate::rsa_private_operation(&self.rsa, input),

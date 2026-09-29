@@ -826,6 +826,12 @@ fn sign(
                 piv::Algorithm::EccP256 => 64,
                 piv::Algorithm::EccP384 => 96,
                 piv::Algorithm::Ed25519 => 64,
+                piv::Algorithm::MlDsa44 => MlDsaParameterSet::MlDsa44.signature_length(),
+                piv::Algorithm::MlDsa65 => MlDsaParameterSet::MlDsa65.signature_length(),
+                piv::Algorithm::MlDsa87 => MlDsaParameterSet::MlDsa87.signature_length(),
+                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
+                    return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+                }
                 piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
             KeyMaterial::OpenPgpPrivate { algorithm, .. } => match algorithm {
@@ -968,6 +974,7 @@ fn sign(
                         *algorithm,
                         &input,
                         operation.piv_pin_policy.unwrap_or(0),
+                        operation.ml_dsa.as_ref(),
                     )?;
                     match algorithm {
                         piv::Algorithm::EccP256 => piv_ecdsa_signature(&response, 32),

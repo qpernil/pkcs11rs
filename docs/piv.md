@@ -34,13 +34,18 @@ The protocol layer implements:
 - PIN verification and retry queries;
 - Yubico version, serial, and key metadata commands;
 - PIV `GET DATA` certificate retrieval;
-- `GENERAL AUTHENTICATE` signing, RSA deciphering, and EC/X25519 key agreement.
+- `GENERAL AUTHENTICATE` signing, RSA deciphering, EC/X25519 key agreement,
+  and virtual ML-KEM decapsulation.
 
 The client supports the four standard slots (`9A`, `9C`, `9D`, `9E`) and retired
 key slots (`82` through `95`). The attestation slot (`F9`) is exposed as its
 static certificate object, not as a normal public/private key slot. RSA-1024
 through RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers are
-recognized. Firmware and FIPS restrictions still apply.
+recognized. The virtual YubiKey Gadget also exposes provisional `E2`–`E4`
+ML-DSA-44/65/87 and `E5`–`E7` ML-KEM-512/768/1024 identifiers. PQC mechanisms
+are enabled for native keys only on the virtual Gadget, not on physical
+YubiKeys. Software session-key mechanisms remain available on either slot.
+Firmware and FIPS restrictions still apply.
 
 When a slot reports the default PIN policy, `9C` uses `ALWAYS`, `9E` uses
 `NEVER`, and the other standard and retired key slots use `ONCE`.
@@ -78,6 +83,18 @@ YubiKey performs the private RSA operation. `CKM_ECDSA` and its hashed variants
 convert the card's DER signature to the PKCS #11 fixed-width `r || s` format,
 while `CKM_EDDSA` returns the card's Ed25519 signature. Multipart sign and
 verify operations buffer their input and use the same mechanism implementations.
+On the virtual Gadget, `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`,
+`CKM_ML_KEM_KEY_PAIR_GEN`, and `CKM_ML_KEM` use the same PKCS #11 key types,
+`CKA_PARAMETER_SET` values, and sign/verify or encapsulate/decapsulate calls as
+YubiHSM slots. ML-DSA signing accepts the standard `CK_SIGN_ADDITIONAL_CONTEXT`
+structure, including all three hedging modes and contexts up to 255 bytes;
+the client sends provisional PIV `GENERAL AUTHENTICATE` tags `88` (context) and
+`89` (hedging mode). Public verification and ML-KEM encapsulation run in the
+module; private signing and decapsulation run in the PIV applet. Private import
+accepts a 32-byte ML-DSA or 64-byte ML-KEM `CKA_SEED`, which is sent through
+the applet's private tag `09`; expanded private keys are not accepted for PIV
+import. Key generation and import require management authentication. Protect
+private-key import APDUs with SCP03 or SCP11 when confidentiality is required.
 `CKM_ECDH1_DERIVE` and
 `CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;
 the derived secret is returned as a sensitive generic secret object. This
