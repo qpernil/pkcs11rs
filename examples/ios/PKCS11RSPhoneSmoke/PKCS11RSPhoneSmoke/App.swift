@@ -14,6 +14,7 @@ private let platformDomains = CK_ULONG(0xffff)
 private let platformCapabilities = [UInt8](repeating: 0xff, count: 8)
 private let postQuantumMlDsaLabel = "iPhone smoke ML-DSA-87"
 private let postQuantumMlKemLabel = "iPhone smoke ML-KEM-1024"
+private let postQuantumHybridKemLabel = "iPhone smoke MLKEM768-X25519"
 private let postQuantumMessageLength = 32
 private let postQuantumSecretLength = 32
 private let previewSignRegistrationLabel = "iPhone smoke previewSign registration"
@@ -29,6 +30,12 @@ private let ckmPreviewSign =
     CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0003)
 private let ckmProjectPublicKey =
     CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0004)
+private let ckmMlKem768X25519KeyPairGen =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0012)
+private let ckmMlKem768X25519 =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0013)
+private let ckkMlKem768X25519 =
+    CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x5053_0011)
 private let ckkPreviewSignRegistration =
     CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x5053_0001)
 private let ckaPreviewSignRegistration =
@@ -445,7 +452,7 @@ private func deleteObjects(
 private func generatePostQuantumKeyPair(
     session: CK_SESSION_HANDLE,
     mechanismType: CK_MECHANISM_TYPE,
-    parameterSet: CK_ULONG,
+    parameterSet: CK_ULONG?,
     label: String,
     identifier: [UInt8],
     publicUsageAttribute: CK_ATTRIBUTE_TYPE,
@@ -454,7 +461,8 @@ private func generatePostQuantumKeyPair(
     var token = CK_BBOOL(CK_TRUE)
     var publicUsage = CK_BBOOL(CK_TRUE)
     var privateUsage = CK_BBOOL(CK_TRUE)
-    var parameterSet = parameterSet
+    let hasParameterSet = parameterSet != nil
+    var parameterSetValue = parameterSet ?? 0
     var identifier = identifier
     var label = Array(label.utf8)
     var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
@@ -467,12 +475,12 @@ private func generatePostQuantumKeyPair(
     let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
         withUnsafeMutablePointer(to: &publicUsage) { publicUsagePointer in
             withUnsafeMutablePointer(to: &privateUsage) { privateUsagePointer in
-                withUnsafeMutablePointer(to: &parameterSet) { parameterSetPointer in
+                withUnsafeMutablePointer(to: &parameterSetValue) { parameterSetPointer in
                     identifier.withUnsafeMutableBytes { identifierBuffer in
                         label.withUnsafeMutableBytes { labelBuffer in
                             var publicAttributes = [CK_ATTRIBUTE](
                                 repeating: CK_ATTRIBUTE(),
-                                count: 5
+                                count: hasParameterSet ? 5 : 4
                             )
                             publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
                             publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
@@ -483,14 +491,20 @@ private func generatePostQuantumKeyPair(
                             publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
                             publicAttributes[2].pValue = identifierBuffer.baseAddress
                             publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                            publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_PARAMETER_SET)
-                            publicAttributes[3].pValue = UnsafeMutableRawPointer(parameterSetPointer)
-                            publicAttributes[3].ulValueLen = CK_ULONG(
-                                MemoryLayout<CK_ULONG>.size
-                            )
-                            publicAttributes[4].type = publicUsageAttribute
-                            publicAttributes[4].pValue = UnsafeMutableRawPointer(publicUsagePointer)
-                            publicAttributes[4].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            let usageIndex: Int
+                            if hasParameterSet {
+                                publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_PARAMETER_SET)
+                                publicAttributes[3].pValue = UnsafeMutableRawPointer(parameterSetPointer)
+                                publicAttributes[3].ulValueLen = CK_ULONG(
+                                    MemoryLayout<CK_ULONG>.size
+                                )
+                                usageIndex = 4
+                            } else {
+                                usageIndex = 3
+                            }
+                            publicAttributes[usageIndex].type = publicUsageAttribute
+                            publicAttributes[usageIndex].pValue = UnsafeMutableRawPointer(publicUsagePointer)
+                            publicAttributes[usageIndex].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
 
                             var privateAttributes = [CK_ATTRIBUTE](
                                 repeating: CK_ATTRIBUTE(),
@@ -1027,10 +1041,12 @@ private func embeddedFidoPreviewSignSmoke(slot: CK_SLOT_ID) -> [String] {
     ]
 }
 
-private func exerciseMlKem(
+private func exerciseKem(
     session: CK_SESSION_HANDLE,
     publicKey: CK_OBJECT_HANDLE,
-    privateKey: CK_OBJECT_HANDLE
+    privateKey: CK_OBJECT_HANDLE,
+    mechanismType: CK_MECHANISM_TYPE,
+    constructionName: String
 ) -> (
     result: CK_RV,
     operation: String,
@@ -1039,7 +1055,7 @@ private func exerciseMlKem(
     decapsulateMilliseconds: Double
 ) {
     var mechanism = CK_MECHANISM(
-        mechanism: CK_MECHANISM_TYPE(CKM_ML_KEM),
+        mechanism: mechanismType,
         pParameter: nil,
         ulParameterLen: 0
     )
@@ -1228,7 +1244,7 @@ private func exerciseMlKem(
     guard firstValue.count == postQuantumSecretLength, firstValue == secondValue else {
         return (
             CK_RV(CKR_GENERAL_ERROR),
-            "ML-KEM shared-secret comparison",
+            "\(constructionName) shared-secret comparison",
             ciphertext.count,
             encapsulateMilliseconds,
             decapsulateMilliseconds
@@ -1236,7 +1252,7 @@ private func exerciseMlKem(
     }
     return (
         CK_RV(CKR_OK),
-        "ML-KEM shared-secret comparison",
+        "\(constructionName) shared-secret comparison",
         ciphertext.count,
         encapsulateMilliseconds,
         decapsulateMilliseconds
@@ -1247,8 +1263,9 @@ private struct PostQuantumSupport {
     let lines: [String]
     let mlDsa: Bool
     let mlKem: Bool
+    let hybridKem: Bool
 
-    var any: Bool { mlDsa || mlKem }
+    var any: Bool { mlDsa || mlKem || hybridKem }
 }
 
 private struct PostQuantumPair {
@@ -1322,7 +1339,8 @@ private func postQuantumSupport(slot: CK_SLOT_ID) -> PostQuantumSupport {
                 "  C_GetMechanismList failed: \(returnValueDescription(listed.result))",
             ],
             mlDsa: false,
-            mlKem: false
+            mlKem: false,
+            hybridKem: false
         )
     }
     let mechanisms = Set(listed.mechanisms)
@@ -1354,6 +1372,20 @@ private func postQuantumSupport(slot: CK_SLOT_ID) -> PostQuantumSupport {
         advertised: mechanisms.contains(CK_MECHANISM_TYPE(CKM_ML_KEM)),
         requiredFlags: CK_FLAGS(CKF_ENCAPSULATE) | CK_FLAGS(CKF_DECAPSULATE)
     )
+    let hybridGeneration = mechanismRequirement(
+        slot: slot,
+        name: "CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN",
+        type: ckmMlKem768X25519KeyPairGen,
+        advertised: mechanisms.contains(ckmMlKem768X25519KeyPairGen),
+        requiredFlags: CK_FLAGS(CKF_GENERATE_KEY_PAIR)
+    )
+    let hybrid = mechanismRequirement(
+        slot: slot,
+        name: "CKM_PKCS11RS_MLKEM768_X25519",
+        type: ckmMlKem768X25519,
+        advertised: mechanisms.contains(ckmMlKem768X25519),
+        requiredFlags: CK_FLAGS(CKF_ENCAPSULATE) | CK_FLAGS(CKF_DECAPSULATE)
+    )
     return PostQuantumSupport(
         lines: [
             "",
@@ -1362,27 +1394,31 @@ private func postQuantumSupport(slot: CK_SLOT_ID) -> PostQuantumSupport {
             dsa.line,
             kemGeneration.line,
             kem.line,
+            hybridGeneration.line,
+            hybrid.line,
         ],
         mlDsa: dsaGeneration.supported && dsa.supported,
-        mlKem: kemGeneration.supported && kem.supported
+        mlKem: kemGeneration.supported && kem.supported,
+        hybridKem: hybridGeneration.supported && hybrid.supported
     )
 }
 
 private func postQuantumIdentifiers(
     tokenLabel: String
-) -> (mlDsa: [UInt8], mlKem: [UInt8]) {
+) -> (mlDsa: [UInt8], mlKem: [UInt8], hybridKem: [UInt8]) {
     if tokenLabel.hasPrefix("PIV #") {
         // PKCS #11 exposes PIV key references as compact CKA_ID values. The
-        // first two retired key-management slots (raw PIV references 0x82 and
-        // 0x83) are therefore IDs 5 and 6 at this API boundary.
-        return ([5], [6])
+        // first three retired key-management slots (raw PIV references 0x82,
+        // 0x83, and 0x84) are therefore IDs 5, 6, and 7 at this API boundary.
+        return ([5], [6], [7])
     }
     if tokenLabel.hasPrefix("YubiHSM #") {
-        return ([0x7e, 0x20], [0x7e, 0x21])
+        return ([0x7e, 0x20], [0x7e, 0x21], [0x7e, 0x22])
     }
     return (
         Array("iphone-smoke-ml-dsa-87".utf8),
-        Array("iphone-smoke-ml-kem-1024".utf8)
+        Array("iphone-smoke-ml-kem-1024".utf8),
+        Array("iphone-smoke-mlkem768-x25519".utf8)
     )
 }
 
@@ -1391,7 +1427,7 @@ private func resolvePostQuantumPair(
     keyType: CK_KEY_TYPE,
     identifier: [UInt8],
     mechanismType: CK_MECHANISM_TYPE,
-    parameterSet: CK_ULONG,
+    parameterSet: CK_ULONG?,
     label: String,
     publicUsageAttribute: CK_ATTRIBUTE_TYPE,
     privateUsageAttribute: CK_ATTRIBUTE_TYPE
@@ -1531,10 +1567,12 @@ private func exercisePostQuantumMechanisms(
         )
         if pair.result == CKR_OK {
             lines.append("  ML-KEM-1024 \(pair.status)")
-            let exercised = exerciseMlKem(
+            let exercised = exerciseKem(
                 session: session,
                 publicKey: pair.publicKey,
-                privateKey: pair.privateKey
+                privateKey: pair.privateKey,
+                mechanismType: CK_MECHANISM_TYPE(CKM_ML_KEM),
+                constructionName: "ML-KEM-1024"
             )
             if exercised.result == CKR_OK {
                 lines.append(
@@ -1557,6 +1595,51 @@ private func exercisePostQuantumMechanisms(
         }
     } else {
         lines.append("  ML-KEM functional test skipped: required mechanism flags not advertised")
+    }
+
+    if support.hybridKem {
+        let pair = resolvePostQuantumPair(
+            session: session,
+            keyType: ckkMlKem768X25519,
+            identifier: identifiers.hybridKem,
+            mechanismType: ckmMlKem768X25519KeyPairGen,
+            parameterSet: nil,
+            label: postQuantumHybridKemLabel,
+            publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
+            privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
+        )
+        if pair.result == CKR_OK {
+            lines.append("  MLKEM768-X25519 \(pair.status)")
+            let exercised = exerciseKem(
+                session: session,
+                publicKey: pair.publicKey,
+                privateKey: pair.privateKey,
+                mechanismType: ckmMlKem768X25519,
+                constructionName: "MLKEM768-X25519"
+            )
+            if exercised.result == CKR_OK {
+                lines.append(
+                    String(
+                        format: "  MLKEM768-X25519 encapsulate %.3f ms, decapsulate %.3f ms (%d-byte ciphertext, shared secret matched)",
+                        exercised.encapsulateMilliseconds,
+                        exercised.decapsulateMilliseconds,
+                        exercised.ciphertextLength
+                    )
+                )
+            } else {
+                lines.append(
+                    "  advertised MLKEM768-X25519 failed at \(exercised.operation): \(returnValueDescription(exercised.result))"
+                )
+            }
+        } else {
+            lines.append(
+                "  advertised MLKEM768-X25519 failed: \(pair.status): \(returnValueDescription(pair.result))"
+            )
+        }
+    } else {
+        lines.append(
+            "  MLKEM768-X25519 functional test skipped: required mechanism flags not advertised"
+        )
     }
     return lines
 }
