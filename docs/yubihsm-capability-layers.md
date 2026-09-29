@@ -17,7 +17,7 @@ There are three deployment profiles:
 | --- | --- | --- |
 | `firmware-yubihsm2` | YubiHSM 2-compatible baseline, without virtual extension commands | Compatibility with a physical YubiHSM command surface |
 | `firmware-secure-channel` | Baseline plus prefixed ECDH and protected native session objects | Client-side secure-channel credentials whose ephemeral private keys and intermediate agreements should remain in the device |
-| `firmware-full` | Secure-channel profile plus extended curves, ML-DSA, ML-KEM, and direct RSA wrapping | Fully featured virtual deployments and interoperability work |
+| `firmware-full` | Secure-channel profile plus extended curves, ML-DSA, ML-KEM, concrete hybrid PQ/T KEMs, and direct RSA wrapping | Fully featured virtual deployments and interoperability work |
 
 `firmware-full` is the default for the standalone Virtual YubiHSM binaries.
 Select either of the other profiles with `--no-default-features`. The connector

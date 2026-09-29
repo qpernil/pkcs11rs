@@ -251,11 +251,13 @@ session; an error reported after the UI disappears can be a consequence of
 system dismissal rather than its cause. They contain no PINs or APDU payloads.
 The PQC smoke test is deliberately mutating: on every capable, sufficiently
 authorized slot, it creates persistent ML-DSA-87 and ML-KEM-1024 keypairs when
-their stable test identifiers are absent. Those identifiers are owned by the
-smoke test: before provisioning a missing or incomplete pair, it deletes every
-object already using the identifier and then generates the expected pair. Do
-not run this app against a production token unless those object IDs are
-reserved for this destructive provisioning behavior. Other inventory and
+their stable test identifiers are absent. It also creates and exercises one
+`MLKEM768-X25519` hybrid pair when both construction-specific mechanisms are
+advertised. Those identifiers are owned by the smoke test: before provisioning
+a missing or incomplete pair, it deletes every object already using the
+identifier and then generates the expected pair. Do not run this app against a
+production token unless those object IDs are reserved for this destructive
+provisioning behavior. Other inventory and
 YubiHSM Auth inspection operations remain read-only. Private objects that
 require login are absent from the public view and may appear in the
 authenticated view.

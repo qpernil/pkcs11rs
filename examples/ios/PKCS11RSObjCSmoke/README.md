@@ -55,9 +55,11 @@ Simulator even though the Simulator has no USB CCID or NFC reader.
 The app recognizes exactly that owned software slot by its `Software token`
 model and `iPhone smoke` label. It initializes the token and user PIN when
 their standard flags require it, logs in with the prototype PIN `password`,
-and creates persistent X25519, ML-DSA-87, and ML-KEM-1024 keypairs with IDs
+and creates persistent X25519, ML-DSA-87, ML-KEM-1024, and
+`MLKEM768-X25519` keypairs with IDs
 `iphone-smoke-x25519`, `iphone-smoke-ml-dsa-87`, and
-`iphone-smoke-ml-kem-1024` when absent. It reports each generation time. On
+`iphone-smoke-ml-kem-1024`, and `iphone-smoke-mlkem768-x25519` when absent. It
+reports each generation time. On
 every refresh it times an X25519 self-agreement using the pair's own public
 point, validates that the resulting shared secret is 32 bytes and nonzero, and
 destroys that session object. This is a compact smoke
@@ -65,9 +67,10 @@ benchmark rather than a two-party protocol. It then generates a fresh 32-byte
 message with `C_GenerateRandom`, signs it, and
 verifies it while reporting both operation times. It also uses the PKCS #11 3.2
 `C_EncapsulateKey` and `C_DecapsulateKey` entry points, verifies that their two
-32-byte shared secrets match, and reports both operation times and the
-ciphertext length. Later refreshes and launches reuse all three persistent
-keypairs. These state-changing calls are never applied to discovered hardware.
+32-byte shared secrets match for ML-KEM-1024 and `MLKEM768-X25519`, and reports
+both operation times and each ciphertext length. Later refreshes and launches
+reuse all four persistent keypairs. These state-changing calls are never
+applied to discovered hardware.
 
 Each generation timing surrounds the complete `C_GenerateKeyPair` call,
 including encrypted persistence. X25519 timing surrounds only `C_DeriveKey`;
