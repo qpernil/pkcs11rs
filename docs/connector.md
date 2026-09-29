@@ -554,6 +554,40 @@ but the application does not yet extract the verified identity or restrict it
 to particular devices or commands. Every certificate accepted by that CA
 therefore has the same access.
 
+### Post-quantum TLS status
+
+Connector TLS currently uses Rustls with its `ring` cryptographic provider and
+therefore offers only traditional key-exchange groups. Post-quantum TLS is not
+currently enabled. Rustls also supports the standardized TLS 1.3 hybrid groups
+`X25519MLKEM768` and `SecP256r1MLKEM768` through its AWS-LC provider. The former
+is the natural general default; the latter is available when a deployment
+prefers the NIST P-256 traditional component. Both combine ephemeral ML-KEM-768
+with ephemeral elliptic-curve Diffie-Hellman and pass the two shared secrets to
+the TLS 1.3 key schedule.
+
+The intended reason to enable one of these groups is protection against
+harvest-now/decrypt-later attacks on connector traffic. Existing RSA, ECDSA,
+or EdDSA server and client certificates can continue to authenticate the live
+connection: a future break of their traditional signature algorithm does not
+recover an already established hybrid session secret. Post-quantum certificate
+authentication is a separate requirement for resisting an active,
+quantum-capable impersonator during a future handshake.
+
+Any implementation should keep the provider dependency local to TLS-enabled
+builds because AWS-LC adds native build and packaging cost. It should provide
+distinct `prefer-pqc` and `require-pqc` policies, report the negotiated group,
+and test client, server, mutual-TLS, and session-resumption behavior. A
+`require-pqc` connection must require TLS 1.3 and a hybrid group; permitting
+TLS 1.2 or an unnoticed traditional-group fallback would not meet the stated
+confidentiality objective. Larger hybrid ClientHello and ServerHello key
+shares must also be qualified across supported networks and platforms.
+
+This transport protection does not depend on exposing a hybrid PKCS #11
+mechanism. Rustls can perform the ephemeral hybrid exchange in software while
+PKCS11RS continues to use the existing connector protocol and certificate
+configuration. The related application-facing mechanism design is documented
+in [Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md).
+
 ### Timeouts and admission
 
 HTTP transport stages are bounded independently from HSM processing:

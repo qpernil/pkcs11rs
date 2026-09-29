@@ -916,6 +916,7 @@ Detailed configuration:
 - [Initialization configuration](docs/configuration.md)
 - [iOS application integration for Swift and Objective-C](docs/ios-integration.md)
 - [Multi-device YubiHSM connector](docs/connector.md)
+- [Post-quantum hybrid key exchange](docs/post-quantum-hybrid-key-exchange.md)
 - [Experimental I2C transport requirements and validation](docs/i2c-stability.md)
 - [Named software slots](docs/software.md)
 - [Vendor extension API index](docs/extensions.md)
