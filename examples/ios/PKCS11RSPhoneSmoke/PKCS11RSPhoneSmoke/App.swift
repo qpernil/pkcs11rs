@@ -12,21 +12,10 @@ private let platformCredentialLabel = "iPhone qpernil"
 private let platformAuthenticationKeyID = CK_ULONG(0x1004)
 private let platformDomains = CK_ULONG(0xffff)
 private let platformCapabilities = [UInt8](repeating: 0xff, count: 8)
-private let softwareTokenName = "iPhone smoke"
-private let softwareTokenModel = "Software token"
-private let softwareTokenPIN = "password"
-private let softwareX25519Label = "iPhone smoke X25519"
-private let softwareX25519ID = Array("iphone-smoke-x25519".utf8)
-private let softwareX25519SecretLength = 32
-private let x25519Parameters: [UInt8] = [
-    0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
-]
-private let softwareMlDsaLabel = "iPhone smoke ML-DSA-87"
-private let softwareMlDsaID = Array("iphone-smoke-ml-dsa-87".utf8)
-private let softwareMlDsaMessageLength = 32
-private let softwareMlKemLabel = "iPhone smoke ML-KEM-1024"
-private let softwareMlKemID = Array("iphone-smoke-ml-kem-1024".utf8)
-private let softwareMlKemSecretLength = 32
+private let postQuantumMlDsaLabel = "iPhone smoke ML-DSA-87"
+private let postQuantumMlKemLabel = "iPhone smoke ML-KEM-1024"
+private let postQuantumMessageLength = 32
+private let postQuantumSecretLength = 32
 private let ckkYubicoHsmAuthSymmetric =
     CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x59554200) | CK_KEY_TYPE(38)
 private let ckkYubicoHsmAuthAsymmetric =
@@ -92,12 +81,6 @@ private func connectorConfiguration() -> ConnectorConfiguration {
             "tokens": tokenStoragePath,
         ],
         "platform": ["enabled": true],
-        "software": [
-            "slots": [[
-                "name": softwareTokenName,
-                "discovery_pin": softwareTokenPIN,
-            ]],
-        ],
         "yubihsm": [
             "urls": [url],
             "public_discovery": "0001password",
@@ -334,52 +317,7 @@ private func objectInventory(
     return ObjectInventory(lines: lines)
 }
 
-private func softwareTokenLabel() -> [UInt8] {
-    var label = [UInt8](repeating: 0x20, count: 32)
-    let name = Array(softwareTokenName.utf8.prefix(label.count))
-    label.replaceSubrange(0..<name.count, with: name)
-    return label
-}
-
-private func login(
-    session: CK_SESSION_HANDLE,
-    userType: CK_USER_TYPE,
-    pin: String
-) -> CK_RV {
-    var bytes = Array(pin.utf8)
-    return bytes.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            userType,
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-}
-
-private func initializeSoftwareToken(slot: CK_SLOT_ID) -> CK_RV {
-    var pin = Array(softwareTokenPIN.utf8)
-    var label = softwareTokenLabel()
-    return pin.withUnsafeMutableBufferPointer { pinBuffer in
-        label.withUnsafeMutableBufferPointer { labelBuffer in
-            C_InitToken(
-                slot,
-                pinBuffer.baseAddress,
-                CK_ULONG(pinBuffer.count),
-                labelBuffer.baseAddress
-            )
-        }
-    }
-}
-
-private func initializeSoftwareUserPIN(session: CK_SESSION_HANDLE) -> CK_RV {
-    var pin = Array(softwareTokenPIN.utf8)
-    return pin.withUnsafeMutableBufferPointer { buffer in
-        C_InitPIN(session, buffer.baseAddress, CK_ULONG(buffer.count))
-    }
-}
-
-private func findSoftwareKey(
+private func findKey(
     session: CK_SESSION_HANDLE,
     objectClass: CK_OBJECT_CLASS,
     keyType: CK_KEY_TYPE,
@@ -428,83 +366,57 @@ private func findSoftwareKey(
     return (CK_RV(CKR_OK), count == 0 ? nil : object)
 }
 
-private func generateSoftwareX25519KeyPair(
-    session: CK_SESSION_HANDLE
-) -> (result: CK_RV, publicKey: CK_OBJECT_HANDLE, privateKey: CK_OBJECT_HANDLE) {
-    var token = CK_BBOOL(CK_TRUE)
-    var derive = CK_BBOOL(CK_TRUE)
-    var parameters = x25519Parameters
-    var identifier = softwareX25519ID
-    var label = Array(softwareX25519Label.utf8)
-    var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-    var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-    var mechanism = CK_MECHANISM(
-        mechanism: CK_MECHANISM_TYPE(CKM_EC_MONTGOMERY_KEY_PAIR_GEN),
-        pParameter: nil,
-        ulParameterLen: 0
-    )
-    let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
-        withUnsafeMutablePointer(to: &derive) { derivePointer in
-            parameters.withUnsafeMutableBytes { parameterBuffer in
-                identifier.withUnsafeMutableBytes { identifierBuffer in
-                    label.withUnsafeMutableBytes { labelBuffer in
-                        var publicAttributes = [CK_ATTRIBUTE](
-                            repeating: CK_ATTRIBUTE(),
-                            count: 4
-                        )
-                        publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
-                        publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
-                        publicAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                        publicAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
-                        publicAttributes[1].pValue = labelBuffer.baseAddress
-                        publicAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
-                        publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
-                        publicAttributes[2].pValue = identifierBuffer.baseAddress
-                        publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                        publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_EC_PARAMS)
-                        publicAttributes[3].pValue = parameterBuffer.baseAddress
-                        publicAttributes[3].ulValueLen = CK_ULONG(parameterBuffer.count)
-
-                        var privateAttributes = [CK_ATTRIBUTE](
-                            repeating: CK_ATTRIBUTE(),
-                            count: 4
-                        )
-                        privateAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
-                        privateAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
-                        privateAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                        privateAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
-                        privateAttributes[1].pValue = labelBuffer.baseAddress
-                        privateAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
-                        privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
-                        privateAttributes[2].pValue = identifierBuffer.baseAddress
-                        privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                        privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_DERIVE)
-                        privateAttributes[3].pValue = UnsafeMutableRawPointer(derivePointer)
-                        privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-
-                        return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
-                            privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
-                                C_GenerateKeyPair(
-                                    session,
-                                    &mechanism,
-                                    publicBuffer.baseAddress,
-                                    CK_ULONG(publicBuffer.count),
-                                    privateBuffer.baseAddress,
-                                    CK_ULONG(privateBuffer.count),
-                                    &publicKey,
-                                    &privateKey
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
+private func findObject(
+    session: CK_SESSION_HANDLE,
+    identifier: [UInt8]
+) -> (result: CK_RV, object: CK_OBJECT_HANDLE?) {
+    var identifier = identifier
+    var attribute = CK_ATTRIBUTE()
+    let initialize = identifier.withUnsafeMutableBytes { identifierBuffer in
+        attribute.type = CK_ATTRIBUTE_TYPE(CKA_ID)
+        attribute.pValue = identifierBuffer.baseAddress
+        attribute.ulValueLen = CK_ULONG(identifierBuffer.count)
+        return C_FindObjectsInit(session, &attribute, 1)
     }
-    return (result, publicKey, privateKey)
+    guard initialize == CKR_OK else {
+        return (initialize, nil)
+    }
+
+    var object = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var count = CK_ULONG()
+    let find = C_FindObjects(session, &object, 1, &count)
+    let finalize = C_FindObjectsFinal(session)
+    guard find == CKR_OK else {
+        return (find, nil)
+    }
+    guard finalize == CKR_OK else {
+        return (finalize, nil)
+    }
+    return (CK_RV(CKR_OK), count == 0 ? nil : object)
 }
 
-private func generateSoftwarePostQuantumKeyPair(
+private func deleteObjects(
+    session: CK_SESSION_HANDLE,
+    identifier: [UInt8]
+) -> (result: CK_RV, count: Int) {
+    var deleted = 0
+    while true {
+        let found = findObject(session: session, identifier: identifier)
+        guard found.result == CKR_OK else {
+            return (found.result, deleted)
+        }
+        guard let object = found.object else {
+            return (CK_RV(CKR_OK), deleted)
+        }
+        let result = C_DestroyObject(session, object)
+        guard result == CKR_OK else {
+            return (result, deleted)
+        }
+        deleted += 1
+    }
+}
+
+private func generatePostQuantumKeyPair(
     session: CK_SESSION_HANDLE,
     mechanismType: CK_MECHANISM_TYPE,
     parameterSet: CK_ULONG,
@@ -594,7 +506,7 @@ private func generateSoftwarePostQuantumKeyPair(
     return (result, publicKey, privateKey)
 }
 
-private func exerciseSoftwareMlDsa(
+private func exerciseMlDsa(
     session: CK_SESSION_HANDLE,
     publicKey: CK_OBJECT_HANDLE,
     privateKey: CK_OBJECT_HANDLE
@@ -605,7 +517,7 @@ private func exerciseSoftwareMlDsa(
     signMilliseconds: Double,
     verifyMilliseconds: Double
 ) {
-    var message = [UInt8](repeating: 0, count: softwareMlDsaMessageLength)
+    var message = [UInt8](repeating: 0, count: postQuantumMessageLength)
     var result = message.withUnsafeMutableBufferPointer { buffer in
         C_GenerateRandom(session, buffer.baseAddress, CK_ULONG(buffer.count))
     }
@@ -679,7 +591,7 @@ private func exerciseSoftwareMlDsa(
     )
 }
 
-private func softwareAttributeValue(
+private func attributeValue(
     session: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
     type: CK_ATTRIBUTE_TYPE
@@ -709,118 +621,7 @@ private func softwareAttributeValue(
     return (result, value)
 }
 
-private func exerciseSoftwareX25519(
-    session: CK_SESSION_HANDLE,
-    publicKey: CK_OBJECT_HANDLE,
-    privateKey: CK_OBJECT_HANDLE
-) -> (result: CK_RV, operation: String, deriveMilliseconds: Double) {
-    let publicResult = softwareAttributeValue(
-        session: session,
-        object: publicKey,
-        type: CK_ATTRIBUTE_TYPE(CKA_EC_POINT)
-    )
-    guard publicResult.result == CKR_OK, var publicPoint = publicResult.value else {
-        return (publicResult.result, "C_GetAttributeValue(CKA_EC_POINT)", 0)
-    }
-
-    var token = CK_BBOOL(CK_FALSE)
-    var sensitive = CK_BBOOL(CK_FALSE)
-    var extractable = CK_BBOOL(CK_TRUE)
-    var keyType = CK_KEY_TYPE(CKK_GENERIC_SECRET)
-    var valueLength = CK_ULONG(softwareX25519SecretLength)
-    var derivedSecret = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-    defer {
-        if derivedSecret != CK_OBJECT_HANDLE(CK_INVALID_HANDLE) {
-            _ = C_DestroyObject(session, derivedSecret)
-        }
-    }
-
-    let deriveStart = ProcessInfo.processInfo.systemUptime
-    let result = publicPoint.withUnsafeMutableBufferPointer { publicBuffer in
-        var parameters = CK_ECDH1_DERIVE_PARAMS(
-            kdf: CK_EC_KDF_TYPE(CKD_NULL),
-            ulSharedDataLen: 0,
-            pSharedData: nil,
-            ulPublicDataLen: CK_ULONG(publicBuffer.count),
-            pPublicData: publicBuffer.baseAddress
-        )
-        var mechanism = CK_MECHANISM(
-            mechanism: CK_MECHANISM_TYPE(CKM_ECDH1_DERIVE),
-            pParameter: nil,
-            ulParameterLen: CK_ULONG(MemoryLayout<CK_ECDH1_DERIVE_PARAMS>.size)
-        )
-        return withUnsafeMutablePointer(to: &parameters) { parametersPointer in
-            mechanism.pParameter = UnsafeMutableRawPointer(parametersPointer)
-            return withUnsafeMutablePointer(to: &token) { tokenPointer in
-                withUnsafeMutablePointer(to: &sensitive) { sensitivePointer in
-                    withUnsafeMutablePointer(to: &extractable) { extractablePointer in
-                        withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
-                            withUnsafeMutablePointer(to: &valueLength) { valueLengthPointer in
-                                var attributes = [
-                                    CK_ATTRIBUTE(
-                                        type: CK_ATTRIBUTE_TYPE(CKA_TOKEN),
-                                        pValue: UnsafeMutableRawPointer(tokenPointer),
-                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                                    ),
-                                    CK_ATTRIBUTE(
-                                        type: CK_ATTRIBUTE_TYPE(CKA_SENSITIVE),
-                                        pValue: UnsafeMutableRawPointer(sensitivePointer),
-                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                                    ),
-                                    CK_ATTRIBUTE(
-                                        type: CK_ATTRIBUTE_TYPE(CKA_EXTRACTABLE),
-                                        pValue: UnsafeMutableRawPointer(extractablePointer),
-                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                                    ),
-                                    CK_ATTRIBUTE(
-                                        type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE),
-                                        pValue: UnsafeMutableRawPointer(keyTypePointer),
-                                        ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
-                                    ),
-                                    CK_ATTRIBUTE(
-                                        type: CK_ATTRIBUTE_TYPE(CKA_VALUE_LEN),
-                                        pValue: UnsafeMutableRawPointer(valueLengthPointer),
-                                        ulValueLen: CK_ULONG(MemoryLayout<CK_ULONG>.size)
-                                    ),
-                                ]
-                                return attributes.withUnsafeMutableBufferPointer { buffer in
-                                    C_DeriveKey(
-                                        session,
-                                        &mechanism,
-                                        privateKey,
-                                        buffer.baseAddress,
-                                        CK_ULONG(buffer.count),
-                                        &derivedSecret
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let deriveMilliseconds = (ProcessInfo.processInfo.systemUptime - deriveStart) * 1_000
-    guard result == CKR_OK else {
-        return (result, "C_DeriveKey", deriveMilliseconds)
-    }
-    let secret = softwareAttributeValue(
-        session: session,
-        object: derivedSecret,
-        type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
-    )
-    guard secret.result == CKR_OK else {
-        return (secret.result, "C_GetAttributeValue(derived secret)", deriveMilliseconds)
-    }
-    guard let secretValue = secret.value,
-          secretValue.count == softwareX25519SecretLength,
-          secretValue.contains(where: { $0 != 0 }) else {
-        return (CK_RV(CKR_GENERAL_ERROR), "X25519 shared-secret validation", deriveMilliseconds)
-    }
-    return (CK_RV(CKR_OK), "X25519 self-agreement", deriveMilliseconds)
-}
-
-private func exerciseSoftwareMlKem(
+private func exerciseMlKem(
     session: CK_SESSION_HANDLE,
     publicKey: CK_OBJECT_HANDLE,
     privateKey: CK_OBJECT_HANDLE
@@ -851,7 +652,7 @@ private func exerciseSoftwareMlKem(
     var sensitive = CK_BBOOL(CK_FALSE)
     var extractable = CK_BBOOL(CK_TRUE)
     var keyType = CK_KEY_TYPE(CKK_GENERIC_SECRET)
-    var valueLength = CK_ULONG(softwareMlKemSecretLength)
+    var valueLength = CK_ULONG(postQuantumSecretLength)
     var ciphertextLength = CK_ULONG()
     let encapsulateStart = ProcessInfo.processInfo.systemUptime
     var result = C_EncapsulateKey(
@@ -990,7 +791,7 @@ private func exerciseSoftwareMlKem(
         )
     }
 
-    let first = softwareAttributeValue(
+    let first = attributeValue(
         session: session,
         object: encapsulatedSecret,
         type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
@@ -1004,7 +805,7 @@ private func exerciseSoftwareMlKem(
             decapsulateMilliseconds
         )
     }
-    let second = softwareAttributeValue(
+    let second = attributeValue(
         session: session,
         object: decapsulatedSecret,
         type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
@@ -1018,7 +819,7 @@ private func exerciseSoftwareMlKem(
             decapsulateMilliseconds
         )
     }
-    guard firstValue.count == softwareMlKemSecretLength, firstValue == secondValue else {
+    guard firstValue.count == postQuantumSecretLength, firstValue == secondValue else {
         return (
             CK_RV(CKR_GENERAL_ERROR),
             "ML-KEM shared-secret comparison",
@@ -1036,194 +837,254 @@ private func exerciseSoftwareMlKem(
     )
 }
 
-private func softwareObjectInventory(
+private struct PostQuantumSupport {
+    let lines: [String]
+    let mlDsa: Bool
+    let mlKem: Bool
+
+    var any: Bool { mlDsa || mlKem }
+}
+
+private struct PostQuantumPair {
+    let result: CK_RV
+    let publicKey: CK_OBJECT_HANDLE
+    let privateKey: CK_OBJECT_HANDLE
+    let status: String
+}
+
+private func mechanismList(
+    slot: CK_SLOT_ID
+) -> (result: CK_RV, mechanisms: [CK_MECHANISM_TYPE]) {
+    var count = CK_ULONG()
+    var result = C_GetMechanismList(slot, nil, &count)
+    guard result == CKR_OK else {
+        return (result, [])
+    }
+    var mechanisms = [CK_MECHANISM_TYPE](repeating: 0, count: Int(count))
+    result = mechanisms.withUnsafeMutableBufferPointer { buffer in
+        C_GetMechanismList(slot, buffer.baseAddress, &count)
+    }
+    while result == CKR_BUFFER_TOO_SMALL && Int(count) > mechanisms.count {
+        mechanisms = [CK_MECHANISM_TYPE](repeating: 0, count: Int(count))
+        result = mechanisms.withUnsafeMutableBufferPointer { buffer in
+            C_GetMechanismList(slot, buffer.baseAddress, &count)
+        }
+    }
+    guard result == CKR_OK else {
+        return (result, [])
+    }
+    return (CK_RV(CKR_OK), Array(mechanisms.prefix(Int(count))))
+}
+
+private func mechanismRequirement(
     slot: CK_SLOT_ID,
-    tokenInfo: CK_TOKEN_INFO
-) -> ObjectInventory {
-    var lines = ["", "Persistent software token \(softwareTokenName.debugDescription):"]
-    let tokenInitialized = tokenInfo.flags & CK_FLAGS(CKF_TOKEN_INITIALIZED) != 0
-    let userPINInitialized = tokenInfo.flags & CK_FLAGS(CKF_USER_PIN_INITIALIZED) != 0
-    if !tokenInitialized {
-        let initialize = initializeSoftwareToken(slot: slot)
-        guard initialize == CKR_OK else {
-            lines.append("  C_InitToken failed: \(returnValueDescription(initialize))")
-            return ObjectInventory(lines: lines)
-        }
-        lines.append("  initialized persistent token")
+    name: String,
+    type: CK_MECHANISM_TYPE,
+    advertised: Bool,
+    requiredFlags: CK_FLAGS
+) -> (supported: Bool, line: String) {
+    guard advertised else {
+        return (false, "  \(name): not advertised")
     }
-
-    var session = CK_SESSION_HANDLE()
-    let open = C_OpenSession(
-        slot,
-        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
-        nil,
-        nil,
-        &session
+    var information = CK_MECHANISM_INFO()
+    let result = C_GetMechanismInfo(slot, type, &information)
+    guard result == CKR_OK else {
+        return (
+            false,
+            "  \(name): advertised, but C_GetMechanismInfo failed: \(returnValueDescription(result))"
+        )
+    }
+    let missing = requiredFlags & ~information.flags
+    let hardware = information.flags & CK_FLAGS(CKF_HW) != 0
+    let flags = String(format: "0x%llX", UInt64(information.flags))
+    let suffix = missing == 0
+        ? "advertised, required flags present"
+        : String(format: "advertised, missing flags 0x%llX", UInt64(missing))
+    return (
+        missing == 0,
+        "  \(name): flags=\(flags), HW=\(hardware), key range \(information.ulMinKeySize)...\(information.ulMaxKeySize), \(suffix)"
     )
-    guard open == CKR_OK else {
-        lines.append("  C_OpenSession failed: \(returnValueDescription(open))")
-        return ObjectInventory(lines: lines)
+}
+
+private func postQuantumSupport(slot: CK_SLOT_ID) -> PostQuantumSupport {
+    let listed = mechanismList(slot: slot)
+    guard listed.result == CKR_OK else {
+        return PostQuantumSupport(
+            lines: [
+                "",
+                "PQC mechanism report:",
+                "  C_GetMechanismList failed: \(returnValueDescription(listed.result))",
+            ],
+            mlDsa: false,
+            mlKem: false
+        )
+    }
+    let mechanisms = Set(listed.mechanisms)
+    let dsaGeneration = mechanismRequirement(
+        slot: slot,
+        name: "CKM_ML_DSA_KEY_PAIR_GEN",
+        type: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
+        advertised: mechanisms.contains(CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN)),
+        requiredFlags: CK_FLAGS(CKF_GENERATE_KEY_PAIR)
+    )
+    let dsa = mechanismRequirement(
+        slot: slot,
+        name: "CKM_ML_DSA",
+        type: CK_MECHANISM_TYPE(CKM_ML_DSA),
+        advertised: mechanisms.contains(CK_MECHANISM_TYPE(CKM_ML_DSA)),
+        requiredFlags: CK_FLAGS(CKF_SIGN) | CK_FLAGS(CKF_VERIFY)
+    )
+    let kemGeneration = mechanismRequirement(
+        slot: slot,
+        name: "CKM_ML_KEM_KEY_PAIR_GEN",
+        type: CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN),
+        advertised: mechanisms.contains(CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN)),
+        requiredFlags: CK_FLAGS(CKF_GENERATE_KEY_PAIR)
+    )
+    let kem = mechanismRequirement(
+        slot: slot,
+        name: "CKM_ML_KEM",
+        type: CK_MECHANISM_TYPE(CKM_ML_KEM),
+        advertised: mechanisms.contains(CK_MECHANISM_TYPE(CKM_ML_KEM)),
+        requiredFlags: CK_FLAGS(CKF_ENCAPSULATE) | CK_FLAGS(CKF_DECAPSULATE)
+    )
+    return PostQuantumSupport(
+        lines: [
+            "",
+            "PQC mechanism report:",
+            dsaGeneration.line,
+            dsa.line,
+            kemGeneration.line,
+            kem.line,
+        ],
+        mlDsa: dsaGeneration.supported && dsa.supported,
+        mlKem: kemGeneration.supported && kem.supported
+    )
+}
+
+private func postQuantumIdentifiers(
+    tokenLabel: String
+) -> (mlDsa: [UInt8], mlKem: [UInt8]) {
+    if tokenLabel.hasPrefix("PIV #") {
+        return ([0x82], [0x83])
+    }
+    if tokenLabel.hasPrefix("YubiHSM #") {
+        return ([0x7e, 0x20], [0x7e, 0x21])
+    }
+    return (
+        Array("iphone-smoke-ml-dsa-87".utf8),
+        Array("iphone-smoke-ml-kem-1024".utf8)
+    )
+}
+
+private func resolvePostQuantumPair(
+    session: CK_SESSION_HANDLE,
+    keyType: CK_KEY_TYPE,
+    identifier: [UInt8],
+    mechanismType: CK_MECHANISM_TYPE,
+    parameterSet: CK_ULONG,
+    label: String,
+    publicUsageAttribute: CK_ATTRIBUTE_TYPE,
+    privateUsageAttribute: CK_ATTRIBUTE_TYPE
+) -> PostQuantumPair {
+    let foundPublic = findKey(
+        session: session,
+        objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
+        keyType: keyType,
+        identifier: identifier
+    )
+    guard foundPublic.result == CKR_OK else {
+        return PostQuantumPair(
+            result: foundPublic.result,
+            publicKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            privateKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            status: "public-key search failed"
+        )
+    }
+    let foundPrivate = findKey(
+        session: session,
+        objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+        keyType: keyType,
+        identifier: identifier
+    )
+    guard foundPrivate.result == CKR_OK else {
+        return PostQuantumPair(
+            result: foundPrivate.result,
+            publicKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            privateKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            status: "private-key search failed"
+        )
+    }
+    if let publicKey = foundPublic.object, let privateKey = foundPrivate.object {
+        return PostQuantumPair(
+            result: CK_RV(CKR_OK),
+            publicKey: publicKey,
+            privateKey: privateKey,
+            status: "keypair already present"
+        )
+    }
+    let cleared = deleteObjects(session: session, identifier: identifier)
+    guard cleared.result == CKR_OK else {
+        return PostQuantumPair(
+            result: cleared.result,
+            publicKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            privateKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
+            status: "failed to clear reserved identifier"
+        )
     }
 
-    var failure: String?
-    if !tokenInitialized || !userPINInitialized {
-        let soLogin = login(
-            session: session,
-            userType: CK_USER_TYPE(CKU_SO),
-            pin: softwareTokenPIN
-        )
-        lines.append("  C_Login(CKU_SO) => \(returnValueDescription(soLogin))")
-        if soLogin != CKR_OK {
-            failure = "software-token SO login failed"
-        } else {
-            let initializePIN = initializeSoftwareUserPIN(session: session)
-            if initializePIN == CKR_OK {
-                lines.append("  initialized user PIN")
-            } else {
-                failure = "C_InitPIN failed: \(returnValueDescription(initializePIN))"
-            }
-            let logout = C_Logout(session)
-            if logout != CKR_OK, failure == nil {
-                failure = "C_Logout(CKU_SO) failed: \(returnValueDescription(logout))"
-            }
-        }
-    }
+    let started = ProcessInfo.processInfo.systemUptime
+    let generated = generatePostQuantumKeyPair(
+        session: session,
+        mechanismType: mechanismType,
+        parameterSet: parameterSet,
+        label: label,
+        identifier: identifier,
+        publicUsageAttribute: publicUsageAttribute,
+        privateUsageAttribute: privateUsageAttribute
+    )
+    let milliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
+    return PostQuantumPair(
+        result: generated.result,
+        publicKey: generated.publicKey,
+        privateKey: generated.privateKey,
+        status: generated.result == CKR_OK
+            ? (cleared.count == 0
+                ? String(format: "generated in %.3f ms", milliseconds)
+                : String(
+                    format: "replaced %d object(s), generated in %.3f ms",
+                    cleared.count,
+                    milliseconds
+                ))
+            : "C_GenerateKeyPair failed"
+    )
+}
 
-    var userLoggedIn = false
-    if failure == nil {
-        let userLogin = login(
-            session: session,
-            userType: CK_USER_TYPE(CKU_USER),
-            pin: softwareTokenPIN
-        )
-        lines.append("  C_Login(CKU_USER) => \(returnValueDescription(userLogin))")
-        if userLogin == CKR_OK {
-            userLoggedIn = true
-        } else {
-            failure = "software-token user login failed"
-        }
-    }
+private func exercisePostQuantumMechanisms(
+    session: CK_SESSION_HANDLE,
+    tokenLabel: String,
+    support: PostQuantumSupport
+) -> [String] {
+    var lines = ["", "PQC functional smoke test:"]
+    let identifiers = postQuantumIdentifiers(tokenLabel: tokenLabel)
 
-    if failure == nil {
-        let foundPublic = findSoftwareKey(
+    if support.mlDsa {
+        let pair = resolvePostQuantumPair(
             session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
-            keyType: CK_KEY_TYPE(CKK_EC_MONTGOMERY),
-            identifier: softwareX25519ID
-        )
-        let foundPrivate = findSoftwareKey(
-            session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
-            keyType: CK_KEY_TYPE(CKK_EC_MONTGOMERY),
-            identifier: softwareX25519ID
-        )
-        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        if foundPublic.result != CKR_OK {
-            failure = "X25519 public-key search failed: \(returnValueDescription(foundPublic.result))"
-        } else if foundPrivate.result != CKR_OK {
-            failure = "X25519 private-key search failed: \(returnValueDescription(foundPrivate.result))"
-        } else if foundPublic.object != nil, foundPrivate.object != nil {
-            lines.append("  X25519 keypair already present")
-        } else if foundPublic.object != nil || foundPrivate.object != nil {
-            failure = "X25519 keypair is incomplete"
-        } else {
-            let generationStart = ProcessInfo.processInfo.systemUptime
-            let generated = generateSoftwareX25519KeyPair(session: session)
-            let generationMilliseconds =
-                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
-            if generated.result == CKR_OK {
-                publicKey = generated.publicKey
-                privateKey = generated.privateKey
-                lines.append(
-                    String(
-                        format: "  generated X25519 keypair in %.3f ms: public %llu, private %llu",
-                        generationMilliseconds,
-                        UInt64(generated.publicKey),
-                        UInt64(generated.privateKey)
-                    )
-                )
-            } else {
-                failure = "C_GenerateKeyPair(X25519) failed: \(returnValueDescription(generated.result))"
-            }
-        }
-
-        if failure == nil {
-            let exercised = exerciseSoftwareX25519(
-                session: session,
-                publicKey: publicKey,
-                privateKey: privateKey
-            )
-            if exercised.result == CKR_OK {
-                lines.append(
-                    String(
-                        format: "  X25519 self-agreement %.3f ms (32-byte shared secret)",
-                        exercised.deriveMilliseconds
-                    )
-                )
-            } else {
-                failure = "\(exercised.operation)(X25519) failed: \(returnValueDescription(exercised.result))"
-            }
-        }
-    }
-
-    if failure == nil {
-        let foundPublic = findSoftwareKey(
-            session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
             keyType: CK_KEY_TYPE(CKK_ML_DSA),
-            identifier: softwareMlDsaID
+            identifier: identifiers.mlDsa,
+            mechanismType: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
+            parameterSet: CK_ULONG(CKP_ML_DSA_87),
+            label: postQuantumMlDsaLabel,
+            publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_VERIFY),
+            privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_SIGN)
         )
-        let foundPrivate = findSoftwareKey(
-            session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
-            keyType: CK_KEY_TYPE(CKK_ML_DSA),
-            identifier: softwareMlDsaID
-        )
-        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        if foundPublic.result != CKR_OK {
-            failure = "ML-DSA-87 public-key search failed: \(returnValueDescription(foundPublic.result))"
-        } else if foundPrivate.result != CKR_OK {
-            failure = "ML-DSA-87 private-key search failed: \(returnValueDescription(foundPrivate.result))"
-        } else if foundPublic.object != nil, foundPrivate.object != nil {
-            lines.append("  ML-DSA-87 keypair already present")
-        } else if foundPublic.object != nil || foundPrivate.object != nil {
-            failure = "ML-DSA-87 keypair is incomplete"
-        } else {
-            let generationStart = ProcessInfo.processInfo.systemUptime
-            let generated = generateSoftwarePostQuantumKeyPair(
+        if pair.result == CKR_OK {
+            lines.append("  ML-DSA-87 \(pair.status)")
+            let exercised = exerciseMlDsa(
                 session: session,
-                mechanismType: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
-                parameterSet: CK_ULONG(CKP_ML_DSA_87),
-                label: softwareMlDsaLabel,
-                identifier: softwareMlDsaID,
-                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_VERIFY),
-                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_SIGN)
-            )
-            let generationMilliseconds =
-                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
-            if generated.result == CKR_OK {
-                publicKey = generated.publicKey
-                privateKey = generated.privateKey
-                lines.append(
-                    String(
-                        format: "  generated ML-DSA-87 keypair in %.3f ms: public %llu, private %llu",
-                        generationMilliseconds,
-                        UInt64(generated.publicKey),
-                        UInt64(generated.privateKey)
-                    )
-                )
-            } else {
-                failure = "C_GenerateKeyPair(ML-DSA-87) failed: \(returnValueDescription(generated.result))"
-            }
-        }
-
-        if failure == nil {
-            let exercised = exerciseSoftwareMlDsa(
-                session: session,
-                publicKey: publicKey,
-                privateKey: privateKey
+                publicKey: pair.publicKey,
+                privateKey: pair.privateKey
             )
             if exercised.result == CKR_OK {
                 lines.append(
@@ -1235,68 +1096,36 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "\(exercised.operation)(ML-DSA-87) failed: \(returnValueDescription(exercised.result))"
+                lines.append(
+                    "  advertised ML-DSA failed at \(exercised.operation): \(returnValueDescription(exercised.result))"
+                )
             }
+        } else {
+            lines.append(
+                "  advertised ML-DSA failed: \(pair.status): \(returnValueDescription(pair.result))"
+            )
         }
+    } else {
+        lines.append("  ML-DSA functional test skipped: required mechanism flags not advertised")
     }
 
-    if failure == nil {
-        let foundPublic = findSoftwareKey(
+    if support.mlKem {
+        let pair = resolvePostQuantumPair(
             session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
             keyType: CK_KEY_TYPE(CKK_ML_KEM),
-            identifier: softwareMlKemID
+            identifier: identifiers.mlKem,
+            mechanismType: CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN),
+            parameterSet: CK_ULONG(CKP_ML_KEM_1024),
+            label: postQuantumMlKemLabel,
+            publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
+            privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
         )
-        let foundPrivate = findSoftwareKey(
-            session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
-            keyType: CK_KEY_TYPE(CKK_ML_KEM),
-            identifier: softwareMlKemID
-        )
-        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
-        if foundPublic.result != CKR_OK {
-            failure = "ML-KEM-1024 public-key search failed: \(returnValueDescription(foundPublic.result))"
-        } else if foundPrivate.result != CKR_OK {
-            failure = "ML-KEM-1024 private-key search failed: \(returnValueDescription(foundPrivate.result))"
-        } else if foundPublic.object != nil, foundPrivate.object != nil {
-            lines.append("  ML-KEM-1024 keypair already present")
-        } else if foundPublic.object != nil || foundPrivate.object != nil {
-            failure = "ML-KEM-1024 keypair is incomplete"
-        } else {
-            let generationStart = ProcessInfo.processInfo.systemUptime
-            let generated = generateSoftwarePostQuantumKeyPair(
+        if pair.result == CKR_OK {
+            lines.append("  ML-KEM-1024 \(pair.status)")
+            let exercised = exerciseMlKem(
                 session: session,
-                mechanismType: CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN),
-                parameterSet: CK_ULONG(CKP_ML_KEM_1024),
-                label: softwareMlKemLabel,
-                identifier: softwareMlKemID,
-                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
-                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
-            )
-            let generationMilliseconds =
-                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
-            if generated.result == CKR_OK {
-                publicKey = generated.publicKey
-                privateKey = generated.privateKey
-                lines.append(
-                    String(
-                        format: "  generated ML-KEM-1024 keypair in %.3f ms: public %llu, private %llu",
-                        generationMilliseconds,
-                        UInt64(generated.publicKey),
-                        UInt64(generated.privateKey)
-                    )
-                )
-            } else {
-                failure = "C_GenerateKeyPair(ML-KEM-1024) failed: \(returnValueDescription(generated.result))"
-            }
-        }
-
-        if failure == nil {
-            let exercised = exerciseSoftwareMlKem(
-                session: session,
-                publicKey: publicKey,
-                privateKey: privateKey
+                publicKey: pair.publicKey,
+                privateKey: pair.privateKey
             )
             if exercised.result == CKR_OK {
                 lines.append(
@@ -1308,33 +1137,52 @@ private func softwareObjectInventory(
                     )
                 )
             } else {
-                failure = "\(exercised.operation)(ML-KEM-1024) failed: \(returnValueDescription(exercised.result))"
+                lines.append(
+                    "  advertised ML-KEM failed at \(exercised.operation): \(returnValueDescription(exercised.result))"
+                )
             }
+        } else {
+            lines.append(
+                "  advertised ML-KEM failed: \(pair.status): \(returnValueDescription(pair.result))"
+            )
         }
-    }
-
-    var inventory = if let failure {
-        ObjectInventory(
-            lines: ["", "Objects: skipped after \(failure)"]
-        )
     } else {
-        objectInventory(session: session, title: "Objects (authenticated software session)")
+        lines.append("  ML-KEM functional test skipped: required mechanism flags not advertised")
     }
-    if let failure {
-        lines.append("  \(failure)")
+    return lines
+}
+
+private func unauthenticatedPostQuantumSmoke(
+    slot: CK_SLOT_ID,
+    tokenLabel: String,
+    support: PostQuantumSupport
+) -> [String] {
+    guard support.any else { return [] }
+    var session = CK_SESSION_HANDLE()
+    let open = C_OpenSession(
+        slot,
+        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+        nil,
+        nil,
+        &session
+    )
+    guard open == CKR_OK else {
+        return [
+            "",
+            "PQC functional smoke test:",
+            "  C_OpenSession(RW) failed: \(returnValueDescription(open))",
+        ]
     }
-    if userLoggedIn {
-        let logout = C_Logout(session)
-        if logout != CKR_OK {
-            inventory.lines.append("  C_Logout failed: \(returnValueDescription(logout))")
-        }
-    }
+    var lines = exercisePostQuantumMechanisms(
+        session: session,
+        tokenLabel: tokenLabel,
+        support: support
+    )
     let close = C_CloseSession(session)
     if close != CKR_OK {
-        inventory.lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
+        lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
     }
-    inventory.lines.insert(contentsOf: lines, at: 0)
-    return inventory
+    return lines
 }
 
 private func publicObjectInventory(
@@ -1372,7 +1220,7 @@ private func yubiHsmLogin(
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
         slot,
-        CK_FLAGS(CKF_SERIAL_SESSION),
+        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
         nil,
         nil,
         &session
@@ -1404,27 +1252,6 @@ private func yubiHsmLogin(
         result: loginResult,
         credential: authenticatedCredentialDescription(session)
     )
-}
-
-private func authenticatedObjectInventory(
-    login: YubiHsmLogin
-) -> [String] {
-    let usernameValue = "pkcs11:"
-    var lines = [""]
-    if let session = login.session {
-        lines.append(
-            "C_LoginUser(CKU_USER, \(usernameValue)) => \(returnValueDescription(login.result)) using \(login.credential ?? "<unknown>")"
-        )
-        lines.append(contentsOf: objectInventory(
-            session: session,
-            title: "Objects (authenticated session)"
-        ).lines)
-    } else {
-        lines.append(
-            "C_LoginUser(CKU_USER, \(usernameValue)) => \(returnValueDescription(login.result))"
-        )
-    }
-    return lines
 }
 
 private func loginSourceSlot(_ slot: CK_SLOT_ID) -> SourceLogin {
@@ -1679,20 +1506,14 @@ private final class ModuleInspector {
             }
             let description = paddedString(slotInfo.slotDescription)
             let tokenLabel = paddedString(tokenInfo.label)
-            let tokenModel = paddedString(tokenInfo.model)
             let serial = paddedString(tokenInfo.serialNumber)
-            let managesSoftwareToken = tokenModel == softwareTokenModel
-                && tokenLabel == softwareTokenName
-            let objects = managesSoftwareToken
-                ? softwareObjectInventory(slot: slot, tokenInfo: tokenInfo)
-                : publicObjectInventory(slot: slot)
             slotInventories.append(SlotInventory(
                 slot: slot,
                 description: description,
                 tokenLabel: tokenLabel,
                 serial: serial,
                 isYubiHsm: tokenLabel.hasPrefix("YubiHSM #"),
-                objects: objects
+                objects: publicObjectInventory(slot: slot)
             ))
         }
 
@@ -1719,27 +1540,70 @@ private final class ModuleInspector {
         // Successful source sessions remain open for later YubiHSM logins.
         for inventory in slotInventories where !inventory.isYubiHsm {
             appendSlot(inventory)
+            let support = postQuantumSupport(slot: inventory.slot)
+            lines.append(contentsOf: support.lines)
+            var authenticatedSession: CK_SESSION_HANDLE?
             if inventory.tokenLabel == "Secure Enclave" {
                 let source = loginSourceSlot(inventory.slot)
                 lines.append("")
                 lines.append("C_Login(CKU_USER) => \(returnValueDescription(source.result))")
                 if let authorization = source.authorization {
                     authorizedSessions.append(authorization)
+                    authenticatedSession = authorization.session
                     lines.append(contentsOf: objectInventory(
                         session: authorization.session,
                         title: "Objects (authenticated session)"
                     ).lines)
                 }
             }
+            if support.any {
+                if let authenticatedSession {
+                    lines.append(contentsOf: exercisePostQuantumMechanisms(
+                        session: authenticatedSession,
+                        tokenLabel: inventory.tokenLabel,
+                        support: support
+                    ))
+                } else {
+                    lines.append(contentsOf: unauthenticatedPostQuantumSmoke(
+                        slot: inventory.slot,
+                        tokenLabel: inventory.tokenLabel,
+                        support: support
+                    ))
+                }
+            }
         }
 
         for inventory in yubiHsmLoginOrder {
             appendSlot(inventory)
+            let support = postQuantumSupport(slot: inventory.slot)
+            lines.append(contentsOf: support.lines)
             let login = yubiHsmLogin(slot: inventory.slot)
             if let session = login.session {
                 authorizedSessions.append(AuthorizedSession(session: session))
+                lines.append("")
+                lines.append(
+                    "C_LoginUser(CKU_USER, pkcs11:) => \(returnValueDescription(login.result)) using \(login.credential ?? "<unknown>")"
+                )
+                if support.any {
+                    lines.append(contentsOf: exercisePostQuantumMechanisms(
+                        session: session,
+                        tokenLabel: inventory.tokenLabel,
+                        support: support
+                    ))
+                }
+                lines.append(contentsOf: objectInventory(
+                    session: session,
+                    title: "Objects (authenticated session)"
+                ).lines)
+            } else {
+                lines.append("")
+                lines.append(
+                    "C_LoginUser(CKU_USER, pkcs11:) => \(returnValueDescription(login.result))"
+                )
+                if support.any {
+                    lines.append("  PQC functional test skipped because authentication failed")
+                }
             }
-            lines.append(contentsOf: authenticatedObjectInventory(login: login))
         }
 
         var cleanupLines = [String]()
