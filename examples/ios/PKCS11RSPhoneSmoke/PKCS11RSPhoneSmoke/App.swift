@@ -16,6 +16,23 @@ private let postQuantumMlDsaLabel = "iPhone smoke ML-DSA-87"
 private let postQuantumMlKemLabel = "iPhone smoke ML-KEM-1024"
 private let postQuantumMessageLength = 32
 private let postQuantumSecretLength = 32
+private let previewSignRegistrationLabel = "iPhone smoke previewSign registration"
+private let previewSignDerivedKeyLabel = "iPhone smoke previewSign ARKG-P256"
+private let previewSignRegistrationID = Array("iphone-smoke-preview-sign-registration".utf8)
+private let previewSignDerivedKeyID = Array("iphone-smoke-preview-sign-p256".utf8)
+private let previewSignDerivationContext = Array("pkcs11rs iPhone previewSign smoke".utf8)
+private let ckmPreviewSignKeyPairGen =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0001)
+private let ckmPreviewSignDerive =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0002)
+private let ckmPreviewSign =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0003)
+private let ckmProjectPublicKey =
+    CK_MECHANISM_TYPE(CKM_VENDOR_DEFINED) | CK_MECHANISM_TYPE(0x5053_0004)
+private let ckkPreviewSignRegistration =
+    CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x5053_0001)
+private let ckaPreviewSignRegistration =
+    CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5053_0001)
 private let ckkYubicoHsmAuthSymmetric =
     CK_KEY_TYPE(CKK_VENDOR_DEFINED) | CK_KEY_TYPE(0x59554200) | CK_KEY_TYPE(38)
 private let ckkYubicoHsmAuthAsymmetric =
@@ -630,6 +647,386 @@ private func attributeValue(
     return (result, value)
 }
 
+private func createPreviewSignRegistration(
+    session: CK_SESSION_HANDLE
+) -> (result: CK_RV, registration: [UInt8]?) {
+    var mechanism = CK_MECHANISM(
+        mechanism: ckmPreviewSignKeyPairGen,
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    var keyType = CK_KEY_TYPE(CKK_EC)
+    var token = CK_BBOOL(CK_TRUE)
+    var privateValue = CK_BBOOL(CK_TRUE)
+    var label = Array(previewSignRegistrationLabel.utf8)
+    var identifier = previewSignRegistrationID
+    var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    let result = withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+        withUnsafeMutablePointer(to: &token) { tokenPointer in
+            withUnsafeMutablePointer(to: &privateValue) { privatePointer in
+                label.withUnsafeMutableBytes { labelBuffer in
+                    identifier.withUnsafeMutableBytes { identifierBuffer in
+                        var publicAttributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 4)
+                        publicAttributes[0] = CK_ATTRIBUTE(
+                            type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE),
+                            pValue: UnsafeMutableRawPointer(keyTypePointer),
+                            ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
+                        )
+                        publicAttributes[1] = CK_ATTRIBUTE(
+                            type: CK_ATTRIBUTE_TYPE(CKA_TOKEN),
+                            pValue: UnsafeMutableRawPointer(tokenPointer),
+                            ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        )
+                        publicAttributes[2] = CK_ATTRIBUTE(
+                            type: CK_ATTRIBUTE_TYPE(CKA_LABEL),
+                            pValue: labelBuffer.baseAddress,
+                            ulValueLen: CK_ULONG(labelBuffer.count)
+                        )
+                        publicAttributes[3] = CK_ATTRIBUTE(
+                            type: CK_ATTRIBUTE_TYPE(CKA_ID),
+                            pValue: identifierBuffer.baseAddress,
+                            ulValueLen: CK_ULONG(identifierBuffer.count)
+                        )
+                        var privateAttributes = publicAttributes
+                        privateAttributes.append(CK_ATTRIBUTE(
+                            type: CK_ATTRIBUTE_TYPE(CKA_PRIVATE),
+                            pValue: UnsafeMutableRawPointer(privatePointer),
+                            ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        ))
+                        return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
+                            privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
+                                C_GenerateKeyPair(
+                                    session,
+                                    &mechanism,
+                                    publicBuffer.baseAddress,
+                                    CK_ULONG(publicBuffer.count),
+                                    privateBuffer.baseAddress,
+                                    CK_ULONG(privateBuffer.count),
+                                    &publicKey,
+                                    &privateKey
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    guard result == CKR_OK else { return (result, nil) }
+    let registration = attributeValue(
+        session: session,
+        object: privateKey,
+        type: ckaPreviewSignRegistration
+    )
+    return (registration.result, registration.value)
+}
+
+private func importPreviewSignRegistration(
+    session: CK_SESSION_HANDLE,
+    registration: [UInt8]
+) -> (result: CK_RV, key: CK_OBJECT_HANDLE) {
+    var objectClass = CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
+    var keyType = ckkPreviewSignRegistration
+    var token = CK_BBOOL(CK_TRUE)
+    var privateValue = CK_BBOOL(CK_TRUE)
+    var derive = CK_BBOOL(CK_TRUE)
+    var label = Array(previewSignRegistrationLabel.utf8)
+    var identifier = previewSignRegistrationID
+    var registration = registration
+    var key = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    let result = withUnsafeMutablePointer(to: &objectClass) { classPointer in
+        withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+            withUnsafeMutablePointer(to: &token) { tokenPointer in
+                withUnsafeMutablePointer(to: &privateValue) { privatePointer in
+                    withUnsafeMutablePointer(to: &derive) { derivePointer in
+                        label.withUnsafeMutableBytes { labelBuffer in
+                            identifier.withUnsafeMutableBytes { identifierBuffer in
+                                registration.withUnsafeMutableBytes { registrationBuffer in
+                                    var attributes = [
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_CLASS), pValue: UnsafeMutableRawPointer(classPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_OBJECT_CLASS>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE), pValue: UnsafeMutableRawPointer(keyTypePointer), ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_TOKEN), pValue: UnsafeMutableRawPointer(tokenPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_PRIVATE), pValue: UnsafeMutableRawPointer(privatePointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_DERIVE), pValue: UnsafeMutableRawPointer(derivePointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_LABEL), pValue: labelBuffer.baseAddress, ulValueLen: CK_ULONG(labelBuffer.count)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_ID), pValue: identifierBuffer.baseAddress, ulValueLen: CK_ULONG(identifierBuffer.count)),
+                                        CK_ATTRIBUTE(type: ckaPreviewSignRegistration, pValue: registrationBuffer.baseAddress, ulValueLen: CK_ULONG(registrationBuffer.count)),
+                                    ]
+                                    return attributes.withUnsafeMutableBufferPointer { buffer in
+                                        C_CreateObject(
+                                            session,
+                                            buffer.baseAddress,
+                                            CK_ULONG(buffer.count),
+                                            &key
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return (result, key)
+}
+
+private func derivePreviewSignKey(
+    session: CK_SESSION_HANDLE,
+    registrationKey: CK_OBJECT_HANDLE
+) -> (result: CK_RV, key: CK_OBJECT_HANDLE) {
+    var context = previewSignDerivationContext
+    var objectClass = CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
+    var keyType = CK_KEY_TYPE(CKK_EC)
+    var token = CK_BBOOL(CK_TRUE)
+    var privateValue = CK_BBOOL(CK_TRUE)
+    var sign = CK_BBOOL(CK_TRUE)
+    var label = Array(previewSignDerivedKeyLabel.utf8)
+    var identifier = previewSignDerivedKeyID
+    var key = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    let result = context.withUnsafeMutableBytes { contextBuffer in
+        var mechanism = CK_MECHANISM(
+            mechanism: ckmPreviewSignDerive,
+            pParameter: contextBuffer.baseAddress,
+            ulParameterLen: CK_ULONG(contextBuffer.count)
+        )
+        return withUnsafeMutablePointer(to: &objectClass) { classPointer in
+            withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+                withUnsafeMutablePointer(to: &token) { tokenPointer in
+                    withUnsafeMutablePointer(to: &privateValue) { privatePointer in
+                        withUnsafeMutablePointer(to: &sign) { signPointer in
+                            label.withUnsafeMutableBytes { labelBuffer in
+                                identifier.withUnsafeMutableBytes { identifierBuffer in
+                                    var attributes = [
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_CLASS), pValue: UnsafeMutableRawPointer(classPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_OBJECT_CLASS>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE), pValue: UnsafeMutableRawPointer(keyTypePointer), ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_TOKEN), pValue: UnsafeMutableRawPointer(tokenPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_PRIVATE), pValue: UnsafeMutableRawPointer(privatePointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_SIGN), pValue: UnsafeMutableRawPointer(signPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_LABEL), pValue: labelBuffer.baseAddress, ulValueLen: CK_ULONG(labelBuffer.count)),
+                                        CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_ID), pValue: identifierBuffer.baseAddress, ulValueLen: CK_ULONG(identifierBuffer.count)),
+                                    ]
+                                    return attributes.withUnsafeMutableBufferPointer { buffer in
+                                        C_DeriveKey(
+                                            session,
+                                            &mechanism,
+                                            registrationKey,
+                                            buffer.baseAddress,
+                                            CK_ULONG(buffer.count),
+                                            &key
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return (result, key)
+}
+
+private func resolvePreviewSignKey(
+    session: CK_SESSION_HANDLE
+) -> (result: CK_RV, key: CK_OBJECT_HANDLE, created: Bool, operation: String) {
+    let existing = findKey(
+        session: session,
+        objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+        keyType: CK_KEY_TYPE(CKK_EC),
+        identifier: previewSignDerivedKeyID
+    )
+    guard existing.result == CKR_OK else {
+        return (existing.result, CK_OBJECT_HANDLE(CK_INVALID_HANDLE), false, "find derived key")
+    }
+    if let key = existing.object {
+        return (CK_RV(CKR_OK), key, false, "reused persisted chain")
+    }
+
+    let existingRegistration = findKey(
+        session: session,
+        objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+        keyType: ckkPreviewSignRegistration,
+        identifier: previewSignRegistrationID
+    )
+    guard existingRegistration.result == CKR_OK else {
+        return (existingRegistration.result, CK_OBJECT_HANDLE(CK_INVALID_HANDLE), false, "find registration")
+    }
+    var registrationKey = existingRegistration.object
+    if registrationKey == nil {
+        let registration = createPreviewSignRegistration(session: session)
+        guard registration.result == CKR_OK, let value = registration.registration else {
+            return (registration.result, CK_OBJECT_HANDLE(CK_INVALID_HANDLE), false, "register credential")
+        }
+        let imported = importPreviewSignRegistration(session: session, registration: value)
+        guard imported.result == CKR_OK else {
+            return (imported.result, CK_OBJECT_HANDLE(CK_INVALID_HANDLE), false, "persist registration")
+        }
+        registrationKey = imported.key
+    }
+    let derived = derivePreviewSignKey(session: session, registrationKey: registrationKey!)
+    guard derived.result == CKR_OK else {
+        return (derived.result, CK_OBJECT_HANDLE(CK_INVALID_HANDLE), false, "derive P-256 key")
+    }
+    return (CK_RV(CKR_OK), derived.key, true, "created and persisted chain")
+}
+
+private func exercisePreviewSign(
+    session: CK_SESSION_HANDLE,
+    signingKey: CK_OBJECT_HANDLE
+) -> (result: CK_RV, operation: String, signatureLength: Int, milliseconds: Double) {
+    var project = CK_MECHANISM(
+        mechanism: ckmProjectPublicKey,
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    var token = CK_BBOOL(CK_FALSE)
+    var verify = CK_BBOOL(CK_TRUE)
+    var projectedKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var result = withUnsafeMutablePointer(to: &token) { tokenPointer in
+        withUnsafeMutablePointer(to: &verify) { verifyPointer in
+            var attributes = [
+                CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_TOKEN), pValue: UnsafeMutableRawPointer(tokenPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+                CK_ATTRIBUTE(type: CK_ATTRIBUTE_TYPE(CKA_VERIFY), pValue: UnsafeMutableRawPointer(verifyPointer), ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)),
+            ]
+            return attributes.withUnsafeMutableBufferPointer { buffer in
+                C_DeriveKey(
+                    session,
+                    &project,
+                    signingKey,
+                    buffer.baseAddress,
+                    CK_ULONG(buffer.count),
+                    &projectedKey
+                )
+            }
+        }
+    }
+    guard result == CKR_OK else { return (result, "project public key", 0, 0) }
+    defer { _ = C_DestroyObject(session, projectedKey) }
+
+    var digest = [UInt8](repeating: 0, count: 32)
+    result = digest.withUnsafeMutableBufferPointer { buffer in
+        C_GenerateRandom(session, buffer.baseAddress, CK_ULONG(buffer.count))
+    }
+    guard result == CKR_OK else { return (result, "C_GenerateRandom", 0, 0) }
+
+    var signMechanism = CK_MECHANISM(
+        mechanism: ckmPreviewSign,
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    let started = ProcessInfo.processInfo.systemUptime
+    result = C_SignInit(session, &signMechanism, signingKey)
+    guard result == CKR_OK else { return (result, "C_SignInit(previewSign)", 0, 0) }
+    var pin = Array("123456".utf8)
+    result = pin.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            CK_USER_TYPE(CKU_CONTEXT_SPECIFIC),
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+    guard result == CKR_OK else { return (result, "C_Login(CKU_CONTEXT_SPECIFIC)", 0, 0) }
+    var signatureLength = CK_ULONG()
+    result = digest.withUnsafeMutableBufferPointer { buffer in
+        C_Sign(session, buffer.baseAddress, CK_ULONG(buffer.count), nil, &signatureLength)
+    }
+    guard result == CKR_OK else { return (result, "C_Sign(size)", 0, 0) }
+    var signature = [UInt8](repeating: 0, count: Int(signatureLength))
+    result = digest.withUnsafeMutableBufferPointer { digestBuffer in
+        signature.withUnsafeMutableBufferPointer { signatureBuffer in
+            C_Sign(
+                session,
+                digestBuffer.baseAddress,
+                CK_ULONG(digestBuffer.count),
+                signatureBuffer.baseAddress,
+                &signatureLength
+            )
+        }
+    }
+    guard result == CKR_OK else { return (result, "C_Sign(previewSign)", 0, 0) }
+
+    var verifyMechanism = CK_MECHANISM(
+        mechanism: CK_MECHANISM_TYPE(CKM_ECDSA),
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    result = C_VerifyInit(session, &verifyMechanism, projectedKey)
+    guard result == CKR_OK else { return (result, "C_VerifyInit(ECDSA)", signature.count, 0) }
+    let signatureCount = signature.count
+    result = digest.withUnsafeMutableBufferPointer { digestBuffer in
+        signature.withUnsafeMutableBufferPointer { signatureBuffer in
+            C_Verify(
+                session,
+                digestBuffer.baseAddress,
+                CK_ULONG(digestBuffer.count),
+                signatureBuffer.baseAddress,
+                CK_ULONG(signatureCount)
+            )
+        }
+    }
+    let milliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
+    return (result, "C_Verify(ECDSA)", signature.count, milliseconds)
+}
+
+private func embeddedFidoPreviewSignSmoke(slot: CK_SLOT_ID) -> [String] {
+    var session = CK_SESSION_HANDLE(CK_INVALID_HANDLE)
+    let open = C_OpenSession(
+        slot,
+        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+        nil,
+        nil,
+        &session
+    )
+    guard open == CKR_OK else {
+        return ["", "FIDO previewSign ARKG-P256:", "  open failed: \(returnValueDescription(open))"]
+    }
+    defer { _ = C_CloseSession(session) }
+    var pin = Array("123456".utf8)
+    let login = pin.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            CK_USER_TYPE(CKU_USER),
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+    guard login == CKR_OK || login == CKR_USER_ALREADY_LOGGED_IN else {
+        return ["", "FIDO previewSign ARKG-P256:", "  user login failed: \(returnValueDescription(login))"]
+    }
+    defer { _ = C_Logout(session) }
+
+    let resolved = resolvePreviewSignKey(session: session)
+    guard resolved.result == CKR_OK else {
+        return [
+            "",
+            "FIDO previewSign ARKG-P256:",
+            "  \(resolved.operation) failed: \(returnValueDescription(resolved.result))",
+        ]
+    }
+    let exercised = exercisePreviewSign(session: session, signingKey: resolved.key)
+    guard exercised.result == CKR_OK else {
+        return [
+            "",
+            "FIDO previewSign ARKG-P256:",
+            "  \(resolved.operation)",
+            "  \(exercised.operation) failed: \(returnValueDescription(exercised.result))",
+        ]
+    }
+    return [
+        "",
+        "FIDO previewSign ARKG-P256:",
+        "  \(resolved.operation)",
+        String(
+            format: "  previewSign and ECDSA verification passed in %.3f ms (%d-byte signature)",
+            exercised.milliseconds,
+            exercised.signatureLength
+        ),
+    ]
+}
+
 private func exerciseMlKem(
     session: CK_SESSION_HANDLE,
     publicKey: CK_OBJECT_HANDLE,
@@ -975,7 +1372,10 @@ private func postQuantumIdentifiers(
     tokenLabel: String
 ) -> (mlDsa: [UInt8], mlKem: [UInt8]) {
     if tokenLabel.hasPrefix("PIV #") {
-        return ([0x82], [0x83])
+        // PKCS #11 exposes PIV key references as compact CKA_ID values. The
+        // first two retired key-management slots (raw PIV references 0x82 and
+        // 0x83) are therefore IDs 5 and 6 at this API boundary.
+        return ([5], [6])
     }
     if tokenLabel.hasPrefix("YubiHSM #") {
         return ([0x7e, 0x20], [0x7e, 0x21])
@@ -1632,6 +2032,11 @@ private final class ModuleInspector {
         // Successful source sessions remain open for later YubiHSM logins.
         for inventory in slotInventories where !inventory.isYubiHsm {
             appendSlot(inventory)
+            if inventory.description.contains("pkcs11rs embedded CCID reader")
+                && inventory.tokenLabel.hasPrefix("FIDO2 #")
+            {
+                lines.append(contentsOf: embeddedFidoPreviewSignSmoke(slot: inventory.slot))
+            }
             let support = postQuantumSupport(slot: inventory.slot)
             lines.append(contentsOf: support.lines)
             var authenticatedSession: CK_SESSION_HANDLE?

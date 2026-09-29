@@ -102,7 +102,16 @@ opt-in applets. The reader uses serial `1`, while its stable configuration ID
 `iphone-smoke` owns the applet-state directory below the application-support
 token-storage root. The same feature can host more readers or other implemented
 applets, but this profile is deliberately the smallest one that runs the local
-post-quantum tests of interest.
+post-quantum PIV test and the embedded FIDO2 previewSign lifecycle.
+
+On the embedded FIDO2 slot, the first refresh registers a previewSign
+credential, persists its registration object, derives and persists an
+ARKG-P256 signing-key wrapper, requests a previewSign assertion, projects the
+corresponding public key, and verifies the resulting signature with ordinary
+`CKM_ECDSA`. Later refreshes locate the persisted derived key and perform only
+the assertion, projection, and ECDSA verification steps. The report identifies
+whether the chain was created or reused and names the exact failing stage. The
+reserved registration and derived-key IDs belong to this smoke app.
 
 Every refresh queries all four post-quantum mechanisms on every token-present slot:
 `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_ML_KEM_KEY_PAIR_GEN`, and
@@ -127,8 +136,9 @@ checks destroy them explicitly, and closing the session cleans them up after an
 earlier failure.
 
 The test uses stable provider-appropriate identifiers so later refreshes reuse
-the generated pairs: PIV retired slots `0x82` and `0x83`, YubiHSM object IDs
-`0x7e20` and `0x7e21`, and descriptive byte-string IDs for other providers.
+the generated pairs: PIV `CKA_ID` values `5` and `6`, which map to raw retired
+slot references `0x82` and `0x83`; YubiHSM object IDs `0x7e20` and `0x7e21`;
+and descriptive byte-string IDs for other providers.
 PQC operations run after the authentication already available to the app.
 YubiHSMs use the authenticated wildcard-login session described below. The
 embedded PIV slot uses the factory management key to provision absent or
@@ -267,7 +277,8 @@ cargo xtask ios --release
 The iOS builder compiles pkcs11rs with `embedded-virtual-yubikey`; runtime JSON
 still decides whether any embedded reader exists. The smoke reader sets
 `persistent: true`, which is supported on iOS and other Unix-family targets, so
-PIV/FIDO state and provisioned PQC keys survive app relaunches. Applet
+PIV/FIDO state, provisioned PQC keys, and the previewSign registration and
+derived-key records survive app relaunches. Applet
 selection, logins, presence grants, and secure-channel sessions remain
 connection state and are recreated.
 

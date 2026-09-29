@@ -65,6 +65,20 @@ fn initialize_embedded() -> CK_RV {
     }))
 }
 
+fn initialize_embedded_piv() -> CK_RV {
+    super::initialize_with_configuration(serde_json::json!({
+        "version": 1,
+        "hardware": {"discovery": false},
+        "yubihsm": {"urls": []},
+        "embedded": {"readers": [{
+            "id": "piv-pqc",
+            "name": "Embedded CCID PIV PQC reader",
+            "serial": 1,
+            "applets": ["piv"]
+        }]}
+    }))
+}
+
 #[cfg(unix)]
 impl Drop for TestFidoStorage {
     fn drop(&mut self) {
@@ -118,6 +132,114 @@ fn read_attribute(
         CKR_OK as CK_RV
     );
     value
+}
+
+#[test]
+fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    assert_eq!(initialize_embedded_piv(), CKR_OK as CK_RV);
+
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    let mut slot = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut count),
+        CKR_OK as CK_RV
+    );
+
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut management_key = b"010203040506070801020304050607080102030405060708".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            management_key.as_mut_ptr(),
+            management_key.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    for (mechanism_type, parameter_set, id, public_usage, private_usage) in [
+        (
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKP_ML_DSA_87 as CK_ULONG,
+            5_u8,
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN as CK_ATTRIBUTE_TYPE,
+        ),
+        (
+            CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKP_ML_KEM_1024 as CK_ULONG,
+            6_u8,
+            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+        ),
+    ] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut public_usage_value = CK_TRUE as CK_BBOOL;
+        let mut private_usage_value = CK_TRUE as CK_BBOOL;
+        let mut parameter_set = parameter_set;
+        let mut id = [id];
+        let mut label = b"embedded PIV PQC smoke".to_vec();
+        let mut public_template = [
+            bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            ulong_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+            bool_attribute(public_usage, &mut public_usage_value),
+        ];
+        let mut private_template = [
+            bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bool_attribute(private_usage, &mut private_usage_value),
+        ];
+        let mut public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut public_key,
+                &mut private_key,
+            ),
+            CKR_OK as CK_RV,
+            "PQC key generation mechanism {mechanism_type:#x} failed"
+        );
+        assert_ne!(public_key, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        assert_ne!(private_key, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    }
+
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[cfg(unix)]

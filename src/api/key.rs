@@ -2638,7 +2638,12 @@ pub(crate) fn generate_piv_token_pair_in_slot<S: Slot + ?Sized>(
     public_template: &[CK_ATTRIBUTE],
     private_template: &[CK_ATTRIBUTE],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
-    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+    let (slot_id, flags, _) = ctx.session_details(slot, session_handle)?;
+    // PIV key generation is authorized by the security-officer management
+    // session. Treat either authenticated role as sufficient for the generic
+    // private-object template check; the PIV backend below still requires the
+    // management role specifically before sending the command.
+    let logged_in = ctx.is_slot_logged_in(slot, slot_id);
 
     let generation =
         piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;

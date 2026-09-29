@@ -452,7 +452,11 @@ names, and every returned string remains owned by the library for the lifetime
 of the process. Each refresh reports ML-DSA and ML-KEM advertisement and
 `CKF_HW` state on every present slot, then generates or reuses and exercises the
 corresponding persistent PQC keypairs wherever the required mechanisms are
-available.
+available. Its embedded FIDO2 slot also creates and persists a previewSign
+ARKG-P256 registration and derived-key chain on the first refresh; subsequent
+refreshes request a new authenticator signature and verify it through the
+projected public key and ordinary `CKM_ECDSA` without recreating the
+credential.
 
 The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
