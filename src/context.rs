@@ -1,4 +1,4 @@
-#[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+#[cfg(feature = "embedded-virtual-yubikey")]
 use crate::EmbeddedVirtualYubiKeyConnector;
 #[cfg(all(
     test,
@@ -47,8 +47,6 @@ use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
-#[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
-const EMBEDDED_VIRTUAL_YUBIKEY_SERIAL: &str = "EMBEDDED0001";
 
 #[derive(Clone, Debug)]
 pub(crate) struct TokenStorageConfig {
@@ -81,6 +79,14 @@ impl TokenStorageConfig {
         self.root.join(TOKEN_STORAGE_SCHEMA_DIRECTORY).join(format!(
             "software-name-{}",
             encode_path_component(name.as_bytes())
+        ))
+    }
+
+    #[cfg(feature = "embedded-virtual-yubikey")]
+    pub(crate) fn embedded_reader_root(&self, id: &str) -> PathBuf {
+        self.root.join(TOKEN_STORAGE_SCHEMA_DIRECTORY).join(format!(
+            "embedded-reader-id-{}",
+            encode_path_component(id.as_bytes())
         ))
     }
 
@@ -251,6 +257,8 @@ pub(crate) struct ModuleContext {
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     ccid_readers: Mutex<HashMap<CcidInventoryKey, CcidReaderInventoryEntry>>,
     ccid_provider: CcidProvider,
+    #[cfg(feature = "embedded-virtual-yubikey")]
+    embedded_ccid_readers: Vec<EmbeddedCcidReader>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     yubihsm_http_endpoints: Mutex<HashMap<usize, HttpConnectorEndpoint>>,
@@ -281,7 +289,15 @@ pub(crate) struct ModuleContext {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum CcidInventoryKey {
     Serial(PhysicalDeviceKey),
+    EmbeddedReader(String),
     TransientReader(String),
+}
+
+#[cfg(feature = "embedded-virtual-yubikey")]
+struct EmbeddedCcidReader {
+    id: String,
+    connector: SharedConnector,
+    reader_state: Arc<PcscReaderState>,
 }
 
 struct CcidReaderInventoryEntry {
@@ -1031,6 +1047,60 @@ impl ModuleContext {
         let yubihsm_public_discovery_config = None;
         let secure_channels = Arc::new(configuration.secure_channels);
         let auth_slots = Arc::new(crate::auth_slots::AuthSlots::default());
+        #[cfg(feature = "embedded-virtual-yubikey")]
+        let embedded_ccid_readers = configuration
+            .embedded_readers
+            .into_iter()
+            .map(|reader| {
+                let mut applets = virtual_yubikey_core::AppletConfiguration {
+                    issuer_security_domain: false,
+                    management: true,
+                    hsmauth: false,
+                    openpgp: false,
+                    piv: false,
+                    fido2: false,
+                };
+                for applet in reader.applets {
+                    match applet {
+                        CcidApplication::Piv => applets.piv = true,
+                        CcidApplication::OpenPgp => applets.openpgp = true,
+                        CcidApplication::HsmAuth => applets.hsmauth = true,
+                        CcidApplication::IssuerSecurityDomain => {
+                            applets.issuer_security_domain = true
+                        }
+                        CcidApplication::Fido2 => applets.fido2 = true,
+                    }
+                }
+                let persistent_root = if reader.persistent {
+                    Some(
+                        token_storage
+                            .as_ref()
+                            .ok_or(CKR_ARGUMENTS_BAD)?
+                            .embedded_reader_root(&reader.id),
+                    )
+                } else {
+                    None
+                };
+                let connector = Arc::new(EmbeddedVirtualYubiKeyConnector::configured(
+                    reader.name,
+                    reader.serial,
+                    applets,
+                    persistent_root,
+                )?);
+                let connector = connector as SharedConnector;
+                let reader_state = Arc::new(PcscReaderState::new(Arc::new(
+                    crate::device::DeviceContext::new(crate::device::DeviceIdentity::unknown(
+                        connector.manufacturer(),
+                        connector.product(),
+                    )),
+                )));
+                Ok(EmbeddedCcidReader {
+                    id: reader.id,
+                    connector,
+                    reader_state,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         let mut context = ModuleContext {
             logging: module_logging,
             hardware_discovery,
@@ -1039,6 +1109,8 @@ impl ModuleContext {
             software_discovery_pins,
             ccid_readers: Mutex::new(HashMap::new()),
             ccid_provider: CcidProvider::new(hardware_discovery),
+            #[cfg(feature = "embedded-virtual-yubikey")]
+            embedded_ccid_readers,
             yubihsm_urls,
             yubihsm_http_tls,
             yubihsm_http_endpoints: Mutex::new(HashMap::new()),
@@ -2076,6 +2148,13 @@ impl ModuleContext {
             provider
         ));
         let mut readers = self.ccid_provider.enumerate()?;
+        #[cfg(feature = "embedded-virtual-yubikey")]
+        readers.extend(self.embedded_ccid_readers.iter().map(|reader| CcidReader {
+            connector: reader.connector.clone(),
+            reader_state: reader.reader_state.clone(),
+            inventory_presence: None,
+            embedded_id: Some(reader.id.clone()),
+        }));
         #[cfg(target_os = "ios")]
         {
             let managed = self
@@ -2455,9 +2534,27 @@ impl ModuleContext {
                 return Ok(HashMap::new());
             }
         };
-        let mut readers = readers
-            .into_iter()
-            .map(|reader| (reader.connector.name(), reader))
+        let mut readers_by_name = HashMap::new();
+        for reader in readers {
+            let name = reader.connector.name();
+            if readers_by_name.insert(name.clone(), reader).is_some() {
+                log!(
+                    1,
+                    "CCID enumeration returned duplicate reader name {}",
+                    name
+                );
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+        }
+        let mut readers = readers_by_name;
+        let embedded_reader_names = readers
+            .iter()
+            .filter_map(|(name, reader)| {
+                reader
+                    .embedded_id
+                    .as_ref()
+                    .map(|id| (id.clone(), name.clone()))
+            })
             .collect::<HashMap<_, _>>();
         let mut enumerated_reader_names = readers.keys().cloned().collect::<Vec<_>>();
         enumerated_reader_names.sort();
@@ -2472,7 +2569,11 @@ impl ModuleContext {
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         let mut ccid_devices = HashMap::new();
         for (key, entry) in inventory.iter_mut() {
-            let Some(name) = entry.reader_name.clone() else {
+            let current_name = match key {
+                CcidInventoryKey::EmbeddedReader(id) => embedded_reader_names.get(id).cloned(),
+                _ => entry.reader_name.clone(),
+            };
+            let Some(name) = current_name else {
                 #[cfg(target_os = "ios")]
                 if entry.using_fallback_connector {
                     if let CcidInventoryKey::Serial(key) = key {
@@ -2577,6 +2678,7 @@ impl ModuleContext {
         }
 
         for (name, reader) in readers {
+            let embedded_id = reader.embedded_id.clone();
             let device = reader.reader_state.device.clone();
             let discovered_identity = (|| {
                 let _operation = device.lock_operation_with_message(
@@ -2586,13 +2688,22 @@ impl ModuleContext {
                 reader.connector.refresh()?;
                 YubiKeyClient.discover_for_inventory(reader.connector.as_ref(), |serial| {
                     !self.serial_is_visible(serial)
-                        || inventory.contains_key(&CcidInventoryKey::Serial(
-                            PhysicalDeviceKey::YubicoSerial(serial.to_owned()),
-                        ))
+                        || (embedded_id.is_none()
+                            && inventory.contains_key(&CcidInventoryKey::Serial(
+                                PhysicalDeviceKey::YubicoSerial(serial.to_owned()),
+                            )))
                 })
             })();
 
             let Ok((serial, device_info)) = discovered_identity else {
+                if embedded_id.is_some() {
+                    log!(
+                        1,
+                        "Embedded CCID reader {} did not expose its required management applet",
+                        name
+                    );
+                    continue;
+                }
                 if self.slot_serials.is_some() {
                     // A configured device serial cannot match an unidentified
                     // reader. Do not probe unrelated applets to guess one.
@@ -2633,8 +2744,11 @@ impl ModuleContext {
                 continue;
             };
 
-            let key = PhysicalDeviceKey::YubicoSerial(serial.clone());
-            let inventory_key = CcidInventoryKey::Serial(key.clone());
+            let physical_key = PhysicalDeviceKey::YubicoSerial(serial.clone());
+            let inventory_key = embedded_id
+                .clone()
+                .map(CcidInventoryKey::EmbeddedReader)
+                .unwrap_or_else(|| CcidInventoryKey::Serial(physical_key.clone()));
             if let Some(entry) = inventory.get_mut(&inventory_key) {
                 let Some(connector) = &entry.connector else {
                     continue;
@@ -2648,9 +2762,11 @@ impl ModuleContext {
                 {
                     entry.using_fallback_connector = false;
                 }
-                ccid_devices
-                    .entry(key)
-                    .or_insert_with(|| connector.reader_state().device.clone());
+                if embedded_id.is_none() {
+                    ccid_devices
+                        .entry(physical_key)
+                        .or_insert_with(|| connector.reader_state().device.clone());
+                }
                 continue;
             }
 
@@ -2684,9 +2800,11 @@ impl ModuleContext {
             })();
             match discovered {
                 Ok(slot_ids) if !slot_ids.is_empty() || excluded => {
-                    ccid_devices
-                        .entry(key)
-                        .or_insert_with(|| connector.reader_state().device.clone());
+                    if embedded_id.is_none() {
+                        ccid_devices
+                            .entry(physical_key)
+                            .or_insert_with(|| connector.reader_state().device.clone());
+                    }
                     inventory.insert(
                         inventory_key,
                         CcidReaderInventoryEntry {
@@ -2778,36 +2896,6 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         {
             return Ok(true);
-        }
-        #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
-        if self.serial_is_visible(EMBEDDED_VIRTUAL_YUBIKEY_SERIAL) {
-            let connector = Rc::new(EmbeddedVirtualYubiKeyConnector::process_device()?);
-            select_application(connector.as_ref(), &crate::ctap::FIDO2_AID)?;
-            let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
-            let device = Arc::new(crate::device::DeviceContext::new(
-                crate::device::DeviceIdentity {
-                    manufacturer: String::from("Yubico"),
-                    product: String::from("Embedded Virtual YubiKey FIDO2"),
-                    serial: String::from(EMBEDDED_VIRTUAL_YUBIKEY_SERIAL),
-                    hardware_version: Some((1, 0)),
-                    firmware_version: None,
-                },
-            ));
-            let mut slot = Box::new(Fido2Slot::new_with_device(
-                connector,
-                crate::ctap::FIDO2_AID.to_vec(),
-                device,
-            )) as Box<dyn Slot>;
-            slot.init_slot()?;
-            let token_objects = slot.token_objects(slot_id)?;
-            slot_contexts.insert_slot_contexts(
-                vec![(slot_id, slot, token_objects)],
-                self.handles.clone(),
-                self.pinentry.clone(),
-                self.trust_store.clone(),
-                self.token_storage.as_ref(),
-                self.fido_storage.as_ref(),
-            )?;
         }
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, CcidFidoRegistration> = HashMap::new();
         let ccid_devices = self.reconcile_ccid_readers(&mut slot_contexts, &mut ccid_fido_slots)?;
@@ -3912,7 +4000,16 @@ mod discovery_tests {
     #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
     #[test]
     fn embedded_virtual_yubikey_is_additive_to_software_slots() {
-        let configuration = ModuleConfiguration::private_software().unwrap();
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration
+            .embedded_readers
+            .push(crate::configuration::EmbeddedReaderConfiguration {
+                id: "test-reader".to_owned(),
+                name: "Embedded CCID test reader".to_owned(),
+                serial: 1,
+                persistent: false,
+                applets: vec![CcidApplication::Fido2],
+            });
         let context = ModuleContext::new_configured(configuration, false).unwrap();
         context.init().unwrap();
 
@@ -3930,6 +4027,15 @@ mod discovery_tests {
     #[test]
     fn embedded_virtual_yubikey_obeys_the_serial_allowlist() {
         let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration
+            .embedded_readers
+            .push(crate::configuration::EmbeddedReaderConfiguration {
+                id: "test-reader".to_owned(),
+                name: "Embedded CCID test reader".to_owned(),
+                serial: 1,
+                persistent: false,
+                applets: vec![CcidApplication::Fido2],
+            });
         configuration.slot_serials = Some(HashSet::from([SoftwareSlot::serial_for_ordinal(0)]));
         let context = ModuleContext::new_configured(configuration, false).unwrap();
         context.init().unwrap();
@@ -3940,6 +4046,77 @@ mod discovery_tests {
             slots.values().next().unwrap().lock().unwrap().slot.kind(),
             crate::SlotKind::Software
         );
+    }
+
+    #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+    #[test]
+    fn multiple_embedded_readers_are_independent_ccid_devices() {
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration.software_slots.clear();
+        for (id, name, serial) in [
+            ("first", "Embedded CCID first", 1),
+            ("second", "Embedded CCID second", 2),
+        ] {
+            configuration.embedded_readers.push(
+                crate::configuration::EmbeddedReaderConfiguration {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    serial,
+                    persistent: false,
+                    applets: vec![CcidApplication::Fido2],
+                },
+            );
+        }
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        context.init().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        assert_eq!(slots.len(), 2);
+        let mut serials = slots
+            .values()
+            .map(|slot| slot.lock().unwrap().slot.serial().to_owned())
+            .collect::<Vec<_>>();
+        serials.sort();
+        assert_eq!(serials, ["1", "2"]);
+    }
+
+    #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+    #[test]
+    fn embedded_reader_routes_every_opted_in_applet_through_ccid_discovery() {
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration.software_slots.clear();
+        configuration
+            .embedded_readers
+            .push(crate::configuration::EmbeddedReaderConfiguration {
+                id: "all-applets".to_owned(),
+                name: "Embedded CCID all applets".to_owned(),
+                serial: 1,
+                persistent: false,
+                applets: vec![
+                    CcidApplication::Piv,
+                    CcidApplication::OpenPgp,
+                    CcidApplication::HsmAuth,
+                    CcidApplication::IssuerSecurityDomain,
+                    CcidApplication::Fido2,
+                ],
+            });
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        context.init().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        let kinds = slots
+            .values()
+            .map(|slot| slot.lock().unwrap().slot.kind())
+            .collect::<Vec<_>>();
+        for application in [
+            CcidApplication::Piv,
+            CcidApplication::OpenPgp,
+            CcidApplication::HsmAuth,
+            CcidApplication::IssuerSecurityDomain,
+        ] {
+            assert!(kinds.contains(&crate::SlotKind::Ccid(application)));
+        }
+        assert!(kinds.contains(&crate::SlotKind::Fido2));
     }
 
     #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]

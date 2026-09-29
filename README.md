@@ -1230,20 +1230,18 @@ slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
-## Embedded virtual YubiKey integration fixture
+## Embedded virtual YubiKey readers
 
-The `embedded-virtual-yubikey` Cargo feature is a process-local integration
-fixture for the FIDO2 PKCS #11 path. It links `virtual-yubikey-core` into the
-module, selects the FIDO2 applet over its smart-card APDU interface, and exposes
-one deterministic `Fido2Slot` with serial `EMBEDDED0001`. It does not install a
-virtual reader or card. The core also implements PIV, YubiHSM Auth, Management,
-and Issuer Security Domain behavior for direct protocol tests, but those
-applets are not published as PKCS #11 slots by this feature.
+The `embedded-virtual-yubikey` Cargo feature links `virtual-yubikey-core` into
+the module as configurable in-process CCID readers. An embedded reader follows
+the normal CCID discovery path: pkcs11rs reads its Management identity, probes
+the configured application AIDs, and constructs the same PIV, FIDO2, OpenPGP,
+YubiHSM Auth, and Issuer Security Domain slots used for external readers.
+Management is always installed because it provides the device identity; every
+PKCS #11 applet is opt-in. Multiple readers may be configured for multi-device
+tests, while ordinary applications normally need only one.
 
-This is not the configurable, persistent deployment model used by embedded
-virtual YubiHSMs. Its supported purpose is CI and manual integration testing of
-FIDO behavior, including features unavailable on ordinary hardware. The CI
-fixture compiles without native USB, HID, or PC/SC support:
+The feature remains useful for CI without native USB, HID, or PC/SC support:
 
 ```sh
 cargo test --locked --no-default-features \
@@ -1258,11 +1256,31 @@ cargo build --release --no-default-features \
 pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 ```
 
-Building the feature without `--no-default-features` deliberately retains the
-ordinary native-hardware paths and makes the fixture additive. Runtime
-configuration can still disable discovery and the serial allowlist can include
-or exclude `EMBEDDED0001`, but neither form is a supported virtual-device
-deployment boundary.
+Building the feature without `--no-default-features` retains ordinary hardware
+discovery and makes embedded readers additive. No reader exists merely because
+the feature was compiled; `embedded.readers` is the runtime opt-in:
+
+```json
+{
+  "version": 1,
+  "storage": {"tokens": "/var/lib/pkcs11rs"},
+  "embedded": {"readers": [{
+    "id": "local-test",
+    "name": "pkcs11rs embedded CCID reader",
+    "serial": 1,
+    "persistent": true,
+    "applets": ["piv", "fido2"]
+  }]}
+}
+```
+
+`id`, current reader `name`, and `serial` must each be unique within the
+embedded-reader list. The ID is the stable internal identity; the reader name
+is the current CCID route and may be treated like a PC/SC name rather than a
+device identity. Supported applet names are `piv`, `fido2`, `openpgp`,
+`hsmauth`, and `issuer-sd`. The ordinary `ccid.applications` allowlist still
+controls which installed applets pkcs11rs publishes as slots, and
+`slots.serials` applies to the Management-reported serial.
 
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
@@ -1277,10 +1295,14 @@ under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
 always see first-party edits immediately; there is no dependency-source switch
 or generated override.
 
-The initial PIN is `123456`. Embedded device state, including PIN changes and
-created credentials, lasts for the client process and survives
-`C_Finalize`/`C_Initialize`; unloading the library or ending the process resets
-it. The device begins without resident credentials. Tests can create a
+The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
+each `C_Initialize` receives factory applet state. With `persistent: true`,
+`storage.tokens` is required on Unix-family targets and the complete durable
+PIV, FIDO2, YubiHSM Auth, and Issuer Security Domain state is restored from an
+ID-scoped, locked file and written by the shared batched atomic-persistence
+engine. Applet selection, login state, presence grants, and secure-channel
+sessions are never persisted.
+The device begins without resident credentials. Tests can create a
 deterministic resident credential through previewSign registration and then
 exercise credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification

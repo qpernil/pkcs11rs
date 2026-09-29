@@ -41,7 +41,7 @@ required-features = ["native-hardware"]
 [features]
 default = ["native-hardware"]
 abi-tests = ["dep:p256", "dep:virtual-yubihsm-core", "x509-cert/builder"]
-embedded-virtual-yubikey = ["dep:virtual-yubikey-core"]
+embedded-virtual-yubikey = ["dep:virtual-yubikey-core", "software-key-core/state-persistence"]
 native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

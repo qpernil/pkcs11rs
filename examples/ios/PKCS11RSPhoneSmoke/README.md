@@ -95,8 +95,16 @@ Auth. The PIV entry is therefore a CryptoTokenKit bootstrap requirement, not a
 requirement that the operation or card use PIV. A short PIV AID suitable for an
 APDU partial SELECT does not satisfy this requirement.
 
-The Swift app intentionally configures no software slot. Every refresh queries
-all four post-quantum mechanisms on every token-present slot:
+The Swift app intentionally configures no software slot. It configures one
+persistent in-process CCID reader named `pkcs11rs embedded CCID reader` with
+Management, PIV, and FIDO2; Management is implicit and PIV/FIDO2 are the two
+opt-in applets. The reader uses serial `1`, while its stable configuration ID
+`iphone-smoke` owns the applet-state directory below the application-support
+token-storage root. The same feature can host more readers or other implemented
+applets, but this profile is deliberately the smallest one that runs the local
+post-quantum tests of interest.
+
+Every refresh queries all four post-quantum mechanisms on every token-present slot:
 `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_ML_KEM_KEY_PAIR_GEN`, and
 `CKM_ML_KEM`. The report includes the complete mechanism flags, the decoded
 `CKF_HW` value, the key-size range, and whether the operation-specific flags
@@ -122,9 +130,14 @@ The test uses stable provider-appropriate identifiers so later refreshes reuse
 the generated pairs: PIV retired slots `0x82` and `0x83`, YubiHSM object IDs
 `0x7e20` and `0x7e21`, and descriptive byte-string IDs for other providers.
 PQC operations run after the authentication already available to the app.
-YubiHSMs use the authenticated wildcard-login session described below; other
-slots use an authenticated retained session when one exists and otherwise an
-ordinary read/write session. A provider that advertises a mechanism but rejects
+YubiHSMs use the authenticated wildcard-login session described below. The
+embedded PIV slot uses the factory management key to provision absent or
+incomplete pairs, logs out, then uses the factory user PIN `123456` for private
+operations. The embedded FIDO2 slot uses the same initial PIN. This automatic
+factory authentication is restricted to the configured embedded reader name;
+the app does not submit those credentials to physical USB or NFC readers.
+Other slots use an authenticated retained session when one exists and otherwise
+an ordinary read/write session. A provider that advertises a mechanism but rejects
 key generation or use because authentication, authorization, templates, or the
 implementation is incomplete is shown as an advertised-mechanism failure. This
 distinction is an intentional part of the smoke test.
@@ -250,6 +263,13 @@ Build the XCFramework before opening the Xcode project:
 ```sh
 cargo xtask ios --release
 ```
+
+The iOS builder compiles pkcs11rs with `embedded-virtual-yubikey`; runtime JSON
+still decides whether any embedded reader exists. The smoke reader sets
+`persistent: true`, which is supported on iOS and other Unix-family targets, so
+PIV/FIDO state and provisioned PQC keys survive app relaunches. Applet
+selection, logins, presence grants, and secure-channel sessions remain
+connection state and are recreated.
 
 The app defaults to `http://plankan-9.duckdns.org:12345`. Override that URL
 with the `PKCS11RS_YUBIHSM_URLS` launch environment variable or change
