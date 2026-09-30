@@ -337,10 +337,11 @@ pub(crate) trait Slot {
     ) -> Result<Option<crate::ctap::CredentialAuthorization>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    // Authentication lifecycle methods intentionally have no defaults. Every
+    // backend must state how role logout, role mirroring, and cleanup work.
     fn logout(&mut self) -> Result<(), Error>;
-    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
-        Ok(())
-    }
+    fn logout_role(&mut self, role: LoginRole) -> Result<(), Error>;
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error>;
     fn init_slot(&mut self) -> Result<(), Error>;
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error>;
@@ -349,7 +350,7 @@ pub(crate) trait Slot {
     }
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
-    fn clear_session(&mut self) {}
+    fn clear_session(&mut self);
     fn hsmauth_authenticate(
         &self,
         _credential: &TokenObject,
@@ -826,13 +827,11 @@ pub(crate) trait Slot {
     fn piv_delete_data(&mut self, _object_id: u32) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    fn login_is_active(&self) -> bool {
-        true
-    }
+    // These predicates intentionally have no defaults so a new backend cannot
+    // silently inherit the wrong token-wide or backend-session semantics.
+    fn login_is_active(&self) -> bool;
 
-    fn backend_session_is_active(&self) -> bool {
-        false
-    }
+    fn backend_session_is_active(&self) -> bool;
 
     fn ensure_backend_read_session(&self) -> Result<(), Error> {
         Ok(())

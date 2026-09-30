@@ -826,6 +826,76 @@ impl Client {
             .map(|_| ())
     }
 
+    pub(crate) fn deauthenticate_pin(&self, connector: &dyn Connector) -> Result<(), Error> {
+        let response = self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_VERIFY,
+                p1: 0xff,
+                p2: 0x80,
+                data: Vec::new(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        require_success(response.status)
+    }
+
+    pub(crate) fn deauthenticate_management_key(
+        &self,
+        connector: &dyn Connector,
+    ) -> Result<(), Error> {
+        let algorithm = self
+            .metadata_for_reference(connector, MANAGEMENT_KEY_REFERENCE)
+            .ok()
+            .and_then(|metadata| metadata.algorithm)
+            .and_then(ManagementAlgorithm::from_id)
+            .unwrap_or(ManagementAlgorithm::TripleDes);
+
+        // Begin an ordinary management-key mutual-authentication exchange and
+        // leave its challenge pending. PIV clears the existing management
+        // authorization before processing the next APDU unless that APDU is a
+        // GENERAL AUTHENTICATE continuation for reference 9B. No management
+        // key needs to be retained and no other applet needs to be selected.
+        let request = encode_tlv(0x7c, &encode_tlv(0x80, &[])?)?;
+        self.command(
+            connector,
+            INS_AUTHENTICATE,
+            algorithm as u8,
+            MANAGEMENT_KEY_REFERENCE,
+            &request,
+        )
+        .map(|_| ())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn management_authentication_probe_status(
+        &self,
+        connector: &dyn Connector,
+    ) -> Result<u16, Error> {
+        // Slot 0 is not a valid PIV key reference, so this syntactically valid
+        // GENERATE ASYMMETRIC command cannot change persistent state. YubiKey
+        // firmware checks management authorization before rejecting the slot,
+        // which lets hardware tests distinguish authenticated (bad slot) from
+        // unauthenticated (security status not satisfied).
+        let attributes = encode_tlv(0x80, &[Algorithm::EccP256 as u8])?;
+        let request = encode_tlv(0xac, &attributes)?;
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_GENERATE_ASYMMETRIC,
+                p1: 0,
+                p2: 0,
+                data: request,
+                le: Some(256),
+                extended: false,
+            },
+        )
+        .map(|response| response.status)
+    }
+
     pub(crate) fn change_pin(
         &self,
         connector: &dyn Connector,

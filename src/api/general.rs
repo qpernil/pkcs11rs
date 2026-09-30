@@ -103,7 +103,10 @@ ffi_entry_point! {
                                 if child.login_role.is_some() {
                                     let slot_id = child.slot_id;
                                     if child.logout_slot(slot_id).is_err() {
-                                        child.clear_login_state(slot_id);
+                                        child.clear_login_state(
+                                            slot_id,
+                                            "C_Finalize logout failed",
+                                        );
                                         logout_failed = true;
                                     }
                                 }

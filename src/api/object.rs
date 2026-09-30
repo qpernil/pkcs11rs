@@ -1888,6 +1888,9 @@ pub(crate) fn destroy_object(
                 return Ok(());
             }
             KeyMaterial::PivData { object_id, .. } => {
+                if ctx.login_role(slot_id) != Some(LoginRole::So) {
+                    return Err(CKR_USER_NOT_LOGGED_IN.into());
+                }
                 ctx._get_slot_mut(slot_id)?.piv_delete_data(*object_id)?;
                 ctx.refresh_slot_token_objects(slot_id)?;
                 return Ok(());
@@ -1895,6 +1898,9 @@ pub(crate) fn destroy_object(
             _ => None,
         };
         if let Some((delete_key, piv_slot)) = piv_action {
+            if ctx.login_role(slot_id) != Some(LoginRole::So) {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
             if delete_key {
                 ctx._get_slot_mut(slot_id)?.piv_delete_key(piv_slot)?;
             } else {
@@ -2369,6 +2375,9 @@ fn set_attribute_value(
             return Ok(());
         }
         if let KeyMaterial::PivPrivate { slot: from, .. } = stored_object.material {
+            if ctx.login_role(slot_id) != Some(LoginRole::So) {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
             let [attribute] = templ else {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             };
@@ -2644,6 +2653,9 @@ pub(crate) fn create_piv_object_in_slot<S: Slot + ?Sized>(
                 || class == CKO_DATA as CK_OBJECT_CLASS
         })
     {
+        if ctx.login_role(backend, slot_id) != Some(LoginRole::So) {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         let import = piv_import_parameters(templ)?;
         match import {
             PivImport::Private {

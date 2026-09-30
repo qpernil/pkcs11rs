@@ -2686,11 +2686,13 @@ pub(crate) fn generate_piv_token_pair_in_slot<S: Slot + ?Sized>(
     private_template: &[CK_ATTRIBUTE],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
     let (slot_id, flags, _) = ctx.session_details(slot, session_handle)?;
-    // PIV key generation is authorized by the security-officer management
-    // session. Treat either authenticated role as sufficient for the generic
-    // private-object template check; the PIV backend below still requires the
-    // management role specifically before sending the command.
-    let logged_in = ctx.is_slot_logged_in(slot, slot_id);
+    // The PKCS #11 role is owned by SlotState. The PIV backend deliberately
+    // retains no parallel authentication state; the applet itself enforces
+    // whether management-key authentication is still valid.
+    if ctx.login_role(slot, slot_id) != Some(LoginRole::So) {
+        return Err(CKR_USER_NOT_LOGGED_IN.into());
+    }
+    let logged_in = true;
 
     let generation =
         piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;

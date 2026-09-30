@@ -1050,6 +1050,10 @@ impl Slot for Fido2Slot {
         Ok(())
     }
 
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+
     fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
         self.endpoint.set_login_role(role)
     }
@@ -1285,6 +1289,10 @@ impl Slot for Fido2Slot {
             || self.authenticated.get(),
             |state| state != CcidLoginState::Public && self.authenticated.get(),
         )
+    }
+
+    fn backend_session_is_active(&self) -> bool {
+        false
     }
 
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {

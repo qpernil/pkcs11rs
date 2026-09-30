@@ -167,11 +167,37 @@ impl SecureChannelState {
             .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
     }
 
-    fn clear_selection(&mut self) {
+    fn clear_selection(&mut self, reason: &'static str) {
+        if let Some(selected) = self.selected_applet.as_ref() {
+            tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "ccid_connector",
+                reason,
+                application_aid = ?selected.application_aid,
+                old_login = ?selected.login,
+                new_login = ?Option::<CcidLoginState>::None,
+                "CCID selected-applet guard cleared"
+            );
+        }
         self.selected_applet = None;
     }
 
-    fn select(&mut self, application_aid: &[u8]) {
+    fn select(&mut self, application_aid: &[u8], reason: &'static str) {
+        let old_application_aid = self
+            .selected_applet
+            .as_ref()
+            .map(|selected| selected.application_aid.as_slice());
+        let old_login = self.selected_applet.as_ref().map(|selected| selected.login);
+        tracing::debug!(
+            target: "pkcs11rs::auth",
+            component = "ccid_connector",
+            reason,
+            ?old_application_aid,
+            ?old_login,
+            new_application_aid = ?application_aid,
+            new_login = ?CcidLoginState::Public,
+            "CCID selected applet changed"
+        );
         self.selected_applet = Some(SelectedApplet {
             application_aid: application_aid.to_vec(),
             session: None,
@@ -181,7 +207,14 @@ impl SecureChannelState {
 
     fn synchronize_connection(&mut self, connection_epoch: u64) {
         if self.connection_epoch != connection_epoch {
-            self.clear_selection();
+            tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "ccid_connector",
+                old_connection_epoch = self.connection_epoch,
+                new_connection_epoch = connection_epoch,
+                "CCID connection epoch changed"
+            );
+            self.clear_selection("connection epoch changed");
             self.validated_scp11_keys.clear();
             self.connection_epoch = connection_epoch;
         }
@@ -263,7 +296,7 @@ impl PcscReaderState {
     pub(crate) fn set_selected_application(&self, application_aid: &[u8]) -> Result<(), Error> {
         self.with_operation(|| {
             let mut state = self.secure_channel()?;
-            state.select(application_aid);
+            state.select(application_aid, "selected application set explicitly");
             Ok(())
         })
     }
@@ -710,13 +743,13 @@ impl PcscAppletConnector {
             .as_ref()
             .is_none_or(|selected| selected.application_aid != self.application_aid)
         {
-            state.clear_selection();
+            state.clear_selection("another applet required selection");
             select_application(self.base.as_ref(), &self.application_aid)?;
             // The first APDU may lazily acquire or replace the native card and
             // advance its connection generation. Record that generation before
             // publishing the selection created by this APDU.
             state.synchronize_connection(self.base.connection_epoch());
-            state.select(&self.application_aid);
+            state.select(&self.application_aid, "applet selected for operation");
         }
 
         if self.protocol.is_none() || !self.enabled() || state.selected_applet()?.session.is_some()
@@ -741,7 +774,7 @@ impl PcscAppletConnector {
         let established = match established {
             Ok(established) => established,
             Err(error) => {
-                state.clear_selection();
+                state.clear_selection("secure-channel authentication failed");
                 return Err(error);
             }
         };
@@ -795,7 +828,9 @@ impl PcscAppletConnector {
         if self.protocol.is_none() || !self.enabled() {
             let result = self.base.send_apdu(command);
             if result.is_err() {
-                self.state.secure_channel()?.clear_selection();
+                self.state
+                    .secure_channel()?
+                    .clear_selection("plain APDU transport failed");
             }
             return result;
         }
@@ -807,7 +842,7 @@ impl PcscAppletConnector {
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit(self.base.as_ref(), command);
         if result.is_err() {
-            state.clear_selection();
+            state.clear_selection("secure APDU transport failed");
         }
         result
     }
@@ -817,7 +852,9 @@ impl PcscAppletConnector {
         if self.protocol.is_none() || !self.enabled() {
             let result = crate::iso7816::transmit_short(self.base.as_ref(), command);
             if result.is_err() {
-                self.state.secure_channel()?.clear_selection();
+                self.state
+                    .secure_channel()?
+                    .clear_selection("plain short APDU transport failed");
             }
             return result;
         }
@@ -829,7 +866,7 @@ impl PcscAppletConnector {
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit_short(self.base.as_ref(), command);
         if result.is_err() {
-            state.clear_selection();
+            state.clear_selection("secure short APDU transport failed");
         }
         result
     }
@@ -843,6 +880,18 @@ impl PcscAppletConnector {
             .is_some_and(|selected| selected.application_aid == self.application_aid)
         {
             let selected = state.selected_applet_mut()?;
+            let old_login = selected.login;
+            if selected.session.is_some() || old_login != CcidLoginState::Public {
+                tracing::debug!(
+                    target: "pkcs11rs::auth",
+                    component = "ccid_connector",
+                    reason = "secure channel cleared",
+                    application_aid = ?selected.application_aid,
+                    ?old_login,
+                    new_login = ?CcidLoginState::Public,
+                    "CCID selected-applet guard cleared"
+                );
+            }
             selected.session = None;
             selected.login = CcidLoginState::Public;
         }
@@ -935,7 +984,9 @@ impl Connector for PcscAppletConnector {
             if self.protocol.is_none() || !self.enabled() {
                 let result = self.base.transmit(send_buffer, receive_buffer, timeout);
                 if result.is_err() {
-                    self.state.secure_channel()?.clear_selection();
+                    self.state
+                        .secure_channel()?
+                        .clear_selection("plain CCID transport failed");
                 }
                 return result;
             }
@@ -960,7 +1011,9 @@ impl Connector for PcscAppletConnector {
                     self.record_discovery_error(&Error::from(CKR_DEVICE_REMOVED));
                 }
                 self.set_enabled(false);
-                self.state.secure_channel()?.clear_selection();
+                self.state
+                    .secure_channel()?
+                    .clear_selection("connector refresh failed or device disappeared");
                 return result;
             }
 
@@ -982,12 +1035,12 @@ impl Connector for PcscAppletConnector {
                 self.forget_discovery_error();
                 return Ok(());
             }
-            state.clear_selection();
+            state.clear_selection("discovery is reselecting a public applet");
             drop(state);
             match select_application(self.base.as_ref(), &self.application_aid) {
                 Ok(()) => {
                     let mut state = self.state.secure_channel()?;
-                    state.select(&self.application_aid);
+                    state.select(&self.application_aid, "discovery selected applet");
                     self.set_applet_presence(true);
                     self.forget_discovery_error();
                     Ok(())
@@ -1048,12 +1101,38 @@ impl Connector for PcscAppletConnector {
                 if let Some(selected) = &mut state.selected_applet
                     && selected.application_aid == self.application_aid
                 {
-                    selected.login = CcidLoginState::Public;
+                    let old_login = selected.login;
+                    if old_login != login {
+                        tracing::debug!(
+                            target: "pkcs11rs::auth",
+                            component = "ccid_connector",
+                            reason = "selected-applet guard updated",
+                            application_aid = ?selected.application_aid,
+                            ?old_login,
+                            new_login = ?login,
+                            "CCID selected-applet guard changed"
+                        );
+                    }
+                    selected.login = login;
                 }
                 return Ok(());
             }
             self.ensure_selected_locked()?;
-            self.state.secure_channel()?.selected_applet_mut()?.login = login;
+            let mut state = self.state.secure_channel()?;
+            let selected = state.selected_applet_mut()?;
+            let old_login = selected.login;
+            if old_login != login {
+                tracing::debug!(
+                    target: "pkcs11rs::auth",
+                    component = "ccid_connector",
+                    reason = "selected-applet guard updated",
+                    application_aid = ?selected.application_aid,
+                    ?old_login,
+                    new_login = ?login,
+                    "CCID selected-applet guard changed"
+                );
+            }
+            selected.login = login;
             Ok(())
         })
     }
@@ -1086,7 +1165,7 @@ impl Connector for PcscAppletConnector {
                 keys,
             );
             if result.is_err() {
-                state.clear_selection();
+                state.clear_selection("SCP03 key update failed");
             }
             result
         })
@@ -1115,7 +1194,7 @@ impl Connector for PcscAppletConnector {
                 delete_last,
             );
             if result.is_err() {
-                state.clear_selection();
+                state.clear_selection("SCP03 key deletion failed");
             }
             result
         })
@@ -1145,7 +1224,7 @@ impl Connector for PcscAppletConnector {
             if result.is_ok() {
                 state.invalidate_scp11_certificates();
             } else {
-                state.clear_selection();
+                state.clear_selection("SCP11 administration failed");
             }
             result
         })

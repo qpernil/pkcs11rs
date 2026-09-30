@@ -121,6 +121,19 @@ impl Slot for AbiTestSlot {
     fn logout(&mut self) -> Result<(), Error> {
         Ok(())
     }
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
+        Ok(())
+    }
+    fn clear_session(&mut self) {}
+    fn login_is_active(&self) -> bool {
+        true
+    }
+    fn backend_session_is_active(&self) -> bool {
+        false
+    }
 
     fn init_slot(&mut self) -> Result<(), Error> {
         Ok(())
@@ -162,6 +175,7 @@ impl BackendSession for AbiTestSession {
 #[derive(Debug)]
 struct AbiPivConnector {
     certificate_data: Vec<u8>,
+    login: Cell<CcidLoginState>,
 }
 
 #[cfg(feature = "abi-tests")]
@@ -214,6 +228,15 @@ impl Connector for AbiPivConnector {
 
     fn buffer_size(&self) -> usize {
         4096
+    }
+
+    fn ccid_login_state(&self) -> Option<CcidLoginState> {
+        Some(self.login.get())
+    }
+
+    fn set_ccid_login_state(&self, state: CcidLoginState) -> Result<(), Error> {
+        self.login.set(state);
+        Ok(())
     }
 
     fn transmit<'a>(
@@ -278,7 +301,10 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
         })
         .clone();
     let certificate_data = piv::encode_certificate_object(&certificate)?;
-    let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector { certificate_data });
+    let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector {
+        certificate_data,
+        login: Cell::new(CcidLoginState::Public),
+    });
     let device = Arc::new(crate::device::DeviceContext::new(
         crate::device::DeviceIdentity {
             manufacturer: String::from("PKCS11RS"),
@@ -523,6 +549,12 @@ impl Slot for AbiScp03Slot {
         *self.session.try_borrow_mut()? = None;
         Ok(())
     }
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
+        Ok(())
+    }
 
     fn init_slot(&mut self) -> Result<(), Error> {
         Ok(())
@@ -550,6 +582,9 @@ impl Slot for AbiScp03Slot {
 
     fn login_is_active(&self) -> bool {
         self.session.borrow().is_some()
+    }
+    fn backend_session_is_active(&self) -> bool {
+        false
     }
 }
 

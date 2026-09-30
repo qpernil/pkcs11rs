@@ -4345,6 +4345,12 @@ impl Slot for YubiHsmSlot {
         let clear_result = self.clear_cached_private_objects();
         close_result.and(clear_result)
     }
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
+        Ok(())
+    }
     fn init_slot(&mut self) -> Result<(), Error> {
         let _ = self.close_active_session("slot initialization");
         let _ = self.device_public_key.take();

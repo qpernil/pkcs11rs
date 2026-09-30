@@ -214,7 +214,7 @@ ffi_entry_point! {
                 match ctx.logout_slot(slotID) {
                     Ok(()) => None,
                     Err(error) => {
-                        ctx.clear_login_state(slotID);
+                        ctx.clear_login_state(slotID, "C_CloseAllSessions logout failed");
                         ctx.slot.clear_session();
                         Some(error)
                     }
@@ -319,16 +319,16 @@ fn login_role(
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
     if let Err(error) = ctx.get_slot(slot_id)?.set_login_role(Some(role)) {
-        let _ = ctx._get_slot_mut(slot_id)?.logout();
+        let _ = ctx._get_slot_mut(slot_id)?.logout_role(role);
         return Err(error);
     }
-    ctx.login_role = Some(role);
+    ctx.set_login_role_state(slot_id, Some(role), "C_Login completed");
     if ctx.get_slot(slot_id)?.refresh_token_objects_after_login()
         && let Err(error) = ctx.refresh_slot_token_objects(slot_id)
     {
-        let _ = ctx._get_slot_mut(slot_id)?.logout();
+        let _ = ctx._get_slot_mut(slot_id)?.logout_role(role);
         let _ = ctx.get_slot(slot_id)?.set_login_role(None);
-        ctx.clear_login_state(slot_id);
+        ctx.clear_login_state(slot_id, "post-login object refresh failed");
         return Err(error);
     }
     Ok(())
@@ -620,7 +620,7 @@ pub(crate) fn close_session(session_handle: CK_SESSION_HANDLE) -> Result<(), Err
             match ctx.logout_slot(slot_id) {
                 Ok(()) => None,
                 Err(error) => {
-                    ctx.clear_login_state(slot_id);
+                    ctx.clear_login_state(slot_id, "C_CloseSession logout failed");
                     ctx.slot.clear_session();
                     Some(error)
                 }

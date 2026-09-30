@@ -1833,8 +1833,15 @@ impl SlotState {
         slot_id: CK_SLOT_ID,
     ) {
         if self.login_role.is_some() && !self.is_slot_logged_in(slot, slot_id) {
+            tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "pkcs11_context",
+                slot_id,
+                role = ?self.login_role,
+                "backend reported that the recorded PKCS #11 login is no longer active"
+            );
             slot.clear_session();
-            self.clear_login_state(slot_id);
+            self.clear_login_state(slot_id, "backend login reconciliation");
         }
     }
 
@@ -2040,7 +2047,7 @@ impl SlotState {
             return Err(CKR_SESSION_EXISTS.into());
         }
         slot.init_token(so_pin, label)?;
-        self.login_role = None;
+        self.set_login_role_state(self.slot_id, None, "token initialized");
         self.refresh_slot_token_objects(slot, self.slot_id)
     }
 
@@ -2081,11 +2088,31 @@ impl SlotState {
         Ok(())
     }
 
-    pub(crate) fn clear_login_state(&mut self, slot_id: CK_SLOT_ID) {
+    pub(crate) fn set_login_role_state(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        role: Option<LoginRole>,
+        reason: &'static str,
+    ) {
+        if self.login_role != role {
+            tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "pkcs11_context",
+                slot_id,
+                reason,
+                old_role = ?self.login_role,
+                new_role = ?role,
+                "PKCS #11 token-wide authentication state changed"
+            );
+        }
+        self.login_role = role;
+    }
+
+    pub(crate) fn clear_login_state(&mut self, slot_id: CK_SLOT_ID, reason: &'static str) {
         if self.require_slot_id(slot_id).is_err() {
             return;
         }
-        self.login_role = None;
+        self.set_login_role_state(slot_id, None, reason);
         for session in self.sessions.values_mut() {
             session.clear_operations();
         }
@@ -2098,9 +2125,12 @@ impl SlotState {
         slot: &'a mut S,
         slot_id: CK_SLOT_ID,
     ) -> Result<(), Error> {
-        self._get_slot_mut(slot, slot_id)?.logout()?;
+        let role = self
+            .login_role(slot, slot_id)
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        self._get_slot_mut(slot, slot_id)?.logout_role(role)?;
         self.get_slot(slot, slot_id)?.set_login_role(None)?;
-        self.clear_login_state(slot_id);
+        self.clear_login_state(slot_id, "C_Logout completed");
         if self
             .get_slot(slot, slot_id)?
             .refresh_token_objects_after_logout()
@@ -2120,7 +2150,7 @@ impl SlotState {
         if self.require_slot_id(slot_id).is_err() {
             return;
         }
-        self.login_role = None;
+        self.set_login_role_state(slot_id, None, "slot state closed");
         slot.clear_session();
         self.sessions.clear();
         self.memory_objects

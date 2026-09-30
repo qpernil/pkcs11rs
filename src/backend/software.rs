@@ -237,6 +237,12 @@ impl Slot for SoftwareSlot {
         self.clear_sensitive_state();
         Ok(())
     }
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
+        Ok(())
+    }
 
     fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
         pinentry.is_configured()
@@ -428,6 +434,10 @@ impl Slot for SoftwareSlot {
 
     fn login_is_active(&self) -> bool {
         self.logged_in
+    }
+
+    fn backend_session_is_active(&self) -> bool {
+        false
     }
 
     fn clear_session(&mut self) {

@@ -16,8 +16,72 @@ is documented in [`ccid.md`](ccid.md).
 The PIV client selects application AID `A0 00 00 03 08` and reads the firmware
 version and serial number from the applet. PKCS #11 `C_Login` verifies the PIV
 PIN. PINs must contain six to eight bytes and are padded to the eight-byte PIV
-APDU field with `FF`. `C_Logout` reselects the application to clear card
-authentication state.
+APDU field with `FF`.
+
+## PKCS #11 role and PIV authentication
+
+The module keeps one logical PKCS #11 role per PIV slot: PUBLIC, SO, or USER.
+Read-only versus read/write is a property of each open session. Consequently,
+`C_GetSessionInfo` combines the slot role with the queried session's
+`CKF_RW_SESSION` flag: PUBLIC and USER have RO and RW states, while SO is
+reported only as `CKS_RW_SO_FUNCTIONS`. The role is token-wide, so every open
+session on the slot observes the same role. SO login requires an RW session and
+is rejected while an RO session exists.
+
+This logical role is the only PKCS #11 authentication state retained by the
+module for PIV. The PIV backend does not cache separate `PIN authenticated` or
+`management key authenticated` flags, and `C_GetSessionInfo` does not probe PIN
+retries or derive the role from applet state. The CCID connector has only a
+selected-applet guard while a role is active; that guard is not an
+authentication role and is never used to synthesize `CK_SESSION_INFO.state`.
+
+PIV itself remains authoritative for its authentication facts. It may retain
+PIN verification and management-key authentication at the same time even
+though PKCS #11 exposes only one logical role. It also enforces per-key PIN
+policies, including one-use `ALWAYS` verification. The module performs the
+minimum PKCS #11 role checks before issuing a command: management operations
+require the logical SO role, and operations on login-protected private keys
+require the logical USER role. The PIV command can still fail when the applet's
+corresponding authentication is absent or has been consumed.
+
+`C_Logout` de-authenticates the active logical role before changing the slot
+role to PUBLIC and releasing the connector's selected-applet guard. USER logout
+uses the YubiKey 5.4.3 direct PIN de-authentication command, `VERIFY` with
+`P1=FF` and `P2=80`. SO logout starts an ordinary management-key
+mutual-authentication exchange and stops after receiving the card's challenge.
+The module immediately discards that response and retains neither it nor the
+management key, so it cannot construct a valid continuation.
+While that challenge is pending, only `GENERAL AUTHENTICATE` for key reference
+`9B` can continue the exchange. Any other APDU clears the pending exchange and
+existing management authorization before the applet processes that APDU
+normally. A wrong continuation to `9B` likewise consumes the challenge and
+clears management authorization. This permits logout without retaining the
+challenge, retaining the management key, or selecting another applet. The
+behavior is verified on YubiKey firmware 5.2.4 and 5.7.4: a harmless
+management-protected probe using an invalid key reference returns `6B00` while
+authenticated and `6982` when it is the first command after SO logout.
+
+NIST SP 800-73-5 Part 2, Section 2.4.2, requires an aborted or failed
+authentication protocol to set the credential's security-status indicator to
+false, and identifies the PIV Card Application Administration Key indicator as
+application-local. Appendix A.2 specifies the two-command `GENERAL
+AUTHENTICATE` protocol for reference `9B`. Taken together, a later APDU that is
+not a valid continuation of that protocol abandons it and therefore must clear
+the Administration Key security status. The standard's separate rollback rule
+for interrupted `GENERAL AUTHENTICATE` APDU command chaining concerns a
+different transport mechanism. Firmware 5.2.4 and 5.7.4 verify the resulting
+multi-command behavior used here.
+
+The two de-authentication paths are role-specific. PIN de-authentication does
+not clear management-key authentication, while failed management authentication
+does not clear PIN verification. Successful PIN and management authentication
+are likewise independent and may both be active in the PIV applet even though
+PKCS #11 exposes only one logical role. A failure in either de-authentication
+path is logged and ignored so firmware-specific behavior cannot prevent the
+logical logout. The module never falls back to selecting a management or
+Yubico applet; in particular, selecting the management applet can strand a
+YubiKey NEO outside PIV. A later SO or USER login establishes the requested
+logical role and performs the corresponding PIV authentication.
 
 When a prompt provider is configured, the token reports
 `CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for the
