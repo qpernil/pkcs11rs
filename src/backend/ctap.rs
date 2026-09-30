@@ -220,11 +220,9 @@ impl FidoEndpoint for CcidFidoEndpoint {
     }
 
     fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
-        Box::new(super::ccid::PcscAppletSession {
-            slotID: slot_id,
-            flags,
-            connector: self.connector.clone(),
-        })
+        // FIDO has no GET CHALLENGE command. Use the same host-RNG session
+        // as HID; CTAP operations still use this endpoint's CCID transport.
+        Box::new(Fido2Session { slot_id, flags })
     }
 }
 

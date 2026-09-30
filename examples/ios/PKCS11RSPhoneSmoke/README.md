@@ -38,10 +38,11 @@ functional coverage. Its separate bundle uses an independent platform
 credential and YubiHSM Authentication Key so both apps can remain provisioned.
 
 The inventory report follows authentication dependency order. It shows ordinary
-source slots first, including the Secure Enclave login and its authenticated
-objects, followed by YubiHSM slots with native session-key support and then the
-remaining YubiHSM targets. Each YubiHSM login and authenticated object listing
-appears inside that slot's section as soon as the login is attempted. Every
+source slots first, including the Secure Enclave login, post-quantum operations,
+and authenticated objects, followed by YubiHSM slots with native session-key
+support and then the remaining YubiHSM targets. Each YubiHSM section reports
+public objects and the mechanism report before login, then post-quantum
+generation and operations, and finally the authenticated object list. Every
 login performed during Refresh has a terse line containing the PKCS #11 entry
 point, user type, selector when applicable, and named return value.
 
@@ -168,11 +169,12 @@ providers.
 PQC operations run after the authentication already available to the app.
 YubiHSMs use the authenticated wildcard-login session described below. The
 embedded PIV slot uses one explicit consumer sequence on every refresh.
-Mechanism discovery and a public object inventory run first. The app then calls
-`C_Login(CKU_SO)` with the factory management key, provisions any missing or
-incomplete pairs, calls `C_Logout`, calls `C_Login(CKU_USER)` with the factory
-user PIN `123456`, locates the pairs without permitting a generation fallback,
-performs signing and decapsulation, and finally lists the authenticated objects.
+The public object inventory is followed by the mechanism report. The app then calls
+`C_Login(CKU_SO)` with the factory management key, checks the three reserved
+public-key identifiers and generates any missing pairs, calls `C_Logout`, calls
+`C_Login(CKU_USER)` with the factory user PIN `123456`, locates the pairs without
+permitting a generation fallback, performs signing and decapsulation, and
+finally lists the authenticated objects.
 Both login calls are made even when every pair already exists; the smoke app
 exercises the ordinary API flow rather than optimizing or independently testing
 the module's login-state machine. `CKR_USER_ALREADY_LOGGED_IN` remains an

@@ -6,6 +6,11 @@ public behavior, public projection, and the common standalone keyless digests.
 It does not inherit unrelated software key generation, keyed signing, or
 symmetric cryptography.
 
+`C_GenerateRandom` uses the host operating system's cryptographic random
+source for both HID and CCID FIDO sessions. It does not require login or issue
+`GET CHALLENGE` to the authenticator; the FIDO applet does not provide that
+generic ISO 7816 operation.
+
 ## Verified transport boundaries
 
 FIDO CTAP defines both USB HID and smart-card bindings. USB HID uses Usage

@@ -18,11 +18,14 @@ Neither app configures a software slot.
 
 The inventory opens a public session for every present slot and reports its
 objects. It then retains a no-secret `C_Login(CKU_USER, NULL_PTR, 0)` session
-for the Secure Enclave source slot. YubiHSM targets are processed with native
+for the Secure Enclave source slot, runs post-quantum generation and operations,
+and reports authenticated objects. YubiHSM targets are processed with native
 hardware session-key providers first, followed by the remaining targets. Each
-target uses `C_LoginUser(CKU_USER, "pkcs11:", "password")`; successful
-sessions remain open so an earlier authorized YubiHSM can supply a credential
-to a later one. Retained sessions close in reverse dependency order.
+target reports public objects and mechanisms before `C_LoginUser(CKU_USER,
+"pkcs11:", "password")`, then runs post-quantum generation and operations and
+reports the authenticated objects. Successful sessions remain open so an
+earlier authorized YubiHSM can supply a credential to a later one. Retained
+sessions close in reverse dependency order.
 
 Every login performed during Refresh has the same terse report format in both
 apps: the PKCS #11 entry point, user type, selector when applicable, named
@@ -52,9 +55,10 @@ for retired references `0x82`, `0x83`, and `0x84`; YubiHSM IDs `0x7e20`,
 `0x7e21`, and `0x7e22`; and descriptive byte-string IDs for other
 providers.
 
-The embedded PIV flow performs public mechanism and object discovery, then
-calls `C_Login(CKU_SO)` with the factory management key immediately before
-provisioning any missing pairs. It always calls `C_Logout`, then
+The embedded PIV flow reports public objects and mechanisms, then calls
+`C_Login(CKU_SO)` with the factory management key immediately before checking
+the three reserved public-key identifiers and generating any missing pairs. It
+always calls `C_Logout`, then
 `C_Login(CKU_USER)` with factory PIN `123456`, performs signing and
 decapsulation without a generation fallback, and lists the authenticated
 objects. Both logins occur on every refresh even when all pairs already exist.
