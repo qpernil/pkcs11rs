@@ -65,20 +65,6 @@ fn initialize_embedded() -> CK_RV {
     }))
 }
 
-fn initialize_embedded_piv() -> CK_RV {
-    super::initialize_with_configuration(serde_json::json!({
-        "version": 1,
-        "hardware": {"discovery": false},
-        "yubihsm": {"urls": []},
-        "embedded": {"readers": [{
-            "id": "piv-pqc",
-            "name": "Embedded CCID PIV PQC reader",
-            "serial": 1,
-            "applets": ["piv"]
-        }]}
-    }))
-}
-
 #[cfg(unix)]
 impl Drop for TestFidoStorage {
     fn drop(&mut self) {
@@ -134,23 +120,179 @@ fn read_attribute(
     value
 }
 
+fn find_smoke_key(
+    session: CK_SESSION_HANDLE,
+    object_class: CK_OBJECT_CLASS,
+    key_type: CK_KEY_TYPE,
+    identifier: &mut [u8],
+) -> Option<CK_OBJECT_HANDLE> {
+    let mut object_class = object_class;
+    let mut key_type = key_type;
+    let mut attributes = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut object_class),
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, identifier),
+    ];
+    assert_eq!(
+        crate::api::C_FindObjectsInit(
+            session,
+            attributes.as_mut_ptr(),
+            attributes.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(session, &mut object, 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    (count != 0).then_some(object)
+}
+
 #[test]
-fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
+#[cfg(unix)]
+fn every_embedded_ccid_applet_starts_with_public_ro_and_rw_sessions() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
-    assert_eq!(initialize_embedded_piv(), CKR_OK as CK_RV);
+    let storage = TestFidoStorage::new();
+    assert_eq!(
+        super::initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": false},
+            "yubihsm": {"urls": []},
+            "storage": {"tokens": storage.root.to_string_lossy()},
+            "embedded": {"readers": [{
+                "id": "login-state",
+                "name": "Embedded CCID login-state reader",
+                "serial": 41,
+                "persistent": true,
+                "applets": ["piv", "openpgp", "hsmauth", "issuer-sd", "fido2"]
+            }]}
+        })),
+        CKR_OK as CK_RV
+    );
 
     let mut count = 0;
     assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
-    assert_eq!(count, 1);
-    let mut slot = 0;
+    let mut slots = vec![0; count as usize];
     assert_eq!(
-        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut count),
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
         CKR_OK as CK_RV
     );
+    let mut labels = Vec::new();
+    for slot in slots {
+        let mut token = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+        assert_eq!(
+            crate::api::C_GetTokenInfo(slot, &mut token),
+            CKR_OK as CK_RV
+        );
+        let label = String::from_utf8_lossy(&token.label).trim_end().to_owned();
+        labels.push(label.clone());
+
+        for (flags, expected) in [
+            (
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                CKS_RO_PUBLIC_SESSION as CK_STATE,
+            ),
+            (
+                (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                CKS_RW_PUBLIC_SESSION as CK_STATE,
+            ),
+        ] {
+            let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+            assert_eq!(
+                crate::api::C_OpenSession(slot, flags, std::ptr::null_mut(), None, &mut session,),
+                CKR_OK as CK_RV,
+                "failed to open {label}"
+            );
+            let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+            assert_eq!(
+                crate::api::C_GetSessionInfo(session, &mut info),
+                CKR_OK as CK_RV,
+                "failed to query {label}"
+            );
+            assert_eq!(info.state, expected, "wrong initial state for {label}");
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+    }
+
+    labels.sort();
+    assert_eq!(
+        labels,
+        [
+            "FIDO2 FIDO_2_1 #41",
+            "HSM Auth #41",
+            "Issuer SD #41",
+            "OpenPGP #41",
+            "PIV #41",
+        ]
+    );
+    super::finalize_for_test();
+}
+
+#[test]
+#[cfg(unix)]
+fn embedded_piv_pqc_enforces_token_wide_role_transitions() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    let storage = TestFidoStorage::new();
+    assert_eq!(
+        super::initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": false},
+            "yubihsm": {"urls": []},
+            "storage": {"tokens": storage.root.to_string_lossy()},
+            "embedded": {"readers": [{
+                "id": "piv-pqc",
+                "name": "pkcs11rs embedded CCID reader",
+                "serial": 1,
+                "persistent": true,
+                "applets": ["piv", "fido2"]
+            }]}
+        })),
+        CKR_OK as CK_RV
+    );
+
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 2);
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let labels = slots
+        .iter()
+        .map(|slot| {
+            let mut info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+            assert_eq!(
+                crate::api::C_GetTokenInfo(*slot, &mut info),
+                CKR_OK as CK_RV
+            );
+            (
+                *slot,
+                String::from_utf8_lossy(&info.label).trim_end().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(labels.iter().any(|(_, label)| label == "PIV #1"));
+    assert!(labels.iter().any(|(_, label)| label == "FIDO2 FIDO_2_1 #1"));
+    let slot = labels
+        .iter()
+        .find_map(|(slot, label)| (label == "PIV #1").then_some(*slot))
+        .unwrap();
+    let fido_slot = labels
+        .iter()
+        .find_map(|(slot, label)| (label == "FIDO2 FIDO_2_1 #1").then_some(*slot))
+        .unwrap();
 
     let mut session = 0;
     assert_eq!(
@@ -163,6 +305,47 @@ fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
         ),
         CKR_OK as CK_RV
     );
+    let mut session_info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    let mut public_objects = vec![CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 16];
+    let mut public_object_count = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(
+            session,
+            public_objects.as_mut_ptr(),
+            public_objects.len() as CK_ULONG,
+            &mut public_object_count,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+
+    for (key_type, id) in [
+        (CKK_ML_DSA as CK_KEY_TYPE, 5_u8),
+        (CKK_ML_KEM as CK_KEY_TYPE, 6_u8),
+        (crate::CKK_PKCS11RS_MLKEM768_X25519, 7_u8),
+    ] {
+        let mut identifier = [id];
+        assert!(
+            find_smoke_key(
+                session,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type,
+                &mut identifier,
+            )
+            .is_none(),
+            "fresh embedded PIV slot {id} unexpectedly contains the smoke key"
+        );
+    }
+
     let mut management_key = b"010203040506070801020304050607080102030405060708".to_vec();
     assert_eq!(
         crate::api::C_Login(
@@ -173,23 +356,152 @@ fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
         ),
         CKR_OK as CK_RV
     );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
 
-    for (mechanism_type, parameter_set, id, public_usage, private_usage) in [
+    // Closing the final session logs the token out. A later consumer run starts
+    // public and can perform a fresh SO login.
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            management_key.as_mut_ptr(),
+            management_key.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
+
+    // Selecting and authenticating the other applet on the same embedded
+    // reader invalidates the PIV selected-applet guard. The PIV slot must not
+    // continue reporting SO merely because its SlotState recorded that role.
+    let mut fido_session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            fido_slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut fido_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut fido_pin = b"123456".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            fido_session,
+            CKU_USER as CK_USER_TYPE,
+            fido_pin.as_mut_ptr(),
+            fido_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut second_piv_session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut second_piv_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(second_piv_session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_CloseSession(second_piv_session),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            management_key.as_mut_ptr(),
+            management_key.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(fido_session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_Logout(fido_session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(crate::api::C_CloseSession(fido_session), CKR_OK as CK_RV);
+
+    let mut generated = Vec::new();
+    for (mechanism_type, parameter_set, id, label, public_usage, private_usage) in [
         (
             CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            CKP_ML_DSA_87 as CK_ULONG,
+            Some(CKP_ML_DSA_87 as CK_ULONG),
             5_u8,
+            b"iPhone smoke ML-DSA-87".as_slice(),
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             CKA_SIGN as CK_ATTRIBUTE_TYPE,
         ),
         (
             CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            CKP_ML_KEM_1024 as CK_ULONG,
+            Some(CKP_ML_KEM_1024 as CK_ULONG),
             6_u8,
+            b"iPhone smoke ML-KEM-1024".as_slice(),
+            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+        ),
+        (
+            crate::CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
+            None,
+            7_u8,
+            b"iPhone smoke MLKEM768-X25519".as_slice(),
             CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
             CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
         ),
     ] {
+        assert_eq!(
+            crate::api::C_GetSessionInfo(session, &mut session_info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(session_info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
         let mut mechanism = CK_MECHANISM {
             mechanism: mechanism_type,
             pParameter: std::ptr::null_mut(),
@@ -198,16 +510,21 @@ fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
         let mut token = CK_TRUE as CK_BBOOL;
         let mut public_usage_value = CK_TRUE as CK_BBOOL;
         let mut private_usage_value = CK_TRUE as CK_BBOOL;
-        let mut parameter_set = parameter_set;
+        let mut parameter_set = parameter_set.unwrap_or_default();
         let mut id = [id];
-        let mut label = b"embedded PIV PQC smoke".to_vec();
-        let mut public_template = [
+        let mut label = label.to_vec();
+        let mut public_template = vec![
             bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
             bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
             bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
-            ulong_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
             bool_attribute(public_usage, &mut public_usage_value),
         ];
+        if parameter_set != 0 {
+            public_template.insert(
+                3,
+                ulong_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+            );
+        }
         let mut private_template = [
             bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
             bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
@@ -232,9 +549,169 @@ fn embedded_piv_accepts_logical_retired_slot_ids_for_pqc_key_generation() {
         );
         assert_ne!(public_key, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
         assert_ne!(private_key, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        assert_eq!(
+            crate::api::C_GetSessionInfo(session, &mut session_info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(session_info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
+        generated.push((mechanism_type, public_key, private_key));
     }
 
     assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    let mut pin = b"123456".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut session_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(session_info.state, CKS_RW_USER_FUNCTIONS as CK_STATE);
+
+    let (_, dsa_public, dsa_private) = generated[0];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ML_DSA as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut message = b"embedded PIV ML-DSA smoke".to_vec();
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, dsa_private),
+        CKR_OK as CK_RV
+    );
+    let mut signature_length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0; signature_length as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, dsa_public),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    for (generation, public_key, private_key) in generated.into_iter().skip(1) {
+        mechanism.mechanism = if generation == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+            CKM_ML_KEM as CK_MECHANISM_TYPE
+        } else {
+            crate::CKM_PKCS11RS_MLKEM768_X25519
+        };
+        let mut secret_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+        let mut token = CK_FALSE as CK_BBOOL;
+        let mut sensitive = CK_FALSE as CK_BBOOL;
+        let mut extractable = CK_TRUE as CK_BBOOL;
+        let mut value_length = 32 as CK_ULONG;
+        let mut secret_template = [
+            ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut secret_type),
+            bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bool_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+            bool_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+            ulong_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut value_length),
+        ];
+        let mut ciphertext_length = 0;
+        let mut encapsulated = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                session,
+                &mut mechanism,
+                public_key,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ciphertext_length,
+                &mut encapsulated,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut ciphertext = vec![0; ciphertext_length as usize];
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                session,
+                &mut mechanism,
+                public_key,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                &mut ciphertext_length,
+                &mut encapsulated,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut decapsulated = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                session,
+                &mut mechanism,
+                private_key,
+                secret_template.as_mut_ptr(),
+                secret_template.len() as CK_ULONG,
+                ciphertext.as_mut_ptr(),
+                ciphertext_length,
+                &mut decapsulated,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            read_attribute(session, encapsulated, CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            read_attribute(session, decapsulated, CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        );
+    }
+
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    let mut authenticated_objects = vec![CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 32];
+    let mut authenticated_object_count = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(
+            session,
+            authenticated_objects.as_mut_ptr(),
+            authenticated_objects.len() as CK_ULONG,
+            &mut authenticated_object_count,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert!(authenticated_object_count >= public_object_count);
+
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
