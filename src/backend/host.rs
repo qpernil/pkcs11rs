@@ -129,6 +129,9 @@ impl Slot for HostSlot {
     fn login_is_active(&self) -> bool {
         self.logged_in
     }
+    fn backend_session_is_active(&self) -> bool {
+        false
+    }
     fn clear_session(&mut self) {
         self.logged_in = false;
     }
@@ -154,6 +157,12 @@ impl Slot for HostSlot {
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.logged_in = false;
+        Ok(())
+    }
+    fn logout_role(&mut self, _role: LoginRole) -> Result<(), Error> {
+        self.logout()
+    }
+    fn set_login_role(&self, _role: Option<LoginRole>) -> Result<(), Error> {
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {

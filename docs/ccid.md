@@ -104,12 +104,15 @@ This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 
 One card-wide state records either no selected applet or the selected AID with
-its live SCP03/SCP11 session and logical PKCS #11 login role. Selecting another
-applet replaces this state: the old applet's PKCS #11 sessions remain open but
-become public. Repeated operations on the same applet do not send another
-SELECT. Card removal, replacement, or transport reconnection clears the whole
-state. Validated SCP11 public-key material is separately cached for the same
-connected card and is also discarded on reconnection.
+its live SCP03/SCP11 session and a selected-applet guard. The guard prevents
+ordinary discovery from selecting another applet while a slot role is active;
+it is not the authoritative PKCS #11 login role. Each slot context owns that
+token-wide role, while each session owns its RO/RW flag. Repeated operations on
+the selected applet do not send another SELECT. Card removal, replacement, or
+transport reconnection clears the card-wide connector state. Validated SCP11
+public-key material is separately cached for the same connected card and is
+also discarded on reconnection. PIV's precise separation between the logical
+role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs-11-role-and-piv-authentication).
 
 ## PC/SC ownership and external daemons
 

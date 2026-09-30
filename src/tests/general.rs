@@ -901,6 +901,81 @@ fn switching_applets_clears_the_previous_card_login() {
 }
 
 #[test]
+fn authenticated_ccid_backends_follow_the_shared_selected_applet_guard() {
+    let connectors = |application_aid: &[u8]| {
+        let base: crate::SharedConnector = std::sync::Arc::new(RecordingConnector {
+            commands: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+        let device = reader.device.clone();
+        let application: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(
+            crate::PcscAppletConnector::new(base.clone(), application_aid, None, reader.clone()),
+        );
+        let other: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(
+            crate::PcscAppletConnector::new(base, &[0xf0, 0x00, 0x00, 0x01, 0x01], None, reader),
+        );
+        (application, other, device)
+    };
+    let select_other = |connector: &dyn crate::Connector| {
+        connector
+            .send_apdu(&crate::CommandApdu {
+                cla: 0,
+                ins: 0xca,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: None,
+                extended: false,
+            })
+            .unwrap();
+    };
+    let pinentry = crate::pinentry::Pinentry::unconfigured();
+    let token_label = |slot: &dyn crate::Slot| crate::Slot::label(slot);
+
+    let (connector, other, device) = connectors(&crate::piv::PIV_AID);
+    let piv = crate::PivSlot::new_with_device(connector, crate::piv::PIV_AID.to_vec(), device);
+    assert_eq!(token_label(&piv), "PIV #0");
+    crate::Slot::set_login_role(&piv, Some(crate::LoginRole::So)).unwrap();
+    assert!(crate::Slot::login_is_active(&piv));
+    select_other(other.as_ref());
+    assert!(!crate::Slot::login_is_active(&piv));
+
+    let (connector, other, device) = connectors(&crate::openpgp::OPENPGP_AID);
+    let openpgp = crate::OpenPgpSlot::new_with_device(
+        connector,
+        crate::openpgp::OPENPGP_AID.to_vec(),
+        device,
+    );
+    assert_eq!(token_label(&openpgp), "OpenPGP #0");
+    openpgp.authenticated.set(true);
+    crate::Slot::set_login_role(&openpgp, Some(crate::LoginRole::User)).unwrap();
+    assert!(crate::Slot::login_is_active(&openpgp));
+    select_other(other.as_ref());
+    assert!(!crate::Slot::login_is_active(&openpgp));
+
+    let (connector, other, device) = connectors(&crate::hsmauth::AID);
+    let mut hsmauth =
+        crate::HsmAuthSlot::new_with_device(connector, crate::hsmauth::AID.to_vec(), device);
+    assert_eq!(token_label(&hsmauth), "HSM Auth #0");
+    crate::Slot::login_so(&mut hsmauth, Some(b"password"), &pinentry).unwrap();
+    crate::Slot::set_login_role(&hsmauth, Some(crate::LoginRole::So)).unwrap();
+    assert!(crate::Slot::login_is_active(&hsmauth));
+    select_other(other.as_ref());
+    assert!(!crate::Slot::login_is_active(&hsmauth));
+
+    let aid = crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID;
+    let (connector, other, device) = connectors(&aid);
+    let mut issuer_sd =
+        crate::IssuerSecurityDomainSlot::new_with_device(connector, aid.to_vec(), device);
+    assert_eq!(token_label(&issuer_sd), "Issuer SD #0");
+    crate::Slot::login(&mut issuer_sd, Some(&[]), &pinentry).unwrap();
+    crate::Slot::set_login_role(&issuer_sd, Some(crate::LoginRole::User)).unwrap();
+    assert!(crate::Slot::login_is_active(&issuer_sd));
+    select_other(other.as_ref());
+    assert!(!crate::Slot::login_is_active(&issuer_sd));
+}
+
+#[test]
 fn switching_logged_in_ccid_slots_keeps_sessions_but_makes_the_old_slot_public() {
     const FIRST_SLOT_ID: CK_SLOT_ID = 226;
     const SECOND_SLOT_ID: CK_SLOT_ID = 227;
@@ -2581,6 +2656,27 @@ pub fn login_is_shared_and_logout_invalidates_private_session_objects() {
     assert_eq!(ro_info.state, CKS_RO_USER_FUNCTIONS as CK_STATE);
     assert_eq!(rw_info.state, CKS_RW_USER_FUNCTIONS as CK_STATE);
 
+    let mut opened_after_login = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut opened_after_login,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut opened_after_login_info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(opened_after_login, &mut opened_after_login_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        opened_after_login_info.state,
+        CKS_RW_USER_FUNCTIONS as CK_STATE
+    );
+
     let mut sign_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
@@ -2633,6 +2729,14 @@ pub fn login_is_shared_and_logout_invalidates_private_session_objects() {
     );
     assert_eq!(ro_info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
     assert_eq!(rw_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(opened_after_login, &mut opened_after_login_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        opened_after_login_info.state,
+        CKS_RW_PUBLIC_SESSION as CK_STATE
+    );
 
     let mut data = [1u8];
     let mut signature_len = 0;
@@ -2695,6 +2799,63 @@ pub fn login_is_shared_and_logout_invalidates_private_session_objects() {
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
+}
+
+#[test]
+fn every_non_ccid_slot_kind_starts_with_public_ro_and_rw_sessions() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let (yubihsm, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let slots: Vec<(CK_SLOT_ID, &str, Box<dyn crate::Slot>)> = vec![
+        (310, "Synthetic", Box::new(test_slot(true))),
+        (
+            311,
+            "Software",
+            Box::new(crate::SoftwareSlot::new("login-state".to_owned(), 311)),
+        ),
+        (
+            312,
+            "Host",
+            Box::new(crate::backend::host::HostSlot::with_keys(Vec::new())),
+        ),
+        (313, "YubiHSM", yubihsm),
+    ];
+
+    for (slot_id, kind, slot) in slots {
+        install_test_slot_with_backend(slot_id, slot);
+        for (flags, expected) in [
+            (
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                CKS_RO_PUBLIC_SESSION as CK_STATE,
+            ),
+            (
+                (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                CKS_RW_PUBLIC_SESSION as CK_STATE,
+            ),
+        ] {
+            let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+            assert_eq!(
+                crate::api::C_OpenSession(slot_id, flags, std::ptr::null_mut(), None, &mut session,),
+                CKR_OK as CK_RV,
+                "failed to open {kind} session"
+            );
+            let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+            assert_eq!(
+                crate::api::C_GetSessionInfo(session, &mut info),
+                CKR_OK as CK_RV,
+                "failed to query {kind} session"
+            );
+            assert_eq!(info.state, expected, "wrong initial state for {kind}");
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+    }
+
+    finalize_for_test();
 }
 
 #[test]
@@ -3500,6 +3661,22 @@ pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
     assert_eq!(
         crate::api::C_GetSessionInfo(read_write_session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
+    let mut another_read_write_session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut another_read_write_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetSessionInfo(another_read_write_session, &mut info),
         CKR_OK as CK_RV
     );
     assert_eq!(info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);

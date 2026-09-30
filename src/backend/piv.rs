@@ -7,8 +7,6 @@ pub(crate) struct PivSlot {
     pub(crate) device: Arc<DeviceContext>,
     pub(crate) application_aid: Vec<u8>,
     pub(crate) slot_description: Option<String>,
-    pub(crate) authenticated: Rc<Cell<bool>>,
-    pub(crate) management_authenticated: Rc<Cell<bool>>,
     pub(crate) version: piv::Version,
     pub(crate) serial: String,
     pub(crate) keys: Vec<PivKey>,
@@ -174,6 +172,32 @@ pub(crate) fn piv_effective_pin_policy(slot: piv::Slot, policy: u8) -> u8 {
 
 pub(crate) fn piv_policy_requires_login(slot: piv::Slot, policy: u8) -> bool {
     piv_effective_pin_policy(slot, policy) != 1
+}
+
+fn observe_piv_authentication_result<T>(
+    connector: &dyn Connector,
+    role: LoginRole,
+    result: Result<T, Error>,
+) -> Result<T, Error> {
+    if matches!(
+        &result,
+        Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as CK_RV
+    ) {
+        let connector_role = match role {
+            LoginRole::User => CcidLoginState::User,
+            LoginRole::So => CcidLoginState::So,
+        };
+        if connector.ccid_login_state() == Some(connector_role) {
+            let _ = connector.set_ccid_login_state(CcidLoginState::Public);
+            tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "piv",
+                ?role,
+                "PIV authentication failure cleared the selected-applet login guard"
+            );
+        }
+    }
+    result
 }
 
 pub(crate) fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> String {
@@ -425,8 +449,6 @@ impl PivSlot {
             device,
             application_aid,
             slot_description: None,
-            authenticated: Rc::new(Cell::new(false)),
-            management_authenticated: Rc::new(Cell::new(false)),
             version,
             serial,
             keys: Vec::new(),
@@ -575,11 +597,7 @@ impl Slot for PivSlot {
         self.connector.is_present()
     }
     fn refresh(&self) -> Result<(), Error> {
-        if let Err(error) = self.connector.refresh() {
-            self.authenticated.set(false);
-            return Err(error);
-        }
-        Ok(())
+        self.connector.refresh()
     }
     fn set_discovery_error(&self, error: &Error) {
         self.connector.set_discovery_error(error);
@@ -592,8 +610,6 @@ impl Slot for PivSlot {
             slotID,
             flags,
             connector: self.connector.clone(),
-            authenticated: self.authenticated.clone(),
-            management_authenticated: self.management_authenticated.clone(),
         })
     }
     fn supports_login_user(&self) -> bool {
@@ -603,8 +619,6 @@ impl Slot for PivSlot {
         pinentry.is_configured()
     }
     fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
@@ -629,12 +643,9 @@ impl Slot for PivSlot {
                     prompted.as_slice()
                 }
             };
-            if pin.is_empty() && only_never {
-                self.authenticated.set(true);
-            } else {
+            if !(pin.is_empty() && only_never) {
                 PivClient.verify_pin(self.connector.as_ref(), pin)?;
             }
-            self.authenticated.set(true);
             Ok(())
         })();
         if result.is_err() {
@@ -656,8 +667,6 @@ impl Slot for PivSlot {
                 prompted.as_slice()
             }
         };
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
         let key_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
         let key = parse_hex(key_text).map_err(|_| Error::from(CKR_PIN_INVALID))?;
         self.connector
@@ -666,7 +675,6 @@ impl Slot for PivSlot {
             let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
             self.update_device_info(info);
             PivClient.authenticate_management_key(self.connector.as_ref(), &key)?;
-            self.management_authenticated.set(true);
             Ok(())
         })();
         if result.is_err() {
@@ -687,8 +695,6 @@ impl Slot for PivSlot {
         } else {
             PivClient.change_pin(self.connector.as_ref(), old_pin, new_pin)
         };
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
         self.connector.clear_secure_channel();
         result
     }
@@ -699,23 +705,38 @@ impl Slot for PivSlot {
         let new_key = parse_hex(new_text).map_err(|_| Error::from(CKR_PIN_INVALID))?;
         PivClient.authenticate_management_key(self.connector.as_ref(), &old_key)?;
         let result = PivClient.set_management_key(self.connector.as_ref(), &new_key);
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
         self.connector.clear_secure_channel();
         result
     }
     fn logout(&mut self) -> Result<(), Error> {
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
-        let result = PivClient.select(self.connector.as_ref(), &self.application_aid);
-        if let Ok(info) = result.as_ref() {
-            self.version = info.version;
-            self.serial = info.serial.unwrap_or_default().to_string();
+        self.logout_role(LoginRole::User)
+    }
+    fn logout_role(&mut self, role: LoginRole) -> Result<(), Error> {
+        let result = match role {
+            LoginRole::User => PivClient.deauthenticate_pin(self.connector.as_ref()),
+            LoginRole::So => PivClient.deauthenticate_management_key(self.connector.as_ref()),
+        };
+        match result {
+            Ok(()) => tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "piv",
+                ?role,
+                "PIV role de-authentication completed"
+            ),
+            Err(error) => tracing::debug!(
+                target: "pkcs11rs::auth",
+                component = "piv",
+                ?role,
+                ?error,
+                "PIV role de-authentication failed and was ignored"
+            ),
         }
-        self.connector.clear_secure_channel();
-        result.map(|_| ())
+        Ok(())
     }
     fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        // SlotState owns the PKCS #11 role and the applet owns authentication.
+        // The connector records which role remains valid for the currently
+        // selected PIV applet so applet switches and reconnects invalidate it.
         self.connector.set_ccid_login_state(match role {
             Some(LoginRole::User) => CcidLoginState::User,
             Some(LoginRole::So) => CcidLoginState::So,
@@ -729,12 +750,10 @@ impl Slot for PivSlot {
         _rp_id: Option<&str>,
     ) -> Result<Option<crate::ctap::CredentialAuthorization>, Error> {
         PivClient.verify_pin(self.connector.as_ref(), pin)?;
-        self.authenticated.set(true);
         Ok(None)
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
+        self.connector.clear_secure_channel();
         let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
         self.update_device_info(info);
         self.keys.clear();
@@ -1038,15 +1057,16 @@ impl Slot for PivSlot {
         true
     }
     fn clear_session(&mut self) {
-        self.authenticated.set(false);
-        self.management_authenticated.set(false);
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        let local = self.authenticated.get() || self.management_authenticated.get();
-        self.connector
-            .ccid_login_state()
-            .map_or(local, |state| state != CcidLoginState::Public && local)
+        matches!(
+            self.connector.ccid_login_state(),
+            Some(CcidLoginState::User | CcidLoginState::So)
+        )
+    }
+    fn backend_session_is_active(&self) -> bool {
+        false
     }
     fn piv_generate_key_pair(
         &mut self,
@@ -1055,18 +1075,19 @@ impl Slot for PivSlot {
         pin_policy: u8,
         touch_policy: u8,
     ) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
             return Err(CKR_MECHANISM_INVALID.into());
         }
-        let public_key = PivClient.generate_key_pair(
+        let public_key = observe_piv_authentication_result(
             self.connector.as_ref(),
-            slot,
-            algorithm,
-            pin_policy,
-            touch_policy,
+            LoginRole::So,
+            PivClient.generate_key_pair(
+                self.connector.as_ref(),
+                slot,
+                algorithm,
+                pin_policy,
+                touch_policy,
+            ),
         )?;
         let public_key = piv_public_key_from_metadata(algorithm, public_key)?;
         self.keys.retain(|key| key.slot != slot);
@@ -1088,18 +1109,19 @@ impl Slot for PivSlot {
         pin_policy: u8,
         touch_policy: u8,
     ) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if !piv_algorithm_supported(self.reported_version(), key.algorithm, self.supports_pq()) {
             return Err(CKR_MECHANISM_INVALID.into());
         }
-        PivClient.import_private_key(
+        observe_piv_authentication_result(
             self.connector.as_ref(),
-            slot,
-            key,
-            pin_policy,
-            touch_policy,
+            LoginRole::So,
+            PivClient.import_private_key(
+                self.connector.as_ref(),
+                slot,
+                key,
+                pin_policy,
+                touch_policy,
+            ),
         )?;
         let public_key = piv_public_key_from_metadata(key.algorithm, key.public_key.clone())?;
         self.keys.retain(|candidate| candidate.slot != slot);
@@ -1115,35 +1137,38 @@ impl Slot for PivSlot {
         Ok(())
     }
     fn piv_import_certificate(&mut self, slot: piv::Slot, certificate: &[u8]) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         let algorithm = piv_algorithm_from_certificate(certificate).ok_or(CKR_DATA_INVALID)?;
         if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
-        let data = PivClient.put_certificate(self.connector.as_ref(), slot, certificate)?;
+        let data = observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.put_certificate(self.connector.as_ref(), slot, certificate),
+        )?;
         self.cache_certificate(slot, algorithm, certificate.to_vec(), data)
     }
     fn piv_delete_key(&mut self, slot: piv::Slot) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if (self.reported_version().major, self.reported_version().minor) < (5, 7) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        PivClient.delete_key(self.connector.as_ref(), slot)?;
+        observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.delete_key(self.connector.as_ref(), slot),
+        )?;
         self.keys.retain(|key| key.slot != slot);
         Ok(())
     }
     fn piv_move_key(&mut self, from: piv::Slot, to: piv::Slot) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if (self.reported_version().major, self.reported_version().minor) < (5, 7) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        PivClient.move_key(self.connector.as_ref(), from, to)?;
+        observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.move_key(self.connector.as_ref(), from, to),
+        )?;
         if let Some(key) = self.keys.iter_mut().find(|key| key.slot == from) {
             key.slot = to;
             key.attestation = Rc::new(RefCell::new(LazyCache::Unattempted));
@@ -1151,10 +1176,11 @@ impl Slot for PivSlot {
         Ok(())
     }
     fn piv_delete_certificate(&mut self, slot: piv::Slot) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
-        PivClient.delete_certificate(self.connector.as_ref(), slot)?;
+        observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.delete_certificate(self.connector.as_ref(), slot),
+        )?;
         self.certificates
             .retain(|certificate| certificate.slot != slot);
         self.data_objects
@@ -1162,9 +1188,6 @@ impl Slot for PivSlot {
         Ok(())
     }
     fn piv_write_data(&mut self, object_id: u32, value: &[u8]) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if !piv::data_object_allowed(object_id) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
         }
@@ -1174,10 +1197,18 @@ impl Slot for PivSlot {
             if !piv_algorithm_supported(self.reported_version(), algorithm, self.supports_pq()) {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             }
-            PivClient.put_data(self.connector.as_ref(), object_id, value)?;
+            observe_piv_authentication_result(
+                self.connector.as_ref(),
+                LoginRole::So,
+                PivClient.put_data(self.connector.as_ref(), object_id, value),
+            )?;
             return self.cache_certificate(slot, algorithm, certificate, value.to_vec());
         }
-        PivClient.put_data(self.connector.as_ref(), object_id, value)?;
+        observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.put_data(self.connector.as_ref(), object_id, value),
+        )?;
         self.data_objects
             .retain(|object| object.object_id != object_id);
         self.data_objects.push(PivDataObject {
@@ -1187,21 +1218,26 @@ impl Slot for PivSlot {
         Ok(())
     }
     fn piv_delete_data(&mut self, object_id: u32) -> Result<(), Error> {
-        if !self.management_authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         if !piv::data_object_allowed(object_id) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
         }
         if let Some(slot) = piv::data_object_mapping(object_id).and_then(|mapping| mapping.slot) {
-            PivClient.delete_certificate(self.connector.as_ref(), slot)?;
+            observe_piv_authentication_result(
+                self.connector.as_ref(),
+                LoginRole::So,
+                PivClient.delete_certificate(self.connector.as_ref(), slot),
+            )?;
             self.certificates
                 .retain(|certificate| certificate.slot != slot);
             self.data_objects
                 .retain(|object| object.object_id != object_id);
             return Ok(());
         }
-        PivClient.put_data(self.connector.as_ref(), object_id, &[])?;
+        observe_piv_authentication_result(
+            self.connector.as_ref(),
+            LoginRole::So,
+            PivClient.put_data(self.connector.as_ref(), object_id, &[]),
+        )?;
         self.data_objects
             .retain(|object| object.object_id != object_id);
         Ok(())
@@ -1574,8 +1610,6 @@ pub(crate) struct PivSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
-    authenticated: Rc<Cell<bool>>,
-    management_authenticated: Rc<Cell<bool>>,
 }
 
 impl BackendSession for PivSession {
@@ -1589,14 +1623,6 @@ impl BackendSession for PivSession {
         self.flags
     }
     fn get_session_info(&self) -> Result<(), Error> {
-        if self.management_authenticated.get() {
-            return Ok(());
-        }
-        let retries = PivClient.pin_retries(self.connector.as_ref())?;
-        if self.authenticated.get() && retries != u8::MAX {
-            self.authenticated.set(false);
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         Ok(())
     }
     fn piv_sign(
@@ -1607,15 +1633,12 @@ impl BackendSession for PivSession {
         pin_policy: u8,
         ml_dsa: Option<&MlDsaSignatureParameters>,
     ) -> Result<Vec<u8>, Error> {
-        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input, ml_dsa);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
-        {
-            self.authenticated.set(false);
+        if piv_effective_pin_policy(slot, pin_policy) == 2 {
+            observe_piv_authentication_result(self.connector.as_ref(), LoginRole::User, result)
+        } else {
+            result
         }
-        result
     }
     fn piv_decipher(
         &self,
@@ -1624,15 +1647,12 @@ impl BackendSession for PivSession {
         input: &[u8],
         pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
-        {
-            self.authenticated.set(false);
+        if piv_effective_pin_policy(slot, pin_policy) == 2 {
+            observe_piv_authentication_result(self.connector.as_ref(), LoginRole::User, result)
+        } else {
+            result
         }
-        result
     }
     fn piv_decapsulate(
         &self,
@@ -1641,14 +1661,11 @@ impl BackendSession for PivSession {
         ciphertext: &[u8],
         pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
         let result = PivClient.decapsulate(self.connector.as_ref(), slot, algorithm, ciphertext);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
-        {
-            self.authenticated.set(false);
+        if piv_effective_pin_policy(slot, pin_policy) == 2 {
+            observe_piv_authentication_result(self.connector.as_ref(), LoginRole::User, result)
+        } else {
+            result
         }
-        result
     }
 }

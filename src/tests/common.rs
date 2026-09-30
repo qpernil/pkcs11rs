@@ -7174,6 +7174,98 @@ fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
 }
 
 #[test]
+fn piv_management_authentication_failure_clears_the_selected_applet_guard() {
+    #[derive(Debug)]
+    struct SecurityStatusConnector {
+        login: std::cell::Cell<crate::CcidLoginState>,
+    }
+
+    impl crate::Connector for SecurityStatusConnector {
+        fn as_debug(&self) -> &dyn std::fmt::Debug {
+            self
+        }
+
+        fn manufacturer(&self) -> &str {
+            "Test"
+        }
+
+        fn product(&self) -> &str {
+            "PIV security-status connector"
+        }
+
+        fn major(&self) -> u8 {
+            5
+        }
+
+        fn minor(&self) -> u8 {
+            7
+        }
+
+        fn is_present(&self) -> bool {
+            true
+        }
+
+        fn buffer_size(&self) -> usize {
+            256
+        }
+
+        fn ccid_login_state(&self) -> Option<crate::CcidLoginState> {
+            Some(self.login.get())
+        }
+
+        fn set_ccid_login_state(&self, state: crate::CcidLoginState) -> Result<(), crate::Error> {
+            self.login.set(state);
+            Ok(())
+        }
+
+        fn transmit<'a>(
+            &self,
+            _send_buffer: &[u8],
+            receive_buffer: &'a mut [u8],
+            _timeout: std::time::Duration,
+        ) -> Result<&'a [u8], crate::Error> {
+            receive_buffer[..2].copy_from_slice(&[0x69, 0x82]);
+            Ok(&receive_buffer[..2])
+        }
+    }
+
+    let connector = std::rc::Rc::new(SecurityStatusConnector {
+        login: std::cell::Cell::new(crate::CcidLoginState::Public),
+    });
+    let mut piv = crate::PivSlot {
+        connector: connector.clone(),
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
+        application_aid: crate::piv::PIV_AID.to_vec(),
+        slot_description: None,
+        version: crate::piv::Version {
+            major: 5,
+            minor: 7,
+            patch: 0,
+        },
+        serial: String::from("TEST0001"),
+        keys: Vec::new(),
+        certificates: Vec::new(),
+        data_objects: Vec::new(),
+    };
+
+    crate::Slot::set_login_role(&piv, Some(crate::LoginRole::So)).unwrap();
+    assert_eq!(connector.login.get(), crate::CcidLoginState::So);
+    assert!(crate::Slot::login_is_active(&piv));
+
+    let error = crate::Slot::piv_generate_key_pair(
+        &mut piv,
+        crate::piv::Slot::Retired1,
+        crate::piv::Algorithm::EccP256,
+        2,
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(CK_RV::from(error), CKR_USER_NOT_LOGGED_IN as CK_RV);
+    assert_eq!(connector.login.get(), crate::CcidLoginState::Public);
+    assert!(!crate::Slot::login_is_active(&piv));
+}
+
+#[test]
 fn piv_and_openpgp_mechanisms_keep_native_ranges_without_unrelated_software_keys() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let piv = crate::PivSlot {
@@ -7181,8 +7273,6 @@ fn piv_and_openpgp_mechanisms_keep_native_ranges_without_unrelated_software_keys
         device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
-        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
-        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: crate::piv::Version {
             major: 5,
             minor: 7,
@@ -7269,8 +7359,6 @@ fn virtual_piv_projects_post_quantum_keys_like_yubihsm() {
         device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
-        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
-        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: crate::piv::Version {
             major: 5,
             minor: 8,
@@ -7398,8 +7486,6 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
         device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
-        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
-        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: crate::piv::Version {
             major: 5,
             minor: 7,
@@ -8679,6 +8765,24 @@ impl crate::Slot for ConcurrentSlot {
         Ok(())
     }
 
+    fn logout_role(&mut self, _role: crate::LoginRole) -> Result<(), crate::error::Error> {
+        self.logout()
+    }
+
+    fn set_login_role(&self, _role: Option<crate::LoginRole>) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn clear_session(&mut self) {}
+
+    fn login_is_active(&self) -> bool {
+        true
+    }
+
+    fn backend_session_is_active(&self) -> bool {
+        false
+    }
+
     fn init_slot(&mut self) -> Result<(), crate::error::Error> {
         Ok(())
     }
@@ -9096,6 +9200,20 @@ impl crate::Slot for TestSlot {
         }
         TEST_SLOT_LOGGED_IN.store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    fn logout_role(&mut self, _role: crate::LoginRole) -> Result<(), crate::error::Error> {
+        self.logout()
+    }
+
+    fn set_login_role(&self, _role: Option<crate::LoginRole>) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn clear_session(&mut self) {}
+
+    fn backend_session_is_active(&self) -> bool {
+        false
     }
 
     fn init_slot(&mut self) -> Result<(), crate::error::Error> {

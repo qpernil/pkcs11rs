@@ -302,6 +302,141 @@ mod tests {
         assert!(info.option("clientPin"));
     }
 
+    #[test]
+    fn direct_piv_deauthentication_clears_pin_but_not_management_authentication() {
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
+        let client = crate::PivClient;
+        client.select(&connector, &crate::piv::PIV_AID).unwrap();
+        let management_key =
+            crate::parse_hex("010203040506070801020304050607080102030405060708").unwrap();
+        client
+            .authenticate_management_key(&connector, &management_key)
+            .unwrap();
+        client.verify_pin(&connector, b"123456").unwrap();
+
+        client
+            .generate_key_pair(
+                &connector,
+                crate::piv::Slot::Retired1,
+                crate::piv::Algorithm::EccP256,
+                2,
+                1,
+            )
+            .unwrap();
+        client
+            .sign(
+                &connector,
+                crate::piv::Slot::Retired1,
+                crate::piv::Algorithm::EccP256,
+                &[0x31; 32],
+                None,
+            )
+            .unwrap();
+
+        client.deauthenticate_pin(&connector).unwrap();
+        assert!(matches!(
+            client.sign(
+                &connector,
+                crate::piv::Slot::Retired1,
+                crate::piv::Algorithm::EccP256,
+                &[0x31; 32],
+                None,
+            ),
+            Err(Error::Generic(rv)) if rv == crate::CKR_USER_NOT_LOGGED_IN as crate::CK_RV
+        ));
+
+        client
+            .generate_key_pair(
+                &connector,
+                crate::piv::Slot::Retired2,
+                crate::piv::Algorithm::EccP256,
+                2,
+                1,
+            )
+            .expect("VERIFY FF/80 must not clear management-key authentication");
+    }
+
+    #[test]
+    fn piv_pin_and_management_authentication_can_coexist_in_either_order() {
+        for management_first in [true, false] {
+            let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
+            let client = crate::PivClient;
+            client.select(&connector, &crate::piv::PIV_AID).unwrap();
+            let management_key =
+                crate::parse_hex("010203040506070801020304050607080102030405060708").unwrap();
+            if management_first {
+                client
+                    .authenticate_management_key(&connector, &management_key)
+                    .unwrap();
+                client.verify_pin(&connector, b"123456").unwrap();
+            } else {
+                client.verify_pin(&connector, b"123456").unwrap();
+                client
+                    .authenticate_management_key(&connector, &management_key)
+                    .unwrap();
+            }
+
+            client
+                .generate_key_pair(
+                    &connector,
+                    crate::piv::Slot::Retired1,
+                    crate::piv::Algorithm::EccP256,
+                    2,
+                    1,
+                )
+                .expect("management authentication must remain active");
+            client
+                .sign(
+                    &connector,
+                    crate::piv::Slot::Retired1,
+                    crate::piv::Algorithm::EccP256,
+                    &[0x31; 32],
+                    None,
+                )
+                .expect("PIN authentication must remain active");
+        }
+    }
+
+    #[test]
+    fn pending_management_authentication_is_cleared_by_next_apdu_without_clearing_pin() {
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
+        let client = crate::PivClient;
+        client.select(&connector, &crate::piv::PIV_AID).unwrap();
+        let management_key =
+            crate::parse_hex("010203040506070801020304050607080102030405060708").unwrap();
+        client.verify_pin(&connector, b"123456").unwrap();
+        client
+            .authenticate_management_key(&connector, &management_key)
+            .unwrap();
+        client
+            .generate_key_pair(
+                &connector,
+                crate::piv::Slot::Retired1,
+                crate::piv::Algorithm::EccP256,
+                2,
+                1,
+            )
+            .unwrap();
+
+        client.deauthenticate_management_key(&connector).unwrap();
+
+        client
+            .sign(
+                &connector,
+                crate::piv::Slot::Retired1,
+                crate::piv::Algorithm::EccP256,
+                &[0x31; 32],
+                None,
+            )
+            .expect("the APDU that cancels pending management auth must still execute normally");
+        assert_eq!(
+            client
+                .management_authentication_probe_status(&connector)
+                .unwrap(),
+            0x6982
+        );
+    }
+
     fn exercise_pin_and_credential_management(connector: Rc<EmbeddedVirtualYubiKeyConnector>) {
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));

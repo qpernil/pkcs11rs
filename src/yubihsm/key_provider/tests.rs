@@ -410,6 +410,21 @@ impl Slot for WithoutMechanismSlot {
     fn logout(&mut self) -> Result<(), Error> {
         self.0.logout()
     }
+    fn logout_role(&mut self, role: LoginRole) -> Result<(), Error> {
+        self.0.logout_role(role)
+    }
+    fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
+        self.0.set_login_role(role)
+    }
+    fn clear_session(&mut self) {
+        self.0.clear_session()
+    }
+    fn login_is_active(&self) -> bool {
+        self.0.login_is_active()
+    }
+    fn backend_session_is_active(&self) -> bool {
+        self.0.backend_session_is_active()
+    }
     fn init_slot(&mut self) -> Result<(), Error> {
         self.0.init_slot()
     }
@@ -558,6 +573,7 @@ fn asymmetric_combined_policy_failure_is_not_retried_with_standard_ecdh() {
 #[derive(Debug)]
 struct AgreementCard {
     calls: Cell<usize>,
+    login: Cell<CcidLoginState>,
 }
 impl Connector for AgreementCard {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
@@ -580,6 +596,13 @@ impl Connector for AgreementCard {
     }
     fn buffer_size(&self) -> usize {
         2048
+    }
+    fn ccid_login_state(&self) -> Option<CcidLoginState> {
+        Some(self.login.get())
+    }
+    fn set_ccid_login_state(&self, state: CcidLoginState) -> Result<(), Error> {
+        self.login.set(state);
+        Ok(())
     }
     fn transmit<'a>(
         &self,
@@ -616,6 +639,7 @@ fn piv_and_openpgp_native_keys_select_combined_authentication_and_complete_kdf()
     for is_piv in [true, false] {
         let card = Rc::new(AgreementCard {
             calls: Cell::new(0),
+            login: Cell::new(CcidLoginState::Public),
         });
         let device = Arc::new(crate::device::DeviceContext::test());
         let slot: Box<dyn Slot> = if is_piv {
@@ -634,7 +658,6 @@ fn piv_and_openpgp_native_keys_select_combined_authentication_and_complete_kdf()
                 touch_policy: 1,
                 origin: piv::ORIGIN_GENERATED,
             });
-            slot.authenticated.set(true);
             Box::new(slot)
         } else {
             let mut slot = OpenPgpSlot::new_with_device(card.clone(), vec![], device);
@@ -672,6 +695,7 @@ fn piv_and_openpgp_native_keys_select_combined_authentication_and_complete_kdf()
         owner
             .call(|| {
                 with_session_context_mut(owner.handle, |ctx| {
+                    ctx.slot.set_login_role(Some(LoginRole::User))?;
                     ctx.login_role = Some(LoginRole::User);
                     Ok(())
                 })

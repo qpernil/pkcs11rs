@@ -13,6 +13,117 @@ fn initialize_direct_hardware(recreate_yubihsm_sessions: bool) -> CK_RV {
     }))
 }
 
+#[cfg(feature = "native-hardware")]
+#[test]
+#[ignore = "requires an explicitly selected YubiKey PC/SC reader with the factory PIV management key"]
+fn piv_pending_management_authentication_clears_hardware_authorization_on_next_command() {
+    use crate::{ApduCapabilities, Connector};
+    use std::time::Duration;
+
+    struct SharedPcscProbeConnector {
+        card: std::sync::Mutex<pcsc::Card>,
+    }
+
+    impl std::fmt::Debug for SharedPcscProbeConnector {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("SharedPcscProbeConnector")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Connector for SharedPcscProbeConnector {
+        fn as_debug(&self) -> &dyn std::fmt::Debug {
+            self
+        }
+        fn manufacturer(&self) -> &str {
+            "Yubico"
+        }
+        fn product(&self) -> &str {
+            "YubiKey"
+        }
+        fn major(&self) -> u8 {
+            0
+        }
+        fn minor(&self) -> u8 {
+            0
+        }
+        fn is_present(&self) -> bool {
+            true
+        }
+        fn buffer_size(&self) -> usize {
+            pcsc::MAX_BUFFER_SIZE_EXTENDED
+        }
+        fn apdu_capabilities(&self) -> ApduCapabilities {
+            ApduCapabilities::SHORT_ONLY
+        }
+        fn transmit<'a>(
+            &self,
+            command: &[u8],
+            receive: &'a mut [u8],
+            _timeout: Duration,
+        ) -> Result<&'a [u8], crate::Error> {
+            let card = self.card.lock().map_err(|_| crate::CKR_MUTEX_BAD)?;
+            let received = card.transmit(command, receive)?;
+            let length = received.len();
+            Ok(&receive[..length])
+        }
+    }
+
+    let reader_name = std::env::var("PKCS11RS_PIV_AUTH_PROBE_READER")
+        .expect("set PKCS11RS_PIV_AUTH_PROBE_READER to one exact PC/SC reader name");
+    let context =
+        pcsc::Context::establish(pcsc::Scope::System).expect("failed to establish PC/SC context");
+    let reader = context
+        .list_readers_owned()
+        .expect("failed to list PC/SC readers")
+        .into_iter()
+        .find(|reader| reader.to_string_lossy() == reader_name)
+        .unwrap_or_else(|| panic!("PC/SC reader {reader_name:?} is not present"));
+    let card = context
+        .connect(
+            &reader,
+            pcsc::ShareMode::Shared,
+            pcsc::Protocols::T0 | pcsc::Protocols::T1,
+        )
+        .expect("failed to connect to reader");
+    let connector = SharedPcscProbeConnector {
+        card: std::sync::Mutex::new(card),
+    };
+
+    let client = crate::PivClient;
+    let info = client
+        .select(&connector, &crate::piv::PIV_AID)
+        .expect("failed to select PIV");
+    let management_key =
+        crate::parse_hex("010203040506070801020304050607080102030405060708").unwrap();
+    client
+        .authenticate_management_key(&connector, &management_key)
+        .expect("factory PIV management-key authentication failed");
+    let authenticated = client
+        .management_authentication_probe_status(&connector)
+        .expect("authenticated management-state probe failed");
+    assert_ne!(
+        authenticated, 0x6982,
+        "management operation was rejected after successful authentication"
+    );
+
+    client
+        .deauthenticate_management_key(&connector)
+        .expect("starting the logout management-auth exchange failed");
+    let deauthenticated = client
+        .management_authentication_probe_status(&connector)
+        .expect("deauthenticated management-state probe failed");
+    eprintln!(
+        "PIV firmware {}.{}.{}: authenticated probe status {authenticated:04x}; first command after pending logout challenge {deauthenticated:04x}",
+        info.version.major, info.version.minor, info.version.patch
+    );
+    assert_eq!(
+        deauthenticated, 0x6982,
+        "the first command after the pending logout challenge did not clear authorization"
+    );
+}
+
 #[cfg(not(feature = "abi-tests"))]
 mod hardware_provisioning {
     use super::*;

@@ -215,6 +215,44 @@ fn pads_pin_and_reports_retry_failures() {
 }
 
 #[test]
+fn sends_direct_deauthentication_without_selecting_another_applet() {
+    let connector = ScriptedConnector::new(vec![response(&[], STATUS_SUCCESS)]);
+    Client.deauthenticate_pin(&connector).unwrap();
+    assert_eq!(
+        connector.commands.borrow().as_slice(),
+        [vec![0, INS_VERIFY, 0xff, 0x80]]
+    );
+}
+
+#[test]
+fn starts_management_authentication_and_leaves_its_challenge_pending_to_deauthenticate() {
+    let connector = ScriptedConnector::new(vec![
+        response(
+            &[0x01, 0x01, ManagementAlgorithm::TripleDes as u8],
+            STATUS_SUCCESS,
+        ),
+        response(
+            &[
+                0x7c, 0x0a, 0x80, 0x08, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+            ],
+            STATUS_SUCCESS,
+        ),
+    ]);
+    Client.deauthenticate_management_key(&connector).unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(
+        &commands[0][..4],
+        &[0, INS_GET_METADATA, 0, MANAGEMENT_KEY_REFERENCE]
+    );
+    assert_eq!(
+        &commands[1][..4],
+        &[0, INS_AUTHENTICATE, 0x03, MANAGEMENT_KEY_REFERENCE]
+    );
+    assert!(commands[1].windows(2).any(|window| window == [0x80, 0]));
+    assert_eq!(commands.len(), 2);
+}
+
+#[test]
 fn changes_and_unblocks_piv_pin_references() {
     let connector = ScriptedConnector::new(vec![
         response(&[], STATUS_SUCCESS),
