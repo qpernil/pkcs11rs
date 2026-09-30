@@ -277,6 +277,15 @@ jobs:
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES \
             build
+          xcodebuild -quiet \
+            -project examples/ios/PKCS11RSCCIDStateTest/PKCS11RSCCIDStateTest.xcodeproj \
+            -scheme PKCS11RSCCIDStateTest \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            build
 
       - name: Run embedded virtual YubiKey PKCS #11 tests
         run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
