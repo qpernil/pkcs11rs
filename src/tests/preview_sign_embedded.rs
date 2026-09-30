@@ -840,6 +840,65 @@ fn authorize_preview_operation(session: CK_SESSION_HANDLE, digest: &[u8; 32]) {
 }
 
 #[test]
+fn embedded_fido_random_generation_in_public_and_user_ro_and_rw_sessions() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    assert_eq!(initialize_embedded(), CKR_OK as CK_RV);
+
+    let mut count = 1;
+    let mut slot = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    for flags in [
+        CKF_SERIAL_SESSION as CK_FLAGS,
+        (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+    ] {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(slot, flags, std::ptr::null_mut(), None, &mut session),
+            CKR_OK as CK_RV
+        );
+        for logged_in in [false, true, false] {
+            if logged_in {
+                let mut pin = *b"123456";
+                assert_eq!(
+                    crate::api::C_Login(
+                        session,
+                        CKU_USER as CK_USER_TYPE,
+                        pin.as_mut_ptr(),
+                        pin.len() as CK_ULONG,
+                    ),
+                    CKR_OK as CK_RV
+                );
+            }
+            for length in [0, 1, 32, 256, 257] {
+                let mut random = vec![0; length];
+                assert_eq!(
+                    crate::api::C_GenerateRandom(
+                        session,
+                        random.as_mut_ptr(),
+                        random.len() as CK_ULONG,
+                    ),
+                    CKR_OK as CK_RV,
+                    "flags {flags:#x}, logged in {logged_in}, length {length}"
+                );
+            }
+            if logged_in {
+                assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            }
+        }
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
@@ -1168,10 +1227,13 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
 
-    let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
-        .digest(b"pkcs11rs previewSign PKCS #11 embedded")
-        .try_into()
-        .unwrap();
+    // Match the phone smoke app: obtain the signing input through the FIDO
+    // session rather than bypassing C_GenerateRandom with a fixed digest.
+    let mut digest = [0u8; 32];
+    assert_eq!(
+        crate::api::C_GenerateRandom(session, digest.as_mut_ptr(), digest.len() as CK_ULONG),
+        CKR_OK as CK_RV
+    );
     mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN,
         pParameter: std::ptr::null_mut(),

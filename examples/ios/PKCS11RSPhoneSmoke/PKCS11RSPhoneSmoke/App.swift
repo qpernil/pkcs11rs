@@ -1642,7 +1642,8 @@ private func exercisePostQuantumMechanisms(
     tokenLabel: String,
     support: PostQuantumSupport,
     performOperations: Bool = true,
-    allowGeneration: Bool = true
+    allowGeneration: Bool = true,
+    reportPairStatus: Bool = true
 ) -> [String] {
     var lines = ["", "PQC functional smoke test:"]
     let identifiers = postQuantumIdentifiers(tokenLabel: tokenLabel)
@@ -1660,7 +1661,9 @@ private func exercisePostQuantumMechanisms(
             allowGeneration: allowGeneration
         )
         if pair.result == CKR_OK {
-            lines.append("  ML-DSA-87 \(pair.status)")
+            if reportPairStatus {
+                lines.append("  ML-DSA-87 \(pair.status)")
+            }
             if performOperations {
                 let exercised = exerciseMlDsa(
                     session: session,
@@ -1704,7 +1707,9 @@ private func exercisePostQuantumMechanisms(
             allowGeneration: allowGeneration
         )
         if pair.result == CKR_OK {
-            lines.append("  ML-KEM-1024 \(pair.status)")
+            if reportPairStatus {
+                lines.append("  ML-KEM-1024 \(pair.status)")
+            }
             if performOperations {
                 let exercised = exerciseKem(
                     session: session,
@@ -1750,7 +1755,9 @@ private func exercisePostQuantumMechanisms(
             allowGeneration: allowGeneration
         )
         if pair.result == CKR_OK {
-            lines.append("  MLKEM768-X25519 \(pair.status)")
+            if reportPairStatus {
+                lines.append("  MLKEM768-X25519 \(pair.status)")
+            }
             if performOperations {
                 let exercised = exerciseKem(
                     session: session,
@@ -1857,6 +1864,28 @@ private func embeddedPivPostQuantumSmoke(
         session: session,
         title: "Objects (public RW session)"
     ).lines)
+    lines.append(contentsOf: support.lines)
+    lines.append("")
+
+    var managementCredential = Array(
+        "010203040506070801020304050607080102030405060708".utf8
+    )
+    let managementLogin = managementCredential.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            CK_USER_TYPE(CKU_SO),
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+    _ = managementCredential.withUnsafeMutableBytes { bytes in
+        bytes.initializeMemory(as: UInt8.self, repeating: 0)
+    }
+    lines.append(loginResultLine(CK_USER_TYPE(CKU_SO), result: managementLogin))
+    guard managementLogin == CKR_OK || managementLogin == CKR_USER_ALREADY_LOGGED_IN else {
+        _ = C_CloseSession(session)
+        return lines
+    }
 
     let identifiers = postQuantumIdentifiers(tokenLabel: tokenLabel)
     let mlDsaMissing: (result: CK_RV, missing: Bool) = support.mlDsa
@@ -1891,34 +1920,11 @@ private func embeddedPivPostQuantumSmoke(
                 : hybridKemMissing.result)
         _ = C_CloseSession(session)
         return lines + [
-            "",
-            "PQC PIV public-key discovery failed: \(returnValueDescription(failure))",
+            "  PQC PIV public-key discovery failed: \(returnValueDescription(failure))",
         ]
     }
 
-    lines.append("")
-    lines.append("PQC PIV management provisioning:")
-    var managementCredential = Array(
-        "010203040506070801020304050607080102030405060708".utf8
-    )
-    let managementLogin = managementCredential.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_SO),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-    _ = managementCredential.withUnsafeMutableBytes { bytes in
-        bytes.initializeMemory(as: UInt8.self, repeating: 0)
-    }
-    lines.append(loginResultLine(CK_USER_TYPE(CKU_SO), result: managementLogin))
-    guard managementLogin == CKR_OK || managementLogin == CKR_USER_ALREADY_LOGGED_IN else {
-        _ = C_CloseSession(session)
-        return lines
-    }
-
-    if mlDsaMissing.missing || mlKemMissing.missing || hybridKemMissing.missing {
+    if support.mlDsa {
         if mlDsaMissing.missing {
             let pair = generatePivPostQuantumPair(
                 session: session,
@@ -1934,9 +1940,11 @@ private func embeddedPivPostQuantumSmoke(
                     ? "  ML-DSA-87 \(pair.status)"
                     : "  advertised ML-DSA failed: \(pair.status): \(returnValueDescription(pair.result))"
             )
-        } else if support.mlDsa {
+        } else {
             lines.append("  ML-DSA-87 keypair already present")
         }
+    }
+    if support.mlKem {
         if mlKemMissing.missing {
             let pair = generatePivPostQuantumPair(
                 session: session,
@@ -1952,9 +1960,11 @@ private func embeddedPivPostQuantumSmoke(
                     ? "  ML-KEM-1024 \(pair.status)"
                     : "  advertised ML-KEM failed: \(pair.status): \(returnValueDescription(pair.result))"
             )
-        } else if support.mlKem {
+        } else {
             lines.append("  ML-KEM-1024 keypair already present")
         }
+    }
+    if support.hybridKem {
         if hybridKemMissing.missing {
             let pair = generatePivPostQuantumPair(
                 session: session,
@@ -1970,7 +1980,7 @@ private func embeddedPivPostQuantumSmoke(
                     ? "  MLKEM768-X25519 \(pair.status)"
                     : "  advertised MLKEM768-X25519 failed: \(pair.status): \(returnValueDescription(pair.result))"
             )
-        } else if support.hybridKem {
+        } else {
             lines.append("  MLKEM768-X25519 keypair already present")
         }
     }
@@ -1982,6 +1992,7 @@ private func embeddedPivPostQuantumSmoke(
             "  C_Logout() => \(returnValueDescription(managementLogout))",
         ]
     }
+    lines.append("")
 
     var userCredential = Array("123456".utf8)
     let userLogin = userCredential.withUnsafeMutableBufferPointer { buffer in
@@ -2000,14 +2011,14 @@ private func embeddedPivPostQuantumSmoke(
         _ = C_CloseSession(session)
         return lines
     }
-    lines.append("")
-    lines.append("PQC PIV user operations:")
     let operations = exercisePostQuantumMechanisms(
         session: session,
         tokenLabel: tokenLabel,
         support: support,
-        allowGeneration: false
+        allowGeneration: false,
+        reportPairStatus: false
     )
+    lines.append("")
     lines.append(contentsOf: operations.dropFirst(2))
     lines.append(contentsOf: objectInventory(
         session: session,
@@ -2070,6 +2081,10 @@ private func embeddedFidoPostQuantumSmoke(
         tokenLabel: tokenLabel,
         support: support
     ))
+    lines.append(contentsOf: objectInventory(
+        session: session,
+        title: "Objects (authenticated RW session)"
+    ).lines)
     let userLogout = C_Logout(session)
     if userLogout != CKR_OK {
         lines.append("  FIDO2 user logout failed: \(returnValueDescription(userLogout))")
@@ -2444,7 +2459,6 @@ private final class ModuleInspector {
                 // Login state is token-wide. Mechanism discovery and the first
                 // object inventory use RW-public state, followed by explicit
                 // SO provisioning, logout, and USER operations.
-                lines.append(contentsOf: support.lines)
                 if support.any {
                     lines.append(contentsOf: embeddedPivPostQuantumSmoke(
                         slot: inventory.slot,
@@ -2453,17 +2467,18 @@ private final class ModuleInspector {
                     ))
                 } else {
                     appendPublicObjects(inventory)
+                    lines.append(contentsOf: support.lines)
                 }
                 continue
             }
 
             appendPublicObjects(inventory)
+            lines.append(contentsOf: support.lines)
             if isConfiguredEmbeddedReaderSlot(inventory)
                 && isFido2TokenLabel(inventory.tokenLabel)
             {
                 lines.append(contentsOf: embeddedFidoPreviewSignSmoke(slot: inventory.slot))
             }
-            lines.append(contentsOf: support.lines)
             var authenticatedSession: CK_SESSION_HANDLE?
             if isHostTokenLabel(inventory.tokenLabel) {
                 let source = loginSourceSlot(inventory.slot)
@@ -2472,10 +2487,6 @@ private final class ModuleInspector {
                 if let authorization = source.authorization {
                     authorizedSessions.append(authorization)
                     authenticatedSession = authorization.session
-                    lines.append(contentsOf: objectInventory(
-                        session: authorization.session,
-                        title: "Objects (authenticated session)"
-                    ).lines)
                 }
             }
             if support.any {
@@ -2500,6 +2511,12 @@ private final class ModuleInspector {
                         support: support
                     ))
                 }
+            }
+            if let authenticatedSession {
+                lines.append(contentsOf: objectInventory(
+                    session: authenticatedSession,
+                    title: "Objects (authenticated session)"
+                ).lines)
             }
         }
 

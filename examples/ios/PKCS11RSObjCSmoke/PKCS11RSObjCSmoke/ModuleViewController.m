@@ -1163,7 +1163,8 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                                                       tokenLabel:(NSString *)tokenLabel
                                                          support:(PKCS11RSPostQuantumSupport *)support
                                                performOperations:(BOOL)performOperations
-                                                 allowGeneration:(BOOL)allowGeneration {
+                                                 allowGeneration:(BOOL)allowGeneration
+                                                reportPairStatus:(BOOL)reportPairStatus {
     NSMutableArray<NSString *> *lines =
         [[NSMutableArray alloc] initWithObjects:@"", @"PQC functional smoke test:", nil];
     NSArray<NSData *> *identifiers = [self postQuantumIdentifiersForTokenLabel:tokenLabel];
@@ -1174,7 +1175,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             publicUsageAttribute:CKA_VERIFY privateUsageAttribute:CKA_SIGN
             allowGeneration:allowGeneration];
         if (pair.result == CKR_OK) {
-            [lines addObject:[NSString stringWithFormat:@"  ML-DSA-87 %@", pair.status]];
+            if (reportPairStatus) {
+                [lines addObject:[NSString stringWithFormat:@"  ML-DSA-87 %@", pair.status]];
+            }
             if (performOperations) {
                 CK_ULONG signatureLength = 0;
                 double signMilliseconds = 0;
@@ -1242,7 +1245,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                               name, pair.status, PKCS11RSReturnValue(pair.result)]];
             continue;
         }
-        [lines addObject:[NSString stringWithFormat:@"  %@ %@", name, pair.status]];
+        if (reportPairStatus) {
+            [lines addObject:[NSString stringWithFormat:@"  %@ %@", name, pair.status]];
+        }
         if (!performOperations) {
             continue;
         }
@@ -1288,7 +1293,8 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         ];
     }
     NSMutableArray<NSString *> *lines = [[self exercisePostQuantumMechanismsInSession:session
-        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:YES] mutableCopy];
+        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:YES
+        reportPairStatus:YES] mutableCopy];
     CK_RV close = C_CloseSession(session);
     if (close != CKR_OK) {
         [lines addObject:[NSString stringWithFormat:@"  C_CloseSession failed: %@",
@@ -1332,7 +1338,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         return lines;
     }
     [lines addObjectsFromArray:[self exercisePostQuantumMechanismsInSession:session
-        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:YES]];
+        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:YES
+        reportPairStatus:YES]];
+    [lines addObjectsFromArray:[self objectInventoryForSession:session
+                                      title:@"Objects (authenticated RW session)"].lines];
     CK_RV logout = C_Logout(session);
     if (logout != CKR_OK) {
         [lines addObject:[NSString stringWithFormat:@"  FIDO2 user logout failed: %@",
@@ -1416,6 +1425,17 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] init];
     [lines addObjectsFromArray:[self objectInventoryForSession:session
                                       title:@"Objects (public RW session)"].lines];
+    [lines addObjectsFromArray:support.lines];
+    [lines addObject:@""];
+    NSMutableData *management = [[@"010203040506070801020304050607080102030405060708"
+        dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    result = C_Login(session, CKU_SO, management.mutableBytes, (CK_ULONG)management.length);
+    [management resetBytesInRange:NSMakeRange(0, management.length)];
+    [lines addObject:PKCS11RSLoginResult(CKU_SO, result)];
+    if (result != CKR_OK && result != CKR_USER_ALREADY_LOGGED_IN) {
+        C_CloseSession(session);
+        return lines;
+    }
     NSArray<NSData *> *identifiers = [self postQuantumIdentifiersForTokenLabel:tokenLabel];
     BOOL missing[] = {NO, NO, NO};
     CK_RV discovery[] = {CKR_OK, CKR_OK, CKR_OK};
@@ -1443,16 +1463,6 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             return lines;
         }
     }
-    [lines addObjectsFromArray:@[@"", @"PQC PIV management provisioning:"]];
-    NSMutableData *management = [[@"010203040506070801020304050607080102030405060708"
-        dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
-    result = C_Login(session, CKU_SO, management.mutableBytes, (CK_ULONG)management.length);
-    [management resetBytesInRange:NSMakeRange(0, management.length)];
-    [lines addObject:PKCS11RSLoginResult(CKU_SO, result)];
-    if (result != CKR_OK && result != CKR_USER_ALREADY_LOGGED_IN) {
-        C_CloseSession(session);
-        return lines;
-    }
     NSArray<NSDictionary *> *cases = @[
         @{
             @"enabled" : @(support.mlDsa), @"missing" : @(missing[0]),
@@ -1477,28 +1487,26 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             @"privateUsage" : @(CKA_DECAPSULATE),
         },
     ];
-    if (missing[0] || missing[1] || missing[2]) {
-        for (NSDictionary *test in cases) {
-            if (![test[@"enabled"] boolValue]) {
-                continue;
-            }
-            if (![test[@"missing"] boolValue]) {
-                [lines addObject:[NSString stringWithFormat:@"  %@ keypair already present",
-                                                           test[@"name"]]];
-                continue;
-            }
-            NSNumber *parameterSet = test[@"parameterSet"] == NSNull.null
-                ? nil : test[@"parameterSet"];
-            PKCS11RSPostQuantumPair *pair = [self generatePivPostQuantumPairInSession:session
-                mechanism:[test[@"mechanism"] unsignedLongValue]
-                parameterSet:parameterSet label:test[@"label"] identifier:test[@"identifier"]
-                publicUsageAttribute:[test[@"publicUsage"] unsignedLongValue]
-                privateUsageAttribute:[test[@"privateUsage"] unsignedLongValue]];
-            [lines addObject:pair.result == CKR_OK
-                ? [NSString stringWithFormat:@"  %@ %@", test[@"name"], pair.status]
-                : [NSString stringWithFormat:@"  advertised %@ failed: %@: %@",
-                    test[@"name"], pair.status, PKCS11RSReturnValue(pair.result)]];
+    for (NSDictionary *test in cases) {
+        if (![test[@"enabled"] boolValue]) {
+            continue;
         }
+        if (![test[@"missing"] boolValue]) {
+            [lines addObject:[NSString stringWithFormat:@"  %@ keypair already present",
+                                                       test[@"name"]]];
+            continue;
+        }
+        NSNumber *parameterSet = test[@"parameterSet"] == NSNull.null
+            ? nil : test[@"parameterSet"];
+        PKCS11RSPostQuantumPair *pair = [self generatePivPostQuantumPairInSession:session
+            mechanism:[test[@"mechanism"] unsignedLongValue]
+            parameterSet:parameterSet label:test[@"label"] identifier:test[@"identifier"]
+            publicUsageAttribute:[test[@"publicUsage"] unsignedLongValue]
+            privateUsageAttribute:[test[@"privateUsage"] unsignedLongValue]];
+        [lines addObject:pair.result == CKR_OK
+            ? [NSString stringWithFormat:@"  %@ %@", test[@"name"], pair.status]
+            : [NSString stringWithFormat:@"  advertised %@ failed: %@: %@",
+                test[@"name"], pair.status, PKCS11RSReturnValue(pair.result)]];
     }
     result = C_Logout(session);
     if (result != CKR_OK) {
@@ -1507,6 +1515,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         C_CloseSession(session);
         return lines;
     }
+    [lines addObject:@""];
     NSMutableData *pin = [[@"123456" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     result = C_Login(session, CKU_USER, pin.mutableBytes, (CK_ULONG)pin.length);
     [pin resetBytesInRange:NSMakeRange(0, pin.length)];
@@ -1515,9 +1524,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         C_CloseSession(session);
         return lines;
     }
-    [lines addObjectsFromArray:@[@"", @"PQC PIV user operations:"]];
     NSArray<NSString *> *operations = [self exercisePostQuantumMechanismsInSession:session
-        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:NO];
+        tokenLabel:tokenLabel support:support performOperations:YES allowGeneration:NO
+        reportPairStatus:NO];
+    [lines addObject:@""];
     if (operations.count > 2) {
         [lines addObjectsFromArray:[operations subarrayWithRange:NSMakeRange(2, operations.count - 2)]];
     }
@@ -2345,9 +2355,6 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             [self postQuantumSupportForSlot:inventory.slot];
         BOOL embedded = [self isConfiguredEmbeddedReaderSlot:inventory];
         if (embedded && PKCS11RSIsPivTokenLabel(inventory.tokenLabel)) {
-            for (NSString *line in support.lines) {
-                [report appendFormat:@"%@\n", line];
-            }
             NSArray<NSString *> *pivLines = support.any
                 ? [self embeddedPivPostQuantumSmokeForSlot:inventory.slot
                                                 tokenLabel:inventory.tokenLabel
@@ -2356,19 +2363,24 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             for (NSString *line in pivLines) {
                 [report appendFormat:@"%@\n", line];
             }
+            if (!support.any) {
+                for (NSString *line in support.lines) {
+                    [report appendFormat:@"%@\n", line];
+                }
+            }
             continue;
         }
 
         for (NSString *line in [self publicObjectInventoryForSlot:inventory.slot].lines) {
             [report appendFormat:@"%@\n", line];
         }
+        for (NSString *line in support.lines) {
+            [report appendFormat:@"%@\n", line];
+        }
         if (embedded && PKCS11RSIsFido2TokenLabel(inventory.tokenLabel)) {
             for (NSString *line in [self embeddedFidoPreviewSignSmokeForSlot:inventory.slot]) {
                 [report appendFormat:@"%@\n", line];
             }
-        }
-        for (NSString *line in support.lines) {
-            [report appendFormat:@"%@\n", line];
         }
         CK_SESSION_HANDLE authenticatedSession = CK_INVALID_HANDLE;
         if (PKCS11RSIsHostTokenLabel(inventory.tokenLabel)) {
@@ -2379,12 +2391,6 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             if (authorization != nil) {
                 [authorizedSessions addObject:authorization];
                 authenticatedSession = authorization.session;
-                PKCS11RSObjectInventory *authenticated =
-                    [self objectInventoryForSession:authorization.session
-                                              title:@"Objects (authenticated session)"];
-                for (NSString *line in authenticated.lines) {
-                    [report appendFormat:@"%@\n", line];
-                }
             }
         }
         if (support.any) {
@@ -2392,7 +2398,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             if (authenticatedSession != CK_INVALID_HANDLE) {
                 pqcLines = [self exercisePostQuantumMechanismsInSession:authenticatedSession
                     tokenLabel:inventory.tokenLabel support:support
-                    performOperations:YES allowGeneration:YES];
+                    performOperations:YES allowGeneration:YES reportPairStatus:YES];
             } else if (embedded && PKCS11RSIsFido2TokenLabel(inventory.tokenLabel)) {
                 pqcLines = [self embeddedFidoPostQuantumSmokeForSlot:inventory.slot
                     tokenLabel:inventory.tokenLabel support:support];
@@ -2401,6 +2407,14 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                     tokenLabel:inventory.tokenLabel support:support];
             }
             for (NSString *line in pqcLines) {
+                [report appendFormat:@"%@\n", line];
+            }
+        }
+        if (authenticatedSession != CK_INVALID_HANDLE) {
+            PKCS11RSObjectInventory *authenticated =
+                [self objectInventoryForSession:authenticatedSession
+                                          title:@"Objects (authenticated session)"];
+            for (NSString *line in authenticated.lines) {
                 [report appendFormat:@"%@\n", line];
             }
         }
@@ -2421,10 +2435,6 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     }
     [nativeSessionKeyProviders addObjectsFromArray:otherYubiHsms];
     for (PKCS11RSSlotInventory *inventory in nativeSessionKeyProviders) {
-        [self loginYubiHsmInventory:inventory];
-        if (inventory.authorization != nil) {
-            [authorizedSessions addObject:inventory.authorization];
-        }
         [report appendFormat:@"\nSlot %lu: %@\n",
                              (unsigned long)inventory.slot,
                              inventory.slotDescription];
@@ -2437,6 +2447,10 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             [self postQuantumSupportForSlot:inventory.slot];
         for (NSString *line in support.lines) {
             [report appendFormat:@"%@\n", line];
+        }
+        [self loginYubiHsmInventory:inventory];
+        if (inventory.authorization != nil) {
+            [authorizedSessions addObject:inventory.authorization];
         }
         [report appendFormat:@"\n%@\n",
             PKCS11RSLoginUserResult(@"pkcs11:",
@@ -2451,7 +2465,8 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                         tokenLabel:inventory.tokenLabel
                         support:support
                         performOperations:YES
-                        allowGeneration:YES]) {
+                        allowGeneration:YES
+                        reportPairStatus:YES]) {
                     [report appendFormat:@"%@\n", line];
                 }
             }
