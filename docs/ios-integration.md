@@ -303,22 +303,28 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
 
 - [Swift iPhone smoke test](../examples/ios/PKCS11RSPhoneSmoke/README.md) and
   [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) exercise
-  the same direct C ABI with complementary scopes. The Swift app configures no
-  software slot. It inventories USB CCID, NFC, platform, and remote YubiHSM
-  slots; reports ML-DSA and ML-KEM mechanism flags including `CKF_HW`; and
-  generates, reuses, and exercises ML-DSA-87 and ML-KEM-1024 on every slot that
-  advertises the required operations. Failures after successful advertisement
-  remain visible so the report qualifies implementation as well as discovery.
-  The Objective-C app retains persistent software-token initialization, X25519
-  self-agreement, ML-DSA sign/verify, and ML-KEM
-  encapsulation/decapsulation coverage. Both examples cover remote YubiHSM
-  discovery, YubiHSM Auth matching and login, object inventory, debug Unified
-  Logging, and long-lived application behavior. The first explicit refresh
-  starts slot discovery, so NFC UI is not presented automatically at launch.
+  the same direct C ABI, initialization profile, slot order, authentication
+  sequence, and functional coverage. Both configure the persistent embedded
+  PIV/FIDO2 reader rather than a software slot; inventory USB CCID, NFC,
+  platform, and remote YubiHSM slots; report ML-DSA, ML-KEM, and
+  MLKEM768-X25519 mechanism flags including `CKF_HW`; run the explicit PIV
+  SO-to-USER provisioning and operation sequence; and exercise FIDO2
+  previewSign. Failures after successful advertisement remain visible so the
+  report qualifies implementation as well as discovery. Both examples cover
+  YubiHSM Auth matching and login, object inventory, debug Unified Logging,
+  platform-credential lifecycle, and long-lived application behavior. The
+  first explicit refresh starts slot discovery, so NFC UI is not presented
+  automatically at launch. The two bundle identifiers use independent
+  platform credentials and YubiHSM Authentication Key IDs.
 
 Build the XCFramework before opening either Xcode project. Both projects contain
-the maintainer's development team for automatic device signing; select a
-different team in Xcode when building under another Apple developer account.
+development team `Q4X2Q59C2D` for automatic device signing. Their distinct
+bundle identifiers are `com.qpernil.PKCS11RSSmoke` and
+`com.nilssoncrypto.PKCS11RSObjCSmoke`. Select a different team in Xcode when
+building under another Apple developer account. Command-line device builds
+that may need Xcode to create or refresh the automatic profile must pass
+`-allowProvisioningUpdates`; add `-allowProvisioningDeviceRegistration` when
+the target device may also need registration.
 
 ## Diagnostics and troubleshooting
 

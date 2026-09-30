@@ -32,9 +32,10 @@ if every target succeeded. A conflict is never overwritten or deleted.
 For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
 [iOS integration guide](../../../docs/ios-integration.md). The Objective-C
-smoke app is a separate C-ABI example and retains its persistent-software-token
-test flow. This document describes the Swift client's hardware and remote-token
-coverage.
+smoke app is a direct C-ABI implementation of the same configuration,
+authentication order, embedded PIV and FIDO2 workflows, and post-quantum
+functional coverage. Its separate bundle uses an independent platform
+credential and YubiHSM Authentication Key so both apps can remain provisioned.
 
 The inventory report follows authentication dependency order. It shows ordinary
 source slots first, including the Secure Enclave login and its authenticated
@@ -95,7 +96,7 @@ Auth. The PIV entry is therefore a CryptoTokenKit bootstrap requirement, not a
 requirement that the operation or card use PIV. A short PIV AID suitable for an
 APDU partial SELECT does not satisfy this requirement.
 
-The Swift app intentionally configures no software slot. It configures one
+Both smoke apps intentionally configure no software slot. They configure one
 persistent in-process CCID reader named `pkcs11rs embedded CCID reader` with
 Management, PIV, and FIDO2; Management is implicit and PIV/FIDO2 are the two
 opt-in applets. The reader uses serial `1`, while its stable configuration ID
@@ -103,6 +104,16 @@ opt-in applets. The reader uses serial `1`, while its stable configuration ID
 token-storage root. The same feature can host more readers or other implemented
 applets, but this profile is deliberately the smallest one that runs the local
 post-quantum PIV test and the embedded FIDO2 previewSign lifecycle.
+
+The smoke app uses only the standard PKCS #11 ABI. That ABI does not expose a
+backend or applet-kind field. Applet-specific workflows therefore use the
+module's canonical `CK_TOKEN_INFO.label` forms: `PIV #<serial>`,
+`OpenPGP #<serial>`, `HSM Auth #<serial>`, `Issuer SD #<serial>`,
+`FIDO2 [<protocol>] #<serial>`, `YubiHSM #<serial>`, and the exact host label
+`Secure Enclave` on iOS. The physical-device `model` field does not identify a
+CCID applet. Treat these comparisons as protocol compatibility points: review
+label-based routing across every example whenever the module changes a
+canonical token label.
 
 On the embedded FIDO2 slot, the first refresh registers a previewSign
 credential, persists its registration object, derives and persists an
@@ -113,15 +124,29 @@ the assertion, projection, and ECDSA verification steps. The report identifies
 whether the chain was created or reused and names the exact failing stage. The
 reserved registration and derived-key IDs belong to this smoke app.
 
-Every refresh queries all four post-quantum mechanisms on every token-present slot:
+Every refresh queries six post-quantum mechanisms on every token-present slot:
 `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_ML_KEM_KEY_PAIR_GEN`, and
-`CKM_ML_KEM`. The report includes the complete mechanism flags, the decoded
+`CKM_ML_KEM`, plus `CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN` and
+`CKM_PKCS11RS_MLKEM768_X25519`. The report includes the complete mechanism flags, the decoded
 `CKF_HW` value, the key-size range, and whether the operation-specific flags
 needed by the smoke test are present. Unsupported mechanisms and incomplete
 flag sets are reported explicitly instead of being silently skipped. This
 makes the same inventory qualify both mechanism advertisement and behavior on
 PIV, YubiHSM, and any other provider that exposes the standard PKCS #11
 post-quantum mechanisms.
+
+The hybrid smoke case is exactly `MLKEM768-X25519` from
+`draft-irtf-cfrg-concrete-hybrid-kems-04`, byte-identical to X-Wing in
+`draft-connolly-cfrg-xwing-kem-10`, under the generic construction in
+`draft-irtf-cfrg-hybrid-kems-12`. It uses FIPS 203 ML-KEM-768, RFC 7748
+X25519, and the FIPS 202 SHA3-256 combiner. Its public key is
+`ek_ML-KEM || ek_X25519` (1184 + 32 = 1216 bytes), its ciphertext is
+`ct_ML-KEM || ct_X25519` (1088 + 32 = 1120 bytes), and its shared secret is
+the 32-byte SHA3-256 result over the two component secrets, the X25519
+ciphertext, the recipient X25519 public key, and the X-Wing domain-separation
+label. The complete three-construction profile and exact private-seed,
+serialization, PKCS #11 identifier, and device-command rules are specified in
+[Post-quantum hybrid key exchange](../../../docs/post-quantum-hybrid-key-exchange.md).
 
 When a slot advertises ML-DSA key generation, signing, and verification, the app
 creates or reuses a persistent ML-DSA-87 keypair. It generates a fresh 32-byte
@@ -136,16 +161,28 @@ checks destroy them explicitly, and closing the session cleans them up after an
 earlier failure.
 
 The test uses stable provider-appropriate identifiers so later refreshes reuse
-the generated pairs: PIV `CKA_ID` values `5` and `6`, which map to raw retired
-slot references `0x82` and `0x83`; YubiHSM object IDs `0x7e20` and `0x7e21`;
-and descriptive byte-string IDs for other providers.
+the generated pairs: PIV `CKA_ID` values `5`, `6`, and `7`, which map to raw
+retired slot references `0x82`, `0x83`, and `0x84`; YubiHSM object IDs
+`0x7e20`, `0x7e21`, and `0x7e22`; and descriptive byte-string IDs for other
+providers.
 PQC operations run after the authentication already available to the app.
 YubiHSMs use the authenticated wildcard-login session described below. The
-embedded PIV slot uses the factory management key to provision absent or
-incomplete pairs, logs out, then uses the factory user PIN `123456` for private
-operations. The embedded FIDO2 slot uses the same initial PIN. This automatic
-factory authentication is restricted to the configured embedded reader name;
-the app does not submit those credentials to physical USB or NFC readers.
+embedded PIV slot uses one explicit consumer sequence on every refresh.
+Mechanism discovery and a public object inventory run first. The app then calls
+`C_Login(CKU_SO)` with the factory management key, provisions any missing or
+incomplete pairs, calls `C_Logout`, calls `C_Login(CKU_USER)` with the factory
+user PIN `123456`, locates the pairs without permitting a generation fallback,
+performs signing and decapsulation, and finally lists the authenticated objects.
+Both login calls are made even when every pair already exists; the smoke app
+exercises the ordinary API flow rather than optimizing or independently testing
+the module's login-state machine. `CKR_USER_ALREADY_LOGGED_IN` remains an
+accepted successful login result. Separate conformance tests verify initial RO
+and RW public states, token-wide USER and SO propagation to sessions opened
+after login, logout propagation, and final-session cleanup. The embedded FIDO2
+slot uses the same initial PIN. Automatic factory authentication is restricted
+to the configured embedded reader serial together with its canonical PIV or
+FIDO2 token label; the app does not submit those credentials to physical USB or
+NFC readers.
 Other slots use an authenticated retained session when one exists and otherwise
 an ordinary read/write session. A provider that advertises a mechanism but rejects
 key generation or use because authentication, authorization, templates, or the
@@ -237,9 +274,14 @@ the macOS Console app with the device selected. The elapsed `Working…`
 indicator continues updating during long calls. Debug logging adds
 named reader and device inventories, each applet probe and outcome, stable slot
 registration and retention, deduplication decisions, phase timing, and each
-PKCS #11 call with its outcome and duration. Connector payloads and responses,
-per-request transport and APDU timing, and session state remain reserved for
-`trace`.
+PKCS #11 call with its outcome and duration. The `pkcs11rs::auth` category logs
+every state transition in the embedded PIV authentication path at debug level:
+the token-wide PKCS #11 role and the separate CCID selected-applet guard or
+selection loss. The PIV backend keeps no USER or management-key authentication
+flags; those facts and one-use PIN policies belong to the applet. Each record
+includes the old state, new state, and transition reason without credential material. Connector
+payloads and responses, per-request transport and APDU timing, and ordinary
+session-state reads remain reserved for `trace`.
 NFC lifecycle diagnostics also go directly to Unified Logging under category
 `pkcs11rs::nfc` and to the attached console with prefix `[pkcs11rs:nfc]`, including
 from background workers. Every explicit NFC dialog close logs its session ID,
@@ -275,6 +317,13 @@ Build the XCFramework before opening the Xcode project:
 ```sh
 cargo xtask ios --release
 ```
+
+The checked-in project uses automatic signing with development team
+`Q4X2Q59C2D` and bundle identifier `com.qpernil.PKCS11RSSmoke`. A command-line
+device build that may need to create or refresh its automatic profile must pass
+`-allowProvisioningUpdates`; add `-allowProvisioningDeviceRegistration` when
+the target device may also need registration. Developers using another Apple
+account should select their own team in Xcode.
 
 The iOS builder compiles pkcs11rs with `embedded-virtual-yubikey`; runtime JSON
 still decides whether any embedded reader exists. The smoke reader sets

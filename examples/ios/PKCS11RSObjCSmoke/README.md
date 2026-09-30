@@ -1,123 +1,100 @@
 # PKCS11RS Objective-C smoke test
 
-This small UIKit application demonstrates direct integration with the
-statically linked PKCS #11 C ABI from Objective-C. It imports the generated
-`PKCS11RS` Clang module, initializes pkcs11rs with direct JSON configuration,
-reports `CK_INFO`, and lists every present slot, token, and public object.
-Its functional smoke coverage is synchronized with the Swift UIKit app; the
-difference is the client language and its direct Objective-C representation of
-the same C structures, buffers, sessions, and lifecycle.
+This UIKit application demonstrates direct integration with the statically
+linked PKCS #11 C ABI from Objective-C. It imports the generated `PKCS11RS`
+Clang module and implements the same configuration, slot ordering,
+authentication flows, and functional smoke coverage as the
+[Swift UIKit smoke app](../PKCS11RSPhoneSmoke/README.md). The only intentional
+differences are the client language and its representation of C structures and
+buffers, plus the app-scoped bundle and platform-credential identities that let
+both signed apps remain installed and provisioned at the same time.
 
-The app uses UIKit's scene lifecycle, with a single `UIWindowScene` and a
-`UIWindow` attached to that scene. This is required when building with the
-iOS 27 SDK. PKCS #11 inspection runs on its background queue.
+Both apps configure CryptoTokenKit NFC discovery, the local or overridden
+YubiHSM connector, prototype YubiHSM public discovery, the Secure Enclave host
+slot, and one persistent embedded CCID reader. The embedded reader has stable
+configuration ID `iphone-smoke`, display name
+`pkcs11rs embedded CCID reader`, serial `1`, and the PIV and FIDO2 applets.
+Neither app configures a software slot.
 
-The inventory also exercises automatic YubiHSM authentication. It first logs
-in and retains a Secure Enclave source session using the host slot's no-secret
-`C_Login(CKU_USER, NULL_PTR, 0)` contract. It then calls `C_LoginUser` with the
-provider-independent wildcard URI `pkcs11:` and the prototype YubiHSM Auth
-credential password `password` for each YubiHSM, processing
-hardware session-key providers first and retaining successful sessions. This
-lets an authorized virtual YubiHSM supply a credential to later targets.
-Native YubiHSM Auth slots need no preliminary login. Other ordinary slots are
-eligible only when the application has already logged them in, so wildcard
-resolution neither submits the target PIN nor performs key operations on
-unselected applets. Each successful login produces a second authenticated
-object inventory in that slot's report section. The report follows execution
-order: ordinary source slots, native session-key-provider YubiHSMs, and then
-remaining YubiHSM targets. Every login has a terse line containing the PKCS #11
-entry point, user type, selector when applicable, and named return value. The
-app closes all retained sessions in reverse
-dependency order. It does not call the token-wide `C_Logout`; closing the final
-session naturally ends authorization when no other application session retains
-it.
+The inventory opens a public session for every present slot and reports its
+objects. It then retains a no-secret `C_Login(CKU_USER, NULL_PTR, 0)` session
+for the Secure Enclave source slot. YubiHSM targets are processed with native
+hardware session-key providers first, followed by the remaining targets. Each
+target uses `C_LoginUser(CKU_USER, "pkcs11:", "password")`; successful
+sessions remain open so an earlier authorized YubiHSM can supply a credential
+to a later one. Retained sessions close in reverse dependency order.
 
-The platform-credential button exercises the same idempotent high-level
-PKCS11RS lifecycle API as the Swift app. **Provision platform credential** uses
-the connected YubiHSM Auth administrator credential for bootstrap login,
-provisions every present YubiHSM, and verifies a fresh Secure Enclave-backed
-login and authenticated random operation. When the local credential exists,
-the button changes to **Unprovision platform credential**; that action removes
-only target objects proven to match and deletes the local key only after every
-present target succeeds. Conflicts are neither overwritten nor deleted.
-Because iOS scopes Keychain items to the signed application, this app uses its
-own `iphone-qpernil-objc` credential and Authentication Key `1005`; the Swift
-app independently uses `iphone-qpernil` and `1004`. Both can therefore remain
-provisioned at the same time.
+Every login performed during Refresh has the same terse report format in both
+apps: the PKCS #11 entry point, user type, selector when applicable, named
+return value, and selected credential when available. Login secrets are
+zeroized after each call.
 
-All synchronous PKCS #11 work runs on one serial background queue. The example
-uses the same initialization configuration as the Swift UIKit smoke app:
-CryptoTokenKit NFC discovery, the local or overridden YubiHSM connector,
-prototype public discovery, and the persistent `iPhone smoke` software token
-below Application Support. The software slot produces useful output in the
-Simulator even though the Simulator has no USB CCID or NFC reader.
+Every slot receives the same six-entry post-quantum mechanism report:
+`CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`,
+`CKM_ML_KEM_KEY_PAIR_GEN`, `CKM_ML_KEM`,
+`CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN`, and
+`CKM_PKCS11RS_MLKEM768_X25519`. The report includes all mechanism flags,
+`CKF_HW`, the key-size range, and whether the flags required by the smoke
+operation are present.
 
-The app recognizes exactly that owned software slot by its `Software token`
-model and `iPhone smoke` label. It initializes the token and user PIN when
-their standard flags require it, logs in with the prototype PIN `password`,
-and creates persistent X25519, ML-DSA-87, ML-KEM-1024, and
-`MLKEM768-X25519` keypairs with IDs
-`iphone-smoke-x25519`, `iphone-smoke-ml-dsa-87`, and
-`iphone-smoke-ml-kem-1024`, and `iphone-smoke-mlkem768-x25519` when absent. It
-reports each generation time. On
-every refresh it times an X25519 self-agreement using the pair's own public
-point, validates that the resulting shared secret is 32 bytes and nonzero, and
-destroys that session object. This is a compact smoke
-benchmark rather than a two-party protocol. It then generates a fresh 32-byte
-message with `C_GenerateRandom`, signs it, and
-verifies it while reporting both operation times. It also uses the PKCS #11 3.2
-`C_EncapsulateKey` and `C_DecapsulateKey` entry points, verifies that their two
-32-byte shared secrets match for ML-KEM-1024 and `MLKEM768-X25519`, and reports
-both operation times and each ciphertext length. Later refreshes and launches
-reuse all four persistent keypairs. These state-changing calls are never
-applied to discovered hardware.
+The functional cases use persistent ML-DSA-87, ML-KEM-1024, and
+`MLKEM768-X25519` keypairs. ML-DSA signs and verifies a fresh 32-byte random
+message. Both KEM cases encapsulate and decapsulate, request 32-byte
+nonsensitive extractable `CKK_GENERIC_SECRET` session objects, compare their
+`CKA_VALUE` bytes, and destroy the session objects. The hybrid case is the
+exact construction documented in
+[Post-quantum hybrid key exchange](../../../docs/post-quantum-hybrid-key-exchange.md):
+FIPS 203 ML-KEM-768 plus RFC 7748 X25519 with the X-Wing SHA3-256 combiner,
+1216-byte public keys, 1120-byte ciphertexts, and 32-byte shared secrets.
 
-Each generation timing surrounds the complete `C_GenerateKeyPair` call,
-including encrypted persistence. X25519 timing surrounds only `C_DeriveKey`;
-the public-point read and shared-secret validation remain outside it.
-`C_GenerateRandom` runs outside the sign timer. Signing includes `C_SignInit`,
-the signature-length query, and the output-producing `C_Sign`; verification
-includes `C_VerifyInit` and `C_Verify`. ML-KEM encapsulation timing includes its
-ciphertext-length query and the output-producing `C_EncapsulateKey`;
-decapsulation timing surrounds `C_DecapsulateKey`. The shared-secret reads and
-comparison occur after the timers. The X25519 output template and both ML-KEM
-output templates request a 32-byte `CKK_GENERIC_SECRET` with `CKA_TOKEN` false,
-`CKA_SENSITIVE` false, and `CKA_EXTRACTABLE` true so the app can validate
-`CKA_VALUE`. These are session objects: successful checks destroy them
-explicitly, and closing the session cleans them up on an earlier failure. Only
-the three keypairs are persisted.
+Persistent identifiers match the Swift client: PIV IDs `5`, `6`, and `7`
+for retired references `0x82`, `0x83`, and `0x84`; YubiHSM IDs `0x7e20`,
+`0x7e21`, and `0x7e22`; and descriptive byte-string IDs for other
+providers.
 
-The `public_discovery` prototype credential is required for wildcard matching:
-it lets pkcs11rs expose the public companion objects on a YubiHSM before the
-ordinary PKCS #11 user login. The Objective-C client itself does not implement
-credential-to-HSM matching.
-Do not ship or commit a production discovery credential in application source.
+The embedded PIV flow performs public mechanism and object discovery, then
+calls `C_Login(CKU_SO)` with the factory management key immediately before
+provisioning any missing pairs. It always calls `C_Logout`, then
+`C_Login(CKU_USER)` with factory PIN `123456`, performs signing and
+decapsulation without a generation fallback, and lists the authenticated
+objects. Both logins occur on every refresh even when all pairs already exist.
 
-The configuration requests `debug` logging. pkcs11rs writes discovery, object,
-matching-related PKCS #11 calls, and `C_LoginUser` outcomes to Apple Unified
-Logging under subsystem `com.nilssoncrypto.pkcs11rs`; Rust tracing targets are
-the log categories. View these records in Xcode's console or the macOS Console
-app with the device selected. The app's text report displays the credentials,
-login result, and authenticated inventory.
+The embedded FIDO2 flow uses PIN `123456`. It creates or reuses the persisted
+previewSign registration and ARKG-P256 derived-key wrapper, performs
+`C_Login(CKU_CONTEXT_SPECIFIC)`, projects the public key, and verifies the
+previewSign result with `CKM_ECDSA`. It also runs the advertised
+post-quantum cases under the same user login.
 
-The app initializes and displays module information at launch without listing
-slots. The first tap on **Refresh** calls `C_GetSlotList` and presents Apple's
-NFC UI, matching the Swift app's lifecycle. An elapsed `Working…` indicator
-continues updating while synchronous discovery or authentication is in
-progress.
+The platform-credential button exercises the same idempotent lifecycle as the
+Swift app: bootstrap login, provision or repair every present YubiHSM, logout,
+fresh platform-backed login, and an authenticated random operation.
+Unprovisioning removes only matching target objects and deletes the local key
+only after all present targets succeed. Because iOS scopes Keychain items to
+the signed application, the Objective-C app uses credential
+`iphone-qpernil-objc` and Authentication Key `1005`; the Swift app uses
+`iphone-qpernil` and `1004`.
 
-Build the XCFramework before opening the Xcode project:
+The app initializes on a serial background queue and waits until the first
+Refresh before calling `C_GetSlotList`, so NFC presentation and lifecycle
+match the Swift app. The configuration requests debug logging under Apple
+Unified Logging subsystem `com.nilssoncrypto.pkcs11rs`. An elapsed
+`Working…` indicator remains visible while synchronous discovery or
+authentication is running.
+
+Build the shared XCFramework before opening the project:
 
 ```sh
 cargo xtask ios --release
 ```
 
-Open `PKCS11RSObjCSmoke.xcodeproj` and run the `PKCS11RSObjCSmoke` scheme. The
-project contains the maintainer's development team for automatic device
-signing; select a different team when building under another Apple developer
-account. The project references `target/ios/PKCS11RS.xcframework` and links it
-as a static library; it does not embed a dynamic framework.
+Open `PKCS11RSObjCSmoke.xcodeproj` and run the `PKCS11RSObjCSmoke` scheme.
+The project links `target/ios/PKCS11RS.xcframework` statically and uses
+automatic signing with development team `Q4X2Q59C2D` and bundle identifier
+`com.nilssoncrypto.PKCS11RSObjCSmoke`. A command-line device build that may
+need to create or refresh its automatic profile must pass
+`-allowProvisioningUpdates`; add `-allowProvisioningDeviceRegistration` when
+the target device may also need registration. Developers using another Apple
+account should select their own team in Xcode.
 
-See the [iOS integration guide](../../../docs/ios-integration.md) for the shared
-Swift and Objective-C integration model, configuration, lifecycle, NFC setup,
-and platform limitations.
+See the [iOS integration guide](../../../docs/ios-integration.md) for the
+shared integration model, lifecycle, NFC setup, and platform limitations.

@@ -168,8 +168,8 @@ software mechanism list for session keys.
   transport callback. See [iOS integration](docs/ios-integration.md).
 - Checked-in [Swift](examples/ios/PKCS11RSPhoneSmoke) and
   [Objective-C](examples/ios/PKCS11RSObjCSmoke) smoke apps exercise discovery,
-  software crypto, post-quantum operations, automatic YubiHSM login, and
-  idempotent platform-credential provisioning.
+  the same embedded PIV and FIDO2 workflows, post-quantum operations,
+  automatic YubiHSM login, and idempotent platform-credential provisioning.
 - `pkcs11rs-tool` authors and validates canonical certificate bundles and
   manages Apple platform credentials. See
   [Authoring and credential management](docs/pkcs11rs-tool.md).
@@ -273,11 +273,11 @@ return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
 calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
 
 Applet connectors on a reader share one `PcscReaderState`, which owns the card
-connection, APDU capabilities, selected AID, live SCP03/SCP11 state, logical
-login role, validated SCP11 trust cache, and complete APDU-exchange lock.
-Repeated operations on the selected applet send no extra SELECT. Selecting a
-different applet discards the previous applet's secure channel and logical
-login, so its existing PKCS #11 sessions remain open but become public.
+connection, APDU capabilities, selected AID, live SCP03/SCP11 state,
+selected-applet guard, validated SCP11 trust cache, and complete APDU-exchange
+lock. The authoritative logical login role belongs to the slot context, while
+RO/RW belongs to each session. Repeated operations on the selected applet send
+no extra SELECT.
 PKCS #11 calls targeting different applet slots may overlap while working with
 their independent slot and session state, but their card interactions cannot.
 Different YubiHSMs and different native CCID readers can execute concurrently.
@@ -462,8 +462,9 @@ The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
 storage, and diagnostics guidance for both Swift and Objective-C applications.
 The [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke) demonstrates
-direct calls to the same statically linked C ABI with persistent-software-token,
-object-inventory, and YubiHSM Auth coverage.
+direct calls to the same statically linked C ABI and mirrors the Swift app's
+configuration, object inventory, embedded PIV/FIDO2, post-quantum, YubiHSM
+Auth, and platform-credential coverage.
 
 ### Asynchronous multi-device connector
 
@@ -947,8 +948,12 @@ other platforms. With no configured level, pkcs11rs installs no subscriber and
 participates in an ambient Rust `tracing` subscriber. Debug output explains named reader/device discovery,
 applet outcomes, slot registration and retention, deduplication decisions,
 phase durations, and every PKCS #11 entry point with its return value and
-duration. Trace output adds API state diagnostics and per-request connector,
-APDU, and transport timing.
+duration. Authentication transitions use the `pkcs11rs::auth` target. For PIV,
+debug records cover the authoritative token-wide PKCS #11 role and the separate
+CCID applet-selection guard; the backend retains no PIN or management-key
+authentication flags. Records include the old state, new state, and reason and
+never include credential material. Trace output adds API state diagnostics and
+per-request connector, APDU, and transport timing.
 
 ## Testing
 
