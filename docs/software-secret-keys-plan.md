@@ -52,6 +52,12 @@ lifetime, privacy, usage, sensitivity, extractability, and policy templates;
 constructs zeroizing key material; publishes either a session or token object;
 and returns a handle only after the complete operation succeeds.
 
+HMAC generation supports generic generation with an explicit hash-specific
+key type and the SHA-1, SHA-256, SHA-384, and SHA-512 key-generation mechanisms.
+The latter imply their key type and reject conflicting templates. Both routes
+preserve generation provenance and share the existing secret-key validation
+and zeroizing storage boundary.
+
 ECDH supports `CKD_NULL` and the SHA-1, SHA-2, and SHA-3 ANSI X9.63 KDFs with
 optional shared data and multi-block expansion. Software Weierstrass, X25519,
 and X448 private keys, PIV, OpenPGP, and YubiHSM sources use the same host-side output

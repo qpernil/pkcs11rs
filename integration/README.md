@@ -68,7 +68,7 @@ python3 integration/run_pkcs11test.py --filter 'Init.*' --jobs 1
 
 The dedicated Linux CI job runs the full suite on every push and pull request.
 It builds `qpernil/pkcs11test` at the pinned commit
-`ba0cf2fe1cc40852d068a5493fef8d8dbce674a2`, including its vendored Google Test,
+`bab8443b01c712e81460af18b3ce479624e64358`, including its vendored Google Test,
 and checks the fork's fixture contracts before running the compatibility suite.
 The `pkcs11test-results-linux` artifact contains the JSON report, uploaded even
 when the suite fails. Failures, crashes, timeouts, harness errors, and incomplete
@@ -95,22 +95,23 @@ PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
 The verified macOS run uses [qpernil/pkcs11test](https://github.com/qpernil/pkcs11test)
-at `d688ee23d18d27b77652804861161c90b3341d73`: **542 cases, 444 passed,
-98 unsupported/skipped, zero failures, crashes, or timeouts**. The fork preserves
+at `bab8443b01c712e81460af18b3ce479624e64358`: **547 cases, 452 passed,
+95 unsupported/skipped, zero failures, crashes, or timeouts**. The fork preserves
 Google upstream and YubicoLabs history and builds with Google Test 1.10.0. This inventory
-includes six parameterized encryption/decryption cancellation cases. The
+includes six parameterized encryption/decryption cancellation cases and tests
+both SHA-specific and generic generation of typed HMAC keys. The
 [fixture contracts](https://github.com/qpernil/pkcs11test#fixture-contracts) describe its
 standards-based corrections and explicit key-policy requirements. These
 results cover this fork and the software backend; they do not establish
 cross-vendor conformance or native hardware support for every passing case.
-The final report is `target/review-final.json`; the module binary is unchanged
-from the unmodified Google baseline below.
+The full-suite report is `target/pkcs11test-results.json`.
 
 An independent, unmodified [Google `dev` baseline](https://github.com/google/pkcs11test/tree/2cbe462c62bacf537b9a9a427a1c053d8c2e4760)
 at `2cbe462c62bacf537b9a9a427a1c053d8c2e4760` runs **331 cases: 234 passed,
-25 unsupported/skipped, 72 failed**, with no crashes or timeouts. It uses the
-same module binary (verified by SHA-256) and disposable software fixtures as
-the fork run. Of its failing cases, 46 encounter unsupported DES setup
+25 unsupported/skipped, 72 failed**, with no crashes or timeouts. This
+historical comparison used the same module binary (verified by SHA-256) as its
+contemporaneous fork run and the same disposable software fixtures. Of its
+failing cases, 46 encounter unsupported DES setup
 (36 cipher, eight digest-key, two dual-operation cases); four expect pre-3.x
 NULL-mechanism behavior; and eight assume size queries commit to single-part
 processing. The remaining 14 involve wrapping mechanism selection, key
@@ -131,8 +132,7 @@ Build unmodified upstream separately and select its executable with
 | MD5 digest unavailable | 12 |
 | MD5-with-RSA unavailable | 3 |
 | MD5-HMAC unavailable (including named input cases) | 23 |
-| Typed SHA HMAC key generation unavailable | 4 |
-| No standard typed MD5 generation fixture | 1 |
+| No standard typed MD5 fixture (two generation routes) | 2 |
 | Combined digest/encryption API unsupported | 4 |
 | Operation-state save/restore unsupported | 2 |
 | Application-provided locking callbacks unsupported | 1 |

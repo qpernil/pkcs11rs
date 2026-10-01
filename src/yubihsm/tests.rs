@@ -1556,6 +1556,59 @@ pub(crate) fn make_yubihsm_native_session_test_slot()
     (Box::new(slot), control)
 }
 
+// This peer delegates every command to the actual virtual-device core.
+#[derive(Debug)]
+struct NativeHmacPeer(RefCell<VirtualYubiHsm>);
+impl Connector for NativeHmacPeer {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "Virtual HMAC test"
+    }
+    fn major(&self) -> u8 {
+        2
+    }
+    fn minor(&self) -> u8 {
+        5
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        8192
+    }
+    fn transmit<'a>(
+        &self,
+        request: &[u8],
+        response: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let encoded = self.0.borrow_mut().handle_encoded(request);
+        if encoded.len() > response.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        response[..encoded.len()].copy_from_slice(&encoded);
+        Ok(&response[..encoded.len()])
+    }
+}
+
+pub(crate) fn make_yubihsm_native_hmac_test_slot() -> (Box<dyn crate::Slot>, TestTrustEntry) {
+    let config = VirtualYubiHsmConfig::default();
+    let version = (config.version[0], config.version[1], config.version[2]);
+    let algorithms = config.algorithms.clone();
+    let peer = Rc::new(NativeHmacPeer(RefCell::new(
+        VirtualYubiHsm::factory_default(config),
+    )));
+    let trust = TestTrustEntry::new();
+    let mut slot = crate::YubiHsmSlot::new(peer, version, algorithms);
+    slot.trust_prefix = Some(trust.prefix.clone());
+    (Box::new(slot), trust)
+}
+
 pub(crate) fn make_yubihsm_provisioning_test_slot()
 -> (Box<dyn crate::Slot>, Rc<ProtocolPeer>, TestTrustEntry) {
     let peer = Rc::new(ProtocolPeer::new());

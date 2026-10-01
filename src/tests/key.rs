@@ -3,7 +3,8 @@ use crate::{
     CKK_PKCS11RS_MLKEM768_P256, CKK_PKCS11RS_MLKEM768_X25519, CKK_PKCS11RS_MLKEM1024_P384,
     CKM_PKCS11RS_MLKEM768_P256, CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN,
     CKM_PKCS11RS_MLKEM768_X25519, CKM_PKCS11RS_MLKEM768_X25519_KEY_PAIR_GEN,
-    CKM_PKCS11RS_MLKEM1024_P384, CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
+    CKM_PKCS11RS_MLKEM1024_P384, CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN, SHA_HMAC_KEY_GENERATION,
+    YubiHsmCommandCode, yubihsm_mechanisms,
 };
 
 #[path = "key/counter_kdf.rs"]
@@ -750,6 +751,212 @@ fn software_concrete_hybrid_kems_round_trip_and_reject_cross_construction_use() 
 }
 
 #[test]
+fn virtual_yubihsm_hmac_token_keys_generate_both_ways() {
+    const SLOT: CK_SLOT_ID = 0x484d;
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (slot, _trust) = crate::yubihsm::tests::make_yubihsm_native_hmac_test_slot();
+    install_test_slot_with_backend(SLOT, slot);
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = b"0001password".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    for ((specific_generation, key_type, _, native_length), signing) in
+        SHA_HMAC_KEY_GENERATION.into_iter().zip([
+            CKM_SHA_1_HMAC,
+            CKM_SHA256_HMAC,
+            CKM_SHA384_HMAC,
+            CKM_SHA512_HMAC,
+        ])
+    {
+        for generation in [
+            CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+            specific_generation,
+        ] {
+            let mut key_type = key_type;
+            let mut length = native_length;
+            let mut yes = CK_TRUE as CK_BBOOL;
+            let mut template = [
+                scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut yes),
+                scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut yes),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+                scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut yes),
+                scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut yes),
+            ];
+            let mut mechanism = CK_MECHANISM {
+                mechanism: generation,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_GenerateKey(
+                    session,
+                    &mut mechanism,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut key
+                ),
+                CKR_OK as CK_RV
+            );
+            with_test_slot_context(SLOT, |context| {
+                let object = context.resolve_object(key).unwrap().unwrap();
+                assert_eq!(object.key_type, key_type);
+                assert_eq!(object.key_gen_mechanism, Some(generation));
+                assert!(matches!(
+                    object.material,
+                    crate::KeyMaterial::YubiHsm { .. }
+                ));
+            });
+            sign_and_verify(session, key, key, signing as CK_MECHANISM_TYPE);
+            assert_eq!(crate::api::C_DestroyObject(session, key), CKR_OK as CK_RV);
+        }
+    }
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
+fn sha_hmac_generation_validates_templates_and_native_commands() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for (generation, expected_type, algorithm, native_length) in SHA_HMAC_KEY_GENERATION {
+        let mut length = native_length;
+        let mut template = [scalar_attribute(
+            CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            &mut length,
+        )];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: generation,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                1,
+                &mut key
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(key).unwrap().unwrap();
+            assert_eq!(object.key_type, expected_type);
+            assert_eq!(object.key_gen_mechanism, Some(generation));
+        });
+        let (native, command) =
+            crate::api::yubihsm_generate_key_command(&mechanism, &template).unwrap();
+        assert_eq!(native.key_type, expected_type);
+        assert_eq!(native.key_gen_mechanism, Some(generation));
+        assert_eq!(command.code(), YubiHsmCommandCode::GenerateHmacKey);
+        assert_eq!(*command.data().last().unwrap(), algorithm);
+        let advertised = yubihsm_mechanisms(&[algorithm]);
+        for (other_generation, _, _, _) in SHA_HMAC_KEY_GENERATION {
+            assert_eq!(
+                advertised.iter().any(|m| m.type_ == other_generation),
+                other_generation == generation
+            );
+        }
+        let details = advertised.iter().find(|m| m.type_ == generation).unwrap();
+        assert_eq!(
+            (details.min_key_size, details.max_key_size),
+            (native_length, native_length)
+        );
+        assert_eq!(details.flags, (CKF_HW | CKF_GENERATE) as CK_FLAGS);
+        let mut wrong_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+        let mut wrong_template = [
+            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut wrong_type),
+        ];
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                wrong_template.as_mut_ptr(),
+                2,
+                &mut key
+            ),
+            CKR_TEMPLATE_INCONSISTENT as CK_RV
+        );
+        assert_eq!(
+            CK_RV::from(
+                crate::api::yubihsm_generate_key_command(&mechanism, &wrong_template).unwrap_err()
+            ),
+            CKR_TEMPLATE_INCONSISTENT as CK_RV
+        );
+        for invalid_length in [0, 1025] {
+            let mut invalid_length = invalid_length as CK_ULONG;
+            let mut bad_length = [scalar_attribute(
+                CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+                &mut invalid_length,
+            )];
+            assert_eq!(
+                crate::api::C_GenerateKey(
+                    TEST_SESSION_HANDLE,
+                    &mut mechanism,
+                    bad_length.as_mut_ptr(),
+                    1,
+                    &mut key
+                ),
+                CKR_KEY_SIZE_RANGE as CK_RV
+            );
+        }
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                std::ptr::null_mut(),
+                0,
+                &mut key
+            ),
+            CKR_TEMPLATE_INCOMPLETE as CK_RV
+        );
+        mechanism.ulParameterLen = 1;
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                1,
+                &mut key
+            ),
+            CKR_MECHANISM_PARAM_INVALID as CK_RV
+        );
+    }
+    finalize_for_test();
+}
+
+#[test]
 fn software_hmac_session_keys_generate_import_sign_and_verify() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -767,44 +974,56 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
         (CKK_SHA384_HMAC, CKM_SHA384_HMAC, 48),
         (CKK_SHA512_HMAC, CKM_SHA512_HMAC, 64),
     ] {
-        let mut key_type = key_type as CK_KEY_TYPE;
-        let mut length = length as CK_ULONG;
-        let mut sign = CK_TRUE as CK_BBOOL;
-        let mut verify = CK_TRUE as CK_BBOOL;
-        let mut template = [
-            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
-            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
-            scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
-            scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
-        ];
-        let mut mechanism = CK_MECHANISM {
-            mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
-            pParameter: std::ptr::null_mut(),
-            ulParameterLen: 0,
-        };
-        let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-        assert_eq!(
-            crate::api::C_GenerateKey(
+        for generation in std::iter::once(CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE).chain(
+            SHA_HMAC_KEY_GENERATION
+                .iter()
+                .filter_map(|&(generation, generated_type, _, _)| {
+                    (generated_type == key_type as CK_KEY_TYPE).then_some(generation)
+                }),
+        ) {
+            let mut key_type = key_type as CK_KEY_TYPE;
+            let mut length = length as CK_ULONG;
+            let mut sign = CK_TRUE as CK_BBOOL;
+            let mut verify = CK_TRUE as CK_BBOOL;
+            let mut template = [
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+                scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+                scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+            ];
+            let mut mechanism = CK_MECHANISM {
+                mechanism: generation,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_GenerateKey(
+                    TEST_SESSION_HANDLE,
+                    &mut mechanism,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut key,
+                ),
+                CKR_OK as CK_RV
+            );
+            with_test_slot_context(TEST_SLOT_ID, |context| {
+                let object = context.resolve_object(key).unwrap().unwrap();
+                assert_eq!(object.key_type, key_type);
+                assert_eq!(object.key_gen_mechanism, Some(generation));
+                assert!(object.local);
+                assert!(matches!(
+                    object.material,
+                    crate::KeyMaterial::SoftwareSecret(_)
+                ));
+            });
+            sign_and_verify(
                 TEST_SESSION_HANDLE,
-                &mut mechanism,
-                template.as_mut_ptr(),
-                template.len() as CK_ULONG,
-                &mut key,
-            ),
-            CKR_OK as CK_RV
-        );
-        with_test_slot_context(TEST_SLOT_ID, |context| {
-            assert!(matches!(
-                context.resolve_object(key).unwrap().unwrap().material,
-                crate::KeyMaterial::SoftwareSecret(_)
-            ));
-        });
-        sign_and_verify(
-            TEST_SESSION_HANDLE,
-            key,
-            key,
-            mechanism_type as CK_MECHANISM_TYPE,
-        );
+                key,
+                key,
+                mechanism_type as CK_MECHANISM_TYPE,
+            );
+        }
     }
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;

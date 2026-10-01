@@ -193,25 +193,28 @@ fn generate_key(
     })
 }
 
-fn yubihsm_generate_key_command(
+pub(crate) fn yubihsm_generate_key_command(
     mechanism: &CK_MECHANISM,
     templ: &[CK_ATTRIBUTE],
 ) -> Result<(TokenObject, YubiHsmCommand), Error> {
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    if !matches!(
-        mechanism.mechanism,
-        x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
-            || x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
-    ) {
+    let hmac_key_type = sha_hmac_generation_key_type(mechanism.mechanism);
+    if hmac_key_type.is_none()
+        && !matches!(
+            mechanism.mechanism,
+            x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
+                || x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
+        )
+    {
         return Err(CKR_MECHANISM_INVALID.into());
     }
     validate_unique_template(templ)?;
     let default_key_type = if mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE {
         CKK_AES as CK_KEY_TYPE
     } else {
-        CKK_GENERIC_SECRET as CK_KEY_TYPE
+        hmac_key_type.unwrap_or(CKK_GENERIC_SECRET as CK_KEY_TYPE)
     };
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
@@ -236,6 +239,13 @@ fn yubihsm_generate_key_command(
     if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
+    if hmac_key_type.is_some_and(|key_type| object.key_type != key_type) {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    if hmac_key_type.is_some() && value_len.is_none() {
+        return Err(CKR_TEMPLATE_INCOMPLETE.into());
+    }
+    object.key_gen_mechanism = Some(mechanism.mechanism);
     let supplied_value_len = value_len.map(|length| length as usize);
     let (code, algorithm, expected_len) =
         if mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE {
@@ -282,6 +292,7 @@ fn generate_key_object(
     mechanism: &CK_MECHANISM,
     templ: &[CK_ATTRIBUTE],
 ) -> Result<TokenObject, Error> {
+    let hmac_key_type = sha_hmac_generation_key_type(mechanism.mechanism);
     let aes_generation = mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
     let des3_generation = mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
     let pbkdf2_generation = mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
@@ -289,6 +300,7 @@ fn generate_key_object(
         && !aes_generation
         && !des3_generation
         && !pbkdf2_generation
+        && hmac_key_type.is_none()
     {
         return Err(CKR_MECHANISM_INVALID.into());
     }
@@ -309,7 +321,7 @@ fn generate_key_object(
         } else if des3_generation {
             CKK_DES3 as CK_KEY_TYPE
         } else {
-            CKK_GENERIC_SECRET as CK_KEY_TYPE
+            hmac_key_type.unwrap_or(CKK_GENERIC_SECRET as CK_KEY_TYPE)
         }),
         sensitive: Some(true),
         extractable: Some(false),
@@ -334,6 +346,7 @@ fn generate_key_object(
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
         || (aes_generation && key.key_type != CKK_AES as CK_KEY_TYPE)
         || (des3_generation && key.key_type != CKK_DES3 as CK_KEY_TYPE)
+        || hmac_key_type.is_some_and(|key_type| key.key_type != key_type)
         || (!aes_generation
             && !des3_generation
             && !pbkdf2_generation

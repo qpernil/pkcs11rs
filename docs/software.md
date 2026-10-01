@@ -304,6 +304,11 @@ its last owner is dropped. This does not change persisted key encodings.
 - HMAC: generic or hash-specific keys with SHA-1, SHA-224, SHA-256, SHA-384,
   and SHA-512, including the fixed-length and `*_HMAC_GENERAL` one-shot and
   multipart signing and verification mechanisms.
+  Generic generation accepts an explicit hash-specific HMAC key type. The
+  SHA-1, SHA-256, SHA-384, and SHA-512 generation mechanisms imply their
+  corresponding key type; a conflicting template type is rejected. They
+  require `CKA_VALUE_LEN`, accept no mechanism parameters, and record the
+  requested mechanism in `CKA_KEY_GEN_MECHANISM`.
 - PBKDF2: generic-secret generation with HMAC-SHA-1, SHA-224, SHA-256,
   SHA-384, or SHA-512.
 - Derivation: ECDH with `CKD_NULL` or SHA-1/SHA-2/SHA-3 X9.63 KDFs, and HKDF
@@ -360,6 +365,7 @@ For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 | `CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM1024_P384` | 1665 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
 | `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
+| `CKM_SHA_1_KEY_GEN`, `CKM_SHA256_KEY_GEN`, `CKM_SHA384_KEY_GEN`, `CKM_SHA512_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
 | `CKM_DES3_KEY_GEN` | 24 bytes | `CKF_GENERATE` |
 | `CKM_PKCS5_PBKD2` | 1–1024 bytes | `CKF_GENERATE` |

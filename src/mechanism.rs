@@ -132,6 +132,10 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_ML_KEM_KEY_PAIR_GEN,
         CKM_ML_KEM,
         CKM_GENERIC_SECRET_KEY_GEN,
+        CKM_SHA_1_KEY_GEN,
+        CKM_SHA256_KEY_GEN,
+        CKM_SHA384_KEY_GEN,
+        CKM_SHA512_KEY_GEN,
         CKM_AES_KEY_GEN,
         CKM_AES_ECB,
         CKM_AES_CBC,
@@ -189,6 +193,40 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_PKCS11RS_MLKEM1024_P384_KEY_PAIR_GEN,
         CKM_PKCS11RS_MLKEM1024_P384,
     )
+}
+
+// Generation mechanism, resulting key type, device algorithm, and native length in bytes.
+pub(crate) const SHA_HMAC_KEY_GENERATION: [(CK_MECHANISM_TYPE, CK_KEY_TYPE, u8, CK_ULONG); 4] = [
+    (
+        CKM_SHA_1_KEY_GEN as CK_MECHANISM_TYPE,
+        CKK_SHA_1_HMAC as CK_KEY_TYPE,
+        YUBIHSM_ALGO_HMAC_SHA1,
+        20,
+    ),
+    (
+        CKM_SHA256_KEY_GEN as CK_MECHANISM_TYPE,
+        CKK_SHA256_HMAC as CK_KEY_TYPE,
+        YUBIHSM_ALGO_HMAC_SHA256,
+        32,
+    ),
+    (
+        CKM_SHA384_KEY_GEN as CK_MECHANISM_TYPE,
+        CKK_SHA384_HMAC as CK_KEY_TYPE,
+        YUBIHSM_ALGO_HMAC_SHA384,
+        48,
+    ),
+    (
+        CKM_SHA512_KEY_GEN as CK_MECHANISM_TYPE,
+        CKK_SHA512_HMAC as CK_KEY_TYPE,
+        YUBIHSM_ALGO_HMAC_SHA512,
+        64,
+    ),
+];
+
+pub(crate) fn sha_hmac_generation_key_type(mechanism: CK_MECHANISM_TYPE) -> Option<CK_KEY_TYPE> {
+    SHA_HMAC_KEY_GENERATION
+        .iter()
+        .find_map(|&(generation, key_type, _, _)| (generation == mechanism).then_some(key_type))
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -592,6 +630,14 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             flags: (CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
         },
     ];
+    mechanisms.extend(
+        SHA_HMAC_KEY_GENERATION.map(|(type_, _, _, _)| MechanismDetails {
+            type_,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_GENERATE as CK_FLAGS,
+        }),
+    );
     for type_ in [
         CKM_AES_ECB,
         CKM_AES_CBC,
@@ -1111,6 +1157,16 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             supported.then_some(details)
         })
         .collect();
+    mechanisms.extend(SHA_HMAC_KEY_GENERATION.into_iter().filter_map(
+        |(type_, _, algorithm, length)| {
+            algorithms.contains(&algorithm).then_some(MechanismDetails {
+                type_,
+                min_key_size: length,
+                max_key_size: length,
+                flags: (CKF_HW | CKF_GENERATE) as CK_FLAGS,
+            })
+        },
+    ));
     for (base, sizes, generation, operation, flags) in [
         (
             YUBIHSM_ALGO_ML_DSA_44,

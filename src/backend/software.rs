@@ -528,7 +528,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.stores_software_token_keys());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 95);
+        assert_eq!(mechanisms.len(), 99);
         assert_eq!(
             mechanisms
                 .iter()
@@ -668,7 +668,9 @@ mod tests {
                     (1665, 1665, CKF_ENCAPSULATE | CKF_DECAPSULATE)
                 }
                 x if x == CKM_PKCS11RS_PROJECT_PUBLIC_KEY => (0, 0, CKF_DERIVE),
-                x if x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE => {
+                x if x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
+                    || sha_hmac_generation_key_type(x).is_some() =>
+                {
                     (1, 1024, CKF_GENERATE)
                 }
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => (16, 32, CKF_GENERATE),

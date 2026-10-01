@@ -73,6 +73,17 @@ not turn each YubiHSM slot into a general software provider. Persistent device
 keys retain the native capabilities and authentication requirements described
 here.
 
+Persistent HMAC keys can be generated through `CKM_GENERIC_SECRET_KEY_GEN`
+with a SHA-specific key type, or through `CKM_SHA_1_KEY_GEN`,
+`CKM_SHA256_KEY_GEN`, `CKM_SHA384_KEY_GEN`, and `CKM_SHA512_KEY_GEN`.
+Both routes use the existing device `GenerateHmacKey` command. SHA-specific
+mechanisms are advertised only when the device enables the matching algorithm.
+Native generation supports fixed lengths of 20, 32, 48, and 64 bytes,
+respectively; conflicting key types or lengths are rejected. The requested
+SHA-specific generation mechanism is retained in canonical companion metadata
+and checked against the device's key type and generated origin on rediscovery.
+These provider interfaces require no additional virtual-device command.
+
 The module exposes one slot for every selectable CCID applet, one slot for
 every physical YubiHSM USB device, and one slot for every device enumerated by
 each URL configured in `PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated
