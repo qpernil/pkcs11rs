@@ -1054,7 +1054,9 @@ dependencies, case selection, safety boundaries, and JSON result reports.
 `python3 integration/run_pkcs11test.py` runs the full installed upstream
 `pkcs11test` suite, including SO and token-reset cases, on a fresh production
 software token per case. It records failures and unsupported cases without
-inheriting `yubihsm-shell` exclusions. See the
+inheriting `yubihsm-shell` exclusions. A dedicated Linux CI job builds the pinned
+`qpernil/pkcs11test` fork, runs the full suite on pushes and pull requests, and
+uploads its JSON report even on failure. See the
 [upstream compatibility baseline](integration/README.md#full-upstream-pkcs11test)
 for current results and remaining gaps.
 
