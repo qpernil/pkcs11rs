@@ -66,6 +66,15 @@ python3 integration/run_pkcs11test.py
 python3 integration/run_pkcs11test.py --filter 'Init.*' --jobs 1
 ```
 
+The dedicated Linux CI job runs the full suite on every push and pull request.
+It builds `qpernil/pkcs11test` at the pinned commit
+`ba0cf2fe1cc40852d068a5493fef8d8dbce674a2`, including its vendored Google Test,
+and checks the fork's fixture contracts before running the compatibility suite.
+The `pkcs11test-results-linux` artifact contains the JSON report, uploaded even
+when the suite fails. Failures, crashes, timeouts, harness errors, and incomplete
+runs fail the job; unsupported/skipped cases remain separately visible and do
+not fail it. The job requires no physical hardware.
+
 The default includes every upstream case, including upstream-disabled cases,
 SO login, and token initialization (`-I`). It uses no exclusions from
 `yubihsm-shell`. Each case gets a fresh encrypted token store, random PINs, and

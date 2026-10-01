@@ -5,6 +5,64 @@ on:
   pull_request:
 
 jobs:
+  pkcs11test:
+    name: Google/Yubico pkcs11test compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out pinned pkcs11test fork
+        uses: actions/checkout@v7
+        with:
+          repository: qpernil/pkcs11test
+          ref: ba0cf2fe1cc40852d068a5493fef8d8dbce674a2
+          path: target/pkcs11test-source
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install build and client dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential opensc openssl pkg-config libssl-dev
+
+      - name: Build pkcs11test fork and check fixture contracts
+        run: |
+          make -C target/pkcs11test-source -j2
+          make -C target/pkcs11test-source check
+
+      - name: Test runner reporting and isolation
+        run: python -m unittest discover -s integration -p 'test_pkcs11test_runner.py'
+
+      - name: Run full pkcs11test suite on disposable software tokens
+        run: >-
+          python integration/run_pkcs11test.py
+          --pkcs11test target/pkcs11test-source/pkcs11test
+          --results target/pkcs11test-results.json
+
+      - name: Upload pkcs11test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pkcs11test-results-linux
+          path: target/pkcs11test-results.json
+          if-no-files-found: warn
+
   virtual-yubihsm-firmware:
     runs-on: ubuntu-latest
     strategy:
