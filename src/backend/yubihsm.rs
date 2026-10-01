@@ -798,6 +798,8 @@ fn primary_metadata_identity(
                 .any(|kind| attribute == u64::from(*kind)) => {}
             (attribute, KeyAttributeValue::Mechanisms(_))
                 if attribute == u64::from(CKA_ALLOWED_MECHANISMS) => {}
+            (attribute, KeyAttributeValue::Unsigned(_))
+                if attribute == u64::from(CKA_KEY_GEN_MECHANISM) => {}
             _ => return Err(CKR_ATTRIBUTE_TYPE_INVALID.into()),
         }
     }
@@ -3861,6 +3863,17 @@ fn yubihsm_primary_policy(
             )
             .map_err(key_metadata_error)?;
     }
+    if let Some(generation) = object.key_gen_mechanism
+        && object.local
+        && sha_hmac_generation_key_type(generation) == Some(object.key_type)
+    {
+        attributes
+            .insert(
+                u64::from(CKA_KEY_GEN_MECHANISM),
+                KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(generation)),
+            )
+            .map_err(key_metadata_error)?;
+    }
     Ok(attributes)
 }
 
@@ -3881,6 +3894,17 @@ fn apply_yubihsm_primary_policy(
                     })
                     .collect::<Result<_, _>>()?,
             );
+            continue;
+        }
+        if let KeyAttributeValue::Unsigned(generation) = value
+            && *kind == u64::from(CKA_KEY_GEN_MECHANISM)
+        {
+            let generation = CK_MECHANISM_TYPE::try_from(*generation)
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+            if !object.local || sha_hmac_generation_key_type(generation) != Some(object.key_type) {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            object.key_gen_mechanism = Some(generation);
             continue;
         }
         let KeyAttributeValue::Boolean(value) = value else {
@@ -5096,6 +5120,28 @@ mod primary_policy_tests {
         assert!(restored.encrypt);
         assert!(!restored.derive && !restored.sign && !restored.verify);
         assert_eq!(restored.allowed_mechanisms, object.allowed_mechanisms);
+    }
+
+    #[test]
+    fn hmac_generation_metadata_survives_cbor_and_rejects_wrong_provenance() {
+        let mut info = aes_info();
+        info.object_type = YUBIHSM_HMAC_KEY;
+        info.algorithm = YUBIHSM_ALGO_HMAC_SHA256;
+        info.origin = 1;
+        let mut object = yubihsm_token_objects(7, info.clone(), None)
+            .unwrap()
+            .remove(0);
+        object.key_gen_mechanism = Some(CKM_SHA256_KEY_GEN as CK_MECHANISM_TYPE);
+        assert_eq!(
+            roundtrip(&info, &object).key_gen_mechanism,
+            object.key_gen_mechanism
+        );
+        let mut wrong_type = object.clone();
+        wrong_type.key_type = CKK_SHA512_HMAC as CK_KEY_TYPE;
+        let policy = yubihsm_primary_policy(&object, &info).unwrap();
+        assert!(apply_yubihsm_primary_policy(&mut wrong_type, &policy).is_err());
+        object.local = false;
+        assert!(apply_yubihsm_primary_policy(&mut object, &policy).is_err());
     }
 
     #[test]

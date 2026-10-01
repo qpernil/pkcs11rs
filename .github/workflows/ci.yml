@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: qpernil/pkcs11test
-          ref: ba0cf2fe1cc40852d068a5493fef8d8dbce674a2
+          ref: bab8443b01c712e81460af18b3ce479624e64358
           path: target/pkcs11test-source
 
       - name: Check out first-party dependencies
