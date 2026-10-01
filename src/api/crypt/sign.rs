@@ -74,9 +74,7 @@ fn software_sign_mechanism_supported(
                     || piv_is_pss_mechanism(mechanism)
             }
             KeyKind::Edwards(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
-            KeyKind::MlDsa(_) => {
-                matches!(mechanism, x if x == CKM_ML_DSA as CK_MECHANISM_TYPE || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE)
-            }
+            KeyKind::MlDsa(_) => is_ml_dsa_mechanism(mechanism),
             KeyKind::Ec(_) => {
                 mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
             }
@@ -247,19 +245,29 @@ fn ml_dsa_sign_with_randomizer<P: ml_dsa::MlDsaParams>(
 
 pub(super) fn ml_dsa_parameters(
     mechanism: &CK_MECHANISM,
+    verifying: bool,
 ) -> Result<Option<MlDsaSignatureParameters>, Error> {
-    if mechanism.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
-        return super::hash_ml_dsa::parameters(mechanism, false).map(Some);
+    if mechanism.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
+        || ml_dsa_module_prehash(mechanism.mechanism).is_some()
+    {
+        return super::hash_ml_dsa::parameters(mechanism, verifying).map(Some);
     }
     if mechanism.mechanism != CKM_ML_DSA as CK_MECHANISM_TYPE {
         return Ok(None);
     }
+    ml_dsa_context_parameters(mechanism, verifying).map(Some)
+}
+
+pub(super) fn ml_dsa_context_parameters(
+    mechanism: &CK_MECHANISM,
+    verifying: bool,
+) -> Result<MlDsaSignatureParameters, Error> {
     if mechanism.pParameter.is_null() && mechanism.ulParameterLen == 0 {
-        return Ok(Some(MlDsaSignatureParameters {
+        return Ok(MlDsaSignatureParameters {
             prehash: None,
             hedge_variant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
             context: Vec::new(),
-        }));
+        });
     }
     if mechanism.pParameter.is_null()
         || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_SIGN_ADDITIONAL_CONTEXT>()
@@ -270,12 +278,14 @@ pub(super) fn ml_dsa_parameters(
         _as_ref(mechanism.pParameter.cast::<CK_SIGN_ADDITIONAL_CONTEXT>())
             .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
     };
-    if !matches!(
-        parameters.hedgeVariant,
-        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE
-            || x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE
-            || x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE
-    ) || parameters.ulContextLen > 255
+    if (!verifying
+        && !matches!(
+            parameters.hedgeVariant,
+            x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE
+                || x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE
+                || x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE
+        ))
+        || parameters.ulContextLen > 255
         || (parameters.pContext.is_null() && parameters.ulContextLen != 0)
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
@@ -285,11 +295,15 @@ pub(super) fn ml_dsa_parameters(
             .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
             .to_vec()
     };
-    Ok(Some(MlDsaSignatureParameters {
+    Ok(MlDsaSignatureParameters {
         prehash: None,
-        hedge_variant: parameters.hedgeVariant,
+        hedge_variant: if verifying {
+            CKH_HEDGE_PREFERRED as _
+        } else {
+            parameters.hedgeVariant
+        },
         context,
-    }))
+    })
 }
 
 pub(crate) use crate::key_mechanisms::hmac_key_type_and_length;
@@ -480,7 +494,7 @@ fn sign_init(
         };
         let hmac_length = hmac_output_length(mechanism)?;
         let mac_length = hmac_length.or(aes_mac_length);
-        let ml_dsa = ml_dsa_parameters(mechanism)?;
+        let ml_dsa = ml_dsa_parameters(mechanism, false)?;
         let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
         } else if piv_is_pss_mechanism(mechanism.mechanism) {
@@ -512,6 +526,7 @@ fn sign_init(
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA as CK_MECHANISM_TYPE
                     || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
+                    || HASH_ML_DSA_MECHANISMS.contains(&x)
                     || x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
@@ -548,11 +563,7 @@ fn sign_init(
             x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
             x if x == CKM_PKCS11RS_FIDO_ASSERTION => 0,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
-            x if x == CKM_ML_DSA as CK_MECHANISM_TYPE
-                || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE =>
-            {
-                CKK_ML_DSA as CK_KEY_TYPE
-            }
+            x if is_ml_dsa_mechanism(x) => CKK_ML_DSA as CK_KEY_TYPE,
             x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                 || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
@@ -656,6 +667,7 @@ fn sign_init(
             _ => None,
         };
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
+            prehash_state: super::signature_hash::context(mechanism.mechanism),
             key: object.material.clone(),
             public_key: object.public_key.clone(),
             slot_id,
@@ -720,7 +732,7 @@ fn sign(
     }
     let signature_len = unsafe { as_mut(signature_len) }?;
     with_session_context_mut(session_handle, |ctx| {
-        let operation = ctx
+        let mut operation = ctx
             .get_session_context(session_handle)?
             .sign_operation
             .as_ref()
@@ -825,8 +837,17 @@ fn sign(
             return Ok(());
         }
         let mut buffered_data = operation.buffer;
-        buffered_data.extend_from_slice(data);
-        let data = buffered_data.as_slice();
+        let mut digest = if let Some(mut state) = operation.prehash_state {
+            state.update(data);
+            Some(state.finalize())
+        } else {
+            buffered_data.extend_from_slice(data);
+            None
+        };
+        if let Some(digest) = &mut digest {
+            super::signature_hash::normalize(&mut operation.mechanism, digest)?;
+        }
+        let data = digest.as_deref().unwrap_or(&buffered_data);
         let required = match &operation.key {
             KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
             KeyMaterial::SoftwareSecret(_) => operation
@@ -904,11 +925,11 @@ fn sign(
             KeyMaterial::PreviewSignDerived { .. } => 64,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        if let Some(hash) = operation.ml_dsa.as_ref().and_then(|p| p.prehash) {
-            if data.len() != hash.digest_length() {
-                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                return Err(CKR_DATA_LEN_RANGE.into());
-            }
+        if let Some(hash) = operation.ml_dsa.as_ref().and_then(|p| p.prehash)
+            && data.len() != hash.digest_length()
+        {
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Err(CKR_DATA_LEN_RANGE.into());
         }
         if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && data.len() != 32 {
             ctx.get_session_context_mut(session_handle)?.sign_operation = None;
@@ -1131,7 +1152,7 @@ ffi_entry_point! {
         part_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
         map(with_session_context_mut(session_handle, |ctx| {
-            let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
+            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
             let session = ctx.get_session_context_mut(session_handle)?;
             let operation = session
                 .sign_operation
@@ -1141,7 +1162,11 @@ ffi_entry_point! {
                 session.sign_operation = None;
                 return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }
-            operation.buffer.extend_from_slice(&part);
+            if let Some(state) = &mut operation.prehash_state {
+                state.update(part);
+            } else {
+                operation.buffer.extend_from_slice(part);
+            }
             Ok(())
         }))
     }

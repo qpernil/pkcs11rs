@@ -528,7 +528,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.stores_software_token_keys());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 100);
+        assert_eq!(mechanisms.len(), 110);
         assert_eq!(
             mechanisms
                 .iter()
@@ -642,11 +642,7 @@ mod tests {
                 x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
                     (1312, 2592, CKF_GENERATE_KEY_PAIR)
                 }
-                x if x == CKM_ML_DSA as CK_MECHANISM_TYPE
-                    || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE =>
-                {
-                    (1312, 2592, CKF_SIGN | CKF_VERIFY)
-                }
+                x if crate::is_ml_dsa_mechanism(x) => (1312, 2592, CKF_SIGN | CKF_VERIFY),
                 x if x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
                     (800, 1568, CKF_GENERATE_KEY_PAIR)
                 }

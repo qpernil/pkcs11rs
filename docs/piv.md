@@ -150,9 +150,13 @@ RSA raw, PKCS #1 v1.5, OAEP, PSS, and hashed RSA mechanisms are supported for
 the applicable slots. The host performs padding and digest encoding while the
 YubiKey performs the private RSA operation. `CKM_ECDSA` and its hashed variants
 convert the card's DER signature to the PKCS #11 fixed-width `r || s` format,
-while `CKM_EDDSA` returns the card's Ed25519 signature. Multipart sign and
-verify operations buffer their input and use the same mechanism implementations.
+while `CKM_EDDSA` returns the card's Ed25519 signature. Hash-specific RSA,
+ECDSA and HashML-DSA multipart operations hash each input part in the module
+and retain only the hash state; Final sends the digest or RSA DigestInfo to
+the private operation. Raw mechanisms, EdDSA and pure ML-DSA retain complete
+input buffers.
 On the virtual Gadget, `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_HASH_ML_DSA`,
+and all ten `CKM_HASH_ML_DSA_<hash>` variants,
 `CKM_ML_KEM_KEY_PAIR_GEN`, and `CKM_ML_KEM` use the same PKCS #11 key types,
 `CKA_PARAMETER_SET` values, and sign/verify or encapsulate/decapsulate calls as
 YubiHSM slots. ML-DSA signing accepts the standard `CK_SIGN_ADDITIONAL_CONTEXT`
@@ -177,7 +181,11 @@ digest for HashML-DSA. The applet constructs the FIPS 204 signing input without
 hashing the original message. TLV framing supplies context and input lengths.
 `CKM_HASH_ML_DSA` requires `CK_HASH_SIGN_ADDITIONAL_CONTEXT` and supports the
 SHA-2 and SHA-3 parameters and single-part operations documented in
-[software.md](software.md#ml-dsa-parameters-and-key-attributes).
+[software.md](software.md#ml-dsa-parameters-and-key-attributes). The
+hash-specific variants accept the original message, use optional
+`CK_SIGN_ADDITIONAL_CONTEXT`, and support single-part and multipart calls.
+The module hashes each input part and sends only the final digest to the applet;
+the wire request is the same as for client-prehashed input.
 
 The virtual PIV extension also exposes `MLKEM768-P256`,
 `MLKEM768-X25519`, and `MLKEM1024-P384` as algorithms `E8`, `E9`, and `EA`

@@ -1239,6 +1239,20 @@ management key and PIN, and YubiHSM authentication key `0001` with password
 slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 `PKCS11RS_TEST_PIV_MANAGEMENT_KEY`, and `PKCS11RS_TEST_PIV_PIN`.
 
+Published cryptographic KATs run offline in `software-key-core` and are also
+required by this repository's CI:
+
+```console
+cargo test --manifest-path ../software-key-core/Cargo.toml --locked kat_
+```
+
+The [coverage inventory](https://github.com/qpernil/software-key-core/blob/main/docs/known-answer-tests.md)
+includes FIPS 203/204 for all ML-KEM/ML-DSA parameter sets, NIST hash and
+Triple-DES vectors, and Wycheproof RSA, ECDSA, EdDSA, ECDH, Montgomery,
+HMAC/HKDF and AES corpora. Provider tests separately exercise mechanism
+parameters, direct/multipart equivalence, hash-state lifetime and embedded
+PIV/YubiHSM signing transports.
+
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 

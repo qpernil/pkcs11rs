@@ -113,7 +113,7 @@ pub(crate) fn operations(key: &TokenObject, m: CK_MECHANISM_TYPE) -> CK_FLAGS {
                 0
             }
         }
-        x if x == CKM_ML_DSA as CK_MECHANISM_TYPE || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE => {
+        x if crate::is_ml_dsa_mechanism(x) => {
             if key.key_type == CKK_ML_DSA as CK_KEY_TYPE {
                 CKF_SIGN | CKF_VERIFY
             } else {

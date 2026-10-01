@@ -4987,9 +4987,7 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
     let cap = |bit| yubihsm_capability(capabilities, bit);
     let pair = |yes, flags| if yes { flags } else { 0 };
     let native = match m {
-        x if x == CKM_ML_DSA as CK_MECHANISM_TYPE || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE => {
-            pair(cap(0x3a), CKF_SIGN)
-        }
+        x if crate::is_ml_dsa_mechanism(x) => pair(cap(0x3a), CKF_SIGN),
         x if x == CKM_ML_KEM as CK_MECHANISM_TYPE => pair(cap(0x3c), CKF_DECAPSULATE),
         CKM_PKCS11RS_MLKEM768_P256 | CKM_PKCS11RS_MLKEM768_X25519 | CKM_PKCS11RS_MLKEM1024_P384 => {
             pair(cap(0x3e), CKF_DECAPSULATE)

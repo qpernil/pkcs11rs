@@ -60,11 +60,7 @@ pub(crate) fn verify_init(
         };
         let hmac_length = hmac_output_length(mechanism)?;
         let mac_length = hmac_length.or(aes_mac_length);
-        let ml_dsa = if mechanism.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
-            Some(super::hash_ml_dsa::parameters(mechanism, true)?)
-        } else {
-            ml_dsa_parameters(mechanism)?
-        };
+        let ml_dsa = ml_dsa_parameters(mechanism, true)?;
         let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
         } else if piv_is_pss_mechanism(mechanism.mechanism) {
@@ -170,6 +166,7 @@ pub(crate) fn verify_init(
 
         ctx.get_session_context_mut(session_handle)?
             .verify_operation = Some(SignatureOperation {
+            prehash_state: super::signature_hash::context(mechanism.mechanism),
             key: asymmetric_key.unwrap_or_else(|| object.material.clone()),
             public_key: object.public_key.clone(),
             slot_id,
@@ -221,7 +218,7 @@ pub(crate) fn verify(
     signature_len: CK_ULONG,
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
-        let operation = ctx
+        let mut operation = ctx
             .get_session_context_mut(session_handle)?
             .verify_operation
             .take()
@@ -232,8 +229,17 @@ pub(crate) fn verify(
         }
         let data = unsafe { from_raw_parts(data, data_len as usize) }?;
         let mut buffered_data = operation.buffer;
-        buffered_data.extend_from_slice(data);
-        let data = buffered_data.as_slice();
+        let mut digest = if let Some(mut state) = operation.prehash_state {
+            state.update(data);
+            Some(state.finalize())
+        } else {
+            buffered_data.extend_from_slice(data);
+            None
+        };
+        if let Some(digest) = &mut digest {
+            super::signature_hash::normalize(&mut operation.mechanism, digest)?;
+        }
+        let data = digest.as_deref().unwrap_or(&buffered_data);
         let signature = unsafe { from_raw_parts(signature, signature_len as usize) }?;
         if let Some((_, full_length)) = hmac_key_type_and_length(operation.mechanism) {
             let expected_length = operation.mac_length.unwrap_or(full_length);
@@ -493,7 +499,7 @@ ffi_entry_point! {
         part_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
         map(with_session_context_mut(session_handle, |ctx| {
-            let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
+            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
             let operation = ctx
                 .get_session_context_mut(session_handle)?
                 .verify_operation
@@ -503,7 +509,11 @@ ffi_entry_point! {
                 ctx.get_session_context_mut(session_handle)?.verify_operation = None;
                 return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }
-            operation.buffer.extend_from_slice(&part);
+            if let Some(state) = &mut operation.prehash_state {
+                state.update(part);
+            } else {
+                operation.buffer.extend_from_slice(part);
+            }
             Ok(())
         }))
     }

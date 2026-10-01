@@ -1,4 +1,6 @@
 mod digest;
+mod signature_hash;
+pub(crate) use signature_hash::SignatureHashContext;
 mod encrypt;
 mod hash_ml_dsa;
 mod shared;

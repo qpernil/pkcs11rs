@@ -214,7 +214,12 @@ fn sign_and_verify(
     private: CK_OBJECT_HANDLE,
     mechanism_type: CK_MECHANISM_TYPE,
 ) {
-    let message = b"software session private key";
+    let message_storage: Vec<u8> = if crate::piv_hash_mechanism(mechanism_type).is_some() {
+        (0..8193).map(|index| (index % 251) as u8).collect()
+    } else {
+        b"software session private key".to_vec()
+    };
+    let message = message_storage.as_slice();
     let mut mechanism = CK_MECHANISM {
         mechanism: mechanism_type,
         pParameter: std::ptr::null_mut(),
@@ -282,6 +287,104 @@ fn sign_and_verify(
         ),
         CKR_OK as CK_RV
     );
+    if crate::piv_hash_mechanism(mechanism_type).is_some() {
+        let slot_id = crate::lock_context()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .slot_contexts
+            .read()
+            .unwrap()
+            .session_slot(session)
+            .unwrap();
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut mechanism, public),
+            CKR_OK as CK_RV
+        );
+        for chunk in message.chunks(137) {
+            assert_eq!(
+                crate::api::C_VerifyUpdate(
+                    session,
+                    chunk.as_ptr().cast_mut(),
+                    chunk.len() as CK_ULONG
+                ),
+                CKR_OK as CK_RV
+            );
+        }
+        with_test_slot_context(slot_id, |context| {
+            let operation = context
+                .sessions
+                .get(&session)
+                .unwrap()
+                .verify_operation
+                .as_ref()
+                .unwrap();
+            assert!(operation.buffer.is_empty());
+            assert!(operation.prehash_state.is_some());
+        });
+        assert_eq!(
+            crate::api::C_VerifyFinal(session, signature.as_mut_ptr(), signature_length),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SignInit(session, &mut mechanism, private),
+            CKR_OK as CK_RV
+        );
+        for chunk in message.chunks(137) {
+            assert_eq!(
+                crate::api::C_SignUpdate(
+                    session,
+                    chunk.as_ptr().cast_mut(),
+                    chunk.len() as CK_ULONG
+                ),
+                CKR_OK as CK_RV
+            );
+        }
+        with_test_slot_context(slot_id, |context| {
+            let operation = context
+                .sessions
+                .get(&session)
+                .unwrap()
+                .sign_operation
+                .as_ref()
+                .unwrap();
+            assert!(operation.buffer.is_empty());
+            assert!(operation.prehash_state.is_some());
+        });
+        let mut multipart_length = 0;
+        assert_eq!(
+            crate::api::C_SignFinal(session, std::ptr::null_mut(), &mut multipart_length),
+            CKR_OK as CK_RV
+        );
+        let mut multipart = vec![0; multipart_length as usize];
+        let mut short_length = 1;
+        assert_eq!(
+            crate::api::C_SignFinal(session, multipart.as_mut_ptr(), &mut short_length),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(short_length, multipart_length);
+        assert_eq!(
+            crate::api::C_SignFinal(session, multipart.as_mut_ptr(), &mut multipart_length),
+            CKR_OK as CK_RV
+        );
+        if crate::HASHED_RSA_PKCS_MECHANISMS.contains(&mechanism_type) {
+            assert_eq!(signature, multipart);
+        }
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut mechanism, public),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                session,
+                message.as_ptr().cast_mut(),
+                message.len() as CK_ULONG,
+                multipart.as_mut_ptr(),
+                multipart_length
+            ),
+            CKR_OK as CK_RV
+        );
+    }
 }
 
 fn ml_dsa_signature(
@@ -4592,5 +4695,254 @@ fn virtual_yubihsm_hash_ml_dsa_crosses_the_provider_and_secure_channel() {
         CKR_OK as CK_RV
     );
     assert_hash_ml_dsa_roundtrip(session, public, private);
+    assert_module_hash_ml_dsa_roundtrip(session, public, private);
+    finalize_for_test();
+}
+
+fn sign_ml_dsa_test_input(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    mechanism: &mut CK_MECHANISM,
+    input: &[u8],
+    multipart: bool,
+) -> Vec<u8> {
+    assert_eq!(
+        crate::api::C_SignInit(session, mechanism, private),
+        CKR_OK as CK_RV
+    );
+    let mut size = 0;
+    if multipart {
+        for part in input.chunks(7) {
+            assert_eq!(
+                crate::api::C_SignUpdate(session, part.as_ptr().cast_mut(), part.len() as _),
+                CKR_OK as CK_RV
+            );
+        }
+        crate::with_session_context(session, |context| {
+            let operation = context
+                .sessions
+                .get(&session)
+                .unwrap()
+                .sign_operation
+                .as_ref()
+                .unwrap();
+            assert!(operation.buffer.is_empty());
+            assert!(operation.prehash_state.is_some());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::api::C_SignFinal(session, std::ptr::null_mut(), &mut size),
+            CKR_OK as CK_RV
+        );
+    } else {
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                input.as_ptr().cast_mut(),
+                input.len() as _,
+                std::ptr::null_mut(),
+                &mut size
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+    let mut signature = vec![0; size as usize];
+    if multipart {
+        let mut short_size = 1;
+        assert_eq!(
+            crate::api::C_SignFinal(session, signature.as_mut_ptr(), &mut short_size),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(short_size, size);
+        assert_eq!(
+            crate::api::C_SignFinal(session, signature.as_mut_ptr(), &mut size),
+            CKR_OK as CK_RV
+        );
+    } else {
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                input.as_ptr().cast_mut(),
+                input.len() as _,
+                signature.as_mut_ptr(),
+                &mut size
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+    signature
+}
+
+pub(super) fn assert_module_hash_ml_dsa_roundtrip(
+    session: CK_SESSION_HANDLE,
+    public: CK_OBJECT_HANDLE,
+    private: CK_OBJECT_HANDLE,
+) {
+    use software_key_core::post_quantum::{MlDsaParameterSet, MlDsaPrehash, verify_ml_dsa_prehash};
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as _,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, public, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut public_key = vec![0; attribute.ulValueLen as usize];
+    attribute.pValue = public_key.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, public, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let parameter_set = match public_key.len() {
+        1312 => MlDsaParameterSet::MlDsa44,
+        1952 => MlDsaParameterSet::MlDsa65,
+        2592 => MlDsaParameterSet::MlDsa87,
+        _ => panic!("unexpected public-key length"),
+    };
+    for (mechanism_type, id, generic_hash) in [
+        (CKM_HASH_ML_DSA_SHA224, 4, Some(CKM_SHA224)),
+        (CKM_HASH_ML_DSA_SHA256, 1, Some(CKM_SHA256)),
+        (CKM_HASH_ML_DSA_SHA384, 2, Some(CKM_SHA384)),
+        (CKM_HASH_ML_DSA_SHA512, 3, Some(CKM_SHA512)),
+        (CKM_HASH_ML_DSA_SHA3_224, 7, Some(CKM_SHA3_224)),
+        (CKM_HASH_ML_DSA_SHA3_256, 8, Some(CKM_SHA3_256)),
+        (CKM_HASH_ML_DSA_SHA3_384, 9, Some(CKM_SHA3_384)),
+        (CKM_HASH_ML_DSA_SHA3_512, 10, Some(CKM_SHA3_512)),
+        (CKM_HASH_ML_DSA_SHAKE128, 11, None),
+        (CKM_HASH_ML_DSA_SHAKE256, 12, None),
+    ] {
+        let hash = MlDsaPrehash::from_id(id).unwrap();
+        for context_length in [0, 255] {
+            let mut context = vec![0x61; context_length];
+            let mut additional = CK_SIGN_ADDITIONAL_CONTEXT {
+                hedgeVariant: CKH_DETERMINISTIC_REQUIRED as _,
+                pContext: context.as_mut_ptr(),
+                ulContextLen: context.len() as _,
+            };
+            let mut mechanism = CK_MECHANISM {
+                mechanism: mechanism_type as _,
+                pParameter: (&mut additional as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast(),
+                ulParameterLen: std::mem::size_of_val(&additional) as _,
+            };
+            for message in [
+                &b""[..],
+                &b"a message whose length differs from every supported digest length"[..],
+            ] {
+                let mut signature =
+                    sign_ml_dsa_test_input(session, private, &mut mechanism, message, false);
+                assert_eq!(
+                    signature,
+                    sign_ml_dsa_test_input(session, private, &mut mechanism, message, true)
+                );
+                let digest = hash.digest(message);
+                verify_ml_dsa_prehash(
+                    parameter_set,
+                    &public_key,
+                    &digest,
+                    &context,
+                    &signature,
+                    hash,
+                )
+                .unwrap();
+                assert_eq!(
+                    crate::api::C_VerifyInit(session, &mut mechanism, public),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(
+                    crate::api::C_Verify(
+                        session,
+                        message.as_ptr().cast_mut(),
+                        message.len() as _,
+                        signature.as_mut_ptr(),
+                        signature.len() as _
+                    ),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(
+                    crate::api::C_VerifyInit(session, &mut mechanism, public),
+                    CKR_OK as CK_RV
+                );
+                for part in message.chunks(11) {
+                    assert_eq!(
+                        crate::api::C_VerifyUpdate(
+                            session,
+                            part.as_ptr().cast_mut(),
+                            part.len() as _
+                        ),
+                        CKR_OK as CK_RV
+                    );
+                }
+                assert_eq!(
+                    crate::api::C_VerifyFinal(
+                        session,
+                        signature.as_mut_ptr(),
+                        signature.len() as _
+                    ),
+                    CKR_OK as CK_RV
+                );
+                if let Some(hash) = generic_hash {
+                    let mut generic_params = CK_HASH_SIGN_ADDITIONAL_CONTEXT {
+                        hedgeVariant: CKH_DETERMINISTIC_REQUIRED as _,
+                        pContext: context.as_mut_ptr(),
+                        ulContextLen: context.len() as _,
+                        hash: hash as _,
+                    };
+                    let mut generic = CK_MECHANISM {
+                        mechanism: CKM_HASH_ML_DSA as _,
+                        pParameter: (&mut generic_params as *mut CK_HASH_SIGN_ADDITIONAL_CONTEXT)
+                            .cast(),
+                        ulParameterLen: std::mem::size_of_val(&generic_params) as _,
+                    };
+                    assert_eq!(
+                        signature,
+                        sign_ml_dsa_test_input(session, private, &mut generic, &digest, false)
+                    );
+                }
+            }
+        }
+        // Optional parameters default to an empty context and preferred hedging.
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type as _,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut signature = sign_ml_dsa_test_input(session, private, &mut mechanism, b"abc", false);
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut mechanism, public),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                session,
+                b"abc".as_ptr().cast_mut(),
+                3,
+                signature.as_mut_ptr(),
+                signature.len() as _
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+}
+
+#[test]
+fn software_module_hash_ml_dsa_supports_all_hashes_and_multipart() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for set in [CKP_ML_DSA_44, CKP_ML_DSA_65, CKP_ML_DSA_87] {
+        let mut parameter_set = crate::ulong_attribute(set as CK_ULONG);
+        let (public, private) = generate_software_key_pair(
+            TEST_SESSION_HANDLE,
+            CKM_ML_DSA_KEY_PAIR_GEN as _,
+            Some(&mut parameter_set),
+        );
+        assert_module_hash_ml_dsa_roundtrip(TEST_SESSION_HANDLE, public, private);
+    }
     finalize_for_test();
 }

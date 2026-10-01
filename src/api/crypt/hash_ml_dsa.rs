@@ -8,6 +8,11 @@ pub(super) fn parameters(
     mechanism: &CK_MECHANISM,
     verifying: bool,
 ) -> Result<MlDsaSignatureParameters, Error> {
+    if let Some(hash) = ml_dsa_module_prehash(mechanism.mechanism) {
+        let mut parameters = super::sign::ml_dsa_context_parameters(mechanism, verifying)?;
+        parameters.prehash = Some(hash);
+        return Ok(parameters);
+    }
     if mechanism.pParameter.is_null()
         || mechanism.ulParameterLen as usize
             != std::mem::size_of::<CK_HASH_SIGN_ADDITIONAL_CONTEXT>()
@@ -47,8 +52,7 @@ pub(super) fn parameters(
         pParameter: (&mut context as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast(),
         ulParameterLen: std::mem::size_of::<CK_SIGN_ADDITIONAL_CONTEXT>() as _,
     };
-    let mut parameters =
-        super::sign::ml_dsa_parameters(&pure)?.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    let mut parameters = super::sign::ml_dsa_context_parameters(&pure, verifying)?;
     parameters.prehash = MlDsaPrehash::from_id(id);
     Ok(parameters)
 }
@@ -101,6 +105,37 @@ pub(super) fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_hash_ml_dsa_uses_optional_context_parameters() {
+        for mechanism_type in HASH_ML_DSA_MECHANISMS {
+            let mut mechanism = CK_MECHANISM {
+                mechanism: mechanism_type,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            let parsed = parameters(&mechanism, false).unwrap();
+            assert!(parsed.context.is_empty());
+            assert_eq!(parsed.hedge_variant, CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE);
+            assert!(parsed.prehash.is_some());
+            let mut context = [0; 256];
+            let mut additional = CK_SIGN_ADDITIONAL_CONTEXT {
+                hedgeVariant: CK_ULONG::MAX,
+                pContext: context.as_mut_ptr(),
+                ulContextLen: 255,
+            };
+            mechanism.pParameter = (&mut additional as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast();
+            mechanism.ulParameterLen = std::mem::size_of_val(&additional) as _;
+            assert!(parameters(&mechanism, false).is_err());
+            assert_eq!(parameters(&mechanism, true).unwrap().context.len(), 255);
+            additional.ulContextLen = 256;
+            assert_eq!(additional.ulContextLen, 256);
+            assert!(parameters(&mechanism, true).is_err());
+            // Generic prehash parameters have a different layout.
+            mechanism.ulParameterLen = std::mem::size_of::<CK_HASH_SIGN_ADDITIONAL_CONTEXT>() as _;
+            assert!(parameters(&mechanism, true).is_err());
+        }
+    }
 
     #[test]
     fn hash_ml_dsa_parameters_require_hash_and_bound_context() {
