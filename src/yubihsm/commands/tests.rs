@@ -162,6 +162,7 @@ fn all_sample_commands() -> Vec<Command> {
         Command::sign_ml_dsa(
             1,
             &crate::MlDsaSignatureParameters {
+                prehash: None,
                 hedge_variant: crate::CKH_DETERMINISTIC_REQUIRED as crate::CK_HEDGE_TYPE,
                 context: b"context".to_vec(),
             },
@@ -296,6 +297,7 @@ fn crypto_commands_match_wire_vectors() {
     let ml_dsa = Command::sign_ml_dsa(
         0x1234,
         &crate::MlDsaSignatureParameters {
+            prehash: None,
             hedge_variant: crate::CKH_HEDGE_REQUIRED as crate::CK_HEDGE_TYPE,
             context: vec![0xaa, 0xbb],
         },
@@ -303,7 +305,7 @@ fn crypto_commands_match_wire_vectors() {
     )
     .unwrap();
     assert_eq!(ml_dsa.code(), CommandCode::SignMlDsa);
-    assert_eq!(ml_dsa.data(), [0x12, 0x34, 1, 2, 0xaa, 0xbb, 0xcc, 0xdd]);
+    assert_eq!(ml_dsa.data(), [0x12, 0x34, 1, 0, 2, 0xaa, 0xbb, 0xcc, 0xdd]);
     let encapsulate = Command::encapsulate_ml_kem(0x1234);
     assert_eq!(encapsulate.code(), CommandCode::EncapsulateMlKem);
     assert_eq!(encapsulate.data(), [0x12, 0x34]);

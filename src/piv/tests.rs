@@ -356,6 +356,7 @@ fn ml_dsa_signing_encodes_context_and_hedging_options() {
         STATUS_SUCCESS,
     )]);
     let options = MlDsaSignatureParameters {
+        prehash: None,
         hedge_variant: CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE,
         context: b"context".to_vec(),
     };

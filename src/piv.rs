@@ -1268,6 +1268,15 @@ impl Client {
             {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
+            if let Some(hash) = parameters.prehash {
+                if input.len() != hash.digest_length() {
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                }
+            }
+            extra.extend_from_slice(&encode_tlv(
+                0x8a,
+                &[parameters.prehash.map_or(0, |hash| hash.id())],
+            )?);
             if !parameters.context.is_empty() {
                 extra.extend_from_slice(&encode_tlv(0x88, &parameters.context)?);
             }
@@ -1280,6 +1289,14 @@ impl Client {
             if let Some(hedge) = hedge {
                 extra.extend_from_slice(&encode_tlv(0x89, &[hedge])?);
             }
+        }
+        if ml_dsa.is_none()
+            && matches!(
+                algorithm,
+                Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87
+            )
+        {
+            extra.extend_from_slice(&encode_tlv(0x8a, &[0])?);
         }
         self.general_authenticate(connector, slot, algorithm, 0x81, input, &extra)
     }

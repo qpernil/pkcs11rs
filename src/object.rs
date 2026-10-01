@@ -592,6 +592,7 @@ pub(crate) struct SignatureOperation {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MlDsaSignatureParameters {
+    pub(crate) prehash: Option<software_key_core::post_quantum::MlDsaPrehash>,
     pub(crate) hedge_variant: CK_HEDGE_TYPE,
     pub(crate) context: Vec<u8>,
 }

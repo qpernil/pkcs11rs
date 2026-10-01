@@ -152,7 +152,7 @@ YubiKey performs the private RSA operation. `CKM_ECDSA` and its hashed variants
 convert the card's DER signature to the PKCS #11 fixed-width `r || s` format,
 while `CKM_EDDSA` returns the card's Ed25519 signature. Multipart sign and
 verify operations buffer their input and use the same mechanism implementations.
-On the virtual Gadget, `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`,
+On the virtual Gadget, `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_HASH_ML_DSA`,
 `CKM_ML_KEM_KEY_PAIR_GEN`, and `CKM_ML_KEM` use the same PKCS #11 key types,
 `CKA_PARAMETER_SET` values, and sign/verify or encapsulate/decapsulate calls as
 YubiHSM slots. ML-DSA signing accepts the standard `CK_SIGN_ADDITIONAL_CONTEXT`
@@ -168,6 +168,16 @@ private-key import APDUs with SCP03 or SCP11 when confidentiality is required.
 `CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;
 the derived secret is returned as a sensitive generic secret object. This
 derive surface is an extension to the current YKCS11 mechanism list.
+
+ML-DSA `GENERAL AUTHENTICATE` requests include tag `8A` with a one-byte prehash
+identifier: `0` selects pure ML-DSA; nonzero values select the NIST hash OID's
+final arc, as documented in [yubihsm-post-quantum.md](yubihsm-post-quantum.md).
+Tag `81` holds the complete message for pure signing or a caller-computed
+digest for HashML-DSA. The applet constructs the FIPS 204 signing input without
+hashing the original message. TLV framing supplies context and input lengths.
+`CKM_HASH_ML_DSA` requires `CK_HASH_SIGN_ADDITIONAL_CONTEXT` and supports the
+SHA-2 and SHA-3 parameters and single-part operations documented in
+[software.md](software.md#ml-dsa-parameters-and-key-attributes).
 
 The virtual PIV extension also exposes `MLKEM768-P256`,
 `MLKEM768-X25519`, and `MLKEM1024-P384` as algorithms `E8`, `E9`, and `EA`

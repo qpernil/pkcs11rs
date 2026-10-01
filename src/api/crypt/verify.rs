@@ -60,7 +60,11 @@ pub(crate) fn verify_init(
         };
         let hmac_length = hmac_output_length(mechanism)?;
         let mac_length = hmac_length.or(aes_mac_length);
-        let ml_dsa = ml_dsa_parameters(mechanism)?;
+        let ml_dsa = if mechanism.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
+            Some(super::hash_ml_dsa::parameters(mechanism, true)?)
+        } else {
+            ml_dsa_parameters(mechanism)?
+        };
         let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
         } else if piv_is_pss_mechanism(mechanism.mechanism) {
@@ -78,7 +82,7 @@ pub(crate) fn verify_init(
         let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
-        let ml_dsa_mechanism = mechanism.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE;
+        let ml_dsa_mechanism = ml_dsa.is_some();
         let aes_mac_mechanism = aes_mac_length.is_some();
         let hmac_mechanism = hmac_key_type_and_length(mechanism.mechanism);
         if !rsa_mechanism
@@ -318,7 +322,7 @@ pub(crate) fn verify(
             KeyMaterial::Public(PublicKeyMaterial::MlDsa {
                 parameter_set,
                 public_key,
-            }) if operation.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE => ml_dsa_verify(
+            }) if operation.ml_dsa.is_some() => ml_dsa_verify(
                 *parameter_set,
                 public_key,
                 operation
@@ -379,6 +383,9 @@ fn ml_dsa_verify(
     }
     if public_key.len() != parameter_set.public_key_length() {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    if parameters.prehash.is_some() {
+        return super::hash_ml_dsa::verify(parameter_set, public_key, parameters, data, signature);
     }
     verify_ml_dsa(
         parameter_set,
@@ -492,6 +499,10 @@ ffi_entry_point! {
                 .verify_operation
                 .as_mut()
                 .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            if operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
+                ctx.get_session_context_mut(session_handle)?.verify_operation = None;
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
             operation.buffer.extend_from_slice(&part);
             Ok(())
         }))
@@ -504,6 +515,15 @@ ffi_entry_point! {
         signature: *mut ::std::os::raw::c_uchar,
         signature_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
+        let allowed = with_session_context_mut(session_handle, |ctx| {
+            let session = ctx.get_session_context_mut(session_handle)?;
+            if session.verify_operation.as_ref().is_some_and(|op| op.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE) {
+                session.verify_operation = None;
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            Ok(())
+        });
+        if let Err(error) = allowed { return map(Err::<(), Error>(error)); }
         map(verify(
             session_handle,
             ptr::null(),

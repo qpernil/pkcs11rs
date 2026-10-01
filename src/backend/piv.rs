@@ -410,6 +410,7 @@ pub(crate) fn piv_sign_mechanism_supported(
         piv::Algorithm::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
         piv::Algorithm::MlDsa44 | piv::Algorithm::MlDsa65 | piv::Algorithm::MlDsa87 => {
             mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE
+                || mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
         }
         piv::Algorithm::X25519
         | piv::Algorithm::MlKem512
@@ -988,6 +989,12 @@ impl Slot for PivSlot {
         if self.supports_pq() {
             add(
                 CKM_ML_DSA as CK_MECHANISM_TYPE,
+                1312,
+                2592,
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            );
+            add(
+                CKM_HASH_ML_DSA as CK_MECHANISM_TYPE,
                 1312,
                 2592,
                 (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
