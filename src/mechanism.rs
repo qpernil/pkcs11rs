@@ -34,6 +34,44 @@ pub(crate) struct MechanismDetails {
     pub(crate) flags: CK_FLAGS,
 }
 
+pub(crate) const HASH_ML_DSA_MECHANISMS: [CK_MECHANISM_TYPE; 10] = [
+    CKM_HASH_ML_DSA_SHA224 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA256 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA384 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA512 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA3_224 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA3_256 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA3_384 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHA3_512 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHAKE128 as CK_MECHANISM_TYPE,
+    CKM_HASH_ML_DSA_SHAKE256 as CK_MECHANISM_TYPE,
+];
+
+pub(crate) fn ml_dsa_module_prehash(
+    mechanism: CK_MECHANISM_TYPE,
+) -> Option<software_key_core::post_quantum::MlDsaPrehash> {
+    let id = match mechanism {
+        x if x == CKM_HASH_ML_DSA_SHA224 as CK_MECHANISM_TYPE => 4,
+        x if x == CKM_HASH_ML_DSA_SHA256 as CK_MECHANISM_TYPE => 1,
+        x if x == CKM_HASH_ML_DSA_SHA384 as CK_MECHANISM_TYPE => 2,
+        x if x == CKM_HASH_ML_DSA_SHA512 as CK_MECHANISM_TYPE => 3,
+        x if x == CKM_HASH_ML_DSA_SHA3_224 as CK_MECHANISM_TYPE => 7,
+        x if x == CKM_HASH_ML_DSA_SHA3_256 as CK_MECHANISM_TYPE => 8,
+        x if x == CKM_HASH_ML_DSA_SHA3_384 as CK_MECHANISM_TYPE => 9,
+        x if x == CKM_HASH_ML_DSA_SHA3_512 as CK_MECHANISM_TYPE => 10,
+        x if x == CKM_HASH_ML_DSA_SHAKE128 as CK_MECHANISM_TYPE => 11,
+        x if x == CKM_HASH_ML_DSA_SHAKE256 as CK_MECHANISM_TYPE => 12,
+        _ => return None,
+    };
+    software_key_core::post_quantum::MlDsaPrehash::from_id(id)
+}
+
+pub(crate) fn is_ml_dsa_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
+    mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE
+        || mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
+        || HASH_ML_DSA_MECHANISMS.contains(&mechanism)
+}
+
 pub(crate) const HASHED_RSA_PKCS_MECHANISMS: [CK_MECHANISM_TYPE; 9] = [
     CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE,
     CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -130,6 +168,16 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_ML_DSA_KEY_PAIR_GEN,
         CKM_ML_DSA,
         CKM_HASH_ML_DSA,
+        CKM_HASH_ML_DSA_SHA224,
+        CKM_HASH_ML_DSA_SHA256,
+        CKM_HASH_ML_DSA_SHA384,
+        CKM_HASH_ML_DSA_SHA512,
+        CKM_HASH_ML_DSA_SHA3_224,
+        CKM_HASH_ML_DSA_SHA3_256,
+        CKM_HASH_ML_DSA_SHA3_384,
+        CKM_HASH_ML_DSA_SHA3_512,
+        CKM_HASH_ML_DSA_SHAKE128,
+        CKM_HASH_ML_DSA_SHAKE256,
         CKM_ML_KEM_KEY_PAIR_GEN,
         CKM_ML_KEM,
         CKM_GENERIC_SECRET_KEY_GEN,
@@ -324,6 +372,14 @@ pub(crate) const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
 
 pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
     let mut mechanisms = Vec::new();
+    for type_ in HASH_ML_DSA_MECHANISMS {
+        mechanisms.push(MechanismDetails {
+            type_,
+            min_key_size: 1312,
+            max_key_size: 2592,
+            flags: CKF_VERIFY as CK_FLAGS,
+        });
+    }
     for type_ in [
         CKM_RSA_X_509,
         CKM_RSA_PKCS,
@@ -524,6 +580,14 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
             flags: CKF_SIGN as CK_FLAGS,
         },
     ];
+    for type_ in HASH_ML_DSA_MECHANISMS {
+        mechanisms.push(MechanismDetails {
+            type_,
+            min_key_size: 1312,
+            max_key_size: 2592,
+            flags: CKF_SIGN as CK_FLAGS,
+        });
+    }
     for type_ in [
         CKM_RSA_X_509,
         CKM_RSA_PKCS,
@@ -1203,12 +1267,16 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             .collect();
         if let (Some(min), Some(max)) = (sizes.iter().min(), sizes.iter().max()) {
             if operation == CKM_ML_DSA {
-                mechanisms.push(MechanismDetails {
-                    type_: CKM_HASH_ML_DSA as _,
-                    min_key_size: *min,
-                    max_key_size: *max,
-                    flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as _,
-                });
+                for type_ in std::iter::once(CKM_HASH_ML_DSA as CK_MECHANISM_TYPE)
+                    .chain(HASH_ML_DSA_MECHANISMS)
+                {
+                    mechanisms.push(MechanismDetails {
+                        type_,
+                        min_key_size: *min,
+                        max_key_size: *max,
+                        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as _,
+                    });
+                }
             }
             for (kind, flags) in [
                 (generation, CKF_HW | CKF_GENERATE_KEY_PAIR),

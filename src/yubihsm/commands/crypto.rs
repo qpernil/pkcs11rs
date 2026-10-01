@@ -46,10 +46,10 @@ impl Command {
         let mut payload = key_id.to_be_bytes().to_vec();
         payload.extend_from_slice(&[mode, parameters.prehash.map_or(0, |hash| hash.id()), length]);
         payload.extend_from_slice(&parameters.context);
-        if let Some(hash) = parameters.prehash {
-            if message.len() != hash.digest_length() {
-                return Err(CKR_DATA_LEN_RANGE.into());
-            }
+        if let Some(hash) = parameters.prehash
+            && message.len() != hash.digest_length()
+        {
+            return Err(CKR_DATA_LEN_RANGE.into());
         }
         payload.extend_from_slice(message);
         Self::from_vec(CommandCode::SignMlDsa, payload)

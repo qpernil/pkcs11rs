@@ -1268,10 +1268,10 @@ impl Client {
             {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
-            if let Some(hash) = parameters.prehash {
-                if input.len() != hash.digest_length() {
-                    return Err(CKR_DATA_LEN_RANGE.into());
-                }
+            if let Some(hash) = parameters.prehash
+                && input.len() != hash.digest_length()
+            {
+                return Err(CKR_DATA_LEN_RANGE.into());
             }
             extra.extend_from_slice(&encode_tlv(
                 0x8a,

@@ -340,6 +340,12 @@ plaintext. Other cipher mechanisms retain their buffered multipart behavior.
 
 The slot advertises these exact mechanism groups:
 
+Hash-specific RSA PKCS/PSS and ECDSA signatures use the same incremental
+hashing for single-part and multipart calls. The private operation consumes
+one digest (or RSA DigestInfo). Raw RSA/ECDSA, pure ML-DSA and EdDSA retain
+their complete-input paths. Generic client-prehashed `CKM_HASH_ML_DSA` is
+single-part only.
+
 Both raw and hashed RSA-PSS mechanisms require `CK_RSA_PKCS_PSS_PARAMS`.
 For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 `mgf` and `sLen` select the MGF1 hash and salt length independently.
@@ -359,6 +365,7 @@ For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 | `CKM_ML_DSA_KEY_PAIR_GEN` | 1312–2592 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_HASH_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_HASH_ML_DSA_SHA224/256/384/512`, `CKM_HASH_ML_DSA_SHA3_224/256/384/512`, `CKM_HASH_ML_DSA_SHAKE128/256` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_KEM_KEY_PAIR_GEN` | 800–1568 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_KEM` | 800–1568 bytes | `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
 | `CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM768_P256` | 1249 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
@@ -412,9 +419,21 @@ hedging fields as pure ML-DSA, plus `hash`. Supported values are `CKM_SHA224`,
 The digest must have the selected hash's exact output length. Verification
 ignores the hedging field. This mechanism supports single-part operations only;
 `C_SignUpdate/Final` and `C_VerifyUpdate/Final` return
-`CKR_FUNCTION_NOT_SUPPORTED` and terminate the operation. The hash-specific
-`CKM_HASH_ML_DSA_<hash>` mechanisms are not advertised. Passing a digest to pure
-`CKM_ML_DSA` produces a pure signature over those bytes, not HashML-DSA.
+`CKR_FUNCTION_NOT_SUPPORTED` and terminate the operation. Passing a digest to
+pure `CKM_ML_DSA` produces a pure signature over those bytes, not HashML-DSA.
+
+The hash-specific `CKM_HASH_ML_DSA_<hash>` mechanisms take the original message
+and compute its prehash in the module. All ten PKCS #11 3.2 variants are
+supported: SHA-224/256/384/512, SHA3-224/256/384/512, SHAKE128 (32-byte digest),
+and SHAKE256 (64-byte digest). They accept optional
+`CK_SIGN_ADDITIONAL_CONTEXT`, with the same defaults, context limit, and
+hedging modes as pure ML-DSA; verification ignores the hedging field.
+Single-part and multipart signing and verification are supported. Multipart
+operations hash each part at `C_SignUpdate` or `C_VerifyUpdate` and retain
+only the hash state. Final consumes the digest; length queries and short-output
+retries preserve the live hash state. Software signing consumes the digest directly; device backends
+send only the prehash identifier and digest through the existing signing
+request. Device-side HashML-DSA does not prehash the original message.
 
 ### ML-KEM parameters and key attributes
 

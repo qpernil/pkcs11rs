@@ -21,6 +21,7 @@ The mapping is:
 | MLKEM1024-P384 | 67 |
 
 A device contributes `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_HASH_ML_DSA`,
+the ten `CKM_HASH_ML_DSA_<hash>` variants,
 `CKM_ML_KEM_KEY_PAIR_GEN`, or `CKM_ML_KEM` to the slot mechanism list only when
 it reports a corresponding algorithm from 59 through 64. Normal slot-mechanism
 checks, per-object usage flags, and `CKA_ALLOWED_MECHANISMS` select the transport
@@ -38,7 +39,12 @@ The caller computes the digest. The HSM checks its length and constructs
 HashML-DSA's FIPS 204 domain separator and OID. There is no input-length field.
 Clients and devices must both use the explicit prehash field.
 PKCS #11 `CKM_HASH_ML_DSA` accepts the SHA-2 and SHA-3 hash parameters documented
-in [software.md](software.md#ml-dsa-parameters-and-key-attributes).
+in [software.md](software.md#ml-dsa-parameters-and-key-attributes). The
+hash-specific variants hash the original message in the module, including
+SHAKE128/256, and support incremental multipart signing and verification.
+Update hashes each input part; Final sends only the digest to the device.
+Both prehash interfaces use the same device request and perform HashML-DSA's
+private-key operation inside the HSM.
 
 ML-KEM encapsulation uses command `0x0e`, whose fixed request is the key ID;
 decapsulation uses command `0x0f`, whose request is the key ID followed by the

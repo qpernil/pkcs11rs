@@ -152,6 +152,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Run published cryptographic known-answer tests
+        run: cargo test --manifest-path ../software-key-core/Cargo.toml --locked kat_
+
       - name: Run portable provider tests
         run: cargo test --locked -p pkcs11rs --no-default-features --lib
 
