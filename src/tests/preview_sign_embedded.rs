@@ -627,6 +627,8 @@ fn embedded_piv_pqc_enforces_token_wide_role_transitions() {
         CKR_OK as CK_RV
     );
 
+    super::key::assert_hash_ml_dsa_roundtrip(session, dsa_public, dsa_private);
+
     for (generation, public_key, private_key) in generated.into_iter().skip(1) {
         mechanism.mechanism = if generation == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
             CKM_ML_KEM as CK_MECHANISM_TYPE

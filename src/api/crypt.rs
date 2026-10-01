@@ -1,5 +1,6 @@
 mod digest;
 mod encrypt;
+mod hash_ml_dsa;
 mod shared;
 mod sign;
 mod verify;

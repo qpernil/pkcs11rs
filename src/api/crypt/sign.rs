@@ -74,7 +74,9 @@ fn software_sign_mechanism_supported(
                     || piv_is_pss_mechanism(mechanism)
             }
             KeyKind::Edwards(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
-            KeyKind::MlDsa(_) => mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE,
+            KeyKind::MlDsa(_) => {
+                matches!(mechanism, x if x == CKM_ML_DSA as CK_MECHANISM_TYPE || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE)
+            }
             KeyKind::Ec(_) => {
                 mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
             }
@@ -196,6 +198,9 @@ fn shared_ml_dsa_sign(
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     };
     let parameters = parameters.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    if parameters.prehash.is_some() {
+        return super::hash_ml_dsa::sign(key, parameters, data);
+    }
     let randomization = match parameters.hedge_variant {
         x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => MlDsaRandomization::Deterministic,
         x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => MlDsaRandomization::Randomized,
@@ -243,11 +248,15 @@ fn ml_dsa_sign_with_randomizer<P: ml_dsa::MlDsaParams>(
 pub(super) fn ml_dsa_parameters(
     mechanism: &CK_MECHANISM,
 ) -> Result<Option<MlDsaSignatureParameters>, Error> {
+    if mechanism.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
+        return super::hash_ml_dsa::parameters(mechanism, false).map(Some);
+    }
     if mechanism.mechanism != CKM_ML_DSA as CK_MECHANISM_TYPE {
         return Ok(None);
     }
     if mechanism.pParameter.is_null() && mechanism.ulParameterLen == 0 {
         return Ok(Some(MlDsaSignatureParameters {
+            prehash: None,
             hedge_variant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
             context: Vec::new(),
         }));
@@ -277,6 +286,7 @@ pub(super) fn ml_dsa_parameters(
             .to_vec()
     };
     Ok(Some(MlDsaSignatureParameters {
+        prehash: None,
         hedge_variant: parameters.hedgeVariant,
         context,
     }))
@@ -501,6 +511,7 @@ fn sign_init(
                     || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA as CK_MECHANISM_TYPE
+                    || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
                     || x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
@@ -537,7 +548,11 @@ fn sign_init(
             x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
             x if x == CKM_PKCS11RS_FIDO_ASSERTION => 0,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
-            x if x == CKM_ML_DSA as CK_MECHANISM_TYPE => CKK_ML_DSA as CK_KEY_TYPE,
+            x if x == CKM_ML_DSA as CK_MECHANISM_TYPE
+                || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE =>
+            {
+                CKK_ML_DSA as CK_KEY_TYPE
+            }
             x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                 || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
@@ -889,6 +904,12 @@ fn sign(
             KeyMaterial::PreviewSignDerived { .. } => 64,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
+        if let Some(hash) = operation.ml_dsa.as_ref().and_then(|p| p.prehash) {
+            if data.len() != hash.digest_length() {
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+                return Err(CKR_DATA_LEN_RANGE.into());
+            }
+        }
         if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && data.len() != 32 {
             ctx.get_session_context_mut(session_handle)?.sign_operation = None;
             return Err(CKR_DATA_LEN_RANGE.into());
@@ -1047,7 +1068,7 @@ fn sign(
                         mac.truncate(required);
                         return Ok(mac);
                     }
-                    let command = if operation.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE {
+                    let command = if operation.ml_dsa.is_some() {
                         YubiHsmCommand::sign_ml_dsa(
                             *id,
                             operation
@@ -1116,7 +1137,7 @@ ffi_entry_point! {
                 .sign_operation
                 .as_mut()
                 .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION {
+            if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
                 session.sign_operation = None;
                 return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }
@@ -1132,6 +1153,15 @@ ffi_entry_point! {
         signature: *mut ::std::os::raw::c_uchar,
         signature_len: *mut ::std::os::raw::c_ulong,
     ) -> CK_RV {
+        let allowed = with_session_context_mut(session_handle, |ctx| {
+            let session = ctx.get_session_context_mut(session_handle)?;
+            if session.sign_operation.as_ref().is_some_and(|op| op.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE) {
+                session.sign_operation = None;
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            Ok(())
+        });
+        if let Err(error) = allowed { return map(Err::<(), Error>(error)); }
         map(sign(
             session_handle,
             ptr::null(),
@@ -1248,6 +1278,7 @@ mod tests {
     fn ml_dsa_hedge_required_reports_rng_failure_without_fallback() {
         let key = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::Seed::from([7; 32]));
         let parameters = MlDsaSignatureParameters {
+            prehash: None,
             hedge_variant: CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE,
             context: b"required".to_vec(),
         };
@@ -1267,6 +1298,7 @@ mod tests {
     fn ml_dsa_hedge_preferred_rng_failure_returns_valid_deterministic_signature() {
         let key = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::Seed::from([7; 32]));
         let parameters = MlDsaSignatureParameters {
+            prehash: None,
             hedge_variant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
             context: b"preferred".to_vec(),
         };

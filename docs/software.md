@@ -287,8 +287,8 @@ its last owner is dropped. This does not change persisted key encodings.
 - Edwards: Ed25519 and Ed448 signing.
 - Montgomery: X25519 and X448 key agreement.
 - ML-DSA: FIPS 204 parameter sets ML-DSA-44, ML-DSA-65, and ML-DSA-87;
-  key-pair generation plus pure signing and verification with optional context
-  and deterministic or hedged signing.
+  key-pair generation plus pure and prehashed signing and verification with
+  optional context and deterministic or hedged signing.
 - ML-KEM: FIPS 203 parameter sets ML-KEM-512, ML-KEM-768, and ML-KEM-1024;
   key-pair generation plus PKCS #11 3.2 encapsulation and decapsulation.
 - AES: 128, 192, and 256-bit keys with ECB, CBC, CBC-PAD, CTR, CCM, GCM,
@@ -358,6 +358,7 @@ For a hashed mechanism, `hashAlg` must match the mechanism's message hash;
 | `CKM_EDDSA` | 255–448 | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_DSA_KEY_PAIR_GEN` | 1312–2592 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_HASH_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_KEM_KEY_PAIR_GEN` | 800–1568 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_KEM` | 800–1568 bytes | `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
 | `CKM_PKCS11RS_MLKEM768_P256_KEY_PAIR_GEN`, `CKM_PKCS11RS_MLKEM768_P256` | 1249 bytes | `CKF_GENERATE_KEY_PAIR` or `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
@@ -403,6 +404,17 @@ most 255 bytes and select `CKH_HEDGE_PREFERRED`, `CKH_HEDGE_REQUIRED`, or
 ignores the hedge choice. Persistent generated keys are stored using the
 standard ML-DSA PKCS #8 seed encoding inside the software token's existing
 encrypted private-key record.
+
+`CKM_HASH_ML_DSA` signs and verifies an already-computed digest using FIPS 204
+HashML-DSA. It requires `CK_HASH_SIGN_ADDITIONAL_CONTEXT`: the same context and
+hedging fields as pure ML-DSA, plus `hash`. Supported values are `CKM_SHA224`,
+`CKM_SHA256`, `CKM_SHA384`, `CKM_SHA512`, and `CKM_SHA3_224/256/384/512`.
+The digest must have the selected hash's exact output length. Verification
+ignores the hedging field. This mechanism supports single-part operations only;
+`C_SignUpdate/Final` and `C_VerifyUpdate/Final` return
+`CKR_FUNCTION_NOT_SUPPORTED` and terminate the operation. The hash-specific
+`CKM_HASH_ML_DSA_<hash>` mechanisms are not advertised. Passing a digest to pure
+`CKM_ML_DSA` produces a pure signature over those bytes, not HashML-DSA.
 
 ### ML-KEM parameters and key attributes
 

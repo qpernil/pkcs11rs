@@ -129,6 +129,7 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_EDDSA,
         CKM_ML_DSA_KEY_PAIR_GEN,
         CKM_ML_DSA,
+        CKM_HASH_ML_DSA,
         CKM_ML_KEM_KEY_PAIR_GEN,
         CKM_ML_KEM,
         CKM_GENERIC_SECRET_KEY_GEN,
@@ -370,6 +371,12 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         flags: CKF_VERIFY as CK_FLAGS,
     });
     mechanisms.push(MechanismDetails {
+        type_: CKM_HASH_ML_DSA as CK_MECHANISM_TYPE,
+        min_key_size: 1312,
+        max_key_size: 2592,
+        flags: CKF_VERIFY as CK_FLAGS,
+    });
+    mechanisms.push(MechanismDetails {
         type_: CKM_ML_KEM as CK_MECHANISM_TYPE,
         min_key_size: 800,
         max_key_size: 1568,
@@ -434,6 +441,12 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         },
         MechanismDetails {
             type_: CKM_ML_DSA as CK_MECHANISM_TYPE,
+            min_key_size: 1312,
+            max_key_size: 2592,
+            flags: CKF_SIGN as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_HASH_ML_DSA as CK_MECHANISM_TYPE,
             min_key_size: 1312,
             max_key_size: 2592,
             flags: CKF_SIGN as CK_FLAGS,
@@ -1189,6 +1202,14 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             .filter_map(|(i, size)| algorithms.contains(&(base + i as u8)).then_some(size))
             .collect();
         if let (Some(min), Some(max)) = (sizes.iter().min(), sizes.iter().max()) {
+            if operation == CKM_ML_DSA {
+                mechanisms.push(MechanismDetails {
+                    type_: CKM_HASH_ML_DSA as _,
+                    min_key_size: *min,
+                    max_key_size: *max,
+                    flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as _,
+                });
+            }
             for (kind, flags) in [
                 (generation, CKF_HW | CKF_GENERATE_KEY_PAIR),
                 (operation, CKF_HW | flags),
