@@ -194,7 +194,9 @@ a 500 ms maximum delay unless changed with
 persistent sidecar lock used by the USB and I2C frontends before restoring
 state and releases it only after graceful persistence shutdown. This allows the
 same virtual device state to move between frontends across separate runs, but
-forbids simultaneous ownership.
+forbids simultaneous ownership. The shared lock guard releases the kernel lock
+explicitly after the final flush, so descriptors inherited during subprocess
+creation cannot keep a stopped instance's state locked.
 
 All virtual-HSM command, crypto, and durable-state dependencies are optional.
 A connector compiled without the feature still parses these options, logs that
