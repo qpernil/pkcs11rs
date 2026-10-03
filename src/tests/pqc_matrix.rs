@@ -582,6 +582,17 @@ fn run_matrix(backend: Backend) {
         CKR_OK as CK_RV
     );
     let cases = cases();
+    let id_base = if matches!(backend, Backend::DeployedYubiHsm) {
+        std::env::var("PKCS11RS_PQC_ID_BASE")
+            .map(|value| {
+                u16::from_str_radix(value.trim_start_matches("0x"), 16)
+                    .expect("PKCS11RS_PQC_ID_BASE must be a hexadecimal object ID")
+            })
+            .unwrap_or(0x7e40)
+    } else {
+        0x7e40
+    };
+    assert!(id_base > 0 && id_base.checked_add(cases.len() as u16 - 1).is_some());
     let mut keys = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         assert!(
@@ -597,7 +608,7 @@ fn run_matrix(backend: Backend) {
         let mut id = if piv {
             vec![5 + index as u8]
         } else {
-            (0x7e40 + index as u16).to_be_bytes().to_vec()
+            (id_base + index as u16).to_be_bytes().to_vec()
         };
         if matches!(backend, Backend::DeployedYubiHsm) {
             let mut template = [bytes_attribute(CKA_ID as _, &mut id)];
@@ -620,7 +631,10 @@ fn run_matrix(backend: Backend) {
             !matches!(backend, Backend::Software),
         ));
         if cleanup.active {
-            cleanup.keys.push(keys.last().unwrap().1);
+            let &(public, private) = keys.last().unwrap();
+            // Remove the public aspect first; deleting only the private key
+            // preserves a detached public token object on a YubiHSM.
+            cleanup.keys.extend([public, private]);
         }
     }
     if piv {
@@ -679,9 +693,9 @@ fn run_matrix(backend: Backend) {
         }
     }
     if cleanup.active {
-        for &private in &cleanup.keys {
+        for &key in &cleanup.keys {
             assert_eq!(
-                crate::api::C_DestroyObject(session, private),
+                crate::api::C_DestroyObject(session, key),
                 CKR_OK as CK_RV,
                 "delete temporary device key"
             );

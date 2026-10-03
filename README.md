@@ -1287,8 +1287,10 @@ Secure Enclave authentication requires a test executable in a signed app
 container with the provisioning identity's Keychain access group; an unsigned
 Cargo test process cannot access that identity. The runner authorizes the
 platform source with an empty PIN before authenticating the HSM. It refuses
-to overwrite existing object IDs and deletes the temporary device keys on
-completion or assertion failure.
+to overwrite existing object IDs and deletes both temporary public and private
+device objects on completion or assertion failure. The nine object IDs start
+at hexadecimal `7e40`; set `PKCS11RS_PQC_ID_BASE` to another hexadecimal base
+when that range is occupied. Existing objects are preserved.
 
 ```console
 PKCS11RS_PQC_SERIAL=12345678 PKCS11RS_PQC_ENDPOINT=usb \
