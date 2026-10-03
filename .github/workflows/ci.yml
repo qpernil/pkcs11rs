@@ -164,6 +164,38 @@ jobs:
       - name: Run embedded virtual YubiKey PKCS #11 tests
         run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
 
+      - name: Run complete PQC provider matrix
+        run: cargo test --locked -p pkcs11rs --lib --no-default-features --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
+
+      - name: Run full PQC matrix through the connector-embedded HSM
+        run: |
+          cargo build --locked -p pkcs11rs-connector --no-default-features --features firmware-full
+          state_dir=$(mktemp -d)
+          target/debug/pkcs11rs-connector --listen 127.0.0.1:12346 \
+            --hardware-discovery false --virtual-yubihsm "99001001=$state_dir" \
+            > "$RUNNER_TEMP/pqc-connector.log" 2>&1 &
+          connector_pid=$!
+          trap 'kill "$connector_pid"; wait "$connector_pid" || true; rm -rf "$state_dir"' EXIT
+          python3 - <<'PYREADY'
+          import time, urllib.request
+          for attempt in range(100):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:12346/connector/status", timeout=1) as response:
+                      if response.status == 200:
+                          break
+              except OSError:
+                  time.sleep(0.1)
+          else:
+              raise SystemExit("PQC connector did not become ready")
+          PYREADY
+          PKCS11RS_PQC_SERIAL=99001001 PKCS11RS_PQC_ENDPOINT=http://127.0.0.1:12346 \
+            PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --locked -p pkcs11rs --lib \
+            --no-default-features --features embedded-virtual-yubikey \
+            pqc_matrix_deployed_yubihsm -- --ignored --nocapture --test-threads=1
+
+      - name: Run all virtual FIDO ML-DSA credential variants
+        run: cargo test --manifest-path ../virtual-yubikey/Cargo.toml --locked -p virtual-yubikey-core ml_dsa_credentials_persist_and_complete_verified_assertions
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 

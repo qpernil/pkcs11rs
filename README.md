@@ -1253,6 +1253,53 @@ HMAC/HKDF and AES corpora. Provider tests separately exercise mechanism
 parameters, direct/multipart equivalence, hash-state lifetime and embedded
 PIV/YubiHSM signing transports.
 
+CI requires the `pqc_matrix` provider suite across software slots, virtual PIV
+APDUs, and the virtual YubiHSM secure channel. Each backend exercises:
+
+- ML-DSA-44/65/87 with pure signing, every supported client-prehashed
+  `CKM_HASH_ML_DSA` hash, and all ten hash-specific signing mechanisms;
+- ML-KEM-512/768/1024 and all three concrete hybrid KEMs
+  (`MLKEM768-P256`, `MLKEM768-X25519`, `MLKEM1024-P384`);
+- single-part/multipart signatures, empty and 255-byte contexts, all signing
+  hedging modes, signature corruption and pure/prehash domain separation;
+- KEM output sizes, buffer retries, shared-secret agreement, truncated and
+  corrupted ciphertexts, and rejection of mismatched hybrid constructions.
+
+Run the complete provider matrix without discovering physical hardware:
+
+```console
+cargo test --locked -p pkcs11rs --lib --no-default-features \
+  --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
+```
+
+CI starts the actual `pkcs11rs-connector` process with `firmware-full`, an
+isolated persistent virtual YubiHSM, and hardware discovery disabled. It runs
+the same full matrix through HTTP and the authenticated secure channel. CI also
+requires the virtual YubiKey core's persisted credential/assertion test for all
+three FIDO ML-DSA variants.
+
+The ignored `pqc_matrix_deployed_yubihsm` test runs this matrix against an
+explicitly selected lab HSM. Set `PKCS11RS_PQC_SERIAL` and
+`PKCS11RS_PQC_ENDPOINT` (an HTTP URL or `usb`). Set `PKCS11RS_PQC_AUTH_URI` to
+an enrolled Secure Enclave identity, or explicitly select the existing factory
+authentication of a virtual test device with `PKCS11RS_PQC_FACTORY_AUTH=1`.
+Secure Enclave authentication requires a test executable in a signed app
+container with the provisioning identity's Keychain access group; an unsigned
+Cargo test process cannot access that identity. The runner authorizes the
+platform source with an empty PIN before authenticating the HSM. It refuses
+to overwrite existing object IDs and deletes the temporary device keys on
+completion or assertion failure.
+
+```console
+PKCS11RS_PQC_SERIAL=12345678 PKCS11RS_PQC_ENDPOINT=usb \
+  PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --locked -p pkcs11rs --lib \
+  pqc_matrix_deployed_yubihsm -- --ignored --nocapture --test-threads=1
+```
+
+The full deployed matrix has been validated against Ubuntu4's connector-embedded
+virtual YubiHSM (`99000001`, HTTP) and Ubuntu3's virtual YubiHSM gadget
+(`12345678`, USB). Deployed I2C acceptance remains a separate lab check.
+
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 

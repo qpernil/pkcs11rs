@@ -1574,6 +1574,23 @@ impl std::fmt::Debug for PcscConnector {
 }
 
 #[cfg(feature = "native-hardware")]
+fn pcsc_reader_supports_piv_pqc(reader: &std::ffi::CStr) -> bool {
+    reader.to_string_lossy().contains("YubiKey Gadget")
+}
+
+#[cfg(all(test, feature = "native-hardware"))]
+#[test]
+fn pcsc_piv_pqc_is_limited_to_virtual_gadget_readers() {
+    assert!(pcsc_reader_supports_piv_pqc(
+        c"Yubico YubiKey Gadget FIDO+CCID"
+    ));
+    assert!(!pcsc_reader_supports_piv_pqc(
+        c"Yubico YubiKey OTP+FIDO+CCID"
+    ));
+    assert!(!pcsc_reader_supports_piv_pqc(c"Generic smart card reader"));
+}
+
+#[cfg(feature = "native-hardware")]
 impl Connector for PcscConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -1589,6 +1606,9 @@ impl Connector for PcscConnector {
     }
     fn product(&self) -> &str {
         "YubiKey"
+    }
+    fn supports_piv_pqc(&self) -> bool {
+        pcsc_reader_supports_piv_pqc(&self.reader)
     }
     fn major(&self) -> u8 {
         self.firmware_version()

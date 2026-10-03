@@ -113,7 +113,9 @@ through RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers are
 recognized. The virtual YubiKey Gadget also exposes provisional `E2`–`E4`
 ML-DSA-44/65/87 and `E5`–`E7` ML-KEM-512/768/1024 identifiers. PQC mechanisms
 are enabled for native keys only on the virtual Gadget, not on physical
-YubiKeys. Software session-key mechanisms remain available on either slot.
+YubiKeys. Native PC/SC readers identify the virtual device by the `YubiKey Gadget`
+reader name; the embedded transport advertises its capability directly. Software
+session-key mechanisms remain available on either slot.
 Firmware and FIPS restrictions still apply.
 
 When a slot reports the default PIN policy, `9C` uses `ALWAYS`, `9E` uses
