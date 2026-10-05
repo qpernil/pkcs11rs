@@ -756,6 +756,18 @@ impl HandleCounters {
     }
 }
 
+fn yubihsm_serial_matches(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let decimal = |serial: &str| {
+        (!serial.is_empty() && serial.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| serial.parse::<u32>().ok())
+            .flatten()
+    };
+    matches!((decimal(left), decimal(right)), (Some(left), Some(right)) if left == right)
+}
+
 fn allocate_handle(counter: &std::sync::atomic::AtomicU64) -> Result<u64, Error> {
     counter
         .try_update(
@@ -3325,7 +3337,7 @@ impl ModuleContext {
         }
         for candidate in snapshot.candidates {
             let identity = candidate.identity().clone();
-            if !self.serial_is_visible(&identity.provider_slot_id) {
+            if !self.yubihsm_serial_is_visible(&identity.provider_slot_id) {
                 continue;
             }
             if let Some(registration) = registrations.get(&identity) {
@@ -3626,7 +3638,14 @@ impl ModuleContext {
                 .as_ref()
                 .and_then(|device| device.registered_serial())
                 .unwrap_or_else(|| child.slot.serial());
-            serial.is_empty() || serials.contains(serial)
+            serial.is_empty()
+                || if child.slot.kind() == crate::SlotKind::YubiHsm {
+                    serials
+                        .iter()
+                        .any(|allowed| yubihsm_serial_matches(allowed, serial))
+                } else {
+                    serials.contains(serial)
+                }
         })
     }
 
@@ -3634,6 +3653,14 @@ impl ModuleContext {
         self.slot_serials
             .as_ref()
             .is_none_or(|serials| serials.contains(serial))
+    }
+
+    fn yubihsm_serial_is_visible(&self, serial: &str) -> bool {
+        self.slot_serials.as_ref().is_none_or(|serials| {
+            serials
+                .iter()
+                .any(|allowed| yubihsm_serial_matches(allowed, serial))
+        })
     }
 
     fn serial_discovery_is_enabled(&self) -> bool {
@@ -3812,6 +3839,20 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 
 #[cfg(test)]
 mod discovery_tests {
+    #[test]
+    fn yubihsm_serial_filter_accepts_usb_padding_without_broadening_other_filters() {
+        let mut configuration = ModuleConfiguration::private_software().unwrap();
+        configuration.slot_serials = Some(HashSet::from(["12345".to_owned()]));
+        let context = ModuleContext::new_configured(configuration, false).unwrap();
+        assert!(context.yubihsm_serial_is_visible("00012345"));
+        assert!(!context.yubihsm_serial_is_visible("00012346"));
+        assert!(!context.serial_is_visible("00012345"));
+        assert!(yubihsm_serial_matches("00012345", "12345"));
+        assert!(!yubihsm_serial_matches("+12345", "12345"));
+        assert!(!yubihsm_serial_matches("4294967296", "04294967296"));
+        assert!(!yubihsm_serial_matches("", "0"));
+    }
+
     use super::*;
     #[cfg(not(any(feature = "abi-tests", feature = "embedded-virtual-yubikey")))]
     use std::io::{Read, Write};

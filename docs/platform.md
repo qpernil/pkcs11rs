@@ -139,6 +139,66 @@ profile claim does not depend on a matching certificate being installed.
 
 ## Authentication consumer
 
+### Persistent provisioning and hardware qualification
+
+The ignored `provisions_native_platform_credential_on_yubihsm` test provisions
+an existing named native platform credential into one explicitly selected
+physical YubiHSM. The shared credential API selects the native backend; the
+test has no Windows-specific provisioning path. It installs the asymmetric
+Authentication Key and its matching public companion, then logs in through
+the platform PKCS #11 slot using both the native key's URI with explicit target
+key ID and the automatic `pkcs11:` selector. Both paths verify the selected
+credential and Authentication Key ID, random generation, and encrypted echo.
+The test explicitly configures the bootstrap credential for public discovery
+so automatic matching can inspect the target's public companion.
+The test leaves the provisioning in place, reuses an exact matching installation,
+and rejects conflicting identities rather than replacing them. A matching
+Authentication Key with a narrower domain policy is recreated with all domains
+only after verifying its label, algorithm, capabilities, delegated capabilities,
+and complete native public-key binding. Its existing public companion is kept.
+If recreation fails after deletion, rerunning provisions the missing key from
+that verified companion. It never generates
+or deletes the local platform key.
+
+Set `PKCS11RS_PLATFORM_TEST_TARGET` to the HSM serial and
+`PKCS11RS_PLATFORM_TEST_NAME` to an existing credential name. The target
+Authentication Key ID is `1003` by default; override it with
+`PKCS11RS_PLATFORM_TEST_ID` (hexadecimal). The installed key has all 16 domains (`0xffff`),
+`get-pseudo-random` capability, and no delegated capabilities, providing a
+limited credential for authentication qualification. The administrative
+Authentication Key remains intact. The default bootstrap login uses factory
+Authentication Key `0001` and password `password`; override
+`PKCS11RS_PLATFORM_TEST_ADMIN_PIN` with the direct `AAAApassword` login format
+for a configured device. This test-only public-discovery configuration keeps
+the bootstrap credential available for the initialized module's lifetime;
+it is cleared when the test finalizes the module. Clear any password override
+after the run. Direct USB
+is the default; an optional comma-separated `PKCS11RS_PLATFORM_TEST_URLS`
+selects connectors. CCID applications are restricted to HSM Auth, and device
+visibility is restricted to the explicitly selected HSM serial.
+
+For example, from PowerShell in the repository root on Windows:
+
+```powershell
+$env:PKCS11RS_PLATFORM_TEST_TARGET = "HSM-SERIAL"
+$env:PKCS11RS_PLATFORM_TEST_NAME = "windows-test"
+cargo test --locked -p pkcs11rs --lib provisions_native_platform_credential_on_yubihsm -- --ignored --nocapture
+```
+
+The equivalent invocation on a supported desktop Unix platform is:
+
+```sh
+PKCS11RS_PLATFORM_TEST_TARGET=HSM-SERIAL \
+PKCS11RS_PLATFORM_TEST_NAME=reserve \
+cargo test --locked -p pkcs11rs --lib provisions_native_platform_credential_on_yubihsm -- --ignored --nocapture
+```
+
+Apple hosts require the signing and Keychain access-group authorization of the
+process running the test; a credential owned by another application's Keychain
+scope is not accessible simply by supplying its name.
+
+### Credential selection
+
 YubiHSM `C_LoginUser` resolves
 `pkcs11:token=Secure%20Enclave;object=reserve;type=private?pkcs11rs-authkey=1003`
 by exact `CKA_LABEL=reserve` on the enabled platform slot. The target

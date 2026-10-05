@@ -720,11 +720,10 @@ fn mirrors_yubihsm_authentication_inventory() {
             eprintln!("{target}: public discovery is already restricted");
             continue;
         }
-        command(
-            *session,
-            &crate::YubiHsmCommand::delete_object(1, crate::YUBIHSM_AUTHENTICATION_KEY),
-        )
-        .unwrap_or_else(|error| panic!("failed to remove factory key from {target}: {error:?}"));
+        destroy_native_hardware_object(*session, 1, crate::YUBIHSM_AUTHENTICATION_KEY)
+            .unwrap_or_else(|error| {
+                panic!("failed to remove factory key from {target}: {error:?}")
+            });
         let parameters = crate::yubihsm::DelegatedObjectParameters {
             object: crate::YubiHsmObjectParameters {
                 id: 1,
@@ -865,6 +864,32 @@ fn assert_imported_object(response: &[u8], object_type: u8, id: u16) {
     );
 }
 
+// Workflow tests use the same mutation path as provider administration. Raw
+// device commands remain available for protocol-specific creation and replication.
+fn destroy_native_hardware_object(
+    session: CK_SESSION_HANDLE,
+    id: u16,
+    object_type: u8,
+) -> Result<(), crate::Error> {
+    crate::with_session_context_mut(session, |ctx| {
+        let slot_id = ctx._get_session(session)?.1.slotID();
+        ctx.refresh_slot_token_objects(slot_id)?;
+        let key = ctx
+            .resolved_objects()?
+            .into_iter()
+            .find_map(|(_, object)| {
+                matches!(object.material, crate::KeyMaterial::YubiHsm {
+                id: candidate_id, object_type: candidate_type, ..
+            } if candidate_id == id && candidate_type == object_type)
+                .then_some(object)
+            })
+            .ok_or(crate::Error::from(CKR_OBJECT_HANDLE_INVALID))?;
+        ctx.get_slot(slot_id)?
+            .yubihsm_destroy_native_object(slot_id, &key.unique_id)?;
+        ctx.refresh_slot_token_objects(slot_id)
+    })
+}
+
 fn delete_labeled_object_if_present(
     session: CK_SESSION_HANDLE,
     id: u16,
@@ -882,14 +907,8 @@ fn delete_labeled_object_if_present(
         info.label, label,
         "refusing to remove an unexpected object at {object_type:02x}:{id:04x}"
     );
-    assert!(
-        command(
-            session,
-            &crate::YubiHsmCommand::delete_object(id, object_type)
-        )
-        .expect("failed to remove temporary cluster-bootstrap object")
-        .is_empty()
-    );
+    destroy_native_hardware_object(session, id, object_type)
+        .expect("failed to remove temporary cluster-bootstrap object");
 }
 
 #[test]
@@ -1321,6 +1340,155 @@ fn provision_authentication_key(
         public_key,
     )
     .expect("Authentication Key provisioning failed")
+}
+
+#[test]
+#[ignore = "persistently provisions an existing native platform key on one explicit physical HSM"]
+fn provisions_native_platform_credential_on_yubihsm() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let target = required("PKCS11RS_PLATFORM_TEST_TARGET")
+        .trim()
+        .parse::<u32>()
+        .expect("PKCS11RS_PLATFORM_TEST_TARGET must be a decimal HSM serial")
+        .to_string();
+    let name = required("PKCS11RS_PLATFORM_TEST_NAME");
+    let id = hex_u16(
+        "PKCS11RS_PLATFORM_TEST_ID",
+        &std::env::var("PKCS11RS_PLATFORM_TEST_ID").unwrap_or_else(|_| "1003".to_owned()),
+    );
+    assert_ne!(id, 0);
+    assert_ne!(id, 1, "the factory administrative key must be preserved");
+    let pin = crate::Zeroizing::new(
+        std::env::var("PKCS11RS_PLATFORM_TEST_ADMIN_PIN")
+            .unwrap_or_else(|_| "0001password".to_owned()),
+    );
+    let public_key = crate::platform_crypto::platform_credential_public_key(&name)
+        .expect("the named native platform key must already exist");
+    let urls: Vec<_> = std::env::var("PKCS11RS_PLATFORM_TEST_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect();
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1, "hardware": {"discovery": true},
+            "slots": {"serials": [target]}, "ccid": {"applications": ["hsmauth"]},
+            "software": {"slots": []}, "platform": {"enabled": true},
+            "yubihsm": {"urls": urls, "public_discovery": pin.as_str(), "recreate_sessions": false}
+        })),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let session = open(&target);
+    login(session, &pin, "platform provisioning target");
+    drop(pin);
+    // Reprovision only a verified matching test identity when its domain policy
+    // differs. The public companion preserves the native public-key binding.
+    match command(
+        session,
+        &crate::YubiHsmCommand::get_object_info(id, crate::YUBIHSM_AUTHENTICATION_KEY),
+    ) {
+        Ok(response) => {
+            let info = crate::YubiHsmObjectInfo::parse(&response).unwrap();
+            assert_eq!(
+                info.label, name,
+                "Authentication Key ID belongs to another identity"
+            );
+            assert_eq!(
+                info.algorithm,
+                crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION
+            );
+            assert_eq!(info.capabilities, crate::yubihsm_capabilities(&[0x13]));
+            assert_eq!(info.delegated_capabilities, [0; 8]);
+            let projection = find_hardware_object(session, CKO_PUBLIC_KEY as _, &id.to_be_bytes())
+                .expect("cannot change domains without a matching public companion");
+            assert_eq!(
+                read_hardware_attribute(session, projection, CKA_LABEL as _),
+                name.as_bytes()
+            );
+            assert_eq!(p256_public_key(session, projection), public_key);
+            if info.domains != u16::MAX {
+                destroy_native_hardware_object(session, id, crate::YUBIHSM_AUTHENTICATION_KEY)
+                    .expect(
+                        "failed to remove the matching Authentication Key for domain-policy update",
+                    );
+            }
+        }
+        Err(crate::Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as CK_RV => {}
+        Err(error) => panic!("Authentication Key inspection failed: {error:?}"),
+    }
+    let result = provision_authentication_key(session, id, &name, u16::MAX, &public_key);
+    eprintln!("{target}: {name:?} Authentication Key {id:04x}, provisioning result {result}");
+    let object = find_hardware_object(session, CKO_PUBLIC_KEY as _, &id.to_be_bytes())
+        .expect("the provisioned public companion is missing");
+    assert_eq!(p256_public_key(session, object), public_key);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+
+    let platform_slot = crate::with_context(|context| {
+        let slots = context.slot_contexts.read().unwrap();
+        let matches: Vec<_> = slots
+            .iter()
+            .filter_map(|(id, child)| {
+                (child.lock().unwrap().slot.kind() == crate::SlotKind::Host).then_some(*id)
+            })
+            .collect();
+        assert_eq!(matches.len(), 1, "expected one native platform slot");
+        Ok(matches[0])
+    })
+    .unwrap();
+    let mut source_session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            platform_slot,
+            CKF_SERIAL_SESSION as _,
+            std::ptr::null_mut(),
+            None,
+            &mut source_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    login(source_session, "", "native platform source");
+    let source_key = find_hardware_object(source_session, CKO_PRIVATE_KEY as _, name.as_bytes())
+        .expect("the named native private key is missing from the platform slot");
+    let source_uri = String::from_utf8(read_hardware_attribute(
+        source_session,
+        source_key,
+        crate::CKA_PKCS11RS_URI,
+    ))
+    .expect("native platform key URI is not UTF-8");
+    let selector = crate::pkcs11_uri::authentication_uri(&source_uri, id);
+    for login_selector in [selector.as_str(), "pkcs11:"] {
+        login(session, login_selector, "native platform authentication");
+        let selected = authenticated_credential(session);
+        let uri = crate::pkcs11_uri::ClientAuthUri::parse(selected.as_bytes()).unwrap();
+        assert_eq!(uri.object.as_deref(), Some(name.as_bytes()));
+        assert_eq!(uri.authkey_id, Some(id));
+        let mut random = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as _),
+            CKR_OK as CK_RV
+        );
+        let echo = b"pkcs11rs native platform authentication";
+        assert_eq!(
+            command(session, &crate::YubiHsmCommand::echo(echo).unwrap()).unwrap(),
+            echo
+        );
+        eprintln!(
+            "verified native {name:?} => HSM {target} via {login_selector:?}: login, random generation and encrypted echo"
+        );
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    }
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(source_session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(source_session), CKR_OK as CK_RV);
+    finalize_for_test();
 }
 
 #[test]
@@ -1915,12 +2083,8 @@ fn yubihsm_to_yubihsm_asymmetric_authentication() {
             &format!("target {target} cleanup"),
         );
         if let Some(id) = auth_id {
-            let response = command(
-                target_session,
-                &crate::YubiHsmCommand::delete_object(id, crate::YUBIHSM_AUTHENTICATION_KEY),
-            )
-            .unwrap();
-            assert!(response.is_empty());
+            destroy_native_hardware_object(target_session, id, crate::YUBIHSM_AUTHENTICATION_KEY)
+                .unwrap();
         }
         if public != CK_INVALID_HANDLE as CK_OBJECT_HANDLE {
             assert_eq!(
@@ -2184,14 +2348,8 @@ fn symmetric_cross_hsm(path: SymmetricPath) {
             &format!("target {target} cleanup"),
         );
         if let Some(id) = auth_id {
-            assert!(
-                command(
-                    target_session,
-                    &crate::YubiHsmCommand::delete_object(id, crate::YUBIHSM_AUTHENTICATION_KEY)
-                )
-                .unwrap()
-                .is_empty()
-            );
+            destroy_native_hardware_object(target_session, id, crate::YUBIHSM_AUTHENTICATION_KEY)
+                .unwrap();
         }
         for handle in handles {
             assert_eq!(

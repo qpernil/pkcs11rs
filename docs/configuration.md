@@ -155,9 +155,11 @@ with `CKR_ARGUMENTS_BAD`.
 PKCS #11. Omitting it allows every serial-bearing slot; `[]` allows none of
 those slots. Its environment
 fallback, `PKCS11RS_SLOTS_SERIALS`, is comma-separated; an empty value allows
-none. Surrounding whitespace is trimmed and duplicates are ignored. Matching
-is otherwise exact and case-sensitive, preserving leading zeroes. Use strings
-in JSON, including for numeric serials. Empty entries are invalid.
+none. Surrounding whitespace is trimmed and duplicates are ignored. Use strings
+in JSON, including for numeric serials. Empty entries are invalid. YubiHSM
+decimal serials match with or without leading zeros, accommodating padded USB
+descriptor strings and unpadded protocol serials. Other slot serials retain
+exact, case-sensitive string matching, preserving leading zeros.
 
 For a YubiKey, the filter uses its official whole-device serial from the
 Management applet, registered during discovery. Other serial-bearing devices

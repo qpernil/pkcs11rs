@@ -626,6 +626,54 @@ fn yubihsm_platform_provisioning_is_idempotent_and_rejects_policy_conflicts() {
         .is_err()
     );
 
+    // The normal native-object mutation path must remove both the device key
+    // and its cached identity while preserving the public companion.
+    crate::with_session_context(session, |ctx| {
+        let key = ctx
+            .resolved_objects()?
+            .into_iter()
+            .find_map(|(_, object)| {
+                matches!(
+                    object.material,
+                    crate::KeyMaterial::YubiHsm {
+                        id: AUTHENTICATION_KEY_ID,
+                        object_type: crate::YUBIHSM_AUTHENTICATION_KEY,
+                        ..
+                    }
+                )
+                .then_some(object)
+            })
+            .ok_or(crate::Error::from(CKR_OBJECT_HANDLE_INVALID))?;
+        ctx.get_slot(SLOT_ID)?
+            .yubihsm_destroy_native_object(SLOT_ID, &key.unique_id)?;
+        Ok(())
+    })
+    .unwrap();
+    crate::with_session_context_mut(session, |ctx| {
+        ctx.refresh_slot_token_objects(SLOT_ID)?;
+        assert!(
+            !ctx.resolved_objects()?.iter().any(|(_, object)| matches!(
+                object.material,
+                crate::KeyMaterial::YubiHsm {
+                    id: AUTHENTICATION_KEY_ID,
+                    object_type: crate::YUBIHSM_AUTHENTICATION_KEY,
+                    ..
+                }
+            )),
+            "deleted Authentication Key must not survive a refresh in the cache"
+        );
+        assert!(
+            ctx.resolved_objects()?.iter().any(|(_, object)| {
+                object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && object.id == AUTHENTICATION_KEY_ID.to_be_bytes()
+                    && object.label == "iPhone"
+            }),
+            "native deletion must preserve the separate public companion"
+        );
+        Ok(())
+    })
+    .unwrap();
+
     const REPAIR_KEY_ID: u16 = 0x1005;
     let crate::SoftwarePublicKey::Ec { uncompressed, .. } = &key else {
         panic!("generated P-256 key did not expose an EC public point");
