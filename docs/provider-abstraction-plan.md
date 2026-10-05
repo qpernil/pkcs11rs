@@ -166,6 +166,12 @@ credential lifecycle and ECDH contracts without changing selectors or session
 policy. Additional backends should use those contracts; hardware capability
 qualification remains distinct from software-provider CI.
 
+[The Linux TPM2/ESAPI plan](linux-tpm2-plan.md) applies these contracts through
+the native TPM stack. Its proposed store persists random child keys in TPM NVM
+and retains public management records, with deletion qualified separately from
+HSM access revocation. It is proposed work; Linux platform credentials remain
+unsupported in the current implementation.
+
 New protocol clients and transports should follow the YubiHSM Auth and CTAP
 pattern: share the protocol state machine or exchange vocabulary while leaving
 discovery and application policy with the caller.

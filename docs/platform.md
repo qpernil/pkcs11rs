@@ -19,6 +19,14 @@ use managed Secure Enclave P-256 keys and report `Secure Enclave`, with model
 and reports `Windows CNG`, with model `Windows`. Other operating systems return
 `CKR_FUNCTION_NOT_SUPPORTED` during slot initialization.
 
+Linux has no native platform-credential backend, including on Raspberry Pi.
+The proposed TPM2/ESAPI backend uses random child keys persisted in TPM NVM,
+with public management records and no retained wrapped private-key copies.
+Its deletion boundaries, native-library requirements, authorization policy,
+simulator tests, and hardware qualification are described in
+[the Linux TPM2 plan](linux-tpm2-plan.md). Installing the TPM stack does not
+enable the current platform slot or change its unsupported result.
+
 ## Windows CNG store
 
 The Windows backend creates current-user, persisted `ECDH_P256` keys named
@@ -185,7 +193,7 @@ $env:PKCS11RS_PLATFORM_TEST_NAME = "windows-test"
 cargo test --locked -p pkcs11rs --lib provisions_native_platform_credential_on_yubihsm -- --ignored --nocapture
 ```
 
-The equivalent invocation on a supported desktop Unix platform is:
+The equivalent invocation on macOS is:
 
 ```sh
 PKCS11RS_PLATFORM_TEST_TARGET=HSM-SERIAL \
