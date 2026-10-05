@@ -1760,6 +1760,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "software-key-core",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

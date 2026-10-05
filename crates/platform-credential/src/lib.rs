@@ -19,6 +19,11 @@ mod apple;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use apple::ApplePlatformCryptoProvider;
 
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::WindowsPlatformCryptoProvider;
+
 /// Failure reported by a platform credential provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlatformCryptoError {
@@ -27,6 +32,8 @@ pub enum PlatformCryptoError {
     NotFound,
     Ambiguous,
     Unsupported,
+    /// Unsupported native capability with non-secret operation/policy details.
+    UnsupportedWithContext(String),
     InvalidPublicKey,
     OutputTooLong,
     Backend(String),
@@ -40,6 +47,12 @@ impl fmt::Display for PlatformCryptoError {
             Self::NotFound => formatter.write_str("platform credential not found"),
             Self::Ambiguous => formatter.write_str("platform credential name is ambiguous"),
             Self::Unsupported => formatter.write_str("operation is not supported by this provider"),
+            Self::UnsupportedWithContext(context) => {
+                write!(
+                    formatter,
+                    "operation is not supported by this provider: {context}"
+                )
+            }
             Self::InvalidPublicKey => formatter.write_str("invalid peer public key"),
             Self::OutputTooLong => formatter.write_str("derived output is too long"),
             Self::Backend(message) => formatter.write_str(message),
@@ -159,17 +172,21 @@ fn current_provider() -> impl AuthenticationCredentialProvider + AuthenticationC
     {
         ApplePlatformCryptoProvider
     }
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    #[cfg(target_os = "windows")]
+    {
+        WindowsPlatformCryptoProvider::tpm()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     {
         UnsupportedPlatformCryptoProvider
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 #[derive(Clone, Copy, Debug, Default)]
 struct UnsupportedPlatformCryptoProvider;
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 impl AuthenticationCredentialProvider for UnsupportedPlatformCryptoProvider {
     fn resolve(&self, name: &str) -> Result<PlatformAuthenticationCredential, PlatformCryptoError> {
         validate_platform_credential_name(name)?;
@@ -177,7 +194,7 @@ impl AuthenticationCredentialProvider for UnsupportedPlatformCryptoProvider {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 impl AuthenticationCredentialStore for UnsupportedPlatformCryptoProvider {
     fn generate(&self, name: &str) -> Result<SoftwarePublicKey, PlatformCryptoError> {
         validate_platform_credential_name(name)?;

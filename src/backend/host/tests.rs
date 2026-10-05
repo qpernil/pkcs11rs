@@ -41,6 +41,12 @@ fn host_profiles_reflect_the_native_and_composition_surface() {
     );
     #[cfg(target_os = "macos")]
     assert_eq!(slot.model(), "macOS");
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(slot.model(), "Windows");
+        assert_eq!(slot.label(), "Windows CNG");
+        assert!(HostSlot::new().is_ok());
+    }
     assert_ne!(info.flags & CKF_LOGIN_REQUIRED as CK_FLAGS, 0);
 }
 
@@ -372,4 +378,14 @@ fn host_slot_public_api_keeps_ecdh_protected_and_owns_session_outputs() {
     assert_eq!(native.calls.load(Ordering::SeqCst), calls);
     observer.login(&[]).unwrap();
     assert_eq!(find(&observer, CKO_PRIVATE_KEY).len(), 1);
+}
+
+#[test]
+fn contextual_unsupported_error_keeps_cryptoki_status() {
+    assert_eq!(
+        CK_RV::from(platform_error(PlatformCryptoError::UnsupportedWithContext(
+            "CNG read export policy failed: 0x80090029".to_owned(),
+        ))),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
 }

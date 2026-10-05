@@ -1,6 +1,6 @@
-# Secure Enclave slot
+# Platform-protected ECDH slot
 
-Enable the Secure Enclave slot explicitly:
+Enable the platform slot explicitly:
 
 ```json
 {"version": 1, "platform": {"enabled": true}}
@@ -13,13 +13,72 @@ authentication. There is no hidden platform-authentication provider when the
 slot is disabled. `hardware.discovery` does not control this explicitly enabled
 source. The slot has no hardware serial, so `slots.serials` does not control it.
 
-The token label is `Secure Enclave`, its serial is empty, and its model is
-`iOS` or `macOS` according to the build target. It is a non-removable OS token.
-macOS and iOS implement it using managed Secure Enclave P-256 keys; enabling it on an unsupported platform
-returns `CKR_FUNCTION_NOT_SUPPORTED` during slot initialization.
-The platform slot abstraction is also intended for other operating-system key
-providers. Each implementation supplies its own visible token name; a future
-Windows CNG backend will therefore report `Windows CNG`, not `Secure Enclave`.
+The slot is a non-removable OS token with an empty serial. macOS and iOS
+use managed Secure Enclave P-256 keys and report `Secure Enclave`, with model
+`macOS` or `iOS`. Windows uses the Microsoft Platform Crypto Provider (TPM)
+and reports `Windows CNG`, with model `Windows`. Other operating systems return
+`CKR_FUNCTION_NOT_SUPPORTED` during slot initialization.
+
+## Windows CNG store
+
+The Windows backend creates current-user, persisted `ECDH_P256` keys named
+`pkcs11rs.yubihsm-auth.<name>`. Only this namespace and provider are enumerated;
+arbitrary Windows keys and machine-wide keys are outside the managed store.
+Generation refuses duplicate names and sets a zero private-key export policy.
+The TPM provider uses `NCRYPT_PCP_KEY_USAGE_POLICY_PROPERTY` with
+`NCRYPT_PCP_ENCRYPTION_KEY`: the TPM decrypt attribute permits ECDH, while
+signature usage is excluded. Readback may also contain the documented
+`NCRYPT_TPM12_PROVIDER` metadata bit (`0x00010000`); it is ignored when comparing
+usage permissions. Other additional bits, including signature/storage usage,
+are rejected. The software-KSP tests use the generic
+`NCRYPT_KEY_USAGE_PROPERTY` agreement-only policy instead. Resolution checks
+the provider-specific policy and the ECDH P-256 public projection. The provider must report hardware implementation; there is
+no software fallback when a TPM or required operation is unavailable.
+
+Windows key-store authorization follows the current user's Windows security
+context and the KSP's access controls. Unlike Apple's application Keychain group,
+this namespace is not an application isolation boundary. Key opening, policy
+access, generation, and agreement request silent operation: native authorization
+requiring UI fails rather than prompting for or retaining a Windows password,
+PIN, or biometric authorization. TPM key deletion uses zero flags because some
+PCP versions reject `NCRYPT_SILENT_FLAG` for that operation. There is no
+Windows Hello or per-operation user-presence policy in this backend. PKCS #11
+USER login remains the empty-PIN authorization gate described below.
+
+ECDH imports the peer's validated P-256 public point into the same KSP and uses
+`NCryptSecretAgreement` with `NCryptDeriveKey(BCRYPT_KDF_RAW_SECRET)`.
+The exact 32-byte output is reversed from CNG's little-endian representation to
+the common big-endian ECDH contract. The private scalar remains in the TPM;
+the shared secret enters zeroizing module memory. This requires a Windows/TPM
+provider supporting P-256 ECDH, peer-public-key import, and raw-secret derivation.
+Public keys are exported directly from native keys.
+
+Each operation reopens the managed name, checks the original public identity,
+and uses that same native handle. Deletion or replacement prevents a retained
+credential from resolving to a different key. Matching public certificates are
+read from the current user's `MY` certificate store by complete P-256 public key;
+certificate discovery does not authenticate to a private key or create keys.
+
+Windows CI runs the lifecycle and ECDH interoperability tests with the software
+KSP through a test-only provider selection. Production always selects the TPM
+KSP. Hardware qualification is a separate ignored test; run it on a Windows
+TPM machine with:
+
+```sh
+cargo test --locked -p platform-credential tpm_ksp_lifecycle_and_ecdh_interoperate -- --ignored
+```
+
+This test creates temporary, uniquely named managed keys and deletes them. It
+checks persistence, enumeration, duplicate-name refusal, private-export denial,
+ECDH and prefixed-KDF interoperability, and deletion/replacement invalidation.
+A passing cross-target build or software-KSP test does not qualify a TPM model.
+Unsupported Windows capabilities report the native operation and CNG status,
+or the rejected implementation type, key policy, or public-blob format.
+These diagnostics contain no key material or authentication secrets; unsupported
+capabilities map to `CKR_FUNCTION_NOT_SUPPORTED`. If provisioning rollback also
+fails, the error preserves both failures and identifies the managed name that
+may remain. Explicit management deletion accepts that name even if the key's
+policy or public projection is unusable.
 
 ## Objects and operations
 
@@ -32,7 +91,8 @@ key digest separately, so replacement under the same label does not rebind an
 old handle.
 
 Matching certificates in the application's accessible Apple data-protection
-Keychain are exposed as public `CKO_CERTIFICATE` token objects. Matching uses
+Keychain or the current user's Windows `MY` store are exposed as public
+`CKO_CERTIFICATE` token objects. Matching uses
 the complete public key, not the certificate label. Each certificate has the
 managed key's label and `CKA_ID`, matching both key projections, with its DER
 value readable before login and after logout. Certificates are not generated
@@ -42,9 +102,9 @@ identities. The slot exposes only certificates matching its managed keys.
 Native keys support P-256 `CKM_ECDH1_DERIVE` and its cofactor variant (P-256 has
 cofactor one). The selective composition layer adds prefixed ECDH, one-use P-256
 software generation for YubiHSM authentication, and KDF, digest-key, MAC, and
-symmetric consumers for the resulting software session secret. The Secure
-Enclave retains the private key, but Apple's ECDH API returns the shared secret
-to module memory. Sensitive buffers are zeroizing; PKCS #11 object policy
+symmetric consumers for the resulting software session secret. The native
+provider retains the private key, but ECDH returns the shared secret to module
+memory. Sensitive buffers are zeroizing; PKCS #11 object policy
 determines whether a client may read a derived value.
 
 The slot supports common session data and certificates plus software secret
@@ -66,8 +126,8 @@ projections remain discoverable. Login state is shared by sessions, and closing
 the last session clears it. OS access control independently governs native
 key use.
 
-Keychain access follows the signed host application's access group and
-device-unlock policy. Searches refresh the
+On Apple platforms, Keychain access follows the signed host application's
+access group and device-unlock policy. Searches refresh the
 managed-key inventory. A retained Apple key checks that its managed key still
 exists with the same public identity before ECDH; deletion or replacement
 invalidates further use. No password is cached to recover OS authorization.
@@ -88,8 +148,8 @@ keys against the YubiHSM's discovered public authentication-key projections.
 Universal `pkcs11:` considers all eligible public credentials. Multiple matches
 are ordered with the other source slots. Only asymmetric matching is automatic.
 
-The application first performs USER login on the platform slot. The Secure
-Enclave backend accepts only an omitted or explicitly empty PIN. A
+The application first performs USER login on the platform slot. The platform
+backend accepts only an omitted or explicitly empty PIN. A
 later YubiHSM target login can select the key only while that source login is
 active, and never forwards the target PIN to the platform slot. The resolved
 token key is bound through `Pkcs11Auth`. Static and ephemeral ECDH
@@ -103,3 +163,8 @@ See [authentication lifetimes](authentication-secrets.md).
 The Apple store retains its existing `pkcs11rs.yubihsm-auth.<name>` application
 tag for compatibility. Enabling or using the slot does not create or migrate
 keys, and the encrypted software-token backing format is unchanged.
+
+For Windows, the equivalent named selector is
+`pkcs11:token=Windows%20CNG;object=reserve;type=private?pkcs11rs-authkey=1003`.
+The provisioning API, public-key matching, source login, and session lifetime
+are shared with the Apple backend.

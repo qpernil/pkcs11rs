@@ -64,9 +64,13 @@ locked Cargo build for the selected Debug or Release configuration before
 Xcode signs the result. The Debug scheme runs `platform-credential list`, so
 the Xcode console confirms that the signed CLI can reach its Keychain group.
 
-The public Rust API and CLI are backend-neutral. Unsupported systems return an
-explicit error today; a later Windows CNG/TPM implementation can implement the
-same resolve and lifecycle contracts without changing selectors or commands.
+The public Rust API and CLI are backend-neutral. On Windows, these commands
+manage current-user TPM-backed P-256 ECDH keys through the Microsoft Platform
+Crypto Provider. They use the same names and lifecycle contracts, without Apple
+signing requirements. No Windows password/PIN prompt or software fallback is
+provided. See [Windows CNG store](platform.md#windows-cng-store) for native
+access policy, capability requirements, and the hardware qualification test.
+Other unsupported systems return an explicit error.
 
 ## Certificate bundles
 
