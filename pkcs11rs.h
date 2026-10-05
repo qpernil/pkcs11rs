@@ -76,6 +76,8 @@ typedef struct PKCS11RS_BYTE_BUFFER {
   (CKK_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 0x11UL)
 #define CKK_PKCS11RS_MLKEM1024_P384 \
   (CKK_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 0x12UL)
+/* C_CreateObject accepts canonical registration CBOR or the versioned
+ * WebAuthn server-export JSON package. C_GetAttributeValue returns CBOR. */
 #define CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION \
   (CKA_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 1UL)
 #define CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY \

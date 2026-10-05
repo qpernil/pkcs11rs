@@ -124,7 +124,9 @@ transports. A discovered FIDO2 slot advertises the vendor
 `CKM_PKCS11RS_FIDO_ASSERTION` signing mechanism. A device advertising the
 experimental `previewSign` extension additionally exposes the explicit vendor
 registration, derivation, and signing mechanisms described in
-[previewSign mapping](preview-sign.md).
+[previewSign mapping](preview-sign.md). PreviewSign registrations can also be
+imported with `C_CreateObject` from a cooperating RP's saved browser result;
+see [browser/server import](preview-sign.md#browser-server-registration-import).
 
 The ignored compatibility test is another local probe:
 
@@ -556,9 +558,12 @@ Applications can export and strictly re-import both wrappers with
 `C_CreateObject`. Setting `PKCS11RS_TOKEN_STORAGE` installs an applet- and
 serial-scoped local provider on validated YubiKey slots;
 `PKCS11RS_FIDO2_STORAGE` is supported as a FIDO-only compatibility setting.
-Backed token objects are restored automatically after module finalization. Positive
-hardware qualification of that serial binding and the previewSign flow
-remains deferred.
+Backed token objects are restored automatically after module finalization.
+The two-key previewSign lifecycle passes on a physical YubiKey 5C NFC with
+firmware 5.8.0 through the serial-selected production HID slot, using both
+Rust and external dynamic-library tests. Hardware qualification of durable
+storage and serial binding across reconnects remains deferred; see
+[qualification scope](preview-sign.md#hardware-status).
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

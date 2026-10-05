@@ -688,28 +688,63 @@ pub(crate) fn generate_key_pair(
                 CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 CKK_EC as CK_KEY_TYPE,
             )?;
-            let mut private_object = key_pair_object(
-                private_template,
-                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-                CKK_EC as CK_KEY_TYPE,
-            )?;
-            if !public_object.token || !private_object.token {
+            if !public_object.token || !private_token {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
             public_object.verify = false;
-            private_object.sign = false;
-            private_object.derive = false;
+            // Accept the historical EC template, but expose the same registration
+            // key type and capabilities as C_CreateObject.
+            if let Some(kind) =
+                template_attribute(private_template, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+                    .map(|attribute| read_ulong_template_attribute(attribute).map_err(Error::from))
+                    .transpose()?
+                && kind != CKK_EC as CK_ULONG
+                && kind != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            let mut normalized_template: Vec<_> = private_template
+                .iter()
+                .copied()
+                .filter(|attribute| attribute.type_ != CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+                .collect();
+            let mut registration_key_type = CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION;
+            normalized_template.push(CK_ATTRIBUTE {
+                type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut registration_key_type as *mut CK_KEY_TYPE).cast(),
+                ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+            });
+            // Validate both templates before creating anything on the authenticator.
+            validate_unique_template(private_template)?;
+            if private_template.iter().any(|attribute| {
+                matches!(
+                    attribute.type_,
+                    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION | CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY
+                )
+            }) {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            let validated_private =
+                super::object::preview_sign_object_template(&normalized_template, false)?;
             validate_new_object_access(&public_object, flags, logged_in)?;
-            validate_new_object_access(&private_object, flags, logged_in)?;
+            validate_new_object_access(&validated_private, flags, logged_in)?;
             let registration = ctx
                 ._get_slot_mut(slot_id)?
                 .fido_preview_sign_registration()?;
+            let mut private_object = super::object::preview_sign_object(
+                &normalized_template,
+                registration.clone(),
+                None,
+            )?;
+            validate_new_object_access(&private_object, flags, logged_in)?;
             let projected = project_cose_public_key(registration.credential_public_key_cose())
                 .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
                 .ok_or(CKR_DEVICE_ERROR)?;
             public_object.material = KeyMaterial::Public(projected.public_key.clone());
-            private_object.public_key = Some(projected.public_key);
-            private_object.material = KeyMaterial::FidoPreviewCredential { registration };
+            private_object.material = KeyMaterial::PreviewSignRegistration {
+                registration,
+                owns_credential: true,
+            };
             public_object.local = true;
             private_object.local = true;
             public_object.key_gen_mechanism = Some(mechanism.mechanism);
@@ -1860,7 +1895,7 @@ pub(crate) fn derive_key(
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
             let registration = match base.material {
-                KeyMaterial::PreviewSignRegistration { registration } => registration,
+                KeyMaterial::PreviewSignRegistration { registration, .. } => registration,
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             };
             let mut parsed = TokenObjectTemplate {

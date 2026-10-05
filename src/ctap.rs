@@ -1488,7 +1488,9 @@ fn parse_preview_sign_assertion_response(data: &[u8]) -> Result<Vec<u8>, CtapErr
     if decoder.position() != extensions.len() {
         return Err(CtapError::Malformed("trailing assertion extension output"));
     }
-    signature.ok_or(CtapError::Malformed("missing previewSign signature"))
+    let signature = signature.ok_or(CtapError::Malformed("missing previewSign signature"))?;
+    ecdsa_signature_from_der(&signature, 32)
+        .map_err(|_| CtapError::Malformed("invalid previewSign P-256 signature"))
 }
 
 fn verify_make_credential_response(
@@ -3496,15 +3498,89 @@ mod tests {
         response
     }
 
+    fn preview_sign_signature_der() -> Vec<u8> {
+        let mut der = vec![0x30, 0x44, 0x02, 0x20];
+        der.extend_from_slice(&[0x5a; 32]);
+        der.extend_from_slice(&[0x02, 0x20]);
+        der.extend_from_slice(&[0x5a; 32]);
+        der
+    }
+
     #[test]
     fn preview_sign_assertion_response_extracts_only_the_signed_extension_value() {
         let response = preview_sign_assertion_response(|encoder| {
-            encoder.bytes(&[0x5a; 64]).unwrap();
+            encoder.bytes(&preview_sign_signature_der()).unwrap();
         });
         assert_eq!(
             parse_preview_sign_assertion_response(&response).unwrap(),
             [0x5a; 64]
         );
+    }
+
+    #[test]
+    fn preview_sign_assertion_response_normalizes_der_p256_signature() {
+        // Both integers need a leading zero to keep their DER values positive.
+        let mut der = vec![0x30, 0x46, 0x02, 0x21, 0];
+        der.extend_from_slice(&[0x85; 32]);
+        der.extend_from_slice(&[0x02, 0x21, 0]);
+        der.extend_from_slice(&[0x91; 32]);
+        let response = preview_sign_assertion_response(|encoder| {
+            encoder.bytes(&der).unwrap();
+        });
+        let mut expected = vec![0x85; 32];
+        expected.extend_from_slice(&[0x91; 32]);
+        assert_eq!(
+            parse_preview_sign_assertion_response(&response).unwrap(),
+            expected
+        );
+
+        // A DER signature can itself be 64 bytes; its length does not select
+        // a raw-signature format.
+        let mut der = vec![0x30, 0x3e, 0x02, 0x1d];
+        der.extend_from_slice(&[1; 29]);
+        der.extend_from_slice(&[0x02, 0x1d]);
+        der.extend_from_slice(&[2; 29]);
+        assert_eq!(der.len(), 64);
+        let response = preview_sign_assertion_response(|encoder| {
+            encoder.bytes(&der).unwrap();
+        });
+        let mut expected = vec![0; 64];
+        expected[3..32].fill(1);
+        expected[35..].fill(2);
+        assert_eq!(
+            parse_preview_sign_assertion_response(&response).unwrap(),
+            expected
+        );
+
+        // DER integers shorter than a coordinate are left-padded for PKCS #11.
+        let response = preview_sign_assertion_response(|encoder| {
+            encoder
+                .bytes(&[0x30, 0x06, 0x02, 0x01, 1, 0x02, 0x01, 2])
+                .unwrap();
+        });
+        let mut expected = vec![0; 64];
+        expected[31] = 1;
+        expected[63] = 2;
+        assert_eq!(
+            parse_preview_sign_assertion_response(&response).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn preview_sign_assertion_response_rejects_invalid_signature_encodings() {
+        for signature in [
+            vec![0x5a; 63],
+            vec![0x5a; 64],
+            vec![0x5a; 65],
+            vec![0x30, 0x06, 0x02, 0x01, 0x80, 0x02, 0x01, 2],
+            vec![0x30, 0x06, 0x02, 0x01, 1, 0x02, 0x01, 2, 0],
+        ] {
+            let response = preview_sign_assertion_response(|encoder| {
+                encoder.bytes(&signature).unwrap();
+            });
+            assert!(parse_preview_sign_assertion_response(&response).is_err());
+        }
     }
 
     #[test]
@@ -3515,7 +3591,7 @@ mod tests {
         assert!(parse_preview_sign_assertion_response(&wrong_type).is_err());
 
         let mut no_extension_flag = preview_sign_assertion_response(|encoder| {
-            encoder.bytes(&[0x5a; 64]).unwrap();
+            encoder.bytes(&preview_sign_signature_der()).unwrap();
         });
         let mut decoder = Decoder::new(&no_extension_flag);
         assert_eq!(decoder.map().unwrap(), Some(1));
@@ -3525,7 +3601,7 @@ mod tests {
         assert!(parse_preview_sign_assertion_response(&no_extension_flag).is_err());
 
         let mut trailing = preview_sign_assertion_response(|encoder| {
-            encoder.bytes(&[0x5a; 64]).unwrap();
+            encoder.bytes(&preview_sign_signature_der()).unwrap();
         });
         trailing.push(0);
         assert!(parse_preview_sign_assertion_response(&trailing).is_err());

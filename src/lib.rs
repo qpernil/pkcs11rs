@@ -343,7 +343,7 @@ pub struct CK_PKCS11RS_PREFIXED_ECDH_DERIVE_PARAMS {
     pub ulPrefixDataLen: CK_ULONG,
     pub pPrefixData: CK_BYTE_PTR,
 }
-/// Key type used by the importable previewSign registration object.
+/// Key type used by generated and imported previewSign registration objects.
 pub const CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0001;
 pub const CKK_PKCS11RS_MLKEM768_P256: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0010;
@@ -351,7 +351,8 @@ pub const CKK_PKCS11RS_MLKEM768_X25519: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0011;
 pub const CKK_PKCS11RS_MLKEM1024_P384: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0012;
-/// Canonical `PreviewSignRegistration` CBOR wrapper.
+/// Import: canonical registration CBOR or versioned WebAuthn export JSON.
+/// Readback: canonical `PreviewSignRegistration` CBOR wrapper.
 pub const CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0001;
 /// Canonical `PreviewSignDerivedKeyRecord` CBOR wrapper.

@@ -286,8 +286,11 @@ Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-The current token binding uses the validated physical Yubico serial and remains
-provisional until positive previewSign hardware qualification. Local files are
+The current token binding uses the validated physical Yubico serial. The
+two-key previewSign lifecycle passes on a serial-selected physical YubiKey
+5C NFC with firmware 5.8.0, but durable-store restoration and serial binding
+across reconnects still require hardware qualification. See
+[qualification scope](preview-sign.md#hardware-status). Local files are
 not encrypted; access control, backup, synchronization, and private-data
 protection are deployment responsibilities. The provider has no garbage
 collector, so deleting backed objects can leave unreferenced dependency blobs.
