@@ -37,7 +37,11 @@ pub(crate) struct HostSlot {
 }
 impl HostSlot {
     pub(crate) fn new() -> Result<Self, Error> {
-        if !cfg!(any(target_os = "macos", target_os = "ios")) {
+        if !cfg!(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "windows"
+        )) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         Ok(Self {
@@ -80,7 +84,9 @@ impl std::fmt::Debug for HostSlot {
 }
 pub(crate) fn platform_error(error: PlatformCryptoError) -> Error {
     match error {
-        PlatformCryptoError::Unsupported => CKR_FUNCTION_NOT_SUPPORTED.into(),
+        PlatformCryptoError::Unsupported | PlatformCryptoError::UnsupportedWithContext(_) => {
+            CKR_FUNCTION_NOT_SUPPORTED.into()
+        }
         PlatformCryptoError::NotFound => CKR_KEY_HANDLE_INVALID.into(),
         PlatformCryptoError::InvalidPublicKey => CKR_PUBLIC_KEY_INVALID.into(),
         PlatformCryptoError::InvalidName | PlatformCryptoError::Ambiguous => {

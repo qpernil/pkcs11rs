@@ -912,7 +912,7 @@ YubiHSM Auth credential.
 ## Platform-protected authentication credentials
 
 Platform keys are ordinary PKCS #11 token keys on the configurable
-[Secure Enclave ECDH slot](platform.md). Enable `platform.enabled=true` or
+[platform ECDH slot](platform.md). Enable `platform.enabled=true` or
 `PKCS11RS_PLATFORM_ENABLED=1`. The serial-less slot is outside the device serial
 allowlist. A disabled slot cannot supply authentication credentials. The slot
 projects each managed key as private and public P-256
@@ -923,6 +923,12 @@ keys tagged `pkcs11rs.yubihsm-auth.<name>` in the signed host application's
 Keychain access group. Login never creates a missing key. Management tooling
 and the iOS provisioning workflows remain separate from authentication; they
 use the existing names and storage without migration.
+
+On Windows, the same API manages current-user TPM-backed P-256 keys through
+the Microsoft Platform Crypto Provider. Select them with `token=Windows%20CNG`
+instead of `token=Secure%20Enclave`. Names use the same managed prefix; login
+does not create or migrate keys. Windows security-context authorization and
+silent-operation policy apply; see [Windows CNG store](platform.md#windows-cng-store).
 
 ### HSM Auth slot discovery and execution
 
@@ -1009,7 +1015,7 @@ prevents a target login from consuming source-token retries.
 | --- | --- |
 | Temporary direct software slot | Password-derived protected session keys; private preparation establishes authorization |
 | Configured software slot | Persistent P-256 key or named AES pair; application-established USER login; public discovery needed for automatic matching |
-| Secure Enclave | Public P-256 projection; application-established PIN-independent USER login and OS key-use policy |
+| Platform (Secure Enclave, Windows CNG) | Public P-256 projection; application-established PIN-independent USER login and OS key-use policy |
 | PIV / OpenPGP | P-256 key capable of ECDH; application-established USER login and per-key policy, including any fresh-authentication requirement |
 | YubiHSM | P-256 key or AES pair; application-established source HSM login and native key capabilities; public discovery for automatic matching |
 | HSM Auth profile | Dedicated symmetric/asymmetric credential types; native per-credential password |
@@ -1075,10 +1081,10 @@ method and compatibility trait name for existing external consumers. The
 PKCS #11 slot uses ordinary ECDH behind the combined prefixed-KDF mechanism;
 the authentication client prefers that combined operation when available.
 
-Apple returns the ECDH secret from the Secure Enclave to the module. The module
+Apple Secure Enclave and Windows CNG return the ECDH secret to the module. The module
 uses it for the combined KDF in zeroizing memory, or stores it as a protected
 session object for ordinary ECDH; the private scalar remains
-in the Secure Enclave. The native key checks its managed identity before use,
+in the Secure Enclave or TPM. The native key checks its managed identity before use,
 so deletion or replacement does not silently keep an obsolete binding usable.
 OS authorization governs the operation; PKCS #11 USER login gates access to
 the platform slot's private objects without validating a PIN.

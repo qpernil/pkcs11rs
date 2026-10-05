@@ -168,7 +168,7 @@ reports it differently; software tokens match by their generated serial.
 Hidden slots are omitted from
 both count and buffered `C_GetSlotList` calls, regardless of `tokenPresent`, and
 direct slot-ID calls return `CKR_SLOT_ID_INVALID` for them. The explicitly
-enabled Secure Enclave token has no serial and is outside this filter.
+enabled platform token (Secure Enclave or Windows CNG) has no serial and is outside this filter.
 
 Source and applet controls determine where to look and which applets to probe;
 `slots.serials` narrows that selection. An excluded device stops at serial

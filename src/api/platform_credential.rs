@@ -262,7 +262,9 @@ fn platform_crypto_error(error: crate::platform_crypto::PlatformCryptoError) -> 
         PlatformCryptoError::AlreadyExists => CKR_TEMPLATE_INCONSISTENT.into(),
         PlatformCryptoError::NotFound => CKR_OBJECT_HANDLE_INVALID.into(),
         PlatformCryptoError::Ambiguous => CKR_DEVICE_ERROR.into(),
-        PlatformCryptoError::Unsupported => CKR_FUNCTION_NOT_SUPPORTED.into(),
+        PlatformCryptoError::Unsupported | PlatformCryptoError::UnsupportedWithContext(_) => {
+            CKR_FUNCTION_NOT_SUPPORTED.into()
+        }
         PlatformCryptoError::InvalidPublicKey => CKR_DATA_INVALID.into(),
         PlatformCryptoError::OutputTooLong => CKR_DATA_LEN_RANGE.into(),
         PlatformCryptoError::Backend(_) => CKR_DEVICE_ERROR.into(),

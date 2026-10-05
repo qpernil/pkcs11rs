@@ -125,6 +125,12 @@ software mechanism list for session keys.
   YubiHSM, matched automatically at login, and safely unprovisioned. See
   [iPhone provisioning](docs/yubihsm-auth.md#provisioning-an-iphone-platform-credential)
   and [credential tooling](docs/pkcs11rs-tool.md#platform-credentials).
+- Windows uses current-user, non-exportable P-256 ECDH keys in the TPM-backed
+  Microsoft Platform Crypto Provider through the same credential management
+  API and host slot. It has no software fallback or Windows Hello prompt;
+  native access follows the Windows user context. See
+  [Windows CNG store](docs/platform.md#windows-cng-store) for requirements and
+  hardware qualification.
 
 ### Software tokens and shared crypto core
 
@@ -203,7 +209,7 @@ slot's combined native and software session capabilities:
 
 | Slot | Profiles |
 | --- | --- |
-| Secure Enclave | Baseline, Public Certificates Token |
+| Platform (Secure Enclave, Windows CNG) | Baseline, Public Certificates Token |
 | Software, including temporary direct-auth slots | Baseline, Extended Provider, Authentication Token, Public Certificates Token |
 | PIV, OpenPGP | Baseline, Authentication Token, Public Certificates Token |
 | YubiHSM | Baseline; Authentication Token when RSA-2048 SHA-256 signing is exposed; Extended Provider only when the actual native/composed surface satisfies it; Public Certificates Token when public discovery is configured |
@@ -214,7 +220,7 @@ SHA-512/RSA operations required by its mandatory OASIS test. Authentication
 Token requires login support and RSA-2048 `CKM_SHA256_RSA_PKCS` signing.
 Eligibility uses the native and selectively composed mechanism list. HSM Auth exposes native authentication credentials
 through dedicated credential key types; it has no software key operations or
-USER login. Secure Enclave login accepts only an omitted or explicitly empty
+USER login. Platform login accepts only an omitted or explicitly empty
 PIN; OS authorization still controls native key use.
 
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,

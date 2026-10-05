@@ -39,6 +39,10 @@ lifetime is distinct from retaining the login secret to authenticate again.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
   they are not a cache populated from ordinary user login.
+- Platform USER login retains authorization state only. Apple Secure Enclave
+  and Windows CNG/TPM credentials retain public identity and native-key bindings,
+  without caching OS passwords or PINs. Windows operations reopen the current-user
+  managed key and request silent native access. ECDH outputs use zeroizing storage.
 
 ## Explicit exceptions
 

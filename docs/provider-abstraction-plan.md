@@ -161,9 +161,10 @@ conversions that merely move Cryptoki vocabulary behind a new type name.
 The platform-credential crate defines a symmetric CMAC-pair capability.
 Implement it when an operating-system provider can keep both keys
 non-exportable and the complete YubiHSM authentication path can be qualified.
-Likewise, add another protected-credential backend, such as Windows CNG or a
-TPM, without changing selectors or session policy when platform requirements
-and test access are available.
+Apple Secure Enclave and Windows CNG/TPM implement the same protected P-256
+credential lifecycle and ECDH contracts without changing selectors or session
+policy. Additional backends should use those contracts; hardware capability
+qualification remains distinct from software-provider CI.
 
 New protocol clients and transports should follow the YubiHSM Auth and CTAP
 pattern: share the protocol state machine or exchange vocabulary while leaving
