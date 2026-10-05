@@ -33,7 +33,7 @@ For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
 [iOS integration guide](../../../docs/ios-integration.md). The Objective-C
 smoke app is a direct C-ABI implementation of the same configuration,
-authentication order, embedded PIV and FIDO2 workflows, and post-quantum
+authentication order, hardware FIDO2 previewSign, and post-quantum
 functional coverage. Its separate bundle uses an independent platform
 credential and YubiHSM Authentication Key so both apps can remain provisioned.
 
@@ -97,14 +97,12 @@ Auth. The PIV entry is therefore a CryptoTokenKit bootstrap requirement, not a
 requirement that the operation or card use PIV. A short PIV AID suitable for an
 APDU partial SELECT does not satisfy this requirement.
 
-Both smoke apps intentionally configure no software slot. They configure one
-persistent in-process CCID reader named `pkcs11rs embedded CCID reader` with
-Management, PIV, and FIDO2; Management is implicit and PIV/FIDO2 are the two
-opt-in applets. The reader uses serial `1`, while its stable configuration ID
-`iphone-smoke` owns the applet-state directory below the application-support
-token-storage root. The same feature can host more readers or other implemented
-applets, but this profile is deliberately the smallest one that runs the local
-post-quantum PIV test and the embedded FIDO2 previewSign lifecycle.
+Both smoke apps configure storage for host token records, CryptoTokenKit NFC
+discovery, the Secure Enclave host slot, and the YubiHSM connector. They
+configure no embedded reader or software slot. PreviewSign runs on an attached
+FIDO2 authenticator that advertises the required generation, derivation, and
+signing mechanisms. An authenticator without that support is reported as
+skipped before any PIN is submitted.
 
 The smoke app uses only the standard PKCS #11 ABI. That ABI does not expose a
 backend or applet-kind field. Applet-specific workflows therefore use the
@@ -116,14 +114,25 @@ CCID applet. Treat these comparisons as protocol compatibility points: review
 label-based routing across every example whenever the module changes a
 canonical token label.
 
-On the embedded FIDO2 slot, the first refresh registers a previewSign
+On a supported hardware FIDO2 slot, the first refresh registers a previewSign
 credential, persists its registration object, derives and persists an
 ARKG-P256 signing-key wrapper, requests a previewSign assertion, projects the
 corresponding public key, and verifies the resulting signature with ordinary
 `CKM_ECDSA`. Later refreshes locate the persisted derived key and perform only
 the assertion, projection, and ECDSA verification steps. The report identifies
 whether the chain was created or reused and names the exact failing stage. The
-reserved registration and derived-key IDs belong to this smoke app.
+reserved registration and derived-key IDs belong to this smoke app. The
+registration and derived ticket are stored under the app's application-support
+token-storage root; the credential and signing seed remain on the authenticator.
+
+The physical smoke-test YubiKey must already have FIDO2 PIN `123456`. Both apps
+explicitly use this prototype credential for `C_Login(CKU_USER)` and for fresh
+`C_Login(CKU_CONTEXT_SPECIFIC)` authorization before each signature. They build
+and erase a mutable UTF-8 PIN buffer for each call; the module does not cache
+PINs or reuse signing authorization. The literal test PIN remains part of the
+sample app binary. Touch the authenticator whenever it flashes. The apps do
+not set or change its PIN and do not depend on the module's unimplemented iOS
+protected authentication path.
 
 Every refresh queries six post-quantum mechanisms on every token-present slot:
 `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`, `CKM_ML_KEM_KEY_PAIR_GEN`, and
@@ -168,23 +177,9 @@ retired slot references `0x82`, `0x83`, and `0x84`; YubiHSM object IDs
 providers.
 PQC operations run after the authentication already available to the app.
 YubiHSMs use the authenticated wildcard-login session described below. The
-embedded PIV slot uses one explicit consumer sequence on every refresh.
-The public object inventory is followed by the mechanism report. The app then calls
-`C_Login(CKU_SO)` with the factory management key, checks the three reserved
-public-key identifiers and generates any missing pairs, calls `C_Logout`, calls
-`C_Login(CKU_USER)` with the factory user PIN `123456`, locates the pairs without
-permitting a generation fallback, performs signing and decapsulation, and
-finally lists the authenticated objects.
-Both login calls are made even when every pair already exists; the smoke app
-exercises the ordinary API flow rather than optimizing or independently testing
-the module's login-state machine. `CKR_USER_ALREADY_LOGGED_IN` remains an
-accepted successful login result. Separate conformance tests verify initial RO
-and RW public states, token-wide USER and SO propagation to sessions opened
-after login, logout propagation, and final-session cleanup. The embedded FIDO2
-slot uses the same initial PIN. Automatic factory authentication is restricted
-to the configured embedded reader serial together with its canonical PIV or
-FIDO2 token label; the app does not submit those credentials to physical USB or
-NFC readers.
+Secure Enclave uses its no-secret USER login. Physical PIV slots receive public
+inventory and mechanism reports; this profile does not automatically provision
+or submit factory credentials to them.
 Other slots use an authenticated retained session when one exists and otherwise
 an ordinary read/write session. A provider that advertises a mechanism but rejects
 key generation or use because authentication, authorization, templates, or the
@@ -277,11 +272,9 @@ indicator continues updating during long calls. Debug logging adds
 named reader and device inventories, each applet probe and outcome, stable slot
 registration and retention, deduplication decisions, phase timing, and each
 PKCS #11 call with its outcome and duration. The `pkcs11rs::auth` category logs
-every state transition in the embedded PIV authentication path at debug level:
-the token-wide PKCS #11 role and the separate CCID selected-applet guard or
-selection loss. The PIV backend keeps no USER or management-key authentication
-flags; those facts and one-use PIN policies belong to the applet. Each record
-includes the old state, new state, and transition reason without credential material. Connector
+CCID authentication transitions at debug level: the token-wide PKCS #11 role
+and the separate selected-applet guard or selection loss. Records include the
+old state, new state, and transition reason without credential material. Connector
 payloads and responses, per-request transport and APDU timing, and ordinary
 session-state reads remain reserved for `trace`.
 NFC lifecycle diagnostics also go directly to Unified Logging under category
@@ -327,13 +320,11 @@ device build that may need to create or refresh its automatic profile must pass
 the target device may also need registration. Developers using another Apple
 account should select their own team in Xcode.
 
-The iOS builder compiles pkcs11rs with `embedded-virtual-yubikey`; runtime JSON
-still decides whether any embedded reader exists. The smoke reader sets
-`persistent: true`, which is supported on iOS and other Unix-family targets, so
-PIV/FIDO state, provisioned PQC keys, and the previewSign registration and
-derived-key records survive app relaunches. Applet
-selection, logins, presence grants, and secure-channel sessions remain
-connection state and are recreated.
+The iOS builder includes `embedded-virtual-yubikey` support in the shared
+XCFramework, but this app's runtime JSON instantiates no virtual reader.
+Persistent host registration and derived-key records survive app relaunches.
+Hardware applet state belongs to the attached authenticator; login and
+operation authorization are recreated for the current connection.
 
 The app defaults to `http://plankan-9.duckdns.org:12345`. Override that URL
 with the `PKCS11RS_YUBIHSM_URLS` launch environment variable or change

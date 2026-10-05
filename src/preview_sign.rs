@@ -10,6 +10,9 @@ use minicbor::{Decoder, Encoder, data::Type};
 use std::fmt;
 
 mod arkg;
+mod webauthn;
+#[cfg(test)]
+pub(crate) use webauthn::browser_export;
 
 pub use arkg::{
     ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM, ARKG_PUBLIC_KEY_TYPE, ArkgP256DerivedKey,
@@ -18,6 +21,7 @@ pub use arkg::{
 const REGISTRATION_SCHEMA: &str = "pkcs11rs.preview-sign.registration";
 const DERIVED_KEY_SCHEMA: &str = "pkcs11rs.preview-sign.derived-key";
 const SCHEMA_VERSION: u64 = 1;
+const REGISTRATION_VERSION: u8 = 3;
 const PREVIEW_SIGN_EXTENSION: &str = "previewSign";
 const CLIENT_DATA_HASH_LENGTH: usize = 32;
 const AAGUID_LENGTH: usize = 16;
@@ -134,6 +138,8 @@ struct AttestedKey {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RegistrationMaterial {
+    parent_attestation_format: String,
+    parent_attestation_statement_empty: bool,
     credential: AttestedKey,
     signing_key: AttestedKey,
     algorithm: i64,
@@ -143,13 +149,14 @@ struct RegistrationMaterial {
     signing_key_attestation_object: Vec<u8>,
 }
 
-/// A canonical wrapper around the exact CTAP `authenticatorMakeCredential`
-/// response that registered a `previewSign` signing seed.
+/// A canonical registration containing a CTAP response or preserved browser
+/// evidence normalized to the same `previewSign` signing-seed material.
 ///
 /// The wrapper adds the RP ID, client-data hash, and an optional YubiKey serial
 /// hint that are not recoverable from the response. All credential and signing
-/// key fields are parsed from the preserved response bytes and validated for
-/// internal consistency.
+/// key fields are parsed from the preserved protocol bytes and validated for
+/// internal consistency. Browser imports retain original client-data JSON
+/// bytes and protocol evidence in one retained format.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewSignRegistration {
     rp_id: String,
@@ -157,6 +164,9 @@ pub struct PreviewSignRegistration {
     make_credential_response: Vec<u8>,
     token_serial_hint: Option<String>,
     material: RegistrationMaterial,
+    client_data_json: Option<Vec<u8>>,
+    // Preserve validated legacy bytes solely to keep saved content references valid.
+    legacy_encoding: Option<Vec<u8>>,
 }
 
 impl PreviewSignRegistration {
@@ -172,12 +182,33 @@ impl PreviewSignRegistration {
         make_credential_response: impl Into<Vec<u8>>,
         token_serial_hint: Option<String>,
     ) -> Result<Self, PreviewSignError> {
+        Self::with_client_data(
+            rp_id,
+            client_data_hash,
+            make_credential_response,
+            token_serial_hint,
+            None,
+        )
+    }
+
+    fn with_client_data(
+        rp_id: impl Into<String>,
+        client_data_hash: [u8; CLIENT_DATA_HASH_LENGTH],
+        make_credential_response: impl Into<Vec<u8>>,
+        token_serial_hint: Option<String>,
+        client_data_json: Option<Vec<u8>>,
+    ) -> Result<Self, PreviewSignError> {
         let rp_id = rp_id.into();
         if rp_id.is_empty() {
             return Err(PreviewSignError::Malformed("empty relying-party ID"));
         }
         if token_serial_hint.as_ref().is_some_and(String::is_empty) {
             return Err(PreviewSignError::Malformed("empty token serial hint"));
+        }
+        if let Some(client_data) = &client_data_json
+            && webauthn::validate_client_data(client_data)? != client_data_hash
+        {
+            return Err(PreviewSignError::Malformed("inconsistent client-data hash"));
         }
         let make_credential_response = make_credential_response.into();
         let material = parse_make_credential_response(&make_credential_response)?;
@@ -192,7 +223,13 @@ impl PreviewSignRegistration {
                 "registration is not bound to the supplied relying-party ID",
             ));
         }
-        if material.credential.aaguid != material.signing_key.aaguid {
+        // A browser may anonymize the parent attestation. Preserve that evidence
+        // and do not treat its zero AAGUID as an authenticator identity claim.
+        let anonymized_parent = client_data_json.is_some()
+            && material.parent_attestation_format == "none"
+            && material.parent_attestation_statement_empty
+            && material.credential.aaguid == [0; AAGUID_LENGTH];
+        if material.credential.aaguid != material.signing_key.aaguid && !anonymized_parent {
             return Err(PreviewSignError::Malformed(
                 "parent credential and signing key use different AAGUIDs",
             ));
@@ -208,7 +245,36 @@ impl PreviewSignRegistration {
             make_credential_response,
             token_serial_hint,
             material,
+            client_data_json,
+            legacy_encoding: None,
         })
+    }
+
+    /// Import either canonical CBOR or a versioned WebAuthn server-export JSON
+    /// package. Network retrieval and RP ceremony validation belong to the caller.
+    pub fn from_import(encoded: &[u8]) -> Result<Self, PreviewSignError> {
+        if encoded.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
+            Self::from_webauthn_json(encoded)
+        } else {
+            Self::from_cbor(encoded)
+        }
+    }
+
+    /// Normalize browser export JSON into the canonical retained record.
+    pub fn from_webauthn_json(encoded: &[u8]) -> Result<Self, PreviewSignError> {
+        let (rp_id, client_data, response) = webauthn::decode_registration(encoded)?;
+        Self::with_client_data(
+            rp_id,
+            webauthn::validate_client_data(&client_data)?,
+            response,
+            None,
+            Some(client_data),
+        )
+    }
+
+    /// Original clientDataJSON bytes, when supplied by a WebAuthn ceremony.
+    pub fn client_data_json(&self) -> Option<&[u8]> {
+        self.client_data_json.as_deref()
     }
 
     /// Decode and validate the canonical wrapper.
@@ -221,6 +287,7 @@ impl PreviewSignRegistration {
         let mut client_data_hash = None;
         let mut response = None;
         let mut serial = None;
+        let mut evidence = None;
         for _ in 0..count {
             match decoder.u64()? {
                 1 if schema.is_none() => schema = Some(decoder.str()?.to_owned()),
@@ -256,6 +323,12 @@ impl PreviewSignRegistration {
                 }
                 6 if serial.is_none() => serial = Some(decoder.str()?.to_owned()),
                 6 => return Err(PreviewSignError::Malformed("duplicate token serial hint")),
+                7 if evidence.is_none() => evidence = Some(decoder.bytes()?.to_vec()),
+                7 => {
+                    return Err(PreviewSignError::Malformed(
+                        "duplicate client-data evidence",
+                    ));
+                }
                 _ => decoder.skip()?,
             }
         }
@@ -272,10 +345,26 @@ impl PreviewSignRegistration {
         let version = version.ok_or(PreviewSignError::Malformed(
             "missing registration schema version",
         ))?;
-        if version != SCHEMA_VERSION {
+        if !matches!(version, 1..=3) {
             return Err(PreviewSignError::UnsupportedSchemaVersion(version));
         }
-        let registration = Self::new(
+        if (version == 1 && evidence.is_some()) || (version == 2 && evidence.is_none()) {
+            return Err(PreviewSignError::Malformed(
+                "registration evidence version mismatch",
+            ));
+        }
+        let browser = if version == 2 {
+            Some(Self::from_webauthn_json(evidence.as_deref().ok_or(
+                PreviewSignError::Malformed("registration evidence version mismatch"),
+            )?)?)
+        } else {
+            None
+        };
+        let client_data = match &browser {
+            Some(browser) => browser.client_data_json.clone(),
+            None => evidence.clone(),
+        };
+        let mut registration = Self::with_client_data(
             rp_id.ok_or(PreviewSignError::Malformed(
                 "missing registration relying-party ID",
             ))?,
@@ -286,30 +375,47 @@ impl PreviewSignRegistration {
                 "missing makeCredential response",
             ))?,
             serial,
+            client_data,
         )?;
-        if registration.to_cbor()? != encoded {
+        if let Some(browser) = browser
+            && (browser.rp_id != registration.rp_id
+                || browser.client_data_hash != registration.client_data_hash
+                || browser.make_credential_response != registration.make_credential_response)
+        {
+            return Err(PreviewSignError::Malformed(
+                "inconsistent WebAuthn evidence",
+            ));
+        }
+        if registration.encode(version as u8, evidence.as_deref())? != encoded {
             return Err(PreviewSignError::Malformed(
                 "registration wrapper is not canonical",
             ));
         }
+        if version < u64::from(REGISTRATION_VERSION) {
+            registration.legacy_encoding = Some(encoded.to_vec());
+        }
         Ok(registration)
     }
 
-    /// Encode the wrapper in its canonical, versioned CBOR form.
+    /// Encode new records in the common schema. Restored legacy records retain
+    /// their validated encoding so existing derived-key references remain valid.
     pub fn to_cbor(&self) -> Result<Vec<u8>, PreviewSignError> {
+        match &self.legacy_encoding {
+            Some(encoded) => Ok(encoded.clone()),
+            None => self.encode(REGISTRATION_VERSION, self.client_data_json()),
+        }
+    }
+
+    fn encode(&self, version: u8, evidence: Option<&[u8]>) -> Result<Vec<u8>, PreviewSignError> {
         let mut encoded = Vec::new();
-        let count = if self.token_serial_hint.is_some() {
-            6
-        } else {
-            5
-        };
+        let count = 5 + u64::from(self.token_serial_hint.is_some()) + u64::from(evidence.is_some());
         let mut encoder = Encoder::new(&mut encoded);
         encoder
             .map(count)?
             .u8(1)?
             .str(REGISTRATION_SCHEMA)?
             .u8(2)?
-            .u8(SCHEMA_VERSION as u8)?
+            .u8(version)?
             .u8(3)?
             .str(&self.rp_id)?
             .u8(4)?
@@ -318,6 +424,9 @@ impl PreviewSignRegistration {
             .bytes(&self.make_credential_response)?;
         if let Some(serial) = &self.token_serial_hint {
             encoder.u8(6)?.str(serial)?;
+        }
+        if let Some(evidence) = evidence {
+            encoder.u8(7)?.bytes(evidence)?;
         }
         Ok(encoded)
     }
@@ -332,7 +441,8 @@ impl PreviewSignRegistration {
         &self.client_data_hash
     }
 
-    /// Return the exact CTAP `authenticatorMakeCredential` response map.
+    /// Return the CTAP response map: original for native registration, normalized
+    /// from the WebAuthn attestation objects for browser imports.
     pub fn make_credential_response(&self) -> &[u8] {
         &self.make_credential_response
     }
@@ -374,8 +484,8 @@ impl PreviewSignRegistration {
         self.material.policy
     }
 
-    /// Return the authenticator AAGUID shared by the parent credential and
-    /// nested signing-key attestation.
+    /// Return the parent credential AAGUID. Browser anonymization may set it
+    /// to zero; this value alone does not establish authenticator identity.
     pub fn aaguid(&self) -> &[u8; AAGUID_LENGTH] {
         &self.material.credential.aaguid
     }
@@ -612,6 +722,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
     let mut format = None;
     let mut authenticator_data = None;
     let mut attestation_statement = false;
+    let mut attestation_statement_empty = false;
     let mut unsigned_extension_output = None;
     for _ in 0..count {
         match decoder.u64()? {
@@ -630,6 +741,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
                 ));
             }
             3 if !attestation_statement => {
+                attestation_statement_empty = decoder.clone().map()? == Some(0);
                 require_map_value(
                     &mut decoder,
                     "makeCredential attestation statement is not a map",
@@ -661,7 +773,10 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
             "trailing makeCredential response data",
         ));
     }
-    if format.as_ref().is_none_or(String::is_empty) {
+    let format = format.ok_or(PreviewSignError::Malformed(
+        "missing makeCredential attestation format",
+    ))?;
+    if format.is_empty() {
         return Err(PreviewSignError::Malformed(
             "missing makeCredential attestation format",
         ));
@@ -687,6 +802,8 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
     let signing_key = parse_signing_key_attestation_object(&signing_key_attestation_object)?;
     let policy = parse_registration_policy(&signing_key.preview_sign_output)?;
     Ok(RegistrationMaterial {
+        parent_attestation_format: format,
+        parent_attestation_statement_empty: attestation_statement_empty,
         credential,
         signing_key,
         algorithm,
@@ -1310,7 +1427,8 @@ mod tests {
                 .unwrap();
         let encoded = registration.to_cbor().unwrap();
         assert_eq!(
-            crate::storage::ContentReference::for_object(&encoded).digest(),
+            crate::storage::ContentReference::for_object(&registration.encode(1, None).unwrap())
+                .digest(),
             [
                 0x9d, 0x77, 0x49, 0x3f, 0x69, 0xf1, 0xd7, 0xbe, 0x32, 0x8d, 0xc6, 0x0f, 0xc4, 0x5a,
                 0x1f, 0x99, 0x34, 0xa5, 0x4a, 0xdb, 0x9b, 0x96, 0x1e, 0x2e, 0xa9, 0x0a, 0x39, 0x32,
@@ -1322,6 +1440,83 @@ mod tests {
             PreviewSignRegistration::from_cbor(&encoded).unwrap(),
             registration
         );
+    }
+
+    #[test]
+    fn preview_sign_legacy_records_preserve_derived_key_references() {
+        let native = PreviewSignRegistration::new(
+            TEST_RP_ID,
+            [0x11; 32],
+            make_credential_response(),
+            Some("1656992924".into()),
+        )
+        .unwrap();
+        let export = browser_export(&native);
+        let browser = PreviewSignRegistration::from_import(&export).unwrap();
+        for (original, encoded) in [
+            (&native, native.encode(1, None).unwrap()),
+            (&browser, browser.encode(2, Some(&export)).unwrap()),
+        ] {
+            let restored = PreviewSignRegistration::from_cbor(&encoded).unwrap();
+            assert_eq!(restored.to_cbor().unwrap(), encoded);
+            assert_eq!(restored.credential_id(), original.credential_id());
+            assert_eq!(restored.client_data_json(), original.client_data_json());
+            let derived = restored
+                .derive_arkg_p256_with_ikm(&decode_hex(ARKG_VECTOR_IKM), ARKG_VECTOR_CONTEXT)
+                .unwrap();
+            let record = PreviewSignDerivedKeyRecord::new(
+                ContentReference::for_object(&encoded),
+                restored.algorithm(),
+                derived.verification_key_cose().to_vec(),
+                Some(derived.signing_arguments_cbor().to_vec()),
+                None,
+            )
+            .unwrap();
+            record.validate_for_registration(&restored).unwrap();
+            assert!(record.validate_for_registration(original).is_err());
+            let record =
+                PreviewSignDerivedKeyRecord::from_cbor(&record.to_cbor().unwrap()).unwrap();
+            record
+                .validate_for_registration(&PreviewSignRegistration::from_import(&encoded).unwrap())
+                .unwrap();
+            let mut noncanonical = vec![encoded[0], 0x18, 0x01];
+            noncanonical.extend_from_slice(&encoded[2..]);
+            assert!(PreviewSignRegistration::from_cbor(&noncanonical).is_err());
+        }
+        let mut bad_browser = browser.encode(2, Some(&export)).unwrap();
+        let pos = bad_browser
+            .windows(32)
+            .position(|bytes| bytes == browser.client_data_hash())
+            .unwrap();
+        bad_browser[pos] ^= 1;
+        assert!(PreviewSignRegistration::from_cbor(&bad_browser).is_err());
+    }
+
+    #[test]
+    fn preview_sign_browser_export_details_do_not_affect_retained_encoding() {
+        let native =
+            PreviewSignRegistration::new(TEST_RP_ID, [0x11; 32], make_credential_response(), None)
+                .unwrap();
+        let export = browser_export(&native);
+        let browser = PreviewSignRegistration::from_import(&export).unwrap();
+        let mut with_extra: serde_json::Value = serde_json::from_slice(&export).unwrap();
+        with_extra["credential"]["authenticatorAttachment"] = serde_json::json!("cross-platform");
+        with_extra["credential"]["response"]["transports"] = serde_json::json!(["usb", "nfc"]);
+        let reserialized = serde_json::to_vec_pretty(&with_extra).unwrap();
+        let imported = PreviewSignRegistration::from_import(&reserialized).unwrap();
+        assert_eq!(imported.to_cbor().unwrap(), browser.to_cbor().unwrap());
+        assert!(browser.to_cbor().unwrap().len() < export.len());
+        assert!(native.client_data_json().is_none());
+        // Both newly generated and browser-imported registrations use schema 3.
+        for registration in [native, browser] {
+            let encoded = registration.to_cbor().unwrap();
+            let mut decoder = Decoder::new(&encoded);
+            decoder.map().unwrap();
+            decoder.u8().unwrap();
+            decoder.str().unwrap();
+            decoder.u8().unwrap();
+            assert_eq!(decoder.u8().unwrap(), REGISTRATION_VERSION);
+        }
     }
 
     #[test]
@@ -1405,6 +1600,196 @@ mod tests {
                 "trailing registration wrapper data"
             ))
         ));
+    }
+
+    #[test]
+    fn preview_sign_webauthn_import_preserves_evidence_and_uses_shared_material() {
+        let native =
+            PreviewSignRegistration::new(TEST_RP_ID, [0x11; 32], make_credential_response(), None)
+                .unwrap();
+        let export = browser_export(&native);
+        let browser = PreviewSignRegistration::from_import(&export).unwrap();
+        assert_eq!(
+            browser.make_credential_response(),
+            native.make_credential_response()
+        );
+        assert_eq!(browser.credential_id(), native.credential_id());
+        assert_eq!(browser.signing_key_handle(), native.signing_key_handle());
+        assert_eq!(
+            browser.signing_seed_public_key_cose(),
+            native.signing_seed_public_key_cose()
+        );
+        assert_eq!(
+            browser.client_data_json(),
+            Some(
+                br#"{"type":"webauthn.create","challenge":"AQID","origin":"https://example.com"}"#
+                    .as_slice()
+            )
+        );
+        assert_ne!(browser.client_data_hash(), native.client_data_hash());
+        let encoded = browser.to_cbor().unwrap();
+        assert_eq!(
+            PreviewSignRegistration::from_cbor(&encoded).unwrap(),
+            browser
+        );
+        assert_eq!(
+            PreviewSignRegistration::from_import(&native.to_cbor().unwrap()).unwrap(),
+            native
+        );
+        let ikm = decode_hex(ARKG_VECTOR_IKM);
+        assert_eq!(
+            browser
+                .derive_arkg_p256_with_ikm(&ikm, ARKG_VECTOR_CONTEXT)
+                .unwrap()
+                .verification_key_cose(),
+            native
+                .derive_arkg_p256_with_ikm(&ikm, ARKG_VECTOR_CONTEXT)
+                .unwrap()
+                .verification_key_cose()
+        );
+        let mut tampered = encoded;
+        let hash_pos = tampered
+            .windows(32)
+            .position(|window| window == browser.client_data_hash())
+            .unwrap();
+        tampered[hash_pos] ^= 1;
+        assert!(matches!(
+            PreviewSignRegistration::from_cbor(&tampered),
+            Err(PreviewSignError::Malformed("inconsistent client-data hash"))
+        ));
+    }
+
+    #[test]
+    fn preview_sign_webauthn_import_accepts_only_explicit_parent_anonymization() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let native =
+            PreviewSignRegistration::new(TEST_RP_ID, [0x11; 32], make_credential_response(), None)
+                .unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&browser_export(&native)).unwrap();
+        let rewrite = |format: &str, empty_statement: bool| {
+            let mut value = original.clone();
+            let field = value
+                .pointer_mut("/credential/response/attestationObject")
+                .unwrap();
+            let bytes = URL_SAFE_NO_PAD.decode(field.as_str().unwrap()).unwrap();
+            let mut decoder = Decoder::new(&bytes);
+            decoder.map().unwrap();
+            decoder.str().unwrap();
+            decoder.str().unwrap();
+            decoder.str().unwrap();
+            let mut auth_data = decoder.bytes().unwrap().to_vec();
+            auth_data[37..53].fill(0);
+            let mut attestation = Vec::new();
+            let mut encoder = Encoder::new(&mut attestation);
+            encoder
+                .map(3)
+                .unwrap()
+                .str("fmt")
+                .unwrap()
+                .str(format)
+                .unwrap()
+                .str("authData")
+                .unwrap()
+                .bytes(&auth_data)
+                .unwrap()
+                .str("attStmt")
+                .unwrap();
+            if empty_statement {
+                encoder.map(0).unwrap();
+            } else {
+                encoder
+                    .map(1)
+                    .unwrap()
+                    .str("unexpected")
+                    .unwrap()
+                    .u8(0)
+                    .unwrap();
+            }
+            *field = serde_json::json!(URL_SAFE_NO_PAD.encode(attestation));
+            serde_json::to_vec(&value).unwrap()
+        };
+        let anonymized_export = rewrite("none", true);
+        let browser = PreviewSignRegistration::from_import(&anonymized_export).unwrap();
+        let legacy = browser.encode(2, Some(&anonymized_export)).unwrap();
+        let restored = PreviewSignRegistration::from_cbor(&legacy).unwrap();
+        assert_eq!(restored.to_cbor().unwrap(), legacy);
+        assert_eq!(restored.aaguid(), &[0; 16]);
+        assert_eq!(browser.aaguid(), &[0; 16]);
+        assert_eq!(
+            PreviewSignRegistration::from_cbor(&browser.to_cbor().unwrap()).unwrap(),
+            browser
+        );
+        assert!(
+            PreviewSignRegistration::new(
+                TEST_RP_ID,
+                *browser.client_data_hash(),
+                browser.make_credential_response(),
+                None
+            )
+            .is_err()
+        );
+        assert!(PreviewSignRegistration::from_import(&rewrite("packed", true)).is_err());
+        assert!(PreviewSignRegistration::from_import(&rewrite("none", false)).is_err());
+    }
+
+    #[test]
+    fn preview_sign_webauthn_import_rejects_incomplete_or_inconsistent_results() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let native =
+            PreviewSignRegistration::new(TEST_RP_ID, [0x11; 32], make_credential_response(), None)
+                .unwrap();
+        let export = browser_export(&native);
+        let original: serde_json::Value = serde_json::from_slice(&export).unwrap();
+        for pointer in [
+            "/rpId",
+            "/credential/id",
+            "/credential/rawId",
+            "/credential/type",
+            "/credential/response/clientDataJSON",
+            "/credential/response/attestationObject",
+            "/credential/clientExtensionResults/previewSign/generatedKey/keyHandle",
+            "/credential/clientExtensionResults/previewSign/generatedKey/publicKey",
+            "/credential/clientExtensionResults/previewSign/generatedKey/algorithm",
+            "/credential/clientExtensionResults/previewSign/generatedKey/attestationObject",
+        ] {
+            let mut value = original.clone();
+            *value.pointer_mut(pointer).unwrap() = serde_json::json!("wrong");
+            assert!(
+                PreviewSignRegistration::from_import(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut value = original.clone();
+        value["credential"]["clientExtensionResults"] = serde_json::json!({});
+        assert!(
+            PreviewSignRegistration::from_import(&serde_json::to_vec(&value).unwrap()).is_err()
+        );
+        // Change only the nested signing key's RP hash, AAGUID, or counter.
+        for offset in [0, 37, 36] {
+            let mut value = original.clone();
+            let encoded = value
+                .pointer_mut(
+                    "/credential/clientExtensionResults/previewSign/generatedKey/attestationObject",
+                )
+                .unwrap();
+            let mut bytes = URL_SAFE_NO_PAD.decode(encoded.as_str().unwrap()).unwrap();
+            let mut decoder = Decoder::new(&bytes);
+            decoder.map().unwrap();
+            decoder.str().unwrap();
+            decoder.str().unwrap();
+            decoder.str().unwrap();
+            let auth_data = decoder.bytes().unwrap();
+            let start = decoder.position() - auth_data.len();
+            bytes[start + offset] ^= 1;
+            *encoded = serde_json::json!(URL_SAFE_NO_PAD.encode(bytes));
+            assert!(
+                PreviewSignRegistration::from_import(&serde_json::to_vec(&value).unwrap()).is_err()
+            );
+        }
+        let duplicate = String::from_utf8(export)
+            .unwrap()
+            .replace("\"version\":1", "\"version\":1,\"version\":1");
+        assert!(PreviewSignRegistration::from_import(duplicate.as_bytes()).is_err());
     }
 
     #[test]

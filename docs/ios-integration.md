@@ -304,12 +304,14 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
 - [Swift iPhone smoke test](../examples/ios/PKCS11RSPhoneSmoke/README.md) and
   [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) exercise
   the same direct C ABI, initialization profile, slot order, authentication
-  sequence, and functional coverage. Both configure the persistent embedded
-  PIV/FIDO2 reader rather than a software slot; inventory USB CCID, NFC,
-  platform, and remote YubiHSM slots; report ML-DSA, ML-KEM, and
-  MLKEM768-X25519 mechanism flags including `CKF_HW`; run the explicit PIV
-  SO-to-USER provisioning and operation sequence; and exercise FIDO2
-  previewSign. Failures after successful advertisement remain visible so the
+  sequence, and functional coverage. Both configure host token storage without
+  embedded readers or software slots; inventory USB CCID, NFC, platform, and
+  remote YubiHSM slots; report ML-DSA, ML-KEM, and MLKEM768-X25519 mechanism
+  flags including `CKF_HW`; and exercise hardware FIDO2 previewSign when its
+  mechanisms are advertised. The physical smoke-test YubiKey uses explicit
+  prototype PIN `123456` for USER and fresh context-specific logins. Mutable
+  PIN buffers are erased after each call; the module does not cache PINs.
+  Failures after successful advertisement remain visible so the
   report qualifies implementation as well as discovery. Both examples cover
   YubiHSM Auth matching and login, object inventory, debug Unified Logging,
   platform-credential lifecycle, and long-lived application behavior. The

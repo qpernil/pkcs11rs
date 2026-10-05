@@ -452,18 +452,20 @@ names, and every returned string remains owned by the library for the lifetime
 of the process. Each refresh reports ML-DSA and ML-KEM advertisement and
 `CKF_HW` state on every present slot, then generates or reuses and exercises the
 corresponding persistent PQC keypairs wherever the required mechanisms are
-available. Its embedded FIDO2 slot also creates and persists a previewSign
+available. On supported hardware FIDO2 slots it creates and persists a previewSign
 ARKG-P256 registration and derived-key chain on the first refresh; subsequent
 refreshes request a new authenticator signature and verify it through the
 projected public key and ordinary `CKM_ECDSA` without recreating the
-credential.
+credential. The physical smoke-test YubiKey uses prototype FIDO2 PIN `123456`
+for user login and fresh signing authorization. The smoke profiles configure
+no embedded readers.
 
 The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
 storage, and diagnostics guidance for both Swift and Objective-C applications.
 The [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke) demonstrates
 direct calls to the same statically linked C ABI and mirrors the Swift app's
-configuration, object inventory, embedded PIV/FIDO2, post-quantum, YubiHSM
+configuration, object inventory, hardware FIDO2 previewSign, post-quantum, YubiHSM
 Auth, and platform-credential coverage.
 
 ### Asynchronous multi-device connector
@@ -860,8 +862,11 @@ providers may store only public objects or unencrypted private previewSign
 protocol metadata. On Unix, new object files use mode `0600`, but the caller
 remains responsible for protecting and backing up the configured directory.
 Storage corruption is reported instead of silently ignored. The serial
-binding and positive previewSign interoperability still require qualification
-with compatible hardware. See [Named software slots](docs/software.md) and
+binding across reconnects and durable-store restoration still requires
+hardware qualification. The two-key previewSign lifecycle passes on a
+physical YubiKey 5C NFC with firmware 5.8.0 through both Rust and external
+dynamic-library tests; see [qualification scope](docs/preview-sign.md#hardware-status).
+See [Named software slots](docs/software.md) and
 [Content-addressed CBOR storage](docs/storage.md).
 
 ## CCID Configuration
@@ -1368,7 +1373,9 @@ MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and
 error mapping, COSE/CBOR, object storage, and session state remain in this repository. The required sibling layout described
 under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
 always see first-party edits immediately; there is no dependency-source switch
-or generated override.
+or generated override. CI checks out the `virtual-yubikey` revision specified
+by `VIRTUAL_YUBIKEY_REVISION` in its workflow so the embedded PreviewSign
+producer uses the same DER signature contract as the host parser.
 
 The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,
@@ -1382,8 +1389,9 @@ deterministic resident credential through previewSign registration and then
 exercise credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification
 through its projected public key. It also implements the complete experimental
-previewSign PKCS #11 flow: credential registration, registration-attribute
-export/import, offline ARKG derivation, derived-key metadata export and strict
+previewSign PKCS #11 flow: directly derivable generated registrations, browser
+registration JSON import, canonical registration-attribute export/import, offline
+ARKG derivation, derived-key metadata export and strict
 re-import, GetAssertion signing, public-key projection, and PKCS #11
 verification with the derived public key.
 
@@ -1401,7 +1409,11 @@ serial install separate durable local providers for each applet and
 automatically restore their saved backed objects. `PKCS11RS_FIDO2_STORAGE`
 configures durable storage for FIDO2 slots only. Applications can also restore
 exported previewSign registration or derived-key wrappers manually through
-`C_CreateObject`.
+`C_CreateObject`. The registration attribute also accepts the versioned
+browser/server WebAuthn JSON export; pkcs11rs normalizes it internally and uses
+the same derivation and signing paths as locally generated registrations. Only
+the original generating handle can delete the hardware parent credential;
+imported records affect host storage only. See [the import format](docs/preview-sign.md#browser-server-registration-import).
 
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct

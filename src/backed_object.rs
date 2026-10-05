@@ -392,9 +392,10 @@ pub(crate) fn encode_backed_object(object: &TokenObject) -> Result<EncodedBacked
                 dependencies: Vec::new(),
             })
         }
-        KeyMaterial::PreviewSignRegistration { registration }
-            if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
-        {
+        KeyMaterial::PreviewSignRegistration {
+            registration,
+            owns_credential: false,
+        } if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
             let registration = registration
                 .to_cbor()
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?;
@@ -451,7 +452,7 @@ pub(crate) fn supports_backed_object(object: &TokenObject) -> bool {
     ) || matches!(
         (&object.material, object.class),
         (
-            KeyMaterial::PreviewSignRegistration { .. }
+            KeyMaterial::PreviewSignRegistration { owns_credential: false, .. }
                 | KeyMaterial::PreviewSignDerived { .. },
             class
         ) if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -863,7 +864,10 @@ pub(crate) fn decode_backed_object(
                 reference,
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 attributes,
-                KeyMaterial::PreviewSignRegistration { registration },
+                KeyMaterial::PreviewSignRegistration {
+                    registration,
+                    owns_credential: false,
+                },
                 None,
             )
             .map(Some)

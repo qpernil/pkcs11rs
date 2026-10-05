@@ -11,10 +11,9 @@ both signed apps remain installed and provisioned at the same time.
 
 Both apps configure CryptoTokenKit NFC discovery, the local or overridden
 YubiHSM connector, prototype YubiHSM public discovery, the Secure Enclave host
-slot, and one persistent embedded CCID reader. The embedded reader has stable
-configuration ID `iphone-smoke`, display name
-`pkcs11rs embedded CCID reader`, serial `1`, and the PIV and FIDO2 applets.
-Neither app configures a software slot.
+slot, and host token storage. Neither app configures an embedded reader or
+software slot. Physical FIDO2 devices are selected for PreviewSign by their
+advertised generation, derivation, and signing mechanisms.
 
 The inventory opens a public session for every present slot and reports its
 objects. It then retains a no-secret `C_Login(CKU_USER, NULL_PTR, 0)` session
@@ -55,19 +54,23 @@ for retired references `0x82`, `0x83`, and `0x84`; YubiHSM IDs `0x7e20`,
 `0x7e21`, and `0x7e22`; and descriptive byte-string IDs for other
 providers.
 
-The embedded PIV flow reports public objects and mechanisms, then calls
-`C_Login(CKU_SO)` with the factory management key immediately before checking
-the three reserved public-key identifiers and generating any missing pairs. It
-always calls `C_Logout`, then
-`C_Login(CKU_USER)` with factory PIN `123456`, performs signing and
-decapsulation without a generation fallback, and lists the authenticated
-objects. Both logins occur on every refresh even when all pairs already exist.
+The FIDO2 PreviewSign flow creates or reuses the persisted registration and
+ARKG-P256 derived-key wrapper, requests `C_Login(CKU_CONTEXT_SPECIFIC)`, projects
+the public key, and verifies the signature with `CKM_ECDSA`. The physical
+smoke-test YubiKey must already have FIDO2 PIN `123456`. The apps use that
+explicit prototype credential for USER login and fresh context-specific
+signing authorization. Each call builds and erases its mutable UTF-8 PIN
+buffer; the module does not cache the PIN or reuse signing authorization. The
+literal test PIN remains in the sample app binary. Touch the authenticator
+when it flashes. Unsupported devices are skipped before login. The apps do not
+set or change the device PIN and do not depend on the module's unimplemented
+iOS protected authentication path.
 
-The embedded FIDO2 flow uses PIN `123456`. It creates or reuses the persisted
-previewSign registration and ARKG-P256 derived-key wrapper, performs
-`C_Login(CKU_CONTEXT_SPECIFIC)`, projects the public key, and verifies the
-previewSign result with `CKM_ECDSA`. It also runs the advertised
-post-quantum cases under the same user login.
+The first run creates a persistent credential and signing seed on hardware and
+saves its registration and derived ticket in the app's token-storage directory.
+Later refreshes and app relaunches reuse the derived key. Physical PIV slots
+receive public inventory and mechanism reports without automatic factory login
+or provisioning.
 
 The platform-credential button exercises the same idempotent lifecycle as the
 Swift app: bootstrap login, provision or repair every present YubiHSM, logout,

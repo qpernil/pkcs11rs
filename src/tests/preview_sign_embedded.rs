@@ -999,7 +999,32 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
     let mut class = CKO_PRIVATE_KEY as CK_ULONG;
     let mut session_object = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
-    let mut registration_value = registration.clone();
+    let native_registration =
+        crate::preview_sign::PreviewSignRegistration::from_cbor(&registration).unwrap();
+    let mut registration_value = crate::preview_sign::browser_export(&native_registration);
+    let mut malformed_export = registration_value.clone();
+    malformed_export[0] = b'[';
+    let mut malformed_template = [
+        ulong_attribute(
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            &mut registration_key_type,
+        ),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            &mut malformed_export,
+        ),
+    ];
+    let mut rejected_handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            malformed_template.as_mut_ptr(),
+            malformed_template.len() as CK_ULONG,
+            &mut rejected_handle
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+    assert_eq!(rejected_handle, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
     let mut import_template = [
         ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         ulong_attribute(
@@ -1039,6 +1064,34 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
 
+    let registration = read_attribute(
+        session,
+        registration_key,
+        crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+    );
+    assert!(
+        crate::preview_sign::PreviewSignRegistration::from_cbor(&registration)
+            .unwrap()
+            .client_data_json()
+            .is_some()
+    );
+    assert_eq!(
+        read_attribute(
+            session,
+            credential_private_key,
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE
+        ),
+        crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION.to_ne_bytes()
+    );
+    assert_eq!(
+        read_attribute(
+            session,
+            credential_private_key,
+            CKA_DERIVE as CK_ATTRIBUTE_TYPE
+        ),
+        [CK_TRUE as u8]
+    );
+
     let mut context = b"pkcs11rs previewSign demo".to_vec();
     mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
@@ -1073,6 +1126,25 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         ),
         registration
     );
+    // Generation returns a directly derivable registration using the same
+    // object implementation as browser/CBOR imports.
+    let mut generated_signing_key = 0;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut mechanism,
+            credential_private_key,
+            derived_template.as_mut_ptr(),
+            derived_template.len() as CK_ULONG,
+            &mut generated_signing_key
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, generated_signing_key),
+        CKR_OK as CK_RV
+    );
+
     let derived_encoded = read_attribute(
         session,
         signing_key,
@@ -1205,6 +1277,24 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
             crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
         ),
         derived_encoded
+    );
+
+    let mut imported_session_token = CK_FALSE as CK_BBOOL;
+    import_template[2] =
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut imported_session_token);
+    let mut disposable_registration = 0;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            import_template.as_mut_ptr(),
+            import_template.len() as CK_ULONG,
+            &mut disposable_registration
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, disposable_registration),
+        CKR_OK as CK_RV
     );
 
     let mut project_mechanism = CK_MECHANISM {
@@ -1411,8 +1501,12 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
         bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
     ];
+    let mut generated_registration_type = crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION;
     let mut private_template = [
-        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        ulong_attribute(
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            &mut generated_registration_type,
+        ),
         bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
         bool_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
     ];
@@ -1440,7 +1534,9 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
     let mut class = CKO_PRIVATE_KEY as CK_ULONG;
     let mut registration_key_type = crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION as CK_ULONG;
     let mut derive = CK_TRUE as CK_BBOOL;
-    let mut registration_value = registration.clone();
+    let native_registration =
+        crate::preview_sign::PreviewSignRegistration::from_cbor(&registration).unwrap();
+    let mut registration_value = crate::preview_sign::browser_export(&native_registration);
     let mut registration_template = [
         ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         ulong_attribute(
@@ -1464,6 +1560,12 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
             &mut registration_key,
         ),
         CKR_OK as CK_RV
+    );
+
+    let registration = read_attribute(
+        session,
+        registration_key,
+        crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
     );
 
     let mut context = b"pkcs11rs persisted previewSign demo".to_vec();

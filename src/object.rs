@@ -329,11 +329,11 @@ pub(crate) enum KeyMaterial {
     FidoResidentPrivate {
         credential_id: Vec<u8>,
     },
-    FidoPreviewCredential {
-        registration: crate::preview_sign::PreviewSignRegistration,
-    },
     PreviewSignRegistration {
         registration: crate::preview_sign::PreviewSignRegistration,
+        // Only the generating handle owns CTAP deleteCredential authority.
+        // Import and persistent restoration never inherit this flag.
+        owns_credential: bool,
     },
     PreviewSignDerived {
         registration: crate::preview_sign::PreviewSignRegistration,
@@ -517,9 +517,6 @@ impl std::fmt::Debug for KeyMaterial {
                 .finish(),
             Self::FidoResidentPrivate { .. } => fmt
                 .debug_struct("FidoResidentPrivate")
-                .finish_non_exhaustive(),
-            Self::FidoPreviewCredential { .. } => fmt
-                .debug_struct("FidoPreviewCredential")
                 .finish_non_exhaustive(),
             Self::PreviewSignRegistration { .. } => fmt
                 .debug_struct("PreviewSignRegistration")
@@ -1340,8 +1337,7 @@ impl TokenObject {
                 attribute_type,
                 CKA_YUBICO_HSMAUTH_RETRIES | CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED
             ),
-            KeyMaterial::FidoPreviewCredential { .. }
-            | KeyMaterial::PreviewSignRegistration { .. } => {
+            KeyMaterial::PreviewSignRegistration { .. } => {
                 attribute_type == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION
             }
             KeyMaterial::PreviewSignDerived { .. } => matches!(
@@ -1723,8 +1719,7 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION => match &self.material {
-                KeyMaterial::FidoPreviewCredential { registration, .. }
-                | KeyMaterial::PreviewSignRegistration { registration }
+                KeyMaterial::PreviewSignRegistration { registration, .. }
                 | KeyMaterial::PreviewSignDerived { registration, .. } => {
                     registration.to_cbor().ok()
                 }

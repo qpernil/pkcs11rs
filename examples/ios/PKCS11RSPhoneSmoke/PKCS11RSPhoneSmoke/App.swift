@@ -3,8 +3,6 @@ import UIKit
 
 private let connectorURLKey = "PKCS11RSConnectorURL"
 private let fallbackConnectorURL = "http://plankan-9.duckdns.org:12345"
-private let embeddedReaderName = "pkcs11rs embedded CCID reader"
-private let embeddedReaderSerial = 1
 private let initialSlotListCapacity = 10
 private let objectFindBatchCapacity = 64
 private let objectAttributeBufferCapacity = 1024
@@ -104,15 +102,6 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "storage": [
             "tokens": tokenStoragePath,
         ],
-        "embedded": [
-            "readers": [[
-                "id": "iphone-smoke",
-                "name": embeddedReaderName,
-                "serial": embeddedReaderSerial,
-                "persistent": true,
-                "applets": ["piv", "fido2"],
-            ]],
-        ],
         "platform": ["enabled": true],
         "yubihsm": [
             "urls": [url],
@@ -208,13 +197,6 @@ private func isYubiHsmTokenLabel(_ tokenLabel: String) -> Bool {
 
 private func isHostTokenLabel(_ tokenLabel: String) -> Bool {
     tokenLabel == "Secure Enclave"
-}
-
-private func isConfiguredEmbeddedReaderSlot(_ inventory: SlotInventory) -> Bool {
-    // The configured serial is the stable PKCS #11 identity shared by this
-    // reader's applet slots. The slot description is display text assembled by
-    // the backend and must not decide which authentication workflow is used.
-    inventory.serial == String(embeddedReaderSerial)
 }
 
 private func authenticatedCredentialDescription(_ session: CK_SESSION_HANDLE) -> String {
@@ -947,7 +929,8 @@ private func resolvePreviewSignKey(
 private func exercisePreviewSign(
     session: CK_SESSION_HANDLE,
     signingKey: CK_OBJECT_HANDLE,
-    lines: inout [String]
+    lines: inout [String],
+    login: (CK_SESSION_HANDLE, CK_USER_TYPE) -> CK_RV
 ) -> (result: CK_RV, operation: String, signatureLength: Int, milliseconds: Double) {
     var project = CK_MECHANISM(
         mechanism: ckmProjectPublicKey,
@@ -992,15 +975,7 @@ private func exercisePreviewSign(
     let started = ProcessInfo.processInfo.systemUptime
     result = C_SignInit(session, &signMechanism, signingKey)
     guard result == CKR_OK else { return (result, "C_SignInit(previewSign)", 0, 0) }
-    var pin = Array("123456".utf8)
-    result = pin.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_CONTEXT_SPECIFIC),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
+    result = login(session, CK_USER_TYPE(CKU_CONTEXT_SPECIFIC))
     lines.append(loginResultLine(CK_USER_TYPE(CKU_CONTEXT_SPECIFIC), result: result))
     guard result == CKR_OK else { return (result, "C_Login(CKU_CONTEXT_SPECIFIC)", 0, 0) }
     var signatureLength = CK_ULONG()
@@ -1045,7 +1020,32 @@ private func exercisePreviewSign(
     return (result, "C_Verify(ECDSA)", signature.count, milliseconds)
 }
 
-private func embeddedFidoPreviewSignSmoke(slot: CK_SLOT_ID) -> [String] {
+// Explicit test-device credential, supplied anew and erased after each login.
+// The physical smoke-test YubiKey must already have FIDO2 PIN 123456.
+private func smokeFidoLogin(session: CK_SESSION_HANDLE, user: CK_USER_TYPE) -> CK_RV {
+    var pin = Array("123456".utf8)
+    defer {
+        _ = pin.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+    }
+    return pin.withUnsafeMutableBufferPointer {
+        C_Login(session, user, $0.baseAddress, CK_ULONG($0.count))
+    }
+}
+
+private func hasPreviewSignSupport(_ slot: CK_SLOT_ID) -> Bool {
+    [(ckmPreviewSignKeyPairGen, CK_FLAGS(CKF_GENERATE_KEY_PAIR)),
+     (ckmPreviewSignDerive, CK_FLAGS(CKF_DERIVE)),
+     (ckmPreviewSign, CK_FLAGS(CKF_SIGN))].allSatisfy { mechanism, flags in
+        var information = CK_MECHANISM_INFO()
+        return C_GetMechanismInfo(slot, mechanism, &information) == CKR_OK
+            && information.flags & flags == flags
+    }
+}
+
+private func fidoPreviewSignSmoke(
+    slot: CK_SLOT_ID,
+    login: (CK_SESSION_HANDLE, CK_USER_TYPE) -> CK_RV
+) -> [String] {
     var lines = ["", "FIDO previewSign ARKG-P256:"]
     var session = CK_SESSION_HANDLE(CK_INVALID_HANDLE)
     let open = C_OpenSession(
@@ -1059,17 +1059,9 @@ private func embeddedFidoPreviewSignSmoke(slot: CK_SLOT_ID) -> [String] {
         return lines + ["  open failed: \(returnValueDescription(open))"]
     }
     defer { _ = C_CloseSession(session) }
-    var pin = Array("123456".utf8)
-    let login = pin.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_USER),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-    lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: login))
-    guard login == CKR_OK || login == CKR_USER_ALREADY_LOGGED_IN else {
+    let result = login(session, CK_USER_TYPE(CKU_USER))
+    lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: result))
+    guard result == CKR_OK || result == CKR_USER_ALREADY_LOGGED_IN else {
         return lines + ["  user login failed"]
     }
     defer { _ = C_Logout(session) }
@@ -1084,7 +1076,8 @@ private func embeddedFidoPreviewSignSmoke(slot: CK_SLOT_ID) -> [String] {
     let exercised = exercisePreviewSign(
         session: session,
         signingKey: resolved.key,
-        lines: &lines
+        lines: &lines,
+        login: login
     )
     guard exercised.result == CKR_OK else {
         return lines + [
@@ -1584,59 +1577,6 @@ private func resolvePostQuantumPair(
     )
 }
 
-private func generatePivPostQuantumPair(
-    session: CK_SESSION_HANDLE,
-    mechanismType: CK_MECHANISM_TYPE,
-    parameterSet: CK_ULONG?,
-    label: String,
-    identifier: [UInt8],
-    publicUsageAttribute: CK_ATTRIBUTE_TYPE,
-    privateUsageAttribute: CK_ATTRIBUTE_TYPE
-) -> PostQuantumPair {
-    let generationState = currentSessionState(session)
-    guard generationState.result == CKR_OK else {
-        return PostQuantumPair(
-            result: generationState.result,
-            publicKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
-            privateKey: CK_OBJECT_HANDLE(CK_INVALID_HANDLE),
-            status: "C_GetSessionInfo before C_GenerateKeyPair failed"
-        )
-    }
-    let started = ProcessInfo.processInfo.systemUptime
-    let generated = generatePostQuantumKeyPair(
-        session: session,
-        mechanismType: mechanismType,
-        parameterSet: parameterSet,
-        label: label,
-        identifier: identifier,
-        publicUsageAttribute: publicUsageAttribute,
-        privateUsageAttribute: privateUsageAttribute
-    )
-    let milliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1_000
-    return PostQuantumPair(
-        result: generated.result,
-        publicKey: generated.publicKey,
-        privateKey: generated.privateKey,
-        status: generated.result == CKR_OK
-            ? String(format: "generated in %.3f ms", milliseconds)
-            : "C_GenerateKeyPair failed in \(sessionStateDescription(generationState.state))"
-    )
-}
-
-private func pivPublicKeyIsMissing(
-    session: CK_SESSION_HANDLE,
-    keyType: CK_KEY_TYPE,
-    identifier: [UInt8]
-) -> (result: CK_RV, missing: Bool) {
-    let found = findKey(
-        session: session,
-        objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
-        keyType: keyType,
-        identifier: identifier
-    )
-    return (found.result, found.object == nil)
-}
-
 private func exercisePostQuantumMechanisms(
     session: CK_SESSION_HANDLE,
     tokenLabel: String,
@@ -1828,267 +1768,6 @@ private func unauthenticatedPostQuantumSmoke(
         tokenLabel: tokenLabel,
         support: support
     )
-    let close = C_CloseSession(session)
-    if close != CKR_OK {
-        lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
-    }
-    return lines
-}
-
-private func embeddedPivPostQuantumSmoke(
-    slot: CK_SLOT_ID,
-    tokenLabel: String,
-    support: PostQuantumSupport
-) -> [String] {
-    guard support.any else { return [] }
-    var session = CK_SESSION_HANDLE()
-    let open = C_OpenSession(
-        slot,
-        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
-        nil,
-        nil,
-        &session
-    )
-    guard open == CKR_OK else {
-        return [
-            "",
-            "PQC functional smoke test:",
-            "  C_OpenSession(RW) failed: \(returnValueDescription(open))",
-        ]
-    }
-
-    var lines = [String]()
-    // Exercise the same explicit PKCS #11 sequence on every run. PIV differs
-    // only in requiring CKU_SO for key management before CKU_USER operations.
-    lines.append(contentsOf: objectInventory(
-        session: session,
-        title: "Objects (public RW session)"
-    ).lines)
-    lines.append(contentsOf: support.lines)
-    lines.append("")
-
-    var managementCredential = Array(
-        "010203040506070801020304050607080102030405060708".utf8
-    )
-    let managementLogin = managementCredential.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_SO),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-    _ = managementCredential.withUnsafeMutableBytes { bytes in
-        bytes.initializeMemory(as: UInt8.self, repeating: 0)
-    }
-    lines.append(loginResultLine(CK_USER_TYPE(CKU_SO), result: managementLogin))
-    guard managementLogin == CKR_OK || managementLogin == CKR_USER_ALREADY_LOGGED_IN else {
-        _ = C_CloseSession(session)
-        return lines
-    }
-
-    let identifiers = postQuantumIdentifiers(tokenLabel: tokenLabel)
-    let mlDsaMissing: (result: CK_RV, missing: Bool) = support.mlDsa
-        ? pivPublicKeyIsMissing(
-            session: session,
-            keyType: CK_KEY_TYPE(CKK_ML_DSA),
-            identifier: identifiers.mlDsa
-        )
-        : (CK_RV(CKR_OK), false)
-    let mlKemMissing: (result: CK_RV, missing: Bool) = support.mlKem
-        ? pivPublicKeyIsMissing(
-            session: session,
-            keyType: CK_KEY_TYPE(CKK_ML_KEM),
-            identifier: identifiers.mlKem
-        )
-        : (CK_RV(CKR_OK), false)
-    let hybridKemMissing: (result: CK_RV, missing: Bool) = support.hybridKem
-        ? pivPublicKeyIsMissing(
-            session: session,
-            keyType: ckkMlKem768X25519,
-            identifier: identifiers.hybridKem
-        )
-        : (CK_RV(CKR_OK), false)
-    guard mlDsaMissing.result == CKR_OK,
-          mlKemMissing.result == CKR_OK,
-          hybridKemMissing.result == CKR_OK
-    else {
-        let failure = mlDsaMissing.result != CKR_OK
-            ? mlDsaMissing.result
-            : (mlKemMissing.result != CKR_OK
-                ? mlKemMissing.result
-                : hybridKemMissing.result)
-        _ = C_CloseSession(session)
-        return lines + [
-            "  PQC PIV public-key discovery failed: \(returnValueDescription(failure))",
-        ]
-    }
-
-    if support.mlDsa {
-        if mlDsaMissing.missing {
-            let pair = generatePivPostQuantumPair(
-                session: session,
-                mechanismType: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
-                parameterSet: CK_ULONG(CKP_ML_DSA_87),
-                label: postQuantumMlDsaLabel,
-                identifier: identifiers.mlDsa,
-                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_VERIFY),
-                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_SIGN)
-            )
-            lines.append(
-                pair.result == CKR_OK
-                    ? "  ML-DSA-87 \(pair.status)"
-                    : "  advertised ML-DSA failed: \(pair.status): \(returnValueDescription(pair.result))"
-            )
-        } else {
-            lines.append("  ML-DSA-87 keypair already present")
-        }
-    }
-    if support.mlKem {
-        if mlKemMissing.missing {
-            let pair = generatePivPostQuantumPair(
-                session: session,
-                mechanismType: CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN),
-                parameterSet: CK_ULONG(CKP_ML_KEM_1024),
-                label: postQuantumMlKemLabel,
-                identifier: identifiers.mlKem,
-                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
-                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
-            )
-            lines.append(
-                pair.result == CKR_OK
-                    ? "  ML-KEM-1024 \(pair.status)"
-                    : "  advertised ML-KEM failed: \(pair.status): \(returnValueDescription(pair.result))"
-            )
-        } else {
-            lines.append("  ML-KEM-1024 keypair already present")
-        }
-    }
-    if support.hybridKem {
-        if hybridKemMissing.missing {
-            let pair = generatePivPostQuantumPair(
-                session: session,
-                mechanismType: ckmMlKem768X25519KeyPairGen,
-                parameterSet: nil,
-                label: postQuantumHybridKemLabel,
-                identifier: identifiers.hybridKem,
-                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
-                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
-            )
-            lines.append(
-                pair.result == CKR_OK
-                    ? "  MLKEM768-X25519 \(pair.status)"
-                    : "  advertised MLKEM768-X25519 failed: \(pair.status): \(returnValueDescription(pair.result))"
-            )
-        } else {
-            lines.append("  MLKEM768-X25519 keypair already present")
-        }
-    }
-
-    let managementLogout = C_Logout(session)
-    guard managementLogout == CKR_OK else {
-        _ = C_CloseSession(session)
-        return lines + [
-            "  C_Logout() => \(returnValueDescription(managementLogout))",
-        ]
-    }
-    lines.append("")
-
-    var userCredential = Array("123456".utf8)
-    let userLogin = userCredential.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_USER),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-    _ = userCredential.withUnsafeMutableBytes { bytes in
-        bytes.initializeMemory(as: UInt8.self, repeating: 0)
-    }
-    lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: userLogin))
-    guard userLogin == CKR_OK || userLogin == CKR_USER_ALREADY_LOGGED_IN else {
-        _ = C_CloseSession(session)
-        return lines
-    }
-    let operations = exercisePostQuantumMechanisms(
-        session: session,
-        tokenLabel: tokenLabel,
-        support: support,
-        allowGeneration: false,
-        reportPairStatus: false
-    )
-    lines.append("")
-    lines.append(contentsOf: operations.dropFirst(2))
-    lines.append(contentsOf: objectInventory(
-        session: session,
-        title: "Objects (authenticated RW session)"
-    ).lines)
-
-    let close = C_CloseSession(session)
-    if close != CKR_OK {
-        lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
-    }
-    return lines
-}
-
-private func embeddedFidoPostQuantumSmoke(
-    slot: CK_SLOT_ID,
-    tokenLabel: String,
-    support: PostQuantumSupport
-) -> [String] {
-    guard support.any else { return [] }
-    var session = CK_SESSION_HANDLE()
-    let open = C_OpenSession(
-        slot,
-        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
-        nil,
-        nil,
-        &session
-    )
-    guard open == CKR_OK else {
-        return [
-            "",
-            "PQC functional smoke test:",
-            "  C_OpenSession(RW) failed: \(returnValueDescription(open))",
-        ]
-    }
-
-    var userCredential = Array("123456".utf8)
-    let userLogin = userCredential.withUnsafeMutableBufferPointer { buffer in
-        C_Login(
-            session,
-            CK_USER_TYPE(CKU_USER),
-            buffer.baseAddress,
-            CK_ULONG(buffer.count)
-        )
-    }
-    _ = userCredential.withUnsafeMutableBytes { bytes in
-        bytes.initializeMemory(as: UInt8.self, repeating: 0)
-    }
-    var lines = [loginResultLine(CK_USER_TYPE(CKU_USER), result: userLogin)]
-    guard userLogin == CKR_OK || userLogin == CKR_USER_ALREADY_LOGGED_IN else {
-        _ = C_CloseSession(session)
-        return lines + [
-            "",
-            "PQC functional smoke test:",
-            "  user login failed: \(returnValueDescription(userLogin))",
-        ]
-    }
-
-    lines.append(contentsOf: exercisePostQuantumMechanisms(
-        session: session,
-        tokenLabel: tokenLabel,
-        support: support
-    ))
-    lines.append(contentsOf: objectInventory(
-        session: session,
-        title: "Objects (authenticated RW session)"
-    ).lines)
-    let userLogout = C_Logout(session)
-    if userLogout != CKR_OK {
-        lines.append("  FIDO2 user logout failed: \(returnValueDescription(userLogout))")
-    }
     let close = C_CloseSession(session)
     if close != CKR_OK {
         lines.append("  C_CloseSession failed: \(returnValueDescription(close))")
@@ -2453,31 +2132,14 @@ private final class ModuleInspector {
         for inventory in slotInventories where !inventory.isYubiHsm {
             appendSlotHeader(inventory)
             let support = postQuantumSupport(slot: inventory.slot)
-            let embeddedPiv = isConfiguredEmbeddedReaderSlot(inventory)
-                && isPivTokenLabel(inventory.tokenLabel)
-            if embeddedPiv {
-                // Login state is token-wide. Mechanism discovery and the first
-                // object inventory use RW-public state, followed by explicit
-                // SO provisioning, logout, and USER operations.
-                if support.any {
-                    lines.append(contentsOf: embeddedPivPostQuantumSmoke(
-                        slot: inventory.slot,
-                        tokenLabel: inventory.tokenLabel,
-                        support: support
-                    ))
-                } else {
-                    appendPublicObjects(inventory)
-                    lines.append(contentsOf: support.lines)
-                }
-                continue
-            }
-
             appendPublicObjects(inventory)
             lines.append(contentsOf: support.lines)
-            if isConfiguredEmbeddedReaderSlot(inventory)
-                && isFido2TokenLabel(inventory.tokenLabel)
-            {
-                lines.append(contentsOf: embeddedFidoPreviewSignSmoke(slot: inventory.slot))
+            if isFido2TokenLabel(inventory.tokenLabel) {
+                if hasPreviewSignSupport(inventory.slot) {
+                    lines.append(contentsOf: fidoPreviewSignSmoke(slot: inventory.slot, login: smokeFidoLogin))
+                } else {
+                    lines.append("  previewSign skipped: required mechanisms not advertised")
+                }
             }
             var authenticatedSession: CK_SESSION_HANDLE?
             if isHostTokenLabel(inventory.tokenLabel) {
@@ -2493,14 +2155,6 @@ private final class ModuleInspector {
                 if let authenticatedSession {
                     lines.append(contentsOf: exercisePostQuantumMechanisms(
                         session: authenticatedSession,
-                        tokenLabel: inventory.tokenLabel,
-                        support: support
-                    ))
-                } else if isConfiguredEmbeddedReaderSlot(inventory)
-                    && isFido2TokenLabel(inventory.tokenLabel)
-                {
-                    lines.append(contentsOf: embeddedFidoPostQuantumSmoke(
-                        slot: inventory.slot,
                         tokenLabel: inventory.tokenLabel,
                         support: support
                     ))

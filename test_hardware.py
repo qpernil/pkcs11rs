@@ -370,6 +370,7 @@ class HardwareDiscoveryTests(unittest.TestCase):
             private_template = (CK_ATTRIBUTE * len(private_attributes_with_storage))(
                 *(item[0] for item in private_attributes_with_storage)
             )
+            print("previewSign registration: touch the selected YubiKey when it flashes", flush=True)
             self.assertEqual(
                 self.lib.C_GenerateKeyPair(
                     session.value,
@@ -572,6 +573,11 @@ class HardwareDiscoveryTests(unittest.TestCase):
                         len(pin),
                     ),
                     CKR_OK,
+                )
+                print(
+                    f"previewSign signature {len(signatures) + 1}/2: "
+                    "touch the selected YubiKey when it flashes",
+                    flush=True,
                 )
                 self.assertEqual(
                     self.lib.C_Sign(

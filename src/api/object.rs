@@ -17,7 +17,7 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
         read_attribute_value(registration_attribute.ok_or(CKR_TEMPLATE_INCOMPLETE)?)
             .map_err(Error::from)?;
     let registration =
-        crate::preview_sign::PreviewSignRegistration::from_cbor(&registration_encoded)
+        crate::preview_sign::PreviewSignRegistration::from_import(&registration_encoded)
             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
     let derived = derived_attribute
         .map(|attribute| {
@@ -29,9 +29,17 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
                 })
         })
         .transpose()?;
+    preview_sign_object(templ, registration, derived).map(Some)
+}
+
+pub(super) fn preview_sign_object_template(
+    templ: &[CK_ATTRIBUTE],
+    derived: bool,
+) -> Result<TokenObject, Error> {
+    validate_unique_template(templ)?;
     let mut parsed = TokenObjectTemplate {
         class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
-        key_type: Some(if derived.is_some() {
+        key_type: Some(if derived {
             CKK_EC as CK_KEY_TYPE
         } else {
             CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
@@ -52,37 +60,48 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
         parsed.apply_attribute(attribute).map_err(Error::from)?;
     }
     let mut imported = parsed.into_object().map_err(Error::from)?;
+    let expected_type = if derived {
+        CKK_EC as CK_KEY_TYPE
+    } else {
+        CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+    };
+    if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || imported.key_type != expected_type {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    imported.sign = derived;
+    imported.derive = !derived;
+    Ok(imported)
+}
+
+pub(super) fn preview_sign_object(
+    templ: &[CK_ATTRIBUTE],
+    registration: crate::preview_sign::PreviewSignRegistration,
+    derived: Option<crate::preview_sign::PreviewSignDerivedKeyRecord>,
+) -> Result<TokenObject, Error> {
+    registration
+        .arkg_p256_public_seed()
+        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+    let mut imported = preview_sign_object_template(templ, derived.is_some())?;
     imported.local = false;
     imported.material = if let Some(derived) = derived {
-        if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || imported.key_type != CKK_EC as CK_KEY_TYPE
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
         derived
             .validate_for_registration(&registration)
             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
         let projected = project_cose_public_key(derived.verification_key_cose())
             .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
             .ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
-        imported.sign = true;
-        imported.derive = false;
         imported.public_key = Some(projected.public_key);
         KeyMaterial::PreviewSignDerived {
             registration,
             derived,
         }
     } else {
-        if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || imported.key_type != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        KeyMaterial::PreviewSignRegistration {
+            registration,
+            owns_credential: false,
         }
-        imported.sign = false;
-        imported.derive = true;
-        KeyMaterial::PreviewSignRegistration { registration }
     };
-    Ok(Some(imported))
+    Ok(imported)
 }
 
 ffi_entry_point! {
@@ -1844,7 +1863,11 @@ pub(crate) fn destroy_object(
         if ctx.destroy_backed_object(object, &stored_object)? {
             return Ok(());
         }
-        if let KeyMaterial::FidoPreviewCredential { registration } = &stored_object.material {
+        if let KeyMaterial::PreviewSignRegistration {
+            registration,
+            owns_credential: true,
+        } = &stored_object.material
+        {
             ctx._get_slot_mut(slot_id)?
                 .fido_delete_preview_credential(registration)?;
             ctx.remove_object_handle(object);
