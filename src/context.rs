@@ -758,7 +758,7 @@ impl HandleCounters {
 
 fn allocate_handle(counter: &std::sync::atomic::AtomicU64) -> Result<u64, Error> {
     counter
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |candidate| {

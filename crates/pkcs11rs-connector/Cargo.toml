@@ -2,7 +2,7 @@
 name = "pkcs11rs-connector"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 default-run = "pkcs11rs-connector"
 autobins = false
 description = "Asynchronous multi-device HTTP(S) gateway for locally attached YubiHSMs"
