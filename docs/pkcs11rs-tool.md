@@ -23,7 +23,7 @@ commands operate only on the files named on their command line.
 ## Platform credentials
 
 The platform-credential commands use the same focused provider crate as the
-PKCS #11 runtime. They never duplicate Keychain, KDF or public-key encoding
+PKCS #11 runtime. They never duplicate native key-store, KDF or public-key encoding
 logic in the CLI:
 
 ```sh
@@ -36,7 +36,7 @@ pkcs11rs-tool platform-credential delete reserve
 `generate` creates a non-exportable P-256 private key and prints its canonical
 uncompressed SEC1 public point. `show-public` prints the same representation
 for provisioning a YubiHSM Authentication Key and public projection. `list`
-prints only credentials owned by pkcs11rs. `delete` requires an exact name.
+prints credentials in the backend's managed scope. `delete` requires an exact name.
 None of these operations changes a YubiHSM.
 
 On macOS, persistent Secure Enclave access requires entitlements authorized by
@@ -70,7 +70,8 @@ Crypto Provider. They use the same names and lifecycle contracts, without Apple
 signing requirements. No Windows password/PIN prompt or software fallback is
 provided. See [Windows CNG store](platform.md#windows-cng-store) for native
 access policy, capability requirements, and the hardware qualification test.
-Other unsupported systems return an explicit error.
+Linux currently returns an explicit unsupported error, even if `tpm2-tss` is
+installed. See [the Linux TPM2/ESAPI plan](linux-tpm2-plan.md).
 
 ## Certificate bundles
 

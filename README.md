@@ -131,6 +131,9 @@ software mechanism list for session keys.
   native access follows the Windows user context. See
   [Windows CNG store](docs/platform.md#windows-cng-store) for requirements and
   hardware qualification.
+- Linux has no native platform-credential backend. See the proposed
+  [Linux TPM2/ESAPI backend](docs/linux-tpm2-plan.md) for its scope and
+  requirements on PCs and Raspberry Pi devices.
 
 ### Software tokens and shared crypto core
 
@@ -177,7 +180,7 @@ software mechanism list for session keys.
   the same embedded PIV and FIDO2 workflows, post-quantum operations,
   automatic YubiHSM login, and idempotent platform-credential provisioning.
 - `pkcs11rs-tool` authors and validates canonical certificate bundles and
-  manages Apple platform credentials. See
+  manages Apple Secure Enclave and Windows TPM platform credentials. See
   [Authoring and credential management](docs/pkcs11rs-tool.md).
 - Linux, Windows, macOS, iOS, MSRV, ABI, profile, advisory, license, protocol
   vector, virtual-device, and explicitly gated live-hardware validation are all
@@ -388,7 +391,7 @@ such as the iOS XCFramework and generated-binding checks.
 to their configured TLS, SCP11 OCE, or collection purpose. See
 [Certificate-bundle authoring](docs/pkcs11rs-tool.md).
 
-On Apple platforms it also manages named platform-protected YubiHSM
+On Apple platforms and Windows it also manages named platform-protected YubiHSM
 authentication credentials. On macOS, build its signed app-like CLI bundle
 through Xcode so that the development provisioning profile accompanies the
 executable:

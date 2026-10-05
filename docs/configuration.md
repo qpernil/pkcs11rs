@@ -243,6 +243,10 @@ login. Native hardware discovery and the serial allowlist are independent.
 Private and public key objects share their managed name as `CKA_LABEL` for exact
 lookup.
 
+Native platform credentials are implemented on macOS, iOS, and Windows.
+Enabling this slot on Linux returns `CKR_FUNCTION_NOT_SUPPORTED`; see
+[the proposed Linux TPM2 backend](linux-tpm2-plan.md).
+
 ## Environment mapping
 
 `pinentry` names an Assuan-compatible executable on desktop platforms. iOS
