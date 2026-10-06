@@ -81,8 +81,8 @@ jobs:
             features: test-firmware-prefixed-ecdh
           - name: test-session-objects
             features: test-firmware-session-objects
-          - name: secure-channel
-            features: firmware-secure-channel
+          - name: protected-derivation
+            features: firmware-protected-derivation
           - name: full
             features: firmware-full
 

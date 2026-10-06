@@ -323,8 +323,8 @@ mod tests {
 
         let expected = if cfg!(feature = "firmware-full") {
             FirmwareProfile::Full
-        } else if cfg!(feature = "firmware-secure-channel") {
-            FirmwareProfile::SecureChannel
+        } else if cfg!(feature = "firmware-protected-derivation") {
+            FirmwareProfile::ProtectedDerivation
         } else if cfg!(feature = "test-firmware-prefixed-ecdh") {
             FirmwareProfile::TestPrefixedEcdh
         } else if cfg!(feature = "test-firmware-session-objects") {
