@@ -145,6 +145,32 @@ fn parses_application_related_data() {
 }
 
 #[test]
+fn application_discovery_accepts_every_rsa_step_and_rejects_invalid_sizes() {
+    for bits in (1024u16..=4096).step_by(256) {
+        let mut data = app_data();
+        for start in [23, 31] {
+            data[start..start + 2].copy_from_slice(&bits.to_be_bytes());
+        }
+        let info = parse_application_info(&data).unwrap();
+        for key_ref in [KeyRef::Signature, KeyRef::Decipher] {
+            assert_eq!(
+                info.algorithm(key_ref),
+                Some(Algorithm::Rsa {
+                    bits: usize::from(bits)
+                })
+            );
+        }
+    }
+    for bits in [0u16, 768, 1023, 1025, 2049, 4095, 4097, 4352, u16::MAX] {
+        let mut data = app_data();
+        data[23..25].copy_from_slice(&bits.to_be_bytes());
+        assert!(
+            matches!(parse_application_info(&data), Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV)
+        );
+    }
+}
+
+#[test]
 fn parses_optional_attestation_algorithm() {
     let info = parse_application_info(&app_data_with_attestation()).unwrap();
 

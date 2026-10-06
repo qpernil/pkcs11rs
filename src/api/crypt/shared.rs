@@ -149,30 +149,38 @@ pub(crate) fn rsa_oaep_pad(
     })
 }
 
-session_unsupported_stub!(C_DigestEncryptUpdate(
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_DigestEncryptUpdate(
+        _part: *mut ::std::os::raw::c_uchar,
+        _part_len: ::std::os::raw::c_ulong,
+        _encrypted_part: *mut ::std::os::raw::c_uchar,
+        _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 
-session_unsupported_stub!(C_DecryptDigestUpdate(
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: ::std::os::raw::c_ulong,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_DecryptDigestUpdate(
+        _encrypted_part: *mut ::std::os::raw::c_uchar,
+        _encrypted_part_len: ::std::os::raw::c_ulong,
+        _part: *mut ::std::os::raw::c_uchar,
+        _part_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 
-session_unsupported_stub!(C_SignEncryptUpdate(
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_SignEncryptUpdate(
+        _part: *mut ::std::os::raw::c_uchar,
+        _part_len: ::std::os::raw::c_ulong,
+        _encrypted_part: *mut ::std::os::raw::c_uchar,
+        _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 
-session_unsupported_stub!(C_DecryptVerifyUpdate(
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: ::std::os::raw::c_ulong,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_DecryptVerifyUpdate(
+        _encrypted_part: *mut ::std::os::raw::c_uchar,
+        _encrypted_part_len: ::std::os::raw::c_ulong,
+        _part: *mut ::std::os::raw::c_uchar,
+        _part_len: *mut ::std::os::raw::c_ulong,
+    )
+);

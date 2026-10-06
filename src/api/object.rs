@@ -284,7 +284,7 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
         let bits = key.size() * 8;
-        if !matches!(bits, 2048 | 3072 | 4096) {
+        if !openpgp::supports_rsa_bits(bits) {
             return Err(CKR_KEY_SIZE_RANGE.into());
         }
         (

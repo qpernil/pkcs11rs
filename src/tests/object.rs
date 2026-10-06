@@ -98,6 +98,74 @@ fn software_secret_material_has_explicit_usage_and_extraction_policy() {
 }
 
 #[test]
+pub fn openpgp_rsa_private_import_accepts_intermediate_sizes_and_encodes_prime_widths() {
+    for bits in [1280usize, 2304] {
+        let key = crate::SoftwareSigningKey::generate_rsa(bits).unwrap();
+        let crate::SoftwarePublicKey::Rsa {
+            mut modulus,
+            mut exponent,
+        } = key.public_key()
+        else {
+            unreachable!()
+        };
+        let mut components = key.rsa_private_components().unwrap();
+        let [d, p, q, _, _, _] = &mut components;
+        let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let mut key_type = CKK_RSA as CK_KEY_TYPE;
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut id = [2u8];
+        let template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+            bytes_attribute(CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE, &mut exponent),
+            bytes_attribute(CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE, d),
+            bytes_attribute(CKA_PRIME_1 as CK_ATTRIBUTE_TYPE, p),
+            bytes_attribute(CKA_PRIME_2 as CK_ATTRIBUTE_TYPE, q),
+        ];
+        let import = crate::openpgp_private_import(&template).unwrap();
+        assert_eq!(import.algorithm, crate::OpenPgpAlgorithm::Rsa { bits });
+        let [high, low] = (bits as u16).to_be_bytes();
+        let encoded = crate::openpgp_private_key_template(
+            import.key_ref,
+            import.algorithm,
+            &[1, high, low, 0, 32, 0],
+            &import.material,
+        )
+        .unwrap();
+        // Reconstruct the same standard e,p,q import envelope independently.
+        fn tlv(tag: &[u8], value: &[u8]) -> Vec<u8> {
+            let mut out = tag.to_vec();
+            if value.len() < 128 {
+                out.push(value.len() as u8);
+            } else if value.len() < 256 {
+                out.extend([0x81, value.len() as u8]);
+            } else {
+                out.push(0x82);
+                out.extend((value.len() as u16).to_be_bytes());
+            }
+            out.extend(value);
+            out
+        }
+        let prime_length = bits / 16;
+        let mut description = vec![0x91, 4];
+        let mut private = zeroize::Zeroizing::new(vec![0, 1, 0, 1]);
+        for (tag, prime) in [(0x92, &components[1]), (0x93, &components[2])] {
+            let encoded_component = tlv(&[tag], &vec![0; prime_length]);
+            description.extend(&encoded_component[..encoded_component.len() - prime_length]);
+            private.extend(vec![0; prime_length - prime.len()]);
+            private.extend(prime.iter());
+        }
+        let mut body = zeroize::Zeroizing::new(vec![0xb8, 0]);
+        body.extend(tlv(&[0x7f, 0x48], &description));
+        body.extend(tlv(&[0x5f, 0x48], &private));
+        assert_eq!(encoded, tlv(&[0x4d], &body));
+    }
+}
+
+#[test]
 pub fn openpgp_private_import_templates_select_reference_and_scalar() {
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_EC_MONTGOMERY as CK_KEY_TYPE;

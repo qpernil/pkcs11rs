@@ -843,11 +843,11 @@ pub(crate) fn openpgp_generate_key_pair_parameters(
                     .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
             let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
             validate_rsa_generation_exponent(public_template)?;
-            match bits {
-                2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa {
-                    bits: bits as usize,
-                },
-                _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+            if !openpgp::supports_rsa_bits(bits as usize) {
+                return Err(CKR_KEY_SIZE_RANGE.into());
+            }
+            OpenPgpAlgorithm::Rsa {
+                bits: bits as usize,
             }
         }
         x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {

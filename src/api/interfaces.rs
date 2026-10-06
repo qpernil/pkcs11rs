@@ -102,173 +102,192 @@ ffi_entry_point! {
     }
 }
 
-session_unsupported_stub!(C_MessageEncryptInit(
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-));
-session_unsupported_stub!(C_EncryptMessage(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-    plaintext: *mut ::std::os::raw::c_uchar,
-    plaintext_len: ::std::os::raw::c_ulong,
-    ciphertext: *mut ::std::os::raw::c_uchar,
-    ciphertext_len: *mut ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_EncryptMessageBegin(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_EncryptMessageNext(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    plaintext_part: *mut ::std::os::raw::c_uchar,
-    plaintext_part_len: ::std::os::raw::c_ulong,
-    ciphertext_part: *mut ::std::os::raw::c_uchar,
-    ciphertext_part_len: *mut ::std::os::raw::c_ulong,
-    flags: CK_FLAGS,
-));
+session_unsupported_stub!(
+    C_MessageEncryptInit(mechanism: *mut CK_MECHANISM, key: CK_OBJECT_HANDLE)
+);
+session_unsupported_stub!(
+    C_EncryptMessage(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+        plaintext: *mut ::std::os::raw::c_uchar,
+        plaintext_len: ::std::os::raw::c_ulong,
+        ciphertext: *mut ::std::os::raw::c_uchar,
+        ciphertext_len: *mut ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_EncryptMessageBegin(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_EncryptMessageNext(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        plaintext_part: *mut ::std::os::raw::c_uchar,
+        plaintext_part_len: ::std::os::raw::c_ulong,
+        ciphertext_part: *mut ::std::os::raw::c_uchar,
+        ciphertext_part_len: *mut ::std::os::raw::c_ulong,
+        flags: CK_FLAGS,
+    )
+);
 session_unsupported_stub!(C_MessageEncryptFinal());
 
-session_unsupported_stub!(C_MessageDecryptInit(
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-));
-session_unsupported_stub!(C_DecryptMessage(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-    ciphertext: *mut ::std::os::raw::c_uchar,
-    ciphertext_len: ::std::os::raw::c_ulong,
-    plaintext: *mut ::std::os::raw::c_uchar,
-    plaintext_len: *mut ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_DecryptMessageBegin(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_DecryptMessageNext(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    ciphertext_part: *mut ::std::os::raw::c_uchar,
-    ciphertext_part_len: ::std::os::raw::c_ulong,
-    plaintext_part: *mut ::std::os::raw::c_uchar,
-    plaintext_part_len: *mut ::std::os::raw::c_ulong,
-    flags: CK_FLAGS,
-));
+session_unsupported_stub!(
+    C_MessageDecryptInit(mechanism: *mut CK_MECHANISM, key: CK_OBJECT_HANDLE)
+);
+session_unsupported_stub!(
+    C_DecryptMessage(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+        ciphertext: *mut ::std::os::raw::c_uchar,
+        ciphertext_len: ::std::os::raw::c_ulong,
+        plaintext: *mut ::std::os::raw::c_uchar,
+        plaintext_len: *mut ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_DecryptMessageBegin(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_DecryptMessageNext(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        ciphertext_part: *mut ::std::os::raw::c_uchar,
+        ciphertext_part_len: ::std::os::raw::c_ulong,
+        plaintext_part: *mut ::std::os::raw::c_uchar,
+        plaintext_part_len: *mut ::std::os::raw::c_ulong,
+        flags: CK_FLAGS,
+    )
+);
 session_unsupported_stub!(C_MessageDecryptFinal());
 
-session_unsupported_stub!(C_MessageSignInit(
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-));
-session_unsupported_stub!(C_SignMessage(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: *mut ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_SignMessageBegin(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_SignMessageNext(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(C_MessageSignInit(mechanism: *mut CK_MECHANISM, key: CK_OBJECT_HANDLE));
+session_unsupported_stub!(
+    C_SignMessage(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: *mut ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_SignMessageBegin(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_SignMessageNext(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 session_unsupported_stub!(C_MessageSignFinal());
 
-session_unsupported_stub!(C_MessageVerifyInit(
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-));
-session_unsupported_stub!(C_VerifyMessage(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_VerifyMessageBegin(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_VerifyMessageNext(
-    parameter: *mut ::std::os::raw::c_void,
-    parameter_len: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(C_MessageVerifyInit(mechanism: *mut CK_MECHANISM, key: CK_OBJECT_HANDLE));
+session_unsupported_stub!(
+    C_VerifyMessage(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_VerifyMessageBegin(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_VerifyMessageNext(
+        parameter: *mut ::std::os::raw::c_void,
+        parameter_len: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: ::std::os::raw::c_ulong,
+    )
+);
 session_unsupported_stub!(C_MessageVerifyFinal());
 
-session_unsupported_stub!(C_VerifySignatureInit(
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_VerifySignature(
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_VerifySignatureUpdate(
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_VerifySignatureInit(
+        mechanism: *mut CK_MECHANISM,
+        key: CK_OBJECT_HANDLE,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_VerifySignature(data: *mut ::std::os::raw::c_uchar, data_len: ::std::os::raw::c_ulong)
+);
+session_unsupported_stub!(
+    C_VerifySignatureUpdate(part: *mut ::std::os::raw::c_uchar, part_len: ::std::os::raw::c_ulong)
+);
 session_unsupported_stub!(C_VerifySignatureFinal());
-session_unsupported_stub!(C_GetSessionValidationFlags(
-    type_: CK_SESSION_VALIDATION_FLAGS_TYPE,
-    flags: *mut CK_FLAGS,
-));
-session_unsupported_stub!(C_AsyncComplete(
-    function_name: *mut ::std::os::raw::c_uchar,
-    result: *mut CK_ASYNC_DATA,
-));
-session_unsupported_stub!(C_AsyncGetID(
-    function_name: *mut ::std::os::raw::c_uchar,
-    id: *mut ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_AsyncJoin(
-    function_name: *mut ::std::os::raw::c_uchar,
-    id: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_WrapKeyAuthenticated(
-    mechanism: *mut CK_MECHANISM,
-    wrapping_key: CK_OBJECT_HANDLE,
-    key: CK_OBJECT_HANDLE,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-    wrapped_key: *mut ::std::os::raw::c_uchar,
-    wrapped_key_len: *mut ::std::os::raw::c_ulong,
-));
-session_unsupported_stub!(C_UnwrapKeyAuthenticated(
-    mechanism: *mut CK_MECHANISM,
-    unwrapping_key: CK_OBJECT_HANDLE,
-    wrapped_key: *mut ::std::os::raw::c_uchar,
-    wrapped_key_len: ::std::os::raw::c_ulong,
-    templ: *mut CK_ATTRIBUTE,
-    attribute_count: ::std::os::raw::c_ulong,
-    associated_data: *mut ::std::os::raw::c_uchar,
-    associated_data_len: ::std::os::raw::c_ulong,
-    key: *mut CK_OBJECT_HANDLE,
-));
+session_unsupported_stub!(
+    C_GetSessionValidationFlags(type_: CK_SESSION_VALIDATION_FLAGS_TYPE, flags: *mut CK_FLAGS)
+);
+session_unsupported_stub!(
+    C_AsyncComplete(function_name: *mut ::std::os::raw::c_uchar, result: *mut CK_ASYNC_DATA)
+);
+session_unsupported_stub!(
+    C_AsyncGetID(function_name: *mut ::std::os::raw::c_uchar, id: *mut ::std::os::raw::c_ulong)
+);
+session_unsupported_stub!(
+    C_AsyncJoin(
+        function_name: *mut ::std::os::raw::c_uchar,
+        id: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_WrapKeyAuthenticated(
+        mechanism: *mut CK_MECHANISM,
+        wrapping_key: CK_OBJECT_HANDLE,
+        key: CK_OBJECT_HANDLE,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+        wrapped_key: *mut ::std::os::raw::c_uchar,
+        wrapped_key_len: *mut ::std::os::raw::c_ulong,
+    )
+);
+session_unsupported_stub!(
+    C_UnwrapKeyAuthenticated(
+        mechanism: *mut CK_MECHANISM,
+        unwrapping_key: CK_OBJECT_HANDLE,
+        wrapped_key: *mut ::std::os::raw::c_uchar,
+        wrapped_key_len: ::std::os::raw::c_ulong,
+        templ: *mut CK_ATTRIBUTE,
+        attribute_count: ::std::os::raw::c_ulong,
+        associated_data: *mut ::std::os::raw::c_uchar,
+        associated_data_len: ::std::os::raw::c_ulong,
+        key: *mut CK_OBJECT_HANDLE,
+    )
+);
 
 const fn function_list_2_40(version: CK_VERSION) -> CK_FUNCTION_LIST {
     CK_FUNCTION_LIST {

@@ -6,7 +6,7 @@ on:
 
 env:
   # Match shared applet behavior and the persistent storage API to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: c8379ff5f4c35dc6cb2de98e8d27816c43ad4d98
+  VIRTUAL_YUBIKEY_REVISION: b7b0c555cef27ca6f44a8f69134496264cefd72b
 
 jobs:
   pkcs11test:
@@ -54,6 +54,9 @@ jobs:
 
       - name: Test runner reporting and isolation
         run: python -m unittest discover -s integration -p 'test_pkcs11test_runner.py'
+
+      - name: Test physical RSA qualification device-selection guards
+        run: python -m unittest discover -s tools -p 'test_openpgp_rsa_matrix.py'
 
       - name: Run full pkcs11test suite on disposable software tokens
         run: >-

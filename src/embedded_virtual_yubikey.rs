@@ -304,6 +304,69 @@ mod tests {
     }
 
     #[test]
+    fn embedded_openpgp_client_discovers_all_rsa_steps_and_signs_with_an_intermediate_size() {
+        use crate::openpgp::{Algorithm, Client, KeyRef, PublicKey};
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
+        let client = Client;
+        client
+            .select(&connector, &crate::openpgp::OPENPGP_AID)
+            .unwrap();
+        client.verify_admin(&connector, b"12345678").unwrap();
+        for bits in (2048u16..=4096).step_by(256).chain([2560]) {
+            let [high, low] = bits.to_be_bytes();
+            assert_eq!(
+                connector
+                    .send_apdu(&crate::scp03::CommandApdu {
+                        cla: 0,
+                        ins: 0xda,
+                        p1: 0,
+                        p2: 0xc1,
+                        data: vec![1, high, low, 0, 32, 0],
+                        le: None,
+                        extended: false,
+                    })
+                    .unwrap()
+                    .status,
+                0x9000
+            );
+            let info = client
+                .select(&connector, &crate::openpgp::OPENPGP_AID)
+                .unwrap();
+            assert_eq!(
+                info.algorithm(KeyRef::Signature),
+                Some(Algorithm::Rsa {
+                    bits: usize::from(bits)
+                })
+            );
+        }
+        let PublicKey::Rsa(public) = client
+            .generate_key_pair_if_empty(
+                &connector,
+                &crate::openpgp::OPENPGP_AID,
+                KeyRef::Signature,
+                Algorithm::Rsa { bits: 2560 },
+            )
+            .unwrap()
+        else {
+            panic!("wrong key type")
+        };
+        client
+            .verify_password(
+                &connector,
+                crate::openpgp::PasswordRef::UserSignature,
+                b"123456",
+            )
+            .unwrap();
+        let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(b"intermediate RSA");
+        let signature = client.sign(&connector, KeyRef::Signature, &digest).unwrap();
+        assert_eq!(signature.len(), 320);
+        public
+            .verify(rsa::Pkcs1v15Sign::new_unprefixed(), &digest, &signature)
+            .unwrap();
+        assert!(client.sign(&connector, KeyRef::Signature, &digest).is_err());
+    }
+
+    #[test]
     fn embedded_openpgp_client_discovers_generates_signs_and_restores_keys() {
         use crate::openpgp::{Algorithm, Client, Curve, KeyRef, PasswordRef, PublicKey};
         use signature::hazmat::PrehashVerifier;
