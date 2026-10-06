@@ -16,16 +16,22 @@ There are three deployment profiles:
 | Cargo feature | Firmware surface | Intended use |
 | --- | --- | --- |
 | `firmware-yubihsm2` | YubiHSM 2-compatible baseline, without virtual extension commands | Compatibility with a physical YubiHSM command surface |
-| `firmware-secure-channel` | Baseline plus prefixed ECDH and protected native session objects | Client-side secure-channel credentials whose ephemeral private keys and intermediate agreements should remain in the device |
-| `firmware-full` | Secure-channel profile plus extended curves, ML-DSA, ML-KEM, concrete hybrid PQ/T KEMs, and direct RSA wrapping | Fully featured virtual deployments and interoperability work |
+| `firmware-protected-derivation` | Baseline plus prefixed ECDH and protected native session objects | Client-side secure-channel credentials whose ephemeral private keys and intermediate agreements should remain in the device |
+| `firmware-full` | Protected-derivation profile plus extended curves, ML-DSA, ML-KEM, concrete hybrid PQ/T KEMs, and direct RSA wrapping | Fully featured virtual deployments and interoperability work |
 
 `firmware-full` is the default for the standalone Virtual YubiHSM binaries.
+Every profile includes the ordinary authenticated, encrypted YubiHSM session
+protocol. `firmware-protected-derivation` names the additional device-side
+derivation commands and protected volatile objects; it does not select SCP03
+or SCP11. These extensions can keep client-side SCP11 ephemeral keys and
+intermediate agreements inside the virtual HSM.
+
 Select either of the other profiles with `--no-default-features`. The connector
 does not embed a virtual device by default; selecting one of these three
 features both enables the embedded runtime and chooses its firmware profile.
 
 Two additional features, `test-firmware-prefixed-ecdh` and
-`test-firmware-session-objects`, deliberately expose only one secure-channel
+`test-firmware-session-objects`, deliberately expose only one protected-derivation
 extension. They are CI fixtures used to prove fallback ordering. They are not
 deployment profiles.
 
@@ -38,7 +44,7 @@ The configurability serves three concrete purposes:
 
 1. The baseline profile catches accidental dependencies on virtual-only
    commands and algorithms.
-2. The secure-channel profile provides the smallest device extension that
+2. The protected-derivation profile provides the smallest device extension that
    protects client-side SCP11 ephemeral and intermediate secrets.
 3. The full profile supports post-quantum and extended-algorithm experiments
    without suggesting that physical YubiHSM firmware implements them.

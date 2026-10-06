@@ -112,7 +112,7 @@ cargo build --release -p pkcs11rs-connector \
 ```
 
 For a deployment build, select one firmware feature. `firmware-yubihsm2`
-provides the physical-compatible baseline, `firmware-secure-channel` adds
+provides the physical-compatible baseline, `firmware-protected-derivation` adds
 prefixed ECDH and native protected session objects, and `firmware-full`
 additionally enables extended curves, post-quantum algorithms, and direct RSA
 wrapping. Each feature also enables the embedded persistent runtime. Cargo

@@ -18,10 +18,10 @@ firmware-yubihsm2 = [
     "virtual-yubihsm-core/persistent-runtime",
     "virtual-yubihsm-core/firmware-yubihsm2",
 ]
-firmware-secure-channel = [
+firmware-protected-derivation = [
     "dep:virtual-yubihsm-core",
     "virtual-yubihsm-core/persistent-runtime",
-    "virtual-yubihsm-core/firmware-secure-channel",
+    "virtual-yubihsm-core/firmware-protected-derivation",
 ]
 firmware-full = [
     "dep:virtual-yubihsm-core",

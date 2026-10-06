@@ -515,7 +515,7 @@ cargo run -p pkcs11rs-connector \
 ```
 
 For deployment, build the connector with `--release` and the same firmware
-feature. `firmware-yubihsm2`, `firmware-secure-channel`, and `firmware-full`
+feature. `firmware-yubihsm2`, `firmware-protected-derivation`, and `firmware-full`
 select the same profiles as the standalone USB and I2C frontends.
 The complete configuration, persistence, locking, and recompilation behavior
 is documented in
