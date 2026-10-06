@@ -1406,6 +1406,10 @@ fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
     }))
 }
 
+pub(crate) fn supports_rsa_bits(bits: usize) -> bool {
+    (1024..=4096).contains(&bits) && bits.is_multiple_of(256)
+}
+
 fn parse_algorithm(value: &[u8]) -> Result<Algorithm, Error> {
     let algorithm = *value.first().ok_or(CKR_DATA_INVALID)?;
     match algorithm {
@@ -1414,7 +1418,7 @@ fn parse_algorithm(value: &[u8]) -> Result<Algorithm, Error> {
                 return Err(CKR_DATA_INVALID.into());
             }
             let bits = u16::from_be_bytes([value[1], value[2]]) as usize;
-            if !matches!(bits, 1024 | 2048 | 3072 | 4096) {
+            if !supports_rsa_bits(bits) {
                 return Err(CKR_DATA_INVALID.into());
             }
             Ok(Algorithm::Rsa { bits })

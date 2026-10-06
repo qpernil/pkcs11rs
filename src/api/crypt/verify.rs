@@ -544,14 +544,15 @@ ffi_entry_point! {
     }
 }
 
-session_unsupported_stub!(C_VerifyRecoverInit(
-    _mechanism: *mut CK_MECHANISM,
-    _key: CK_OBJECT_HANDLE,
-));
+session_unsupported_stub!(
+    C_VerifyRecoverInit(_mechanism: *mut CK_MECHANISM, _key: CK_OBJECT_HANDLE)
+);
 
-session_unsupported_stub!(C_VerifyRecover(
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: ::std::os::raw::c_ulong,
-    _data: *mut ::std::os::raw::c_uchar,
-    _data_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_VerifyRecover(
+        _signature: *mut ::std::os::raw::c_uchar,
+        _signature_len: ::std::os::raw::c_ulong,
+        _data: *mut ::std::os::raw::c_uchar,
+        _data_len: *mut ::std::os::raw::c_ulong,
+    )
+);

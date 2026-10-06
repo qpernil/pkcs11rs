@@ -283,17 +283,21 @@ pub(crate) fn get_session_info(
     })
 }
 
-session_unsupported_stub!(C_GetOperationState(
-    _operation_state: *mut ::std::os::raw::c_uchar,
-    _operation_state_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_GetOperationState(
+        _operation_state: *mut ::std::os::raw::c_uchar,
+        _operation_state_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 
-session_unsupported_stub!(C_SetOperationState(
-    _operation_state: *mut ::std::os::raw::c_uchar,
-    _operation_state_len: ::std::os::raw::c_ulong,
-    _encryption_key: CK_OBJECT_HANDLE,
-    _authentiation_key: CK_OBJECT_HANDLE,
-));
+session_unsupported_stub!(
+    C_SetOperationState(
+        _operation_state: *mut ::std::os::raw::c_uchar,
+        _operation_state_len: ::std::os::raw::c_ulong,
+        _encryption_key: CK_OBJECT_HANDLE,
+        _authentiation_key: CK_OBJECT_HANDLE,
+    )
+);
 
 fn login_role(
     ctx: &mut SlotContext,

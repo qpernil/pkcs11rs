@@ -1197,17 +1197,16 @@ ffi_entry_point! {
     }
 }
 
-session_unsupported_stub!(C_SignRecoverInit(
-    _mechanism: *mut CK_MECHANISM,
-    _key: CK_OBJECT_HANDLE,
-));
+session_unsupported_stub!(C_SignRecoverInit(_mechanism: *mut CK_MECHANISM, _key: CK_OBJECT_HANDLE));
 
-session_unsupported_stub!(C_SignRecover(
-    _data: *mut ::std::os::raw::c_uchar,
-    _data_len: ::std::os::raw::c_ulong,
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: *mut ::std::os::raw::c_ulong,
-));
+session_unsupported_stub!(
+    C_SignRecover(
+        _data: *mut ::std::os::raw::c_uchar,
+        _data_len: ::std::os::raw::c_ulong,
+        _signature: *mut ::std::os::raw::c_uchar,
+        _signature_len: *mut ::std::os::raw::c_ulong,
+    )
+);
 
 #[cfg(test)]
 mod tests {

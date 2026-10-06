@@ -3147,6 +3147,46 @@ fn hardware_slots_support_session_keys_without_token_storage_fallback() {
 }
 
 #[test]
+pub fn openpgp_rsa_generation_templates_accept_all_steps_and_reject_other_sizes() {
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut id = [1u8];
+    for size in (1024..=4096)
+        .step_by(256)
+        .chain([768, 1023, 1025, 2049, 4095, 4097, 4352])
+    {
+        let mut bits = size as CK_ULONG;
+        let public = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut bits),
+        ];
+        let private = [public[0], public[1], public[2]];
+        let result = crate::openpgp_generate_key_pair_parameters(&mechanism, &public, &private);
+        if (1024..=4096).contains(&size) && size % 256 == 0 {
+            let parameters = result.unwrap();
+            assert_eq!(parameters.key_ref, crate::OpenPgpKeyRef::Signature);
+            assert_eq!(
+                parameters.algorithm,
+                crate::OpenPgpAlgorithm::Rsa {
+                    bits: size as usize
+                }
+            );
+        } else {
+            assert!(
+                matches!(result, Err(crate::Error::Generic(rv)) if rv == CKR_KEY_SIZE_RANGE as CK_RV)
+            );
+        }
+    }
+}
+
+#[test]
 pub fn openpgp_generation_templates_select_reference_algorithm_and_touch_policy() {
     let mechanism = CK_MECHANISM {
         mechanism: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,

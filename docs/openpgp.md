@@ -35,6 +35,58 @@ Connection authorization is not persisted. See the
 algorithms and optional-feature boundaries. Client restrictions against
 potentially key-destructive operations apply to both virtual and physical cards.
 
+### Physical RSA qualification
+
+`tools/openpgp-rsa-matrix.py` compares all 13 RSA sizes with an explicitly
+selected physical test YubiKey. It sends algorithm attributes directly to the
+card so unsupported sizes are rejected by the firmware rather than an SDK
+allowlist. It generates a signature key, imports independent host-generated
+keys into the decipher and authentication slots, and verifies signatures and
+decryption with `cryptography`. Rejections include their operation stage and
+APDU status in the JSON report; rejection of an advertised size fails the test.
+The final public keys are checked after applet reselection and their fingerprints
+are saved in the report. After unplugging and reinserting the test key,
+`--check-retention --serial TEST_SERIAL --report rsa-qualification.json`
+checks those fingerprints, rejects private operations before fresh PIN
+verification, and verifies signing, decryption and authentication afterwards.
+This mode does not replace keys or require admin authentication. For older
+reports without fingerprints, `--capture-retention-baseline` records the final
+keys before the unplug/reinsert step and refuses to overwrite an existing baseline.
+
+This test irreversibly replaces all three ordinary OpenPGP keys. Use a spare
+device, disconnect other YubiKeys, and provide fresh PINs when prompted. The
+harness refuses serial `10462967`, firmware `5.2.4`, mismatched serials, multiple
+connected keys, and existing report files before opening OpenPGP. It verifies
+the selected CCID endpoint's serial through Management before selecting OpenPGP.
+It does not reset the applet or change PINs, touch policies, or certificates.
+
+Run with a Python environment containing `yubikey-manager` and `cryptography`:
+
+```sh
+python tools/openpgp-rsa-matrix.py --serial TEST_SERIAL \
+  --replace-openpgp-keys --report rsa-qualification.json
+```
+
+`--halve-rsa-step` tests 2048 plus increments of 256, 128, 64, 32, 16, 8, 4, 2
+and 1 bit. Attribute readback and actual public-key size distinguish exact support
+from rounding; only successful generation/import and crypto operations count as
+qualified. The report records the smallest qualified increment separately for
+each slot. These probes establish behavior near 2048, not acceptance of every
+size throughout the RSA range. The test finishes with fresh 2048-bit keys. On the qualified
+YubiKey 5 NFC (firmware 5.7.4), the 256-bit increment passed in all three slots;
+all eight smaller increments returned `6A80` at the attribute write.
+
+`--pinentry /path/to/pinentry-mac` uses PIN dialogs instead of terminal prompts.
+`--factory-user-pin` explicitly uses the factory user PIN `123456` for the
+duration of this test. `--factory-admin-pin` opts into one verification with
+the factory admin PIN `12345678`; otherwise admin authentication requires fresh
+PIN entry. These flags apply only to the qualification harness.
+No submitted PIN is cached for later verification. A failed authentication
+stops the test without automatic retries. Reports contain only device identity,
+advertised sizes and test outcomes.
+The device-selection guards have hardware-free tests:
+`python -m unittest discover -s tools -p 'test_openpgp_rsa_matrix.py'`.
+
 ## Discovery
 
 Slot initialization selects the OpenPGP applet and reads its Application
@@ -96,7 +148,12 @@ The current PKCS #11 surface includes:
   corresponding PKCS #11 key-pair generation mechanisms.
 - RSA and elliptic-curve private-key import through `C_CreateObject`.
 
-RSA keys from 1024 through 4096 bits are recognized. Supported elliptic-curve
+RSA keys from 1024 through 4096 bits in 256-bit steps are recognized.
+Virtual devices advertise 2048, 3072 and 4096 through Algorithm Information (`FA`)
+and accept 2048–4096 in 256-bit steps through algorithm attributes, matching
+physical YubiKey 5 NFC firmware 5.7.4 qualification. The client also recognizes
+1024–1792 in 256-bit steps for other card implementations; physical devices retain
+their applet-specific size limits. Supported elliptic-curve
 metadata includes P-256, P-384, P-521, Brainpool P-256/P-384/P-512,
 secp256k1, Ed25519, and X25519. Actual availability depends on the key present
 in the card and the firmware's OpenPGP implementation.
