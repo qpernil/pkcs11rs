@@ -378,8 +378,7 @@ impl YubiHsmUsbDevice {
         receive_buffer: &'a mut [u8],
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let response =
-            self.transfer_blocking(send_buffer, receive_buffer.len(), response_timeout)?;
+        let response = self.transfer_blocking(send_buffer, self.buffer_size(), response_timeout)?;
         copy_received(&response, receive_buffer)
     }
 
@@ -458,7 +457,7 @@ impl YubiHsmUsbDevice {
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let response = self
-            .transfer(send_buffer, receive_buffer.len(), response_timeout)
+            .transfer(send_buffer, self.buffer_size(), response_timeout)
             .await?;
         copy_received(&response, receive_buffer)
     }
