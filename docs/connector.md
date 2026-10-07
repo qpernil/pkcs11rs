@@ -473,7 +473,12 @@ and blocking local access from malformed frames and protects older firmware
 from oversized commands. Receive buffers accept an 8,192-byte frame for every
 firmware version; the pre-2.4 compatibility limit applies only to commands sent
 to the device. One additional USB packet is read so a maximum-size response
-with trailing data is detected and rejected.
+with trailing data is detected and rejected, and a packet-aligned response's
+terminating zero-length packet (ZLP) is consumed in the same read. This transport
+read size also applies to borrowed-buffer APIs; the caller's buffer bounds the
+returned data rather than the USB transfer. Blocking and asynchronous command
+writes send a ZLP whenever the complete frame length is a multiple of the
+endpoint packet size, before requesting the response.
 
 The server never automatically retries a command. This is important for
 non-idempotent operations whose outcome may be unknown after a transport
@@ -843,3 +848,20 @@ journalctl -u pkcs11rs-connector -f
 systemd stops the service with `SIGTERM`, which follows the connector's bounded
 graceful-shutdown path. `Restart=on-failure` restarts unexpected exits but not
 an intentional `systemctl stop`.
+
+## USB Echo qualification
+
+The shared hardware crate includes an opt-in, read-only USB Echo qualification
+matrix for an explicitly selected virtual HSM:
+
+```sh
+PKCS11RS_YUBIHSM_USB_ECHO_SERIAL=12345678 cargo test -p pkcs11rs-local-hardware \
+  --all-features --test yubihsm_usb_echo -- --ignored --nocapture --test-threads=1
+```
+
+It covers blocking and asynchronous calls with borrowed and owned buffers,
+packet-aligned frames and adjacent lengths, the 8192-byte maximum, and subsequent
+commands on the same connection. Borrowed buffers deliberately fit the exact
+response length. These hardware tests are ignored in ordinary CI and require
+both the explicit serial and the virtual gadget's manufacturer descriptor.
+They send only unencrypted Echo commands and require no authentication.
