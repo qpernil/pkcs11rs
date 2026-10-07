@@ -254,7 +254,7 @@ After either entry point:
    and derived-key objects affects host storage only, even if their metadata
    originally came from `C_GenerateKeyPair`.
 
-## Browser/server registration import
+## Browser-server registration import
 
 A cooperating RP stores both the ordinary browser registration and
 `credential.getClientExtensionResults().previewSign.generatedKey`. It exposes

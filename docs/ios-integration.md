@@ -166,15 +166,22 @@ and rejects a configured `pinentry` executable. Applications must pass a PIN to
 `C_Login` or `C_LoginUser`; the PIN remains separate from the latter's RFC 7512
 credential selector.
 
-The native protected-path design registers an application callback as the iOS
-implementation of the shared prompt provider. A backend that receives a null
-PIN requests a title, description, and input label through that provider. The
-callback dispatches an alert to the main queue and blocks only the PKCS #11
-worker thread until the user returns a secret or cancels. Calling this path from
-the main thread must fail instead of deadlocking. Rust copies a successful
-result immediately into zeroizing storage and does not retain it beyond the
-backend's documented authorization lifetime. Once registered, the provider
-causes applicable tokens to report `CKF_PROTECTED_AUTHENTICATION_PATH`; without
+No native PIN callback is implemented or registered by the current build;
+PIN-requiring backends reject a null PIN with `CKR_ARGUMENTS_BAD` and do not
+advertise `CKF_PROTECTED_AUTHENTICATION_PATH`.
+
+### Planned native prompt provider
+
+The proposed protected-path design would register an application callback as
+the iOS implementation of the shared prompt provider. A backend that receives
+a null PIN would request a title, description, and input label through that
+provider. The callback would dispatch an alert to the main queue and block only
+the PKCS #11 worker thread until the user returns a secret or cancels. Calling
+this path from the main thread must fail instead of deadlocking. Rust would
+copy a successful result immediately into zeroizing storage and would not
+retain it beyond the backend's documented authorization lifetime. Once
+registered, the provider would cause applicable tokens to report
+`CKF_PROTECTED_AUTHENTICATION_PATH`; without
 it, a null PIN continues to fail for PIN-requiring backends.
 
 ## Available iOS backends

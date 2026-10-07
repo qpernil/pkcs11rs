@@ -1333,6 +1333,11 @@ Management is always installed because it provides the device identity; every
 PKCS #11 applet is opt-in. Multiple readers may be configured for multi-device
 tests, while ordinary applications normally need only one.
 
+The embedded reader shares applet and cryptographic behavior with the USB
+worker. Joystick sampling, blink indication, blocking touch deadlines, and HID
+cancellation belong to the USB worker and are not provided by the in-process
+CCID transport.
+
 The feature remains useful for CI without native USB, HID, or PC/SC support:
 
 ```sh
@@ -1393,7 +1398,8 @@ The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,
 `storage.tokens` is required on Unix-family targets and the complete durable
 PIV, FIDO2, OpenPGP, YubiHSM Auth, and Issuer Security Domain state uses the
-same five per-applet CBOR records as the USB worker, in an ID-scoped directory.
+same six per-applet CBOR records as the USB worker, including Management USB
+settings, in an ID-scoped directory.
 `virtual-yubikey-core::storage` owns the exclusive device lock, record validation,
 and one writer that batches dirty applets for up to 500 ms. FIDO mutations are
 flushed before returning. OpenPGP keys, certificates, PIN verifiers, retry state,

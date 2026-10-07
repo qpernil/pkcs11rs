@@ -144,6 +144,15 @@ configured [OCE intermediate bundle](scp11.md#dynamic-oce-credentials), without
 provider-wide certificate searches. Native YubiHSM Auth credentials and keys
 on another applet of the target card are excluded from this path.
 
+Omitted URI fields are unrestricted; `*` is a literal value, not a glob.
+Sources are searched in protection-preference order, with module slot order
+within each tier. The first matching source must provide exactly one candidate
+key; multiple candidates return `CKR_TEMPLATE_INCONSISTENT`. Selection does not
+try successive credentials after a handshake failure or match them against
+target-side authentication-key projections. Bare `pkcs11:` selects SCP11a
+unless a protocol is configured. For SCP03, narrow the selector to the ENC key
+by label or ID: an unrestricted AES search normally also finds the MAC key.
+
 ```text
 pkcs11:token=client%20keys;object=client.enc;type=secret-key
 pkcs11:token=client%20keys;object=OCE;type=private?pkcs11rs-scp=scp11c
