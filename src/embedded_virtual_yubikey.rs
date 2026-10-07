@@ -1,14 +1,13 @@
 use crate::{ApduCapabilities, CKR_DEVICE_ERROR, Connector, Error};
-#[cfg(unix)]
-use software_key_core::state_persistence::{
-    PersistenceMode, StateLock, StatePersistence, StatePersistenceHandle,
-};
-#[cfg(unix)]
-use std::io;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
+};
+#[cfg(unix)]
+use virtual_yubikey_core::storage::{
+    DEFAULT_PERSISTENCE_MODE, DevicePersistence, DevicePersistenceHandle, DeviceStorage,
+    PersistentApplet,
 };
 use virtual_yubikey_core::{AppletConfiguration, DeviceProfile, FidoConfiguration, VirtualYubiKey};
 
@@ -32,9 +31,8 @@ fn protocol_one_configuration() -> FidoConfiguration {
 
 #[cfg(unix)]
 struct PersistentEmbeddedState {
-    handle: StatePersistenceHandle<VirtualYubiKey>,
-    _persistence: StatePersistence<VirtualYubiKey>,
-    _lock: StateLock,
+    handle: DevicePersistenceHandle,
+    _persistence: DevicePersistence,
 }
 
 /// An embedded virtual YubiKey CCID reader visible through a pkcs11rs build
@@ -97,41 +95,26 @@ impl EmbeddedVirtualYubiKeyConnector {
 
         #[cfg(unix)]
         {
-            std::fs::create_dir_all(&root)?;
-            let lock = StateLock::acquire(root.join("state.lock"))?;
-            let state_path = root.join("state.cbor");
-            let (state, created) = match std::fs::read(&state_path) {
-                Ok(encoded) => (
-                    VirtualYubiKey::from_persistent_state(profile, configuration, &encoded)
-                        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
-                    false,
-                ),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (
-                    VirtualYubiKey::with_fido_configuration(profile, configuration),
-                    true,
-                ),
-                Err(error) => return Err(error.into()),
-            };
-            let persistence = StatePersistence::start(
-                state,
-                state_path,
-                PersistenceMode::Batched(Duration::from_millis(250)),
-                |state| state.persistent_state().map_err(io::Error::other),
+            let (storage, device) = DeviceStorage::open(&root, profile, configuration)?;
+            let state = Arc::new(Mutex::new(device));
+            let snapshot_state = state.clone();
+            let persistence = storage.start(
+                DEFAULT_PERSISTENCE_MODE,
+                move |applet| {
+                    snapshot_state
+                        .lock()
+                        .map_err(|_| std::io::Error::other("virtual YubiKey state lock poisoned"))?
+                        .persistent_applet(applet)
+                },
                 || tracing::error!("embedded virtual YubiKey persistence failed"),
             )?;
             let handle = persistence.handle();
-            if created {
-                handle.record_mutation()?.wait()?;
-                persistence.flush()?;
-            }
-            let state = handle.state().clone();
             Ok(Self {
                 name,
                 state,
                 persistent: Some(Arc::new(PersistentEmbeddedState {
                     handle,
                     _persistence: persistence,
-                    _lock: lock,
                 })),
             })
         }
@@ -194,22 +177,26 @@ impl EmbeddedVirtualYubiKeyConnector {
             .lock()
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let response = state.transmit(encoded);
-        let persistent_change = state.take_persistent_change();
         #[cfg(unix)]
-        let receipt = if persistent_change {
-            self.persistent
-                .as_ref()
-                .map(|persistent| persistent.handle.record_mutation())
-                .transpose()?
-        } else {
-            None
-        };
+        let persistent_changes = state.take_persistent_applets();
         #[cfg(not(unix))]
-        let _ = persistent_change;
+        state.take_persistent_change();
+        #[cfg(unix)]
+        let force_fido = persistent_changes.contains(&PersistentApplet::Fido);
+        #[cfg(unix)]
+        let receipt = self
+            .persistent
+            .as_ref()
+            .map(|persistent| persistent.handle.record_mutations(persistent_changes))
+            .transpose()?
+            .flatten();
         drop(state);
         #[cfg(unix)]
         if let Some(receipt) = receipt {
             receipt.wait()?;
+            if force_fido && let Some(persistent) = &self.persistent {
+                persistent.handle.flush()?;
+            }
         }
         Ok(response)
     }
@@ -288,6 +275,173 @@ mod tests {
         SecurityDomainClient, select_application,
     };
     use std::rc::Rc;
+
+    #[cfg(unix)]
+    struct TestDirectory(PathBuf);
+    #[cfg(unix)]
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "pkcs11rs-shared-yubikey-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    #[cfg(unix)]
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn embedded_openpgp_client_discovers_generates_signs_and_restores_keys() {
+        use crate::openpgp::{Algorithm, Client, Curve, KeyRef, PasswordRef, PublicKey};
+        use signature::hazmat::PrehashVerifier;
+        #[cfg(unix)]
+        let directory = TestDirectory::new();
+        #[cfg(unix)]
+        let connector = EmbeddedVirtualYubiKeyConnector::configured(
+            "Persistent test reader".into(),
+            EMBEDDED_SERIAL,
+            DeviceProfile::yubikey_5_8_ccid(EMBEDDED_SERIAL).applets,
+            Some(directory.path().to_owned()),
+        )
+        .unwrap();
+        #[cfg(not(unix))]
+        let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
+        let client = Client;
+        let info = client
+            .select(&connector, &crate::openpgp::OPENPGP_AID)
+            .unwrap();
+        assert_eq!(info.version, (3, 4));
+        assert_eq!(
+            info.algorithm(KeyRef::Signature),
+            Some(Algorithm::Rsa { bits: 2048 })
+        );
+        client.verify_admin(&connector, b"12345678").unwrap();
+        // The provider deliberately refuses algorithm changes; this isolated virtual
+        // fixture provisions an empty slot through the raw connector.
+        assert_eq!(
+            connector
+                .send_apdu(&crate::scp03::CommandApdu {
+                    cla: 0,
+                    ins: 0xda,
+                    p1: 0,
+                    p2: 0xc1,
+                    data: vec![0x13, 0x2a, 0x86, 0x48, 0xce, 0x3d, 3, 1, 7],
+                    le: None,
+                    extended: false
+                })
+                .unwrap()
+                .status,
+            0x9000
+        );
+        let public = client
+            .generate_key_pair_if_empty(
+                &connector,
+                &crate::openpgp::OPENPGP_AID,
+                KeyRef::Signature,
+                Algorithm::Ecdsa(Curve::P256),
+            )
+            .unwrap();
+        let PublicKey::Ec { point, .. } = public else {
+            panic!("wrong key type")
+        };
+        let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(b"embedded OpenPGP");
+        assert!(client.sign(&connector, KeyRef::Signature, &digest).is_err());
+        client
+            .verify_password(&connector, PasswordRef::UserSignature, b"123456")
+            .unwrap();
+        let signature = client.sign(&connector, KeyRef::Signature, &digest).unwrap();
+        p256::ecdsa::VerifyingKey::from_sec1_bytes(&[vec![4], point.clone()].concat())
+            .unwrap()
+            .verify_prehash(
+                &digest,
+                &p256::ecdsa::Signature::from_slice(&signature).unwrap(),
+            )
+            .unwrap();
+        assert!(client.sign(&connector, KeyRef::Signature, &digest).is_err());
+        #[cfg(unix)]
+        let connector = {
+            connector
+                .persistent
+                .as_ref()
+                .unwrap()
+                .handle
+                .flush()
+                .unwrap();
+            drop(connector);
+            // Reopen as a USB-style split runtime and compare the actual files,
+            // then return them unchanged to the embedded host.
+            let profile = DeviceProfile::yubikey_5_8_ccid(EMBEDDED_SERIAL);
+            let (storage, loaded) = DeviceStorage::open(
+                directory.path(),
+                profile.clone(),
+                FidoConfiguration::default(),
+            )
+            .unwrap();
+            let expected =
+                PersistentApplet::ALL.map(|applet| loaded.persistent_applet(applet).unwrap());
+            let (card, fido) = loaded.separate_fido();
+            for applet in PersistentApplet::ALL {
+                assert_eq!(
+                    std::fs::read(storage.path(applet)).unwrap(),
+                    expected[applet as usize]
+                );
+            }
+            let persistence = storage
+                .start(
+                    DEFAULT_PERSISTENCE_MODE,
+                    move |applet| {
+                        if applet == PersistentApplet::Fido {
+                            fido.persistent_state().map_err(std::io::Error::other)
+                        } else {
+                            card.persistent_applet(applet)
+                        }
+                    },
+                    || {},
+                )
+                .unwrap();
+            persistence
+                .handle()
+                .record_mutations(PersistentApplet::ALL)
+                .unwrap();
+            persistence.shutdown().unwrap();
+            assert!(!directory.path().join("state.cbor").exists());
+            EmbeddedVirtualYubiKeyConnector::configured(
+                "Persistent test reader".into(),
+                EMBEDDED_SERIAL,
+                profile.applets,
+                Some(directory.path().to_owned()),
+            )
+            .unwrap()
+        };
+        #[cfg(not(unix))]
+        connector.restore_persistent_state(DeviceProfile::yubikey_5_8_ccid(EMBEDDED_SERIAL));
+        client
+            .select(&connector, &crate::openpgp::OPENPGP_AID)
+            .unwrap();
+        let PublicKey::Ec {
+            point: restored, ..
+        } = client
+            .public_key(&connector, KeyRef::Signature, Algorithm::Ecdsa(Curve::P256))
+            .unwrap()
+        else {
+            panic!("wrong restored key")
+        };
+        assert_eq!(restored, point);
+        assert!(client.sign(&connector, KeyRef::Signature, &digest).is_err());
+    }
 
     #[test]
     fn embedded_connector_answers_fido_get_info_through_ccid() {

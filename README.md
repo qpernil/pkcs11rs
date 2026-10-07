@@ -1389,10 +1389,18 @@ producer uses the same DER signature contract as the host parser.
 The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,
 `storage.tokens` is required on Unix-family targets and the complete durable
-PIV, FIDO2, YubiHSM Auth, and Issuer Security Domain state is restored from an
-ID-scoped, locked file and written by the shared batched atomic-persistence
-engine. Applet selection, login state, presence grants, and secure-channel
-sessions are never persisted.
+PIV, FIDO2, OpenPGP, YubiHSM Auth, and Issuer Security Domain state uses the
+same five per-applet CBOR records as the USB worker, in an ID-scoped directory.
+`virtual-yubikey-core::storage` owns the exclusive device lock, record validation,
+and one writer that batches dirty applets for up to 500 ms. FIDO mutations are
+flushed before returning. OpenPGP keys, certificates, PIN verifiers, retry state,
+and metadata survive restart. Applet selection, login state, presence grants,
+and secure-channel sessions are never persisted. See
+[embedded configuration](docs/configuration.md#embedded-virtual-yubikey-readers)
+and [shared device storage](https://github.com/qpernil/virtual-yubikey/blob/main/docs/storage.md).
+Whole-device `state.cbor` files are not imported; explicitly clear previous
+virtual-device state when replacing that layout, and preserve state on ordinary
+updates.
 The device begins without resident credentials. Tests can create a
 deterministic resident credential through previewSign registration and then
 exercise credential-management enumeration, RP-bound

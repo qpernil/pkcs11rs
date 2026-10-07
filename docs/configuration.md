@@ -231,7 +231,17 @@ reader is currently supported on Unix-family targets and requires
 `storage.tokens`; its applet state is stored below that root in
 an ID-scoped directory using an exclusive lock, batched writes, and atomic file
 replacement. Durable state includes PIV keys and data, FIDO credentials and PIN
-state, YubiHSM Auth credentials, and Issuer Security Domain keys and policy.
+state and attestation identity, OpenPGP keys, certificates, PIN verifiers and
+retry policy, YubiHSM Auth credentials, and Issuer Security Domain keys and policy.
+All forms use `virtual-yubikey-core::storage`: five independent
+`fido-<serial>.cbor`, `piv-<serial>.cbor`, `openpgp-<serial>.cbor`,
+`hsmauth-<serial>.cbor`, and `security-domain-<serial>.cbor` records protected by
+`yubikey-<serial>.lock`. One writer batches dirty applets for up to 500 ms and
+flushes on shutdown; FIDO mutations force durability before returning.
+These filenames and applet encodings are identical to the USB worker's storage.
+Only the host-selected directory differs. Whole-device `state.cbor` files are
+not imported; clear the previous virtual-device state when deploying this layout.
+Invalid applet records fail startup rather than being overwritten.
 Transport selection, applet selection, PKCS #11 login state, presence grants,
 and secure-channel sessions are connection state and are not restored.
 
