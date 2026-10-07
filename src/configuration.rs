@@ -138,6 +138,7 @@ struct JsonYubiHsmTlsConfiguration {
 struct JsonCcidConfiguration {
     applications: Option<Vec<String>>,
     secure_channel: Option<String>,
+    recreate_sessions: Option<bool>,
     #[serde(default)]
     aids: JsonCcidAidConfiguration,
 }
@@ -177,6 +178,7 @@ struct JsonScp11Configuration {
     sd_ca_certificate: Option<String>,
     key_version: Option<u8>,
     oce_private_key: Option<String>,
+    oce_intermediate_bundle: Option<String>,
     oce_certificate_bundle: Option<String>,
     oce_key_version: Option<u8>,
     oce_key_id: Option<u8>,
@@ -222,10 +224,14 @@ pub(crate) struct Scp11Configuration {
     pub(crate) key_version: u8,
     pub(crate) oce: Option<Scp11OceConfiguration>,
     pub(crate) issuer_sd_aid: Vec<u8>,
+    pub(crate) oce_intermediates: Vec<Vec<u8>>,
+    pub(crate) oce_key_version: u8,
+    pub(crate) oce_key_id: u8,
 }
 
 #[derive(Clone)]
 pub(crate) struct SecureChannelConfiguration {
+    pub(crate) recreate_sessions: bool,
     pub(crate) scp03: Scp03Configuration,
     pub(crate) scp11: Scp11Configuration,
 }
@@ -234,6 +240,7 @@ pub(crate) struct SecureChannelConfiguration {
 impl SecureChannelConfiguration {
     pub(crate) fn for_test() -> Self {
         Self {
+            recreate_sessions: true,
             scp03: Scp03Configuration {
                 key_material: Scp03KeyMaterialConfiguration::Factory,
                 key_version: 255,
@@ -244,6 +251,9 @@ impl SecureChannelConfiguration {
                 trust: Scp11TrustConfiguration::Yubico,
                 key_version: 1,
                 oce: None,
+                oce_intermediates: Vec::new(),
+                oce_key_version: 0,
+                oce_key_id: 0,
                 issuer_sd_aid: crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
             },
         }
@@ -554,6 +564,14 @@ impl ModuleConfiguration {
             )?)
             .unwrap_or(false);
 
+        let ccid_recreate_sessions = explicit
+            .ccid
+            .recreate_sessions
+            .or(environment_switch(
+                "PKCS11RS_CCID_RECREATE_SESSIONS",
+                &mut environment,
+            )?)
+            .unwrap_or(true);
         let scp03 = resolve_scp03(explicit.scp03, &mut environment)?;
         let scp11 = resolve_scp11(
             explicit.scp11,
@@ -604,7 +622,11 @@ impl ModuleConfiguration {
             ccid_configurations,
             ccid_aids,
             nfc_discovery,
-            secure_channels: SecureChannelConfiguration { scp03, scp11 },
+            secure_channels: SecureChannelConfiguration {
+                recreate_sessions: ccid_recreate_sessions,
+                scp03,
+                scp11,
+            },
         })
     }
 }
@@ -780,6 +802,31 @@ fn resolve_scp11(
     if key_version & 0x80 != 0 {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
+    let oce_intermediates = resolve_os(
+        explicit.oce_intermediate_bundle,
+        "PKCS11RS_SCP11_OCE_INTERMEDIATE_BUNDLE",
+        environment,
+    )?
+    .map(|path| {
+        let bytes = std::fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        crate::certificate_chain::decode_bundle(&bytes)
+    })
+    .transpose()?
+    .unwrap_or_default();
+    let oce_key_version = explicit
+        .oce_key_version
+        .or(environment_byte(
+            "PKCS11RS_SCP11_OCE_KEY_VERSION",
+            environment,
+        )?)
+        .unwrap_or(0);
+    let oce_key_id = explicit
+        .oce_key_id
+        .or(environment_byte("PKCS11RS_SCP11_OCE_KEY_ID", environment)?)
+        .unwrap_or(0);
+    if oce_key_version & 0x80 != 0 || oce_key_id & 0x80 != 0 {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     let private_key = resolve_os(
         explicit.oce_private_key,
         "PKCS11RS_SCP11_OCE_PRIVATE_KEY",
@@ -793,20 +840,8 @@ fn resolve_scp11(
     let oce = match (private_key, certificate_bundle) {
         (None, None) => None,
         (Some(private_key), Some(certificate_bundle)) => {
-            let key_version = explicit
-                .oce_key_version
-                .or(environment_byte(
-                    "PKCS11RS_SCP11_OCE_KEY_VERSION",
-                    environment,
-                )?)
-                .unwrap_or(0);
-            let key_id = explicit
-                .oce_key_id
-                .or(environment_byte("PKCS11RS_SCP11_OCE_KEY_ID", environment)?)
-                .unwrap_or(0);
-            if key_version & 0x80 != 0 || key_id & 0x80 != 0 {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
+            let key_version = oce_key_version;
+            let key_id = oce_key_id;
             Some(Scp11OceConfiguration {
                 private_key: PathBuf::from(private_key),
                 certificate_bundle: PathBuf::from(certificate_bundle),
@@ -817,6 +852,9 @@ fn resolve_scp11(
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
     };
     Ok(Scp11Configuration {
+        oce_intermediates,
+        oce_key_version,
+        oce_key_id,
         trust,
         key_version,
         oce,
@@ -1104,9 +1142,38 @@ mod tests {
         assert_eq!(configuration.logging_level, Some(LogLevel::Trace));
         assert!(!configuration.hardware_discovery);
         assert!(!configuration.yubihsm_recreate_sessions);
+        assert!(configuration.secure_channels.recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://one", "http://two"]);
         assert!(!configuration.nfc_discovery);
         assert_eq!(configuration.secure_channels.scp03.security_level, 0x33);
+    }
+
+    #[test]
+    fn ccid_recreation_can_be_disabled_and_json_overrides_environment() {
+        assert!(
+            !resolve(None, &[("PKCS11RS_CCID_RECREATE_SESSIONS", "0")])
+                .unwrap()
+                .secure_channels
+                .recreate_sessions
+        );
+        assert!(
+            resolve(
+                Some(json(r#"{"version":1,"ccid":{"recreate_sessions":true}}"#)),
+                &[("PKCS11RS_CCID_RECREATE_SESSIONS", "0")]
+            )
+            .unwrap()
+            .secure_channels
+            .recreate_sessions
+        );
+        assert!(
+            !resolve(
+                Some(json(r#"{"version":1,"ccid":{"recreate_sessions":false}}"#)),
+                &[]
+            )
+            .unwrap()
+            .secure_channels
+            .recreate_sessions
+        );
     }
 
     #[test]

@@ -530,6 +530,9 @@ impl PivSlot {
 }
 
 impl Slot for PivSlot {
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn shared_storage_namespace(&self) -> Option<&'static str> {
         Some("piv")
     }
@@ -622,7 +625,11 @@ impl Slot for PivSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                PivClient.selected_info(self.connector.as_ref())?
+            } else {
+                PivClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_device_info(info);
             let only_never = !self.keys.is_empty()
                 && self
@@ -672,7 +679,11 @@ impl Slot for PivSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                PivClient.selected_info(self.connector.as_ref())?
+            } else {
+                PivClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_device_info(info);
             PivClient.authenticate_management_key(self.connector.as_ref(), &key)?;
             Ok(())
@@ -731,6 +742,7 @@ impl Slot for PivSlot {
                 "PIV role de-authentication failed and was ignored"
             ),
         }
+        self.connector.clear_secure_channel();
         Ok(())
     }
     fn set_login_role(&self, role: Option<LoginRole>) -> Result<(), Error> {
@@ -1067,6 +1079,9 @@ impl Slot for PivSlot {
     }
     fn clear_session(&mut self) {
         self.connector.clear_secure_channel();
+    }
+    fn clear_lost_login(&mut self) {
+        self.connector.reconcile_lost_applet_login();
     }
     fn login_is_active(&self) -> bool {
         matches!(

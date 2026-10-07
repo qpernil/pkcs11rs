@@ -678,6 +678,9 @@ impl IssuerSecurityDomainSlot {
 }
 
 impl Slot for IssuerSecurityDomainSlot {
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn supports_security_domain_management(&self) -> bool {
         true
     }
@@ -742,6 +745,10 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn clear_discovery_error(&self) {
         self.connector.clear_discovery_error();
+    }
+    fn clear_lost_login(&mut self) {
+        self.authenticated.set(false);
+        self.connector.reconcile_lost_applet_login();
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);

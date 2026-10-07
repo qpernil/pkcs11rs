@@ -114,6 +114,69 @@ public-key material is separately cached for the same connected card and is
 also discarded on reconnection. PIV's precise separation between the logical
 role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs-11-role-and-piv-authentication).
 
+## Login-selected secure channels
+
+PIV, OpenPGP, FIDO2 over CCID, and the Issuer Security Domain support two
+credential paths. `C_Login`, or `C_LoginUser` with an empty username, uses
+the configured SCP protocol and credentials. A nonempty `C_LoginUser`
+username selects an ordinary provider credential through an RFC 7512 PKCS #11
+URI. Its PIN argument still authenticates the target applet; authorize the
+source slot separately with its own login policy. No target PIN is forwarded
+to the source or retained for later applet verification. The Issuer SD accepts
+an empty PIN because its authorization comes from the authenticated channel.
+
+Dynamic selection requires SCP even when `ccid.secure_channel` is omitted.
+Configured protocol selection takes precedence; a conflicting URI protocol
+is rejected. Without a configured protocol, `type=secret-key` selects SCP03
+and a private-key selector selects SCP11a. The vendor query
+`pkcs11rs-scp=scp11c` selects SCP11c explicitly. SCP11b has no client credential
+and is available through the configured path. A failed dynamic handshake
+cannot fall back to plaintext. Public discovery can run before login, but
+PIN management requiring SCP returns `CKR_USER_NOT_LOGGED_IN` before login.
+
+For SCP03, select a token AES key named `<name>.enc`; the same source must
+contain its unique `<name>.mac` companion. `<name>.dek` is optional for
+transport and required for static-DEK administration. For SCP11a/c, select
+a token P-256 private key and provide one token X.509 leaf certificate with
+the same nonempty `CKA_ID`. Certificate labels need not match. Its public key
+must match the private key. Public intermediate certificates come from the
+configured [OCE intermediate bundle](scp11.md#dynamic-oce-credentials), without
+provider-wide certificate searches. Native YubiHSM Auth credentials and keys
+on another applet of the target card are excluded from this path.
+
+```text
+pkcs11:token=client%20keys;object=client.enc;type=secret-key
+pkcs11:token=client%20keys;object=OCE;type=private?pkcs11rs-scp=scp11c
+```
+
+Selecting another applet destroys the live channel and can clear applet PIN
+authorization. `ccid.recreate_sessions` defaults to `true` for **both configured
+and dynamic** channels. The next operation can establish a fresh channel:
+configured mode uses its configured credentials; dynamic mode reuses the exact
+selected source session, key bindings, and resolved public certificate chain.
+It does not repeat credential lookup or resubmit the applet PIN. PKCS #11 login
+state reconciles separately; channel recreation does not restore a lost role.
+Source logout or deletion of a bound key prevents a fresh dynamic handshake.
+Configured encrypted OCE files can require another file-unlock prompt for a
+fresh handshake; that password is not cached.
+
+Set `ccid.recreate_sessions` to `false`, or
+`PKCS11RS_CCID_RECREATE_SESSIONS=0`, to require fresh login after channel loss
+in either mode. Dynamic reauthentication bindings are then released after
+successful establishment. Logout, closing the last session, and invalidation
+release retained bindings even when applet authorization has already been lost.
+See [authentication secret retention](authentication-secrets.md) for their
+scope and lifetime. Transport failures invalidate the channel; the failed
+operation is returned without automatic replay.
+
+Virtual qualification covers exported login entry points, SCP03 and SCP11a/c,
+direct and intermediate OCE chains, missing intermediates, provider-key mismatch,
+source logout, replacement keys, recreation settings, and session cleanup.
+The virtual target's shared certificate validator rejects the critical
+`certificatePolicies` extension in the physical OCE fixture; these channel
+tests use its supported key-agreement certificate profile. Physical qualification
+of the dynamic login workflow and that OCE profile remains required.
+
 ## PC/SC ownership and external daemons
 
 pkcs11rs connects to each desktop card with `SCARD_SHARE_EXCLUSIVE`. Its reader

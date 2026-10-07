@@ -9,10 +9,14 @@ For the Issuer SD, the selected AID is the Secure Domain used for
 management. For PIV and OpenPGP, the transport initializes against those
 applets' AIDs directly.
 
-The CCID path selects the target application and establishes SCP03 before its
-first operation APDU. The selected AID and channel are retained across calls
-to the same applet. Selecting another applet or reconnecting destroys both.
-`C_Login` establishes PKCS #11 authorization independently of the channel.
+`C_Login` establishes the configured channel before authenticating the target
+applet. `C_LoginUser` can instead select protected provider credentials while
+its PIN authenticates that applet. Public discovery can precede login;
+SCP-required PIN management requires login. The selected AID and live channel
+are retained across calls to the same applet. Selecting another applet or
+reconnecting destroys the live channel. Recreation defaults to enabled for
+both credential paths; it never resubmits an applet PIN or restores lost applet
+authorization. See [CCID login-selected channels](ccid.md#login-selected-secure-channels).
 
 SCP03 configuration is supplied as hexadecimal environment variables:
 
@@ -52,8 +56,13 @@ objects without reading their values. Counter-KDF outputs explicitly permit
 reading the channel working keys; cryptograms and message AES/CMAC run locally.
 The static DEK remains a protected provider binding and wraps administration
 payloads through AES-CBC. Its owning session ends with the live card channel.
-Provider code also accepts an already authorized source session; card
-configuration still uses the input forms above and has no slot-selector syntax.
+Dynamic `C_LoginUser` selects an already authorized ordinary provider's token
+AES `<name>.enc` key through a PKCS #11 URI, with a required `<name>.mac` and
+optional `<name>.dek` in the same source. The keys remain bound provider
+objects; the target PIN is never used to authorize the source. Existing
+configuration continues to select protocol parameters, including KID, KVN,
+and security level. Batch-master-key diversification belongs to the configured
+path.
 
 This implementation currently supports SCP03 S8 mode. It validates the
 card's `i` parameter, verifies pseudo-random card challenges using the

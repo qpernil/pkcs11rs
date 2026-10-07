@@ -796,6 +796,10 @@ impl Client {
         )?;
         require_success(response.status)?;
 
+        self.selected_info(connector)
+    }
+
+    pub(crate) fn selected_info(&self, connector: &dyn Connector) -> Result<DeviceInfo, Error> {
         let version_data = self.command(connector, INS_GET_VERSION, 0, 0, &[])?;
         if version_data.len() != 3 {
             return Err(CKR_DEVICE_ERROR.into());

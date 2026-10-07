@@ -574,25 +574,62 @@ impl Scp03Session {
         host_challenge: [u8; 8],
         selected_aid: &[u8],
     ) -> Result<Self, Error> {
+        Self::establish_using(
+            connector,
+            keys.key_version,
+            keys.key_id,
+            security_level,
+            host_challenge,
+            selected_aid,
+            |context| keys.resolve(context),
+        )
+    }
+
+    pub(crate) fn authenticate_provider(
+        connector: &dyn Connector,
+        configuration: &crate::configuration::Scp03Configuration,
+        credential: &crate::ccid_auth::CardCredential,
+        selected_aid: &[u8],
+    ) -> Result<Self, Error> {
+        let mut challenge = [0; 8];
+        getrandom::fill(&mut challenge).map_err(|_| CKR_RANDOM_NO_RNG)?;
+        Self::establish_using(
+            connector,
+            configuration.key_version,
+            configuration.key_id,
+            configuration.security_level,
+            challenge,
+            selected_aid,
+            |_| credential.scp03_keys(),
+        )
+    }
+
+    fn establish_using(
+        connector: &dyn Connector,
+        key_version: u8,
+        key_id: u8,
+        security_level: u8,
+        host_challenge: [u8; 8],
+        selected_aid: &[u8],
+        resolve: impl FnOnce(&[u8; 10]) -> Result<Scp03Keys, Error>,
+    ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
         let initialize = CommandApdu {
             cla: 0x80,
             ins: 0x50,
-            p1: keys.key_version,
-            p2: keys.key_id,
+            p1: key_version,
+            p2: key_id,
             data: host_challenge.to_vec(),
             le: Some(256),
             extended: false,
         };
         let initialize_response = transmit(connector, &initialize)?.require_success(&initialize)?;
         let update = InitializeUpdate::parse(&initialize_response.data)?;
-        if update.scp_id != 0x03
-            || (keys.key_version != 0 && update.key_version != keys.key_version)
-        {
+        if update.scp_id != 0x03 || (key_version != 0 && update.key_version != key_version) {
             return Err(CKR_DEVICE_ERROR.into());
         }
         validate_card_capabilities(update.implementation, security_level)?;
-        let mut static_keys = keys.resolve(&update.issuer_context)?;
+        let mut static_keys = resolve(&update.issuer_context)?;
         if let Some(sequence_counter) = update.sequence_counter {
             let mut challenge_context = Vec::with_capacity(3 + selected_aid.len());
             challenge_context.extend_from_slice(&sequence_counter);

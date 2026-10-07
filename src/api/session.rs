@@ -152,6 +152,14 @@ fn set_pin(
             with_pin(new_pin, new_len, |new_pin| {
                 ctx.reconcile_login_state(slot_id);
                 let role = ctx.login_role(slot_id);
+                if role.is_none()
+                    && ctx
+                        .get_slot(slot_id)?
+                        .ccid_login_connector()
+                        .is_some_and(|c| c.secure_channel_required())
+                {
+                    return Err(CKR_USER_NOT_LOGGED_IN.into());
+                }
                 match role {
                     Some(LoginRole::So) => ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin),
                     _ => ctx._get_slot_mut(slot_id)?.set_pin(old_pin, new_pin),
@@ -222,6 +230,9 @@ ffi_entry_point! {
             } else {
                 None
             };
+            if let Some(connector) = ctx.slot.ccid_login_connector() {
+                connector.clear_secure_channel();
+            }
             ctx.sessions.retain(|_k, v| v.backend().slotID() != slotID);
             ctx.memory_objects.retain(|_, object| {
                 object
@@ -401,9 +412,19 @@ pub(crate) fn login(
             _ => return Err(CKR_USER_TYPE_INVALID.into()),
         };
         with_optional_pin(pin, pin_len, |pin| {
-            login_role(ctx, slot_id, role, |slot| match role {
-                LoginRole::User => slot.login(pin, pinentry.as_ref()),
-                LoginRole::So => slot.login_so(pin, pinentry.as_ref()),
+            login_role(ctx, slot_id, role, |slot| {
+                let connector = slot.ccid_login_connector();
+                if let Some(c) = &connector {
+                    c.prepare_secure_channel_login(&[])?;
+                }
+                let result = match role {
+                    LoginRole::User => slot.login(pin, pinentry.as_ref()),
+                    LoginRole::So => slot.login_so(pin, pinentry.as_ref()),
+                };
+                if let Some(c) = connector {
+                    c.finish_secure_channel_login(result.is_ok());
+                }
+                result
             })
         })
     })
@@ -533,6 +554,9 @@ fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         ctx.reconcile_login_state(slot_id);
         if !ctx.is_slot_logged_in(slot_id) {
+            if let Some(connector) = ctx.get_slot(slot_id)?.ccid_login_connector() {
+                connector.clear_secure_channel();
+            }
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         ctx.logout_slot(slot_id)
@@ -632,6 +656,9 @@ pub(crate) fn close_session(session_handle: CK_SESSION_HANDLE) -> Result<(), Err
         } else {
             None
         };
+        if is_last_session && let Some(connector) = ctx.slot.ccid_login_connector() {
+            connector.clear_secure_channel();
+        }
         let session = ctx
             .sessions
             .remove(&session_handle)

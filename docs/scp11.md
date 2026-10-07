@@ -38,16 +38,14 @@ The cache is
 discarded after reconnection or Security Domain mutation. The module never
 implicitly trusts a certificate obtained from the card.
 
-A future refinement may make this trust-material acquisition an explicit
-reader-discovery step. The current implementation performs it lazily during
-the first secured applet initialization, which normally already occurs during
-discovery, and then relies on the same connection-scoped validated-key cache.
+Trust-material acquisition occurs lazily during channel establishment at
+login. Later handshakes use the connection-scoped validated-key cache.
 
 Optional configuration:
 
 - `PKCS11RS_SCP11_KEY_VERSION`: decimal or `0x` key version, default `1`;
 
-SCP11a and SCP11c additionally require:
+The configured credential path for SCP11a and SCP11c additionally requires:
 
 - `PKCS11RS_SCP11_OCE_PRIVATE_KEY`: path to a password-encrypted PKCS #8 DER
   P-256 private key, unlocked through `PKCS11RS_PINENTRY`;
@@ -70,6 +68,42 @@ pkcs11rs-tool certificate-bundle create \
   --output /etc/pkcs11rs/oce-chain.cbor \
   oce-leaf.der oce-issuers.pem
 ```
+
+## Dynamic OCE credentials
+
+`C_LoginUser` accepts a PKCS #11 URI selecting an already authorized provider's
+token P-256 private key. The target applet PIN remains the PIN argument.
+The source must also contain exactly one token X.509 leaf certificate with the
+private key's nonempty `CKA_ID`. The module verifies its public key against the
+bound private key; it never reads the private scalar. Source authorization
+is separate and must remain available for later handshakes.
+
+A single leaf is sufficient when the card's provisioned OCE CA directly verifies
+it. Otherwise supply public intermediates using `scp11.oce_intermediate_bundle`
+or `PKCS11RS_SCP11_OCE_INTERMEDIATE_BUNDLE`. This is a canonical CBOR certificate
+collection, loaded once from configuration. It supplies issuer certificates,
+without supplying trust to either the host or card. The module constructs a
+leaf-first chain using issuer names, key identifiers when available, and
+verified signatures. Issuer validity and CA constraints are checked; ambiguous
+paths fail. A self-issued root is omitted from the uploaded chain. A missing
+intermediate does not trigger provider enumeration; the card rejects any chain
+that cannot reach its provisioned trust.
+
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose certificate-collection \
+  --output /etc/pkcs11rs/oce-intermediates.cbor \
+  oce-intermediate.pem
+```
+
+`scp11.oce_key_id` and `scp11.oce_key_version` select the OCE reference for
+both credential paths. Dynamic mode uses the same card-trust configuration
+as configured mode. Without a configured protocol, a private-key selector
+chooses SCP11a; append `?pkcs11rs-scp=scp11c` for SCP11c. See
+[CCID login and recreation](ccid.md#login-selected-secure-channels) for lifetime
+and qualification limits.
+
+## Secure messaging and provider operations
 
 The SCP11b transport uses NIST P-256 ephemeral key agreement and KID `0x13`.
 The SCP11a and SCP11c transports upload the OCE certificate chain, use KID
@@ -96,14 +130,16 @@ encoded transcript before the four final AES values are read. See
 selection rules, host-visible material, SCP11a/b/c differences, and comparison
 with native YubiHSM Auth.
 S-ENC, S-MAC, S-RMAC, and the derived DEK use zeroizing local storage; temporary
-provider objects are released on both success and failure. Existing provider
-sessions use the same operations, but card configuration does not yet select
-credentials by slot and label.
+provider objects are released on both success and failure. Dynamic login uses
+the same operations on the selected provider key.
 
 The live SCP11 session remains paired with the selected applet across calls.
 Selecting another applet or reconnecting destroys the live channel. The
 validated card public key is cached separately for the connection and can be
 reused by later channel establishment.
+Recreation defaults to enabled for configured and dynamic channels and can be
+disabled with `ccid.recreate_sessions=false`. It does not restore applet PIN
+authorization.
 
 ## Issuer SD key provisioning
 

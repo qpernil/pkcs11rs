@@ -175,9 +175,14 @@ login-time enumeration, and cached credential metadata is cleared at logout.
 
 PKCS #11's `CKU_USER` is an authorization role here, not a named FIDO account.
 The ClientPIN is authenticator-wide, so successful PIN/UV token acquisition is
-the FIDO verification operation underlying `C_Login`. `C_LoginUser` accepts
-only an empty username and follows the same PIN/UV authorization path as
-`C_Login`.
+the FIDO verification operation underlying `C_Login`. An empty `C_LoginUser`
+username follows the same PIN/UV authorization path as `C_Login`. FIDO2 over
+CCID also accepts a provider-key URI to establish SCP before that verification;
+the PIN remains the target ClientPIN. Authorize the source separately. HID
+login accepts only an empty username. See
+[CCID login-selected channels](ccid.md#login-selected-secure-channels).
+When a merged FIDO slot prefers HID, configure the SCP protocol to select its
+CCID route before using provider credentials.
 When a prompt provider is configured, the token reports
 `CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for the
 authenticator-wide ClientPIN.
@@ -554,8 +559,10 @@ robustness validation remains useful for:
   intentionally does not retain a PPUAT across PKCS #11 logins;
 - `encCredStoreState` behavior on pre-release firmware and whether it should
   later be used only as a cache-invalidation hint;
-- interaction with configured SCP03/SCP11 channels. Yubico documents FIDO2 SCP
-  over USB CCID for pre-release firmware, but it has not been exercised here.
+- physical interaction with configured or dynamic SCP03/SCP11 channels.
+  Dynamic SCP03 login, ClientPIN verification, and read-only enumeration are
+  covered by the embedded virtual card. Yubico documents FIDO2 SCP over USB
+  CCID for pre-release firmware; physical qualification remains outstanding.
 
 Yubico SDK 1.17 added the WebAuthn `previewSign` extension and explicitly warns
 that the associated ARKG preview code is experimental, not production

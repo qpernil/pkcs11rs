@@ -160,7 +160,19 @@ pub(crate) trait Slot {
     }
     /// Shared context reference used only for reference equality, never for
     /// recursively locking the slot during authentication.
-    fn set_context_reference(&mut self, _context: std::sync::Weak<Mutex<SlotContext>>) {}
+    fn set_context_reference(&mut self, context: std::sync::Weak<Mutex<SlotContext>>) {
+        if let Some(connector) = self.ccid_login_connector() {
+            connector.set_authentication_target(context);
+        }
+    }
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        None
+    }
+    fn set_ccid_auth_sources(&self, sources: Arc<crate::auth_slots::AuthSlots>) {
+        if let Some(connector) = self.ccid_login_connector() {
+            connector.set_authentication_sources(sources);
+        }
+    }
     /// Handle a native import, or return None for common object creation.
     /// State belongs to this slot and is borrowed separately from the backend.
     fn create_object(
@@ -299,6 +311,12 @@ pub(crate) trait Slot {
         if !self.supports_login_user() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
+        if let Some(connector) = self.ccid_login_connector() {
+            connector.prepare_secure_channel_login(username)?;
+            let result = self.login(_pin, _pinentry);
+            connector.finish_secure_channel_login(result.is_ok());
+            return result;
+        }
         if !username.is_empty() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
@@ -351,6 +369,9 @@ pub(crate) trait Slot {
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
     fn clear_session(&mut self);
+    fn clear_lost_login(&mut self) {
+        self.clear_session();
+    }
     fn hsmauth_authenticate(
         &self,
         _credential: &TokenObject,

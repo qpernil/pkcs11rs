@@ -32,6 +32,48 @@ pub(crate) struct AuthSlots {
     fixture_owners: Vec<Arc<Mutex<SlotContext>>>,
 }
 impl AuthSlots {
+    pub(crate) fn find_card_credential<R>(
+        &self,
+        selector: &crate::pkcs11_uri::ClientAuthUri,
+        target: &std::sync::Weak<Mutex<SlotContext>>,
+        target_device: &Arc<crate::device::DeviceContext>,
+        mut select: impl FnMut(Arc<ProviderSession>) -> Result<Option<R>, Error>,
+    ) -> Result<Option<R>, Error> {
+        for (entry, slot, _) in self.ordinary_entries()? {
+            if entry.slot.ptr_eq(target)
+                || entry.native_hsmauth
+                || !selector.matches_slot_fields(
+                    &entry.token,
+                    &entry.manufacturer,
+                    &entry.serial,
+                    &entry.model,
+                )
+            {
+                continue;
+            }
+            {
+                let ctx = slot.try_lock().map_err(|_| CKR_FUNCTION_FAILED)?;
+                if !ctx.slot.is_present() {
+                    continue;
+                }
+                if ctx
+                    .slot
+                    .device_context()
+                    .is_some_and(|device| Arc::ptr_eq(&device, target_device))
+                {
+                    continue;
+                }
+            }
+            let session = ProviderSession::open(Pkcs11Provider::from_slot(slot)?)?;
+            if session.authorization_required()? {
+                continue;
+            }
+            if let Some(selected) = select(session)? {
+                return Ok(Some(selected));
+            }
+        }
+        Ok(None)
+    }
     fn ordinary_entries(&self) -> Result<Vec<OrdinarySearchEntry>, Error> {
         let entries = self
             .slots

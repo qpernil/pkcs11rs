@@ -414,6 +414,13 @@ impl Client {
         application_aid: &[u8],
     ) -> Result<ApplicationInfo, Error> {
         select_application(connector, application_aid)?;
+        self.selected_info(connector)
+    }
+
+    pub(crate) fn selected_info(
+        &self,
+        connector: &dyn Connector,
+    ) -> Result<ApplicationInfo, Error> {
         let data = self.get_data(connector, 0x006e)?;
         let mut info = parse_application_info(&data)?;
         info.kdf = self
