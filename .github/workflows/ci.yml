@@ -5,8 +5,8 @@ on:
   pull_request:
 
 env:
-  # PreviewSign uses the FIDO signer and ASN.1 DER signature encoding.
-  VIRTUAL_YUBIKEY_REVISION: 9c4b7012b830ec9cce9fb0af1264edf7fe2055e6
+  # Match shared applet behavior and the persistent storage API to provider integration.
+  VIRTUAL_YUBIKEY_REVISION: c8379ff5f4c35dc6cb2de98e8d27816c43ad4d98
 
 jobs:
   pkcs11test:

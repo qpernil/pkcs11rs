@@ -23,6 +23,18 @@ Native desktop builds use PC/SC, and native iOS builds use CryptoTokenKit.
 SCP03 or SCP11 configuration is documented in [`scp03.md`](scp03.md) and
 [`scp11.md`](scp11.md).
 
+## Virtual devices
+
+Configured embedded readers with the `openpgp` applet use the same
+`virtual-yubikey-core` implementation as the USB gadget. The core supports
+persistent RSA/ECC/Ed25519/X25519 keys, certificates, PIN/recovery policy,
+signing, decipher, and applet reset. Every form uses the shared per-applet
+storage runtime and the same `openpgp-<serial>.cbor` record.
+Connection authorization is not persisted. See the
+[virtual OpenPGP model](https://github.com/qpernil/virtual-yubikey/blob/main/docs/openpgp.md) for advertised
+algorithms and optional-feature boundaries. Client restrictions against
+potentially key-destructive operations apply to both virtual and physical cards.
+
 ## Discovery
 
 Slot initialization selects the OpenPGP applet and reads its Application

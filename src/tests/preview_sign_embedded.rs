@@ -228,7 +228,8 @@ fn every_embedded_ccid_applet_starts_with_public_ro_and_rw_sessions() {
             "FIDO2 FIDO_2_1 #41",
             "HSM Auth #41",
             "Issuer SD #41",
-            "OpenPGP #41",
+            // The OpenPGP client formats the AID's four serial bytes as BCD-compatible hex.
+            "OpenPGP #00000029",
             "PIV #41",
         ]
     );
