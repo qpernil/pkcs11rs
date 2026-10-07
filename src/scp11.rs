@@ -90,10 +90,11 @@ impl std::fmt::Debug for Scp11KeySet {
 }
 
 impl Scp11KeySet {
-    pub(crate) fn from_configuration(
+    pub(crate) fn from_source(
         variant: Scp11Variant,
         configuration: &crate::configuration::Scp11Configuration,
         pinentry: &crate::pinentry::Pinentry,
+        source: Option<&crate::ccid_auth::CardCredential>,
     ) -> Result<Self, Error> {
         let (card_public_key, certificate_trust) = match &configuration.trust {
             crate::configuration::Scp11TrustConfiguration::PublicKey(point) => {
@@ -114,16 +115,29 @@ impl Scp11KeySet {
                 ])?),
             ),
         };
-        let host = match variant {
-            Scp11Variant::A | Scp11Variant::C => Some(Scp11aHostCredentials::from_configuration(
-                configuration
-                    .oce
-                    .as_ref()
-                    .ok_or(CKR_USER_PIN_NOT_INITIALIZED)?,
-                pinentry,
-            )?),
-            Scp11Variant::B => None,
-        };
+        let host =
+            if let Some(crate::ccid_auth::CardCredential::Scp11 { key, certificates }) = source {
+                key.require_source_authorization()?;
+                Some(Scp11aHostCredentials {
+                    key_version: configuration.oce_key_version,
+                    key_id: configuration.oce_key_id,
+                    private_key: key.clone(),
+                    certificates: certificates.clone(),
+                })
+            } else {
+                match variant {
+                    Scp11Variant::A | Scp11Variant::C => {
+                        Some(Scp11aHostCredentials::from_configuration(
+                            configuration
+                                .oce
+                                .as_ref()
+                                .ok_or(CKR_USER_PIN_NOT_INITIALIZED)?,
+                            pinentry,
+                        )?)
+                    }
+                    Scp11Variant::B => None,
+                }
+            };
         Ok(Self {
             variant,
             key_version: configuration.key_version,

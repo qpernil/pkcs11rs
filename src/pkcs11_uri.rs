@@ -1,4 +1,4 @@
-//! RFC 7512 selectors used for YubiHSM client-authentication credentials.
+//! RFC 7512 selectors used for YubiHSM and CCID client-authentication credentials.
 //!
 //! The URI identifies an existing source token/object. PKCS11RS query
 //! attributes carry the target Authentication Key or request creation of a
@@ -19,6 +19,7 @@ pub(crate) struct ClientAuthUri {
     pub(crate) class: Option<CK_OBJECT_CLASS>,
     pub(crate) authkey_id: Option<u16>,
     pub(crate) direct: Option<String>,
+    pub(crate) scp: Option<SecureChannelProtocol>,
 }
 
 impl ClientAuthUri {
@@ -61,6 +62,12 @@ impl ClientAuthUri {
         for component in query.split('&').filter(|component| !component.is_empty()) {
             let (name, value) = component.split_once('=').ok_or(CKR_PIN_INCORRECT)?;
             match name {
+                "pkcs11rs-scp" => {
+                    if result.scp.is_some() {
+                        return Err(CKR_ARGUMENTS_BAD.into());
+                    }
+                    result.scp = Some(crate::parse_secure_channel(value)?);
+                }
                 AUTHKEY_QUERY => {
                     if result.authkey_id.is_some() {
                         return Err(CKR_PIN_INCORRECT.into());
@@ -164,9 +171,20 @@ impl ClientAuthUri {
         }
         if let Some(authkey_id) = self.authkey_id {
             result.push(if first_query { '?' } else { '&' });
+            first_query = false;
             result.push_str(AUTHKEY_QUERY);
             result.push('=');
             result.push_str(&format!("{authkey_id:04x}"));
+        }
+        if let Some(scp) = self.scp {
+            result.push(if first_query { '?' } else { '&' });
+            result.push_str("pkcs11rs-scp=");
+            result.push_str(match scp {
+                SecureChannelProtocol::Scp03 => "scp03",
+                SecureChannelProtocol::Scp11a => "scp11a",
+                SecureChannelProtocol::Scp11b => "scp11b",
+                SecureChannelProtocol::Scp11c => "scp11c",
+            });
         }
         result
     }
@@ -310,6 +328,18 @@ fn percent_encode(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_protocol_selector_round_trips_and_rejects_duplicates() {
+        let uri = b"pkcs11:object=OCE;type=private?pkcs11rs-scp=scp11c";
+        let parsed = ClientAuthUri::parse(uri).unwrap();
+        assert_eq!(parsed.scp, Some(SecureChannelProtocol::Scp11c));
+        assert_eq!(
+            ClientAuthUri::parse(parsed.format().as_bytes()).unwrap(),
+            parsed
+        );
+        assert!(ClientAuthUri::parse(b"pkcs11:?pkcs11rs-scp=scp03&pkcs11rs-scp=scp11c").is_err());
+    }
 
     #[test]
     fn parses_broad_and_exact_authentication_uris() {

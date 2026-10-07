@@ -294,6 +294,7 @@ fn secure_channel_connector_wraps_encoded_apdus() {
             enabled: std::sync::atomic::AtomicBool::new(true),
             applet_present: std::sync::atomic::AtomicBool::new(true),
             discovery_error: Mutex::new(None),
+            ..Default::default()
         }),
         secure_channels: std::sync::Arc::new(crate::SecureChannelConfiguration::for_test()),
         pinentry: std::sync::Arc::new(crate::pinentry::Pinentry::unconfigured()),

@@ -86,6 +86,7 @@ use configuration::{
 };
 
 mod auth_slots;
+mod ccid_auth;
 mod key_mechanisms;
 mod key_scope;
 mod pkcs11_auth;

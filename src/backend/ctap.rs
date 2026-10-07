@@ -92,6 +92,12 @@ pub(crate) trait FidoEndpoint: std::fmt::Debug {
     fn refresh(&self) -> Result<(), Error> {
         Ok(())
     }
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        None
+    }
+    fn clear_for_login(&self) {
+        self.clear();
+    }
     fn prepare(&self) -> Result<(), Error> {
         Ok(())
     }
@@ -134,6 +140,12 @@ impl CcidFidoEndpoint {
 }
 
 impl FidoEndpoint for CcidFidoEndpoint {
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
+    fn clear_for_login(&self) {
+        self.connector.clear_secure_channel_for_login();
+    }
     fn transport(&self) -> Rc<dyn CtapTransport> {
         self.transport.clone()
     }
@@ -355,6 +367,12 @@ impl FidoEndpoint for SwitchableFidoEndpoint {
         self.routes.ccid.refresh()
     }
 
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        self.routes.active().ccid_login_connector()
+    }
+    fn clear_for_login(&self) {
+        self.routes.active().clear_for_login();
+    }
     fn prepare(&self) -> Result<(), Error> {
         self.routes.active().prepare()
     }
@@ -871,6 +889,9 @@ fn fido2_token_objects(
 }
 
 impl Slot for Fido2Slot {
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        self.endpoint.ccid_login_connector()
+    }
     fn accepts_legacy_fido_storage(&self) -> bool {
         true
     }
@@ -992,7 +1013,7 @@ impl Slot for Fido2Slot {
         self.authenticated.set(false);
         self.administration_authorization.take();
         self.credentials.get_mut().clear();
-        self.endpoint.clear();
+        self.endpoint.clear_for_login();
         self.endpoint.prepare()?;
         let result = (|| {
             let info = self.discovered_info()?;
@@ -1110,8 +1131,14 @@ impl Slot for Fido2Slot {
         self.authenticated.set(false);
         self.administration_authorization.take();
         self.credentials.get_mut().clear();
-        self.endpoint.clear();
-        self.endpoint.prepare()?;
+        if self
+            .endpoint
+            .ccid_login_connector()
+            .is_none_or(|c| !c.secure_channel_required())
+        {
+            self.endpoint.clear();
+            self.endpoint.prepare()?;
+        }
         let result = (|| {
             self.info.get_mut().take();
             let info = self.discovered_info()?;
@@ -1207,6 +1234,16 @@ impl Slot for Fido2Slot {
         self.administration_authorization.take();
         self.credentials.get_mut().clear();
         self.endpoint.clear();
+    }
+    fn clear_lost_login(&mut self) {
+        self.authenticated.set(false);
+        self.administration_authorization.take();
+        self.credentials.get_mut().clear();
+        if let Some(connector) = self.endpoint.ccid_login_connector() {
+            connector.reconcile_lost_applet_login();
+        } else {
+            self.endpoint.clear();
+        }
     }
 
     fn fido_preview_sign_registration(

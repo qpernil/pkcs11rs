@@ -71,6 +71,25 @@ pub(crate) trait Connector {
     }
 
     fn clear_secure_channel(&self) {}
+    fn clear_secure_channel_for_login(&self) {
+        self.clear_secure_channel();
+    }
+    fn set_authentication_sources(&self, _sources: Arc<crate::auth_slots::AuthSlots>) {}
+    fn set_authentication_target(&self, _target: std::sync::Weak<Mutex<SlotContext>>) {}
+    fn prepare_secure_channel_login(&self, username: &[u8]) -> Result<(), Error> {
+        if username.is_empty() {
+            Ok(())
+        } else {
+            Err(CKR_ARGUMENTS_BAD.into())
+        }
+    }
+    fn finish_secure_channel_login(&self, _success: bool) {}
+    fn secure_channel_required(&self) -> bool {
+        false
+    }
+    fn reconcile_lost_applet_login(&self) {
+        self.clear_secure_channel();
+    }
 
     /// Returns the logical PKCS #11 login state of this applet when the
     /// connector participates in a shared CCID card state. `None` means that
@@ -327,6 +346,8 @@ pub(crate) struct PcscAppletState {
     pub(crate) enabled: std::sync::atomic::AtomicBool,
     pub(crate) applet_present: std::sync::atomic::AtomicBool,
     pub(crate) discovery_error: Mutex<Option<String>>,
+    pub(crate) authentication: Mutex<crate::ccid_auth::CardAuthentication>,
+    pub(crate) channel_started: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -669,6 +690,25 @@ impl PcscAppletConnector {
             .and_then(|error| error.clone())
     }
 
+    fn active_protocol(&self) -> Option<SecureChannelProtocol> {
+        self.applet
+            .authentication
+            .lock()
+            .ok()
+            .and_then(|a| a.protocol)
+            .or(self.protocol)
+    }
+    fn source_credential(&self) -> Result<Option<crate::ccid_auth::CardCredential>, Error> {
+        let auth = self
+            .applet
+            .authentication
+            .lock()
+            .map_err(|_| CKR_MUTEX_BAD)?;
+        if auth.protocol.is_some() && auth.credential.is_none() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        Ok(auth.credential.clone())
+    }
     fn enabled(&self) -> bool {
         self.applet
             .enabled
@@ -728,6 +768,8 @@ impl PcscAppletConnector {
                 enabled: std::sync::atomic::AtomicBool::new(false),
                 applet_present: std::sync::atomic::AtomicBool::new(applet_present),
                 discovery_error: Mutex::new(None),
+                authentication: Mutex::new(Default::default()),
+                channel_started: std::sync::atomic::AtomicBool::new(false),
             }),
             secure_channels,
             pinentry,
@@ -752,13 +794,51 @@ impl PcscAppletConnector {
             state.select(&self.application_aid, "applet selected for operation");
         }
 
-        if self.protocol.is_none() || !self.enabled() || state.selected_applet()?.session.is_some()
+        let dynamic_missing = {
+            let auth = self
+                .applet
+                .authentication
+                .lock()
+                .map_err(|_| CKR_MUTEX_BAD)?;
+            auth.protocol.is_some() && auth.credential.is_none()
+        };
+        if dynamic_missing && state.selected_applet()?.session.is_none() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if self
+            .applet
+            .channel_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.enabled()
+        {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if self.active_protocol().is_none()
+            || !self.enabled()
+            || state.selected_applet()?.session.is_some()
         {
             return Ok(());
         }
 
-        let established = match self.protocol.ok_or(CKR_ARGUMENTS_BAD)? {
+        if self
+            .applet
+            .channel_started
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.secure_channels.recreate_sessions
+        {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let source = self.source_credential()?;
+        let established = match self.active_protocol().ok_or(CKR_ARGUMENTS_BAD)? {
             SecureChannelProtocol::Scp03 => (|| {
+                if let Some(source) = &source {
+                    return Scp03Session::authenticate_provider(
+                        self.base.as_ref(),
+                        &self.secure_channels.scp03,
+                        source,
+                        &self.application_aid,
+                    );
+                }
                 let keys = Scp03KeySet::from_configuration(&self.secure_channels.scp03)?;
                 Scp03Session::authenticate_selected(
                     self.base.as_ref(),
@@ -775,10 +855,20 @@ impl PcscAppletConnector {
             Ok(established) => established,
             Err(error) => {
                 state.clear_selection("secure-channel authentication failed");
+                self.set_enabled(false);
+                self.applet
+                    .authentication
+                    .lock()
+                    .map_err(|_| CKR_MUTEX_BAD)?
+                    .credential
+                    .take();
                 return Err(error);
             }
         };
         state.selected_applet_mut()?.session = Some(established);
+        self.applet
+            .channel_started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -787,10 +877,12 @@ impl PcscAppletConnector {
         state: &mut SecureChannelState,
         variant: Scp11Variant,
     ) -> Result<Scp03Session, Error> {
-        let keys = Scp11KeySet::from_configuration(
+        let source = self.source_credential()?;
+        let keys = Scp11KeySet::from_source(
             variant,
             &self.secure_channels.scp11,
             self.pinentry.as_ref(),
+            source.as_ref(),
         )?;
         let cache_key = keys.certificate_cache_key();
         let cached = cache_key
@@ -825,7 +917,7 @@ impl PcscAppletConnector {
 
     fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
-        if self.protocol.is_none() || !self.enabled() {
+        if self.active_protocol().is_none() || !self.enabled() {
             let result = self.base.send_apdu(command);
             if result.is_err() {
                 self.state
@@ -843,13 +935,20 @@ impl PcscAppletConnector {
         let result = channel.transmit(self.base.as_ref(), command);
         if result.is_err() {
             state.clear_selection("secure APDU transport failed");
+            self.set_enabled(false);
+            self.applet
+                .authentication
+                .lock()
+                .map_err(|_| CKR_MUTEX_BAD)?
+                .credential
+                .take();
         }
         result
     }
 
     fn send_short_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
-        if self.protocol.is_none() || !self.enabled() {
+        if self.active_protocol().is_none() || !self.enabled() {
             let result = crate::iso7816::transmit_short(self.base.as_ref(), command);
             if result.is_err() {
                 self.state
@@ -867,6 +966,13 @@ impl PcscAppletConnector {
         let result = channel.transmit_short(self.base.as_ref(), command);
         if result.is_err() {
             state.clear_selection("secure short APDU transport failed");
+            self.set_enabled(false);
+            self.applet
+                .authentication
+                .lock()
+                .map_err(|_| CKR_MUTEX_BAD)?
+                .credential
+                .take();
         }
         result
     }
@@ -981,7 +1087,7 @@ impl Connector for PcscAppletConnector {
     ) -> Result<&'a [u8], Error> {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
-            if self.protocol.is_none() || !self.enabled() {
+            if self.active_protocol().is_none() || !self.enabled() {
                 let result = self.base.transmit(send_buffer, receive_buffer, timeout);
                 if result.is_err() {
                     self.state
@@ -1011,6 +1117,12 @@ impl Connector for PcscAppletConnector {
                     self.record_discovery_error(&Error::from(CKR_DEVICE_REMOVED));
                 }
                 self.set_enabled(false);
+                self.applet
+                    .authentication
+                    .lock()
+                    .map_err(|_| CKR_MUTEX_BAD)?
+                    .credential
+                    .take();
                 self.state
                     .secure_channel()?
                     .clear_selection("connector refresh failed or device disappeared");
@@ -1062,6 +1174,88 @@ impl Connector for PcscAppletConnector {
         self.forget_discovery_error();
     }
 
+    fn set_authentication_sources(&self, sources: Arc<crate::auth_slots::AuthSlots>) {
+        if let Ok(mut auth) = self.applet.authentication.lock()
+            && auth.sources.is_none()
+        {
+            auth.sources = Some(sources);
+        }
+    }
+    fn set_authentication_target(&self, target: std::sync::Weak<Mutex<SlotContext>>) {
+        if let Ok(mut auth) = self.applet.authentication.lock() {
+            auth.target = target;
+        }
+    }
+    fn prepare_secure_channel_login(&self, username: &[u8]) -> Result<(), Error> {
+        let selected = if username.is_empty() {
+            None
+        } else {
+            let (sources, target) = {
+                let auth = self
+                    .applet
+                    .authentication
+                    .lock()
+                    .map_err(|_| CKR_MUTEX_BAD)?;
+                (
+                    auth.sources.clone().ok_or(CKR_FUNCTION_NOT_SUPPORTED)?,
+                    auth.target.clone(),
+                )
+            };
+            Some(crate::ccid_auth::resolve(
+                &sources,
+                &target,
+                &self.state.device,
+                username,
+                self.protocol,
+                &self.secure_channels,
+            )?)
+        };
+        self.state
+            .with_operation(|| self.clear_secure_channel_locked())?;
+        let mut auth = self
+            .applet
+            .authentication
+            .lock()
+            .map_err(|_| CKR_MUTEX_BAD)?;
+        auth.protocol = selected.as_ref().map(|(protocol, _)| *protocol);
+        auth.credential = selected.map(|(_, credential)| credential);
+        self.applet
+            .channel_started
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn finish_secure_channel_login(&self, success: bool) {
+        if !success {
+            self.clear_secure_channel();
+        } else if !self.secure_channels.recreate_sessions
+            && let Ok(mut auth) = self.applet.authentication.lock()
+        {
+            auth.credential.take();
+        }
+    }
+    fn secure_channel_required(&self) -> bool {
+        self.active_protocol().is_some()
+    }
+    fn reconcile_lost_applet_login(&self) {
+        if !self.secure_channels.recreate_sessions {
+            if let Ok(mut auth) = self.applet.authentication.lock() {
+                auth.credential.take();
+            }
+            let _ = self
+                .state
+                .with_operation(|| self.clear_secure_channel_locked());
+            // Preserve channel_started so loss cannot silently enable plaintext.
+            // An explicit fresh login resets it.
+        }
+    }
+    fn clear_secure_channel_for_login(&self) {
+        let _ = self
+            .state
+            .with_operation(|| self.clear_secure_channel_locked());
+        self.applet
+            .channel_started
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     fn establish_secure_channel(&self, application_aid: &[u8]) -> Result<(), Error> {
         if application_aid != self.application_aid {
             return Err(CKR_ARGUMENTS_BAD.into());
@@ -1077,6 +1271,12 @@ impl Connector for PcscAppletConnector {
     }
 
     fn clear_secure_channel(&self) {
+        if let Ok(mut auth) = self.applet.authentication.lock() {
+            auth.credential.take();
+        }
+        self.applet
+            .channel_started
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = self
             .state
             .with_operation(|| self.clear_secure_channel_locked());

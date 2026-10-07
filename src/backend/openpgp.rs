@@ -142,6 +142,9 @@ pub(crate) fn openpgp_signature_requires_context_specific_login(
 }
 
 impl Slot for OpenPgpSlot {
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn shared_storage_namespace(&self) -> Option<&'static str> {
         Some("openpgp")
     }
@@ -247,7 +250,11 @@ impl Slot for OpenPgpSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                OpenPgpClient.selected_info(self.connector.as_ref())?
+            } else {
+                OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_info(&info);
             let pin = self
                 .kdf
@@ -285,7 +292,11 @@ impl Slot for OpenPgpSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                OpenPgpClient.selected_info(self.connector.as_ref())?
+            } else {
+                OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_info(&info);
             let pin = self
                 .kdf
@@ -308,7 +319,11 @@ impl Slot for OpenPgpSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                OpenPgpClient.selected_info(self.connector.as_ref())?
+            } else {
+                OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_info(&info);
             let derive = |input: &[u8]| {
                 if let Some(kdf) = &self.kdf {
@@ -331,7 +346,11 @@ impl Slot for OpenPgpSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            let info = if self.connector.secure_channel_required() {
+                OpenPgpClient.selected_info(self.connector.as_ref())?
+            } else {
+                OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?
+            };
             self.update_info(&info);
             let derive = |input: &[u8]| {
                 if let Some(kdf) = &self.kdf {
@@ -653,6 +672,10 @@ impl Slot for OpenPgpSlot {
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.connector.clear_secure_channel();
+    }
+    fn clear_lost_login(&mut self) {
+        self.authenticated.set(false);
+        self.connector.reconcile_lost_applet_login();
     }
     fn login_is_active(&self) -> bool {
         self.connector.ccid_login_state().map_or_else(

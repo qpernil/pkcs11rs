@@ -93,6 +93,7 @@ a public key or CA certificate.
   "ccid": {
     "applications": ["piv", "openpgp", "hsmauth", "issuer-sd", "fido2"],
     "secure_channel": "scp11b",
+    "recreate_sessions": true,
     "aids": {
       "piv": "a000000308000010000100",
       "openpgp": "d27600012401",
@@ -115,6 +116,7 @@ a public key or CA certificate.
     "key_version": 1,
     "oce_private_key": "/etc/pkcs11rs/oce-key.der",
     "oce_certificate_bundle": "/etc/pkcs11rs/oce-chain.cbor",
+    "oce_intermediate_bundle": "/etc/pkcs11rs/oce-intermediates.cbor",
     "oce_key_version": 0,
     "oce_key_id": 0
   }
@@ -129,6 +131,15 @@ Numeric byte fields are JSON integers from 0 through 255. `security_level` must
 be a supported SCP03 security-level bit combination. The detailed SCP rules
 remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
 rules in [SCP11 configuration](scp11.md).
+
+`ccid.recreate_sessions` defaults to `true` and applies to both configured
+credentials and dynamic `C_LoginUser` provider credentials. Set it to `false`
+to require fresh login after a channel is lost. Recreation preserves only the
+SCP credential binding and channel authorization; it does not retain or replay
+the target applet PIN. The public `scp11.oce_intermediate_bundle` supplies
+issuers for a dynamically selected OCE leaf certificate. It is independent of
+the configured private-key/full-chain pair. See
+[CCID login-selected channels](ccid.md#login-selected-secure-channels).
 
 Experimental I2C YubiHSMs use the same `yubihsm.urls` configuration as USB devices hosted
 by a connector. Configure the bus, address, and required READY GPIO on the
@@ -290,6 +301,7 @@ native application prompt provider.
 | `yubihsm.tls.ca_certificate_bundle` | `PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE` |
 | `ccid.applications` | `PKCS11RS_CCID_APPLICATIONS` |
 | `ccid.secure_channel` | `PKCS11RS_CCID_SECURE_CHANNEL` |
+| `ccid.recreate_sessions` | `PKCS11RS_CCID_RECREATE_SESSIONS` |
 | `ccid.aids.piv` | `PKCS11RS_PIV_AID` |
 | `ccid.aids.openpgp` | `PKCS11RS_OPENPGP_AID` |
 | `ccid.aids.hsmauth` | `PKCS11RS_HSMAUTH_AID` |
@@ -308,6 +320,7 @@ native application prompt provider.
 | `scp11.key_version` | `PKCS11RS_SCP11_KEY_VERSION` |
 | `scp11.oce_private_key` | `PKCS11RS_SCP11_OCE_PRIVATE_KEY` |
 | `scp11.oce_certificate_bundle` | `PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE` |
+| `scp11.oce_intermediate_bundle` | `PKCS11RS_SCP11_OCE_INTERMEDIATE_BUNDLE` |
 | `scp11.oce_key_version` | `PKCS11RS_SCP11_OCE_KEY_VERSION` |
 | `scp11.oce_key_id` | `PKCS11RS_SCP11_OCE_KEY_ID` |
 

@@ -6,7 +6,34 @@ Auth slots expose dedicated credential key types and use their session-bound
 native operation. Both paths keep long-term values out of the client's
 message code; final working AES keys are read once for local secure messaging.
 See [YubiHSM authentication](../yubihsm-auth.md) for selector syntax and the
-[SCP key-provider plan](README.md) for remaining card and virtual-device work.
+[SCP key-provider design](README.md) for card and virtual-device behavior.
+The following lookup details describe YubiHSM authentication; CCID differences
+are described separately below.
+
+## CCID provider credentials
+
+PIV, OpenPGP, FIDO2 over CCID, and Issuer SD accept ordinary provider-key
+selectors through `C_LoginUser`. The source is authorized separately; the PIN
+argument authenticates the target applet. Native HSM Auth and direct password
+derivation are excluded from this path. SCP03 uses the selected token AES
+`<name>.enc` and its `<name>.mac` companion, with optional `<name>.dek`.
+SCP11a/c uses a token P-256 private key and one token X.509 leaf certificate
+associated through its nonempty `CKA_ID`. Only the selected source is searched
+for that leaf; public intermediates come from configuration.
+
+Dynamic selection implies a required channel. Without a configured protocol,
+`type=secret-key` selects SCP03 and a private-key selector selects SCP11a;
+`pkcs11rs-scp=scp11c` explicitly selects SCP11c. A conflict with the configured
+protocol fails. YubiHSM target-ID and direct-password query attributes are
+rejected. Keys on another applet of the target card are excluded because source
+use would deselect the target during its handshake.
+
+CCID recreation defaults to enabled for both configured and dynamic modes.
+It retains the selected source session and bound keys, with the resolved public
+chain, rather than rerunning URI lookup. Source logout or key deletion prevents
+recreation. Disabling `ccid.recreate_sessions` requires fresh login after loss.
+See [CCID login](../ccid.md#login-selected-secure-channels) for cleanup and
+qualification limits. YubiHSM retains its separate opt-in recreation policy.
 
 ## RFC 7512 credential selectors
 

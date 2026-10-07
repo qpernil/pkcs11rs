@@ -31,7 +31,7 @@ lifetime is distinct from retaining the login secret to authenticate again.
 - Card SCP03/SCP11 uses protected provider objects for establishment. Configured
   SCP03 inputs are imported per handshake; the static administration DEK remains
   a protected binding until the selected applet or card connection changes. A
-  configured SCP11 OCE key
+  dynamically selected credential stays in its source token. A configured SCP11 OCE key
   is decrypted once into a protected provider credential; its file-unlock password
   is not retained. Separate handshake sessions release all ephemeral agreements,
   receipt keys, and KDF intermediates. Final message keys and SCP11's derived DEK
@@ -45,6 +45,35 @@ lifetime is distinct from retaining the login secret to authenticate again.
   managed key and request silent native access. ECDH outputs use zeroizing storage.
 
 ## Explicit exceptions
+
+### CCID channel recreation
+
+`ccid.recreate_sessions` defaults to `true` for configured and dynamic SCP03/
+SCP11 channels. A dynamic credential URI explicitly selects source authorization
+with this lifetime. Dynamic login retains the exact source provider session and
+bound token-key references, together with the resolved public OCE certificate
+chain. This retained authorization state enables a fresh handshake after
+applet deselection or connection loss; it does not cache the source login
+secret or target applet PIN. Source logout or deletion of a bound key prevents
+recreation. Successful channel recreation does not restore applet PIN
+authorization or a lost PKCS #11 role.
+
+The binding lasts until logout, closing the last target session, module
+finalization, failed establishment or secure transport, device disappearance,
+or explicit replacement by another login selection. Cleanup applies even
+after deselection has already cleared the applet's login role. Intermediate
+certificates are public configuration data; the resolved chain is retained
+with the selected binding so recreation does not search the provider again.
+
+Set `ccid.recreate_sessions=false` or
+`PKCS11RS_CCID_RECREATE_SESSIONS=0` to release the dynamic reauthentication
+binding after successful establishment and require fresh login after loss.
+An SCP03 administration DEK can still retain its owning provider session for
+the live channel's lifetime; this binding is necessary for administration,
+independent of recreation. Configured keys remain available through explicit
+configuration, but disabled recreation requires an explicit login to establish
+a replacement channel. All transient secret objects and live message keys use
+the protected/zeroizing storage described above.
 
 ### YubiHSM session recreation
 

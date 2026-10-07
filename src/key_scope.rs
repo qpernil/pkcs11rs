@@ -50,6 +50,13 @@ pub(crate) enum CounterKdfPath {
     AesCbc,
 }
 impl BoundKey {
+    pub(crate) fn require_source_authorization(&self) -> Result<(), Error> {
+        if self.0.session.authorization_required()? {
+            Err(CKR_USER_NOT_LOGGED_IN.into())
+        } else {
+            Ok(())
+        }
+    }
     pub(crate) fn authorize_source(&self, pin: &[u8]) -> Result<(), Error> {
         self.0.session.authorize(pin)
     }

@@ -294,9 +294,14 @@ OCE authentication. Every temporary object is released on success or failure.
 Provider and session ownership uses `Arc`; the module's existing slot locks
 serialize backend access and provider selection remains thread-local. A retained
 DEK can move with a live card channel between caller threads. Direct input
-configuration remains supported; selecting card credentials by a configured
-slot/label is future work. Existing authorized sources are covered at the
-provider layer without copying or reading their credential values.
+configuration remains supported. Card `C_LoginUser` can select already
+authorized token keys through a PKCS #11 URI without copying or reading their
+credential values. SCP03 binds ENC/MAC and optional DEK; SCP11a/c matches the
+leaf OCE certificate by `CKA_ID` and obtains public intermediates from
+configuration. CCID recreation defaults to enabled for both configured and
+dynamic credentials and can be disabled. It retains the exact selected
+binding, without an applet PIN. See [CCID login](../ccid.md#login-selected-secure-channels)
+for selection, lifetime, and qualification limits.
 
 Validation includes fixed card vectors, AES-192/256, batch diversification,
 all ECDH placement paths, failed receipts and source policies, source logout, cross-thread

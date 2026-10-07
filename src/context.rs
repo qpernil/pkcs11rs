@@ -606,6 +606,11 @@ impl SlotContextRegistry {
         context: SlotContext,
     ) -> Result<(), Error> {
         let context = Arc::new(Mutex::new(context));
+        context
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .slot
+            .set_ccid_auth_sources(self.auth_slots.clone());
         self.auth_slots.register(&context)?;
         self.slots.insert(slot_id, context);
         Ok(())
@@ -674,6 +679,11 @@ impl SlotContextRegistry {
             .map(|(slot_id, _)| *slot_id)
             .collect::<Vec<_>>();
         for (slot_id, context) in contexts {
+            context
+                .lock()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+                .slot
+                .set_ccid_auth_sources(self.auth_slots.clone());
             self.auth_slots.register(&context)?;
             self.slots.insert(slot_id, context);
         }
@@ -1856,7 +1866,7 @@ impl SlotState {
                 role = ?self.login_role,
                 "backend reported that the recorded PKCS #11 login is no longer active"
             );
-            slot.clear_session();
+            slot.clear_lost_login();
             self.clear_login_state(slot_id, "backend login reconciliation");
         }
     }

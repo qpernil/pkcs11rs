@@ -229,8 +229,11 @@ PIN; OS authorization still controls native key use.
 By module convention, all single-user slots (software, PIV, OpenPGP, FIDO2,
 HSM Auth, Issuer Security Domain, and Platform) accept an empty username in
 `C_LoginUser`, with the same PIN, user-role, and
-session-state behavior as `C_Login`. Nonempty usernames are rejected.
-YubiHSM slots retain their named credential selectors. Neither Complete
+session-state behavior as `C_Login`. PIV, OpenPGP, FIDO2 over CCID, and Issuer SD
+also accept provider-key URIs for [dynamic SCP login](docs/ccid.md#login-selected-secure-channels),
+while their PIN argument authenticates the target applet. Other single-user
+slots reject nonempty usernames. YubiHSM slots retain their named credential
+selectors. Neither Complete
 Provider nor HKDF TLS Token is claimed;
 the complete function/mechanism set and `CKM_HKDF_DATA`, respectively, are absent.
 
