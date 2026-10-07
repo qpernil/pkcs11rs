@@ -457,6 +457,7 @@ mod virtual_card {
             (&OPENPGP_AID, 0x84, 0, &[]),
             (&PIV_AID, 0xfd, 0, &[]),
             (&FIDO2_AID, 0x10, 0, &[0x04]),
+            (&FIDO2_AID, 0x03, 0, &[]),
             (&ISSUER_SECURITY_DOMAIN_AID, 0xca, 0xe0, &[]),
         ];
         for variant in [Scp11Variant::A, Scp11Variant::C] {
@@ -473,11 +474,50 @@ mod virtual_card {
                     // The embedded transport is SHORT_ONLY, so certificates use ISO chaining.
                     let mut session = keys.authenticate_selected(&connector).unwrap();
                     session.require_oce_authentication().unwrap();
-                    let response = session
-                        .transmit(&connector, &command(ins, p2, data))
-                        .unwrap();
+                    let mut request = command(ins, p2, data);
+                    if aid == FIDO2_AID && ins == 0x10 {
+                        request.cla = 0x80;
+                        request.p1 = 0x80;
+                    }
+                    let response = session.transmit(&connector, &request).unwrap();
                     assert!(!response.data.is_empty(), "{variant:?} {aid:x?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn scp11a_and_c_write_independent_usb_application_configuration() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, keys) = fixture(variant);
+            let supported = DeviceProfile::yubikey_5_8_ccid(42).usb_supported_capabilities();
+            for disabled in [0x0002, 0x0200, 0] {
+                select_application(&connector, &MANAGEMENT_AID).unwrap();
+                let mut session = keys.authenticate_selected(&connector).unwrap();
+                session.require_oce_authentication().unwrap();
+                let mask = supported & !disabled;
+                let configuration = [4, 3, 2, (mask >> 8) as u8, mask as u8];
+                session
+                    .transmit(&connector, &command(0x1c, 0, &configuration))
+                    .unwrap();
+                // A capability change invalidates the old card channel and applet authorization.
+                select_application(&connector, &MANAGEMENT_AID).unwrap();
+                let mut session = keys.authenticate_selected(&connector).unwrap();
+                let response = session
+                    .transmit(&connector, &command(0x1d, 0, &[]))
+                    .unwrap();
+                assert!(
+                    response
+                        .data
+                        .windows(4)
+                        .any(|field| field == [3, 2, (mask >> 8) as u8, mask as u8])
+                );
+                assert!(
+                    response
+                        .data
+                        .windows(4)
+                        .any(|field| field == [1, 2, (supported >> 8) as u8, supported as u8])
+                );
             }
         }
     }

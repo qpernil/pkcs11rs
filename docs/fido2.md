@@ -29,11 +29,23 @@ by `80 11 00 00` GET RESPONSE. The transport waits 100 ms between keepalive
 polls, matching Yubico's maintained `SmartCardCtapDevice` behavior and leaving
 time for user-presence interaction.
 
-Yubico's documentation and maintained implementation confirm that pre-release
-YubiKey firmware may expose the smart-card binding over USB CCID. Production
-YubiKeys normally expose FIDO over native USB HID, while NFC uses the
-smart-card binding. pkcs11rs implements these two CTAP device transports
+YubiKey firmware 5.8 exposes the smart-card binding over USB CCID. Read-only
+probes of physical firmware 5.8.0 verified FIDO SELECT, U2F VERSION and CTAP2
+GetInfo through the shared AID; firmware 5.7.4 rejected that AID over USB CCID.
+Both keys accepted U2F VERSION and CTAP2 GetInfo over HID. NFC uses the
+smart-card binding. pkcs11rs implements the HID and smart-card CTAP2 transports
 directly; it does not add a platform WebAuthn transport.
+
+The shared `virtual-yubikey-core` also implements U2F REGISTER, AUTHENTICATE and
+VERSION. U2F uses HID `CTAPHID_MSG` or direct APDUs under the same FIDO AID;
+it has no separate CCID application. Its authenticated wrapped handles require
+no per-credential store and cannot be enumerated. An explicit CTAP2 allow list
+can use a U2F handle when the RP ID hash matches its AppID hash. The PKCS #11
+backend continues to expose its documented CTAP2 operations; this does not add
+a general CTAP1 API or automatic discovery of U2F credentials. Virtual USB
+U2F and FIDO2 enablement is independently controlled by persistent Management
+configuration over CCID or HID. Disabling either protocol preserves credentials;
+the virtual device has no NFC transport.
 
 Primary references:
 
@@ -41,6 +53,7 @@ Primary references:
 - [FIDO Alliance CTAP 2.1 standard](https://fidoalliance.org/specs/fido-v2.1-rd-20210309/fido-client-to-authenticator-protocol-v2.1-rd-20210309.html)
 - [Yubico `SmartCardCtapDevice` source](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/core/fido.html)
 - [Yubico hardware interfaces](https://developers.yubico.com/Developer_Program/Guides/YubiKey_Hardware.html)
+- [YubiKey FIDO over CCID](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-apps-fido.html#fido-over-ccid)
 - [Yubico `Fido2Session` transport documentation](https://docs.yubico.com/yesdk/yubikey-api/Yubico.YubiKey.Fido2.Fido2Session.html)
 
 ## Slot discovery and compatibility probe

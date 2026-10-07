@@ -1071,6 +1071,7 @@ impl ModuleContext {
                     openpgp: false,
                     piv: false,
                     fido2: false,
+                    u2f: false,
                 };
                 for applet in reader.applets {
                     match applet {
@@ -1080,7 +1081,10 @@ impl ModuleContext {
                         CcidApplication::IssuerSecurityDomain => {
                             applets.issuer_security_domain = true
                         }
-                        CcidApplication::Fido2 => applets.fido2 = true,
+                        CcidApplication::Fido2 => {
+                            applets.fido2 = true;
+                            applets.u2f = true;
+                        }
                     }
                 }
                 let persistent_root = if reader.persistent {
