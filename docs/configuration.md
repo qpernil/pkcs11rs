@@ -233,11 +233,18 @@ an ID-scoped directory using an exclusive lock, batched writes, and atomic file
 replacement. Durable state includes PIV keys and data, FIDO credentials and PIN
 state and attestation identity, OpenPGP keys, certificates, PIN verifiers and
 retry policy, YubiHSM Auth credentials, and Issuer Security Domain keys and policy.
-All forms use `virtual-yubikey-core::storage`: five independent
+Selecting `fido2` installs both FIDO2 and U2F in the embedded device. Its USB
+Management settings can disable or enable either protocol independently without
+deleting credentials. There is no virtual NFC transport. Management changes
+force durability before returning.
+
+All forms use `virtual-yubikey-core::storage`: six independent
 `fido-<serial>.cbor`, `piv-<serial>.cbor`, `openpgp-<serial>.cbor`,
-`hsmauth-<serial>.cbor`, and `security-domain-<serial>.cbor` records protected by
+`hsmauth-<serial>.cbor`, `security-domain-<serial>.cbor`, and
+`management-<serial>.cbor` records protected by
 `yubikey-<serial>.lock`. One writer batches dirty applets for up to 500 ms and
-flushes on shutdown; FIDO mutations force durability before returning.
+flushes on shutdown; FIDO mutations and Management settings force durability
+before returning.
 These filenames and applet encodings are identical to the USB worker's storage.
 Only the host-selected directory differs. Whole-device `state.cbor` files are
 not imported; clear the previous virtual-device state when deploying this layout.
