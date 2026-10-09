@@ -110,6 +110,9 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "nfc": [
             "discovery": true,
         ],
+        "ccid": [
+            "secure_channel": "scp11b",
+        ],
     ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     return ConnectorConfiguration(
@@ -213,6 +216,27 @@ private func authenticatedCredentialDescription(_ session: CK_SESSION_HANDLE) ->
         return "<credential query failed: \(returnValueDescription(result))>"
     }
     return String(bytes: value.prefix(Int(length)), encoding: .utf8) ?? "<invalid UTF-8>"
+}
+
+private func authenticationDiagnostics(_ session: CK_SESSION_HANDLE) -> [String] {
+    var length = CK_ULONG()
+    var result = PKCS11RS_GetSecureChannel(session, nil, &length)
+    var lines = [String]()
+    if result == CKR_OK {
+        var value = [UInt8](repeating: 0, count: Int(length))
+        result = value.withUnsafeMutableBufferPointer {
+            PKCS11RS_GetSecureChannel(session, $0.baseAddress, &length)
+        }
+        if result == CKR_OK {
+            let channel = String(decoding: value.prefix(Int(length)), as: UTF8.self)
+            lines.append("  Secure channel: \(channel)")
+        }
+    }
+    if result != CKR_OK {
+        lines.append("  Secure channel query failed: \(returnValueDescription(result))")
+    }
+    lines.append("  Credential: \(authenticatedCredentialDescription(session))")
+    return lines
 }
 
 private func availableLength(_ attribute: CK_ATTRIBUTE, capacity: Int) -> Int? {
@@ -977,6 +1001,7 @@ private func exercisePreviewSign(
     guard result == CKR_OK else { return (result, "C_SignInit(previewSign)", 0, 0) }
     result = login(session, CK_USER_TYPE(CKU_CONTEXT_SPECIFIC))
     lines.append(loginResultLine(CK_USER_TYPE(CKU_CONTEXT_SPECIFIC), result: result))
+    lines.append(contentsOf: authenticationDiagnostics(session))
     guard result == CKR_OK else { return (result, "C_Login(CKU_CONTEXT_SPECIFIC)", 0, 0) }
     var signatureLength = CK_ULONG()
     result = digest.withUnsafeMutableBufferPointer { buffer in
@@ -1061,6 +1086,7 @@ private func fidoPreviewSignSmoke(
     defer { _ = C_CloseSession(session) }
     let result = login(session, CK_USER_TYPE(CKU_USER))
     lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: result))
+    lines.append(contentsOf: authenticationDiagnostics(session))
     guard result == CKR_OK || result == CKR_USER_ALREADY_LOGGED_IN else {
         return lines + ["  user login failed"]
     }
@@ -2142,13 +2168,14 @@ private final class ModuleInspector {
                 }
             }
             var authenticatedSession: CK_SESSION_HANDLE?
-            if isHostTokenLabel(inventory.tokenLabel) {
+            if isHostTokenLabel(inventory.tokenLabel) || inventory.tokenLabel.hasPrefix("Issuer SD #") {
                 let source = loginSourceSlot(inventory.slot)
                 lines.append("")
                 lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: source.result))
                 if let authorization = source.authorization {
                     authorizedSessions.append(authorization)
                     authenticatedSession = authorization.session
+                    lines.append(contentsOf: authenticationDiagnostics(authorization.session))
                 }
             }
             if support.any {
@@ -2185,9 +2212,9 @@ private final class ModuleInspector {
                 lines.append("")
                 lines.append(loginUserResultLine(
                     username: "pkcs11:",
-                    result: login.result,
-                    credential: login.credential ?? "<unknown>"
+                    result: login.result
                 ))
+                lines.append(contentsOf: authenticationDiagnostics(session))
                 if support.any {
                     lines.append(contentsOf: exercisePostQuantumMechanisms(
                         session: session,

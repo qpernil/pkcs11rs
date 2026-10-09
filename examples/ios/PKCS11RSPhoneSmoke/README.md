@@ -1,5 +1,14 @@
 # PKCS11RS iPhone smoke test
 
+The initialization configuration sets `ccid.secure_channel` to `scp11b`.
+Ordinary CCID `C_Login` calls establish the channel inside the module before
+performing the applet's usual authentication. Issuer SD requires no PIN;
+Refresh logs into it to check the secure channel. Public discovery and
+inventory alone do not establish SCP. Factory-provisioned SCP11b-capable YubiKeys use
+the embedded Yubico root and published intermediates without a device pin.
+Virtual YubiKeys require their own explicitly configured CA certificate and,
+when needed, card intermediates; see [SCP11 configuration](../../../docs/scp11.md).
+
 This small UIKit application links the generated `PKCS11RS.xcframework` and
 passes its NUL-terminated JSON configuration directly through
 `CK_C_INITIALIZE_ARGS.pReserved`. The application contains no CryptoTokenKit
@@ -45,6 +54,16 @@ public objects and the mechanism report before login, then post-quantum
 generation and operations, and finally the authenticated object list. Every
 login performed during Refresh has a terse line containing the PKCS #11 entry
 point, user type, selector when applicable, and named return value.
+
+Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
+Issuer SD slot to exercise configured SCP11b without a PIN. It reports the
+login result and both diagnostics. This smoke check is independent of
+post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
+
+After logins, the inventory queries `PKCS11RS_GetSecureChannel` and
+`PKCS11RS_GetAuthenticatedCredential`. It prints the returned channel mode and credential URI, or the literal `none`
+when no channel or credential is available. These queries do not
+log into additional applets and do not depend on PQC support.
 
 The Secure Enclave host slot has a no-secret login. The app authorizes it with
 `C_Login(CKU_USER, NULL_PTR, 0)` and retains that session while resolving
@@ -267,7 +286,13 @@ arbitrary USB interfaces or bulk endpoints.
 The smoke JSON requests the `debug` level, so pkcs11rs writes directly to Apple
 Unified Logging under subsystem `com.nilssoncrypto.pkcs11rs`; Rust tracing
 targets become log categories. View the live records in Xcode's console or in
-the macOS Console app with the device selected. The elapsed `Working…`
+the macOS Console app with the device selected. The `pkcs11rs::scp` category
+reports `SCP established` only after a successful handshake, with the protocol
+(`Scp03`, `Scp11a`, `Scp11b`, or `Scp11c`) and application AID. An unsuccessful
+handshake reports `SCP establishment failed`; its PKCS #11 call reports the
+return value. Reusing an established channel emits no additional establishment
+record. Public discovery alone emits no establishment record. These records
+contain no PINs, keys, certificates, or APDU payloads. The elapsed `Working…`
 indicator continues updating during long calls. Debug logging adds
 named reader and device inventories, each applet probe and outcome, stable slot
 registration and retention, deduplication decisions, phase timing, and each

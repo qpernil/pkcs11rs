@@ -11,8 +11,8 @@ both signed apps remain installed and provisioned at the same time.
 
 Both apps configure CryptoTokenKit NFC discovery, the local or overridden
 YubiHSM connector, prototype YubiHSM public discovery, the Secure Enclave host
-slot, and host token storage. Neither app configures an embedded reader or
-software slot. Physical FIDO2 devices are selected for PreviewSign by their
+slot, host token storage, and `ccid.secure_channel = "scp11b"`. Neither app
+configures an embedded reader or software slot. Physical FIDO2 devices are selected for PreviewSign by their
 advertised generation, derivation, and signing mechanisms.
 
 The inventory opens a public session for every present slot and reports its
@@ -30,6 +30,16 @@ Every login performed during Refresh has the same terse report format in both
 apps: the PKCS #11 entry point, user type, selector when applicable, named
 return value, and selected credential when available. Login secrets are
 zeroized after each call.
+
+Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
+Issuer SD slot to exercise configured SCP11b without a PIN. It reports the
+login result and both diagnostics. This smoke check is independent of
+post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
+
+After logins, the inventory queries `PKCS11RS_GetSecureChannel` and
+`PKCS11RS_GetAuthenticatedCredential`. It prints the returned channel mode and credential URI, or the literal `none`
+when no channel or credential is available. These queries do not
+log into additional applets and do not depend on PQC support.
 
 Every slot receives the same six-entry post-quantum mechanism report:
 `CKM_ML_DSA_KEY_PAIR_GEN`, `CKM_ML_DSA`,
@@ -87,6 +97,13 @@ match the Swift app. The configuration requests debug logging under Apple
 Unified Logging subsystem `com.nilssoncrypto.pkcs11rs`. An elapsed
 `Working…` indicator remains visible while synchronous discovery or
 authentication is running.
+
+The `pkcs11rs::scp` log category reports `SCP established` after a successful
+handshake and `SCP establishment failed` after an unsuccessful handshake, with
+the protocol and application AID. View these records in Xcode's console or
+macOS Console with the device selected. Public discovery does not establish
+SCP, and channel reuse does not emit another establishment record. The records
+contain no authentication secrets or APDU payloads.
 
 Build the shared XCFramework before opening the project:
 
