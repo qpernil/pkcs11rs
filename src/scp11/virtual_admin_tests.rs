@@ -149,9 +149,44 @@ fn commands_provision_scp11a_and_c_with_discovery_and_persistent_policy() {
                 .any(|entry| entry.key_ref == ca_ref
                     && entry.subject_key_identifier == vec![0x55; 20])
         );
+        let mut ca_query = vec![0xa6, 22, 0x42, 20];
+        ca_query.extend([0x55; 20]);
+        let mut ca_lookup_reads = Vec::new();
+        for (tag, data) in [(0x0083_u16, ca_query), (0xff33, Vec::new())] {
+            let [p1, p2] = tag.to_be_bytes();
+            for cla in [0, 0x80] {
+                let command = CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1,
+                    p2,
+                    data: data.clone(),
+                    le: Some(256),
+                    extended: false,
+                };
+                let response = connector.send_apdu(&command).unwrap();
+                assert_eq!(response.status, 0x9000);
+                if tag == 0x83 {
+                    assert_eq!(
+                        response.data,
+                        if cla == 0 {
+                            vec![0x10, 1]
+                        } else {
+                            vec![0x83, 2, 0x10, 1]
+                        }
+                    );
+                }
+                ca_lookup_reads.push((command, response.data));
+            }
+        }
         let (mut channel, _) = keys
             .authenticate_application(&connector, &SD, &SD, None)
             .unwrap();
+        for (command, expected) in &ca_lookup_reads {
+            let response = channel.transmit(&connector, command).unwrap();
+            assert_eq!(response.status, 0x9000);
+            assert_eq!(&response.data, expected);
+        }
         // SCP11 itself can administer policy after host key confirmation.
         administer(
             &connector,
