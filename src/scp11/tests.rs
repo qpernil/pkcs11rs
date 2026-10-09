@@ -104,6 +104,32 @@ fn embedded_yubico_attestation_root_is_self_signed() {
 }
 
 #[test]
+fn factory_scp11b_chain_validates_critical_policies_with_published_intermediates() {
+    // Public Issuer SD certificates read from a factory-provisioned 5.7.4 key.
+    let chain = vec![
+        include_bytes!("../fixtures/yubikey-scp11b-issuer.der").to_vec(),
+        include_bytes!("../fixtures/yubikey-scp11b-leaf.der").to_vec(),
+    ];
+    let mut configured = vec![YUBICO_ATTESTATION_ROOT.to_vec()];
+    let root_only = crate::certificate_chain::CertificateTrust::new(&configured).unwrap();
+    assert!(root_only.validate_p256_public_point(&chain).is_err());
+    configured.extend(crate::certificate_chain::decode_bundle(YUBICO_INTERMEDIATES).unwrap());
+    let trust = crate::certificate_chain::CertificateTrust::new(&configured).unwrap();
+    let point = trust.validate_p256_public_point(&chain).unwrap();
+    assert_eq!(
+        point,
+        crate::certificate_chain::p256_public_point(&chain[1]).unwrap()
+    );
+    let mut corrupted = chain.clone();
+    let last = corrupted[1].len() - 1;
+    corrupted[1][last] ^= 1;
+    assert!(trust.validate_p256_public_point(&corrupted).is_err());
+    let unrelated = certificate_chain(&signing_key(4));
+    let wrong_trust = crate::certificate_chain::CertificateTrust::new(&unrelated[..1]).unwrap();
+    assert!(wrong_trust.validate_p256_public_point(&chain).is_err());
+}
+
+#[test]
 fn encodes_scp11b_authentication_parameters() {
     let mut point = vec![0x04];
     point.extend(1u8..=64);
