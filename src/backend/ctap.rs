@@ -44,7 +44,7 @@ impl CtapTransport for CcidCtapTransport {
             let response = self.connector.send_apdu(&command)?;
             match response.status {
                 ISO7816_SUCCESS => return Ok(response.data),
-                NFCCTAP_KEEPALIVE_STATUS if response.data.len() == 1 => {
+                NFCCTAP_KEEPALIVE_STATUS if matches!(response.data.as_slice(), [0x01] | [0x02]) => {
                     command = CommandApdu {
                         cla: 0x80,
                         ins: NFCCTAP_GETRESPONSE,
@@ -1714,7 +1714,13 @@ mod tests {
     fn ccid_transport_rejects_malformed_keepalive_and_apdu_errors() {
         use crate::ctap::AUTHENTICATOR_GET_INFO;
 
-        for response in [vec![0x91, 0x00], vec![0x6a, 0x80]] {
+        for response in [
+            vec![0x91, 0x00],
+            vec![0x00, 0x91, 0x00],
+            vec![0x03, 0x91, 0x00],
+            vec![0x01, 0x02, 0x91, 0x00],
+            vec![0x6a, 0x80],
+        ] {
             let connector = Rc::new(ScriptedConnector::new(vec![response]));
             let transport = CcidCtapTransport::new(connector);
             assert!(transport.transact(&[AUTHENTICATOR_GET_INFO]).is_err());

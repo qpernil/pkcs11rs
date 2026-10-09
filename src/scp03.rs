@@ -856,6 +856,9 @@ impl Scp03Session {
 
     fn unprotect_response(&self, response: ResponseApdu) -> Result<ResponseApdu, Error> {
         if response.status != RESPONSE_OK
+            // CTAP's processing/user-presence notification is a protected
+            // continuation response, not an ISO 7816 error response.
+            && response.status != 0x9100
             && response.status & 0xff00 != 0x6200
             && response.status & 0xff00 != 0x6300
         {
