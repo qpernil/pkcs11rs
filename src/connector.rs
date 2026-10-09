@@ -70,6 +70,14 @@ pub(crate) trait Connector {
         Ok(())
     }
 
+    fn secure_channel_protocol(&self) -> Result<Option<SecureChannelProtocol>, Error> {
+        Ok(None)
+    }
+
+    fn authenticated_credential_description(&self) -> Result<String, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+
     fn clear_secure_channel(&self) {}
     fn clear_secure_channel_for_login(&self) {
         self.clear_secure_channel();
@@ -163,6 +171,8 @@ pub(crate) enum CcidLoginState {
 struct SelectedApplet {
     application_aid: Vec<u8>,
     session: Option<Scp03Session>,
+    protocol: Option<SecureChannelProtocol>,
+    credential_description: Option<String>,
     login: CcidLoginState,
 }
 
@@ -220,6 +230,8 @@ impl SecureChannelState {
         self.selected_applet = Some(SelectedApplet {
             application_aid: application_aid.to_vec(),
             session: None,
+            protocol: None,
+            credential_description: None,
             login: CcidLoginState::Public,
         });
     }
@@ -330,6 +342,8 @@ impl PcscReaderState {
                 selected_applet: Some(SelectedApplet {
                     application_aid,
                     session: Some(session),
+                    protocol: Some(SecureChannelProtocol::Scp03),
+                    credential_description: None,
                     login: CcidLoginState::Public,
                 }),
                 ..SecureChannelState::default()
@@ -829,7 +843,8 @@ impl PcscAppletConnector {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let source = self.source_credential()?;
-        let established = match self.active_protocol().ok_or(CKR_ARGUMENTS_BAD)? {
+        let protocol = self.active_protocol().ok_or(CKR_ARGUMENTS_BAD)?;
+        let established = match protocol {
             SecureChannelProtocol::Scp03 => (|| {
                 if let Some(source) = &source {
                     return Scp03Session::authenticate_provider(
@@ -846,14 +861,28 @@ impl PcscAppletConnector {
                     self.secure_channels.scp03.security_level,
                     &self.application_aid,
                 )
-            })(),
+            })()
+            .map(|session| {
+                (
+                    session,
+                    source
+                        .as_ref()
+                        .map(|source| source.description().to_owned()),
+                )
+            }),
             SecureChannelProtocol::Scp11a => self.establish_scp11(&mut state, Scp11Variant::A),
             SecureChannelProtocol::Scp11b => self.establish_scp11(&mut state, Scp11Variant::B),
             SecureChannelProtocol::Scp11c => self.establish_scp11(&mut state, Scp11Variant::C),
         };
-        let established = match established {
+        let (established, credential_description) = match established {
             Ok(established) => established,
             Err(error) => {
+                tracing::warn!(
+                    target: "pkcs11rs::scp",
+                    ?protocol,
+                    application_aid = ?self.application_aid,
+                    "SCP establishment failed"
+                );
                 state.clear_selection("secure-channel authentication failed");
                 self.set_enabled(false);
                 self.applet
@@ -865,10 +894,19 @@ impl PcscAppletConnector {
                 return Err(error);
             }
         };
-        state.selected_applet_mut()?.session = Some(established);
+        let selected = state.selected_applet_mut()?;
+        selected.session = Some(established);
+        selected.protocol = Some(protocol);
+        selected.credential_description = credential_description;
         self.applet
             .channel_started
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            target: "pkcs11rs::scp",
+            ?protocol,
+            application_aid = ?self.application_aid,
+            "SCP established"
+        );
         Ok(())
     }
 
@@ -876,7 +914,7 @@ impl PcscAppletConnector {
         &self,
         state: &mut SecureChannelState,
         variant: Scp11Variant,
-    ) -> Result<Scp03Session, Error> {
+    ) -> Result<(Scp03Session, Option<String>), Error> {
         let source = self.source_credential()?;
         let keys = Scp11KeySet::from_source(
             variant,
@@ -912,7 +950,11 @@ impl PcscAppletConnector {
         if let (Some(key), Some(point)) = (cache_key, validated) {
             state.validated_scp11_keys.insert(key, point);
         }
-        Ok(session)
+        let description = source
+            .as_ref()
+            .map(|source| source.description().to_owned())
+            .or_else(|| keys.configured_credential_description());
+        Ok((session, description))
     }
 
     fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
@@ -999,6 +1041,8 @@ impl PcscAppletConnector {
                 );
             }
             selected.session = None;
+            selected.protocol = None;
+            selected.credential_description = None;
             selected.login = CcidLoginState::Public;
         }
         Ok(())
@@ -1243,6 +1287,37 @@ impl Connector for PcscAppletConnector {
     }
     fn secure_channel_required(&self) -> bool {
         self.active_protocol().is_some() || self.secure_channels.client_uri.is_some()
+    }
+    fn secure_channel_protocol(&self) -> Result<Option<SecureChannelProtocol>, Error> {
+        let mut state = self.state.secure_channel()?;
+        state.synchronize_connection(self.base.connection_epoch());
+        Ok(state
+            .selected_applet
+            .as_ref()
+            .filter(|selected| {
+                self.base.is_present()
+                    && selected.application_aid == self.application_aid
+                    && selected.session.is_some()
+            })
+            .and_then(|selected| selected.protocol))
+    }
+    fn authenticated_credential_description(&self) -> Result<String, Error> {
+        let mut state = self.state.secure_channel()?;
+        state.synchronize_connection(self.base.connection_epoch());
+        let selected = state
+            .selected_applet
+            .as_ref()
+            .filter(|selected| {
+                self.base.is_present()
+                    && selected.application_aid == self.application_aid
+                    && selected.session.is_some()
+                    && selected.login != CcidLoginState::Public
+            })
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        selected
+            .credential_description
+            .clone()
+            .ok_or_else(|| CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn reconcile_lost_applet_login(&self) {
         if !self.secure_channels.recreate_sessions {
@@ -3922,6 +3997,8 @@ mod tests {
             selected_applet: Some(SelectedApplet {
                 application_aid: vec![1, 2, 3],
                 session: None,
+                protocol: None,
+                credential_description: None,
                 login: CcidLoginState::Public,
             }),
             ..SecureChannelState::default()

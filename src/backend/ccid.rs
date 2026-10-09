@@ -24,6 +24,17 @@ pub(crate) enum SecureChannelProtocol {
     Scp11c,
 }
 
+impl SecureChannelProtocol {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Scp03 => "scp03",
+            Self::Scp11a => "scp11a",
+            Self::Scp11b => "scp11b",
+            Self::Scp11c => "scp11c",
+        }
+    }
+}
+
 pub(crate) fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Error> {
     let mut applications = Vec::new();
     for application in value

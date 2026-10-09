@@ -4244,12 +4244,22 @@ impl Slot for YubiHsmSlot {
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
         {
             YubiHsmSessionState::Active {
+                session,
                 role: YubiHsmSessionRole::User,
                 credential_description: Some(description),
                 ..
-            } => Ok(description.clone()),
+            } if session.is_valid() => Ok(description.clone()),
             _ => Err(CKR_USER_NOT_LOGGED_IN.into()),
         }
+    }
+    fn secure_channel_description(&self) -> Result<&'static str, Error> {
+        let state = self.session.try_borrow().map_err(|_| CKR_CANT_LOCK)?;
+        Ok(match &*state {
+            YubiHsmSessionState::Active { session, .. } if session.is_valid() => {
+                session.protocol_name()
+            }
+            _ => "none",
+        })
     }
     fn native_storage_provider(&self) -> Option<&dyn StorageProvider> {
         Some(self)

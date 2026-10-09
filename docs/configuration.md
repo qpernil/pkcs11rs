@@ -397,6 +397,12 @@ other platforms. If no level is configured, pkcs11rs installs no subscriber
 and its events flow to an ambient `tracing` subscriber when the Rust host has
 one.
 
+The `pkcs11rs::scp` target reports successful SCP establishment at `info` and
+failed handshakes at `warn`, with the protocol and application AID. Success is
+reported after the channel has been established, rather than when configuration
+is read or public discovery runs. Reusing a channel emits no additional
+establishment record.
+
 On iOS the subsystem is `com.nilssoncrypto.pkcs11rs`, and each Rust tracing
 target is used as the Unified Logging category. Rust `trace` and `debug` map to
 Apple `debug`, `info` maps to `info`, `warn` maps to `default`, and `error` maps

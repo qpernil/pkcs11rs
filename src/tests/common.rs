@@ -2596,6 +2596,63 @@ fn hsmauth_secure_channel_fault_is_consistent_across_login_apis() {
     assert_failed_hsmauth_public_discovery_through_both_login_apis(failure);
 }
 
+fn assert_channel_diagnostic(session: CK_SESSION_HANDLE, expected: &str) {
+    let mut len = 0;
+    assert_eq!(
+        crate::api::PKCS11RS_GetSecureChannel(session, std::ptr::null_mut(), &mut len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(len as usize, expected.len());
+    let mut value = vec![0xff; len as usize + 1];
+    let mut short = len - 1;
+    assert_eq!(
+        crate::api::PKCS11RS_GetSecureChannel(session, value.as_mut_ptr(), &mut short),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(short, len);
+    assert!(value.iter().all(|v| *v == 0xff));
+    assert_eq!(
+        crate::api::PKCS11RS_GetSecureChannel(session, value.as_mut_ptr(), &mut len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&value[..len as usize], expected.as_bytes());
+    assert_eq!(value[len as usize], 0xff);
+    assert_eq!(
+        crate::api::PKCS11RS_GetSecureChannel(session, value.as_mut_ptr(), std::ptr::null_mut()),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
+#[test]
+fn yubihsm_symmetric_channel_diagnostics_follow_login_and_logout() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(99, slot);
+    let session = open_test_session(99);
+    assert_channel_diagnostic(session, "none");
+    assert_eq!(
+        YubiHsmLoginApi::ALL[0].call(session, b"0001", b"password"),
+        CKR_OK as CK_RV
+    );
+    let count = commands.borrow().len();
+    assert_channel_diagnostic(session, "scp03");
+    assert_eq!(commands.borrow().len(), count);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_channel_diagnostic(session, "none");
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    let mut len = 0;
+    assert_eq!(
+        crate::api::PKCS11RS_GetSecureChannel(session, std::ptr::null_mut(), &mut len),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    finalize_for_test();
+}
+
 #[test]
 fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2611,7 +2668,10 @@ fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
         install_test_slot_with_backend(SLOT_ID, slot);
         let session = open_test_session(SLOT_ID);
 
+        assert_channel_diagnostic(session, "none");
         assert_eq!(api.call(session, b"0001", b"password"), CKR_OK as CK_RV);
+        let command_count = commands.borrow().len();
+        assert_channel_diagnostic(session, "scp11");
         let mut description_len = 0;
         assert_eq!(
             crate::api::PKCS11RS_GetAuthenticatedCredential(
@@ -2634,6 +2694,7 @@ fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
             String::from_utf8(description).unwrap(),
             "pkcs11:?pkcs11rs-direct=direct&pkcs11rs-authkey=0001"
         );
+        assert_eq!(commands.borrow().len(), command_count);
         assert!(
             commands
                 .borrow()
@@ -2641,6 +2702,14 @@ fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
                 .any(|(command, _)| *command == crate::yubihsm::CommandCode::ListObjects as u8)
         );
         assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_channel_diagnostic(session, "none");
+        let mut len = 4;
+        let mut value = [0; 4];
+        assert_eq!(
+            crate::api::PKCS11RS_GetAuthenticatedCredential(session, value.as_mut_ptr(), &mut len),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(&value, b"none");
     }
     finalize_for_test();
 }

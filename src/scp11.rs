@@ -94,6 +94,17 @@ impl std::fmt::Debug for Scp11KeySet {
 }
 
 impl Scp11KeySet {
+    pub(crate) fn configured_credential_description(&self) -> Option<String> {
+        let leaf = self.host.as_ref()?.certificates.first()?;
+        let fingerprint = software_key_core::digest::HashAlgorithm::sha256().digest(leaf);
+        let hex = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Some(format!(
+            "pkcs11:?pkcs11rs-direct=scp11-oce&pkcs11rs-cert-sha256={hex}"
+        ))
+    }
     pub(crate) fn from_source(
         variant: Scp11Variant,
         configuration: &crate::configuration::Scp11Configuration,
@@ -128,29 +139,31 @@ impl Scp11KeySet {
                 )
             }
         };
-        let host =
-            if let Some(crate::ccid_auth::CardCredential::Scp11 { key, certificates }) = source {
-                key.require_source_authorization()?;
-                Some(Scp11aHostCredentials {
-                    key_version: configuration.oce_key_version,
-                    key_id: configuration.oce_key_id,
-                    private_key: key.clone(),
-                    certificates: certificates.clone(),
-                })
-            } else {
-                match variant {
-                    Scp11Variant::A | Scp11Variant::C => {
-                        Some(Scp11aHostCredentials::from_configuration(
-                            configuration
-                                .oce
-                                .as_ref()
-                                .ok_or(CKR_USER_PIN_NOT_INITIALIZED)?,
-                            pinentry,
-                        )?)
-                    }
-                    Scp11Variant::B => None,
+        let host = if let Some(crate::ccid_auth::CardCredential::Scp11 {
+            key, certificates, ..
+        }) = source
+        {
+            key.require_source_authorization()?;
+            Some(Scp11aHostCredentials {
+                key_version: configuration.oce_key_version,
+                key_id: configuration.oce_key_id,
+                private_key: key.clone(),
+                certificates: certificates.clone(),
+            })
+        } else {
+            match variant {
+                Scp11Variant::A | Scp11Variant::C => {
+                    Some(Scp11aHostCredentials::from_configuration(
+                        configuration
+                            .oce
+                            .as_ref()
+                            .ok_or(CKR_USER_PIN_NOT_INITIALIZED)?,
+                        pinentry,
+                    )?)
                 }
-            };
+                Scp11Variant::B => None,
+            }
+        };
         Ok(Self {
             variant,
             key_version: configuration.key_version,

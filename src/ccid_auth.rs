@@ -8,11 +8,13 @@ use crate::{
 #[derive(Clone)]
 pub(crate) enum CardCredential {
     Scp03 {
+        description: String,
         enc: BoundKey,
         mac: BoundKey,
         dek: Option<BoundKey>,
     },
     Scp11 {
+        description: String,
         key: BoundKey,
         certificates: Vec<Vec<u8>>,
     },
@@ -35,8 +37,13 @@ impl std::fmt::Debug for CardAuthentication {
 }
 
 impl CardCredential {
+    pub(crate) fn description(&self) -> &str {
+        match self {
+            Self::Scp03 { description, .. } | Self::Scp11 { description, .. } => description,
+        }
+    }
     pub(crate) fn scp03_keys(&self) -> Result<scp_key_provider::Scp03Keys, Error> {
-        let Self::Scp03 { enc, mac, dek } = self else {
+        let Self::Scp03 { enc, mac, dek, .. } = self else {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         };
         enc.require_source_authorization()?;
@@ -139,6 +146,9 @@ pub(crate) fn resolve(
                 _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
             };
             let key = BoundKey::from_session(session.clone(), handle)?;
+            let description =
+                String::from_utf8(session.attribute(handle, CKA_PKCS11RS_URI as _)?.to_vec())
+                    .map_err(|_| CKR_DEVICE_ERROR)?;
             let credential = if symmetric {
                 let label = session.attribute(handle, CKA_LABEL)?;
                 let label = std::str::from_utf8(&label).map_err(|_| CKR_ARGUMENTS_BAD)?;
@@ -158,6 +168,7 @@ pub(crate) fn resolve(
                     }
                 };
                 CardCredential::Scp03 {
+                    description,
                     enc: key,
                     mac: find("mac", true)?.ok_or(CKR_KEY_HANDLE_INVALID)?,
                     dek: find("dek", false)?,
@@ -185,7 +196,11 @@ pub(crate) fn resolve(
                     return Err(CKR_PUBLIC_KEY_INVALID.into());
                 }
                 let certificates = oce_chain(leaf, &configuration.scp11.oce_intermediates)?;
-                CardCredential::Scp11 { key, certificates }
+                CardCredential::Scp11 {
+                    key,
+                    certificates,
+                    description,
+                }
             };
             Ok(Some((protocol, credential)))
         })?
