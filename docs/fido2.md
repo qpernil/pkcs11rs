@@ -29,6 +29,12 @@ by `80 11 00 00` GET RESPONSE. The transport waits 100 ms between keepalive
 polls, matching Yubico's maintained `SmartCardCtapDevice` behavior and leaving
 time for user-presence interaction.
 
+With SCP03 or SCP11 enabled, `91 00` continuation responses undergo the
+same response-MAC verification and negotiated decryption as final `90 00`
+responses. Only the CTAP processing (`01`) and user-presence-needed (`02`)
+notifications trigger polling. An unauthenticated or malformed notification
+cannot bypass secure-channel validation.
+
 YubiKey firmware 5.8 exposes the smart-card binding over USB CCID. Read-only
 probes of physical firmware 5.8.0 verified FIDO SELECT, U2F VERSION and CTAP2
 GetInfo through the shared AID; firmware 5.7.4 rejected that AID over USB CCID.

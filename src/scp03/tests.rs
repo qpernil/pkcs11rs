@@ -924,6 +924,103 @@ fn error_responses_do_not_require_rmac() {
     assert!(response.data.is_empty());
 }
 
+fn protected_test_response(
+    session: &mut Scp03Session,
+    command: &CommandApdu,
+    plaintext: &[u8],
+    status: u16,
+) -> Vec<u8> {
+    session.protect_command(command).unwrap();
+    let mut data = if session.security_level & SECURITY_R_ENCRYPTION != 0 {
+        aes_cbc(
+            &session.s_enc,
+            &session.command_iv(true).unwrap(),
+            &pad(plaintext),
+            Direction::Encrypt,
+        )
+        .unwrap()
+    } else {
+        plaintext.to_vec()
+    };
+    let mut input = session.mac_chaining_value.to_vec();
+    input.extend_from_slice(&data);
+    input.extend_from_slice(&status.to_be_bytes());
+    let mac = aes_cmac(&session.s_rmac, &input).unwrap();
+    data.extend_from_slice(&mac[..MAC_LENGTH]);
+    data.extend_from_slice(&status.to_be_bytes());
+    data
+}
+
+#[test]
+fn protected_ctap_keepalive_preserves_the_channel_for_polling() {
+    let message = CommandApdu {
+        cla: 0x80,
+        ins: 0x10,
+        p1: 0x80,
+        p2: 0,
+        data: vec![0x02, 0xa0],
+        le: Some(256),
+        extended: false,
+    };
+    let poll = CommandApdu {
+        ins: 0x11,
+        p1: 0,
+        data: Vec::new(),
+        ..message.clone()
+    };
+    for level in [0x11, 0x33] {
+        let exchanges = [
+            (&message, &[2][..], 0x9100),
+            (&poll, &[1][..], 0x9100),
+            (&poll, &[0, 0xa0][..], RESPONSE_OK),
+        ];
+        let mut preview = test_session(level);
+        let responses = exchanges
+            .iter()
+            .map(|(command, data, status)| {
+                protected_test_response(&mut preview, command, data, *status)
+            })
+            .collect();
+        let connector = ScriptedConnector::new(responses);
+        let mut session = test_session(level);
+        for (command, data, status) in exchanges {
+            let response = session.transmit(&connector, command).unwrap();
+            assert_eq!(response.status, status);
+            assert_eq!(response.data, data);
+        }
+        assert_eq!(session.encryption_counter, 3);
+    }
+}
+
+#[test]
+fn ctap_keepalive_still_requires_valid_response_protection() {
+    let command = CommandApdu {
+        cla: 0x80,
+        ins: 0x10,
+        p1: 0x80,
+        p2: 0,
+        data: vec![0x02, 0xa0],
+        le: Some(256),
+        extended: false,
+    };
+    for level in [0x11, 0x33] {
+        let valid = protected_test_response(&mut test_session(level), &command, &[2], 0x9100);
+        let mut bad_mac = valid.clone();
+        let offset = bad_mac.len() - 3;
+        bad_mac[offset] ^= 1;
+        let mut changed_status = valid;
+        let offset = changed_status.len() - 2;
+        changed_status[offset] = 0x90;
+        for invalid in [hex("02 91 00"), bad_mac, changed_status] {
+            let connector = ScriptedConnector::new(vec![invalid]);
+            assert!(matches!(
+                test_session(level).transmit(&connector, &command),
+                Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV
+            ));
+        }
+    }
+}
+
 #[test]
 fn yubikey_sessions_share_and_require_the_authenticated_channel() {
     let connector = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]));
