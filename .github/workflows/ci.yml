@@ -297,17 +297,22 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git raspberry-pi-i2c-target
 
-      - name: Check workspace advisories and licenses
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses
-          manifest-path: ./pkcs11rs/Cargo.toml
+          tool: cargo-deny@0.20.2
+          fallback: none
+
+      - name: Check workspace advisories and licenses
+        working-directory: pkcs11rs
+        run: cargo deny --all-features check advisories licenses
 
       - name: Check binding generator advisories and licenses
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories licenses
-          manifest-path: ./pkcs11rs/xtask/Cargo.toml
+        working-directory: pkcs11rs/xtask
+        run: cargo deny --all-features check advisories licenses
 
   macos:
     runs-on: macos-latest
