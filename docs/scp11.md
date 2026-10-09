@@ -205,6 +205,16 @@ credential is insufficient as the only recovery path if the process exits.
 SCP03 and SCP11 credentials can coexist, but the factory SCP03 bootstrap key
 set must not be treated as a persistent recovery credential.
 
+The Swift iPhone smoke app defaults to SCP11b and calls ordinary `C_Login`
+for Issuer SD. SCP11a is selected through
+`PKCS11RS_CCID_SECURE_CHANNEL=scp11a` and
+`PKCS11RS_CCID_CLIENT_URI=pkcs11:`. It retains the existing host-slot
+authorization and reports the established channel and resolved credential through
+the same inventory flow as other logins. The app does not perform SCP enrollment;
+a matching OCE certificate, card provisioning, and card trust configuration
+are prerequisites for SCP11a. See the [iPhone test guide](scp11-ios-smoke.md)
+for provisioning, launch settings, and expected diagnostics.
+
 Physical qualification on firmware 5.7.4 is consistent with a shared budget of
 three credential entries: one SCP03 set, one SCP11a card key, and one SCP11b
 card key fit together. Adding the OCE CA public key as a fourth entry returned

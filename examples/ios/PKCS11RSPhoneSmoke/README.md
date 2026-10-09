@@ -1,6 +1,6 @@
 # PKCS11RS iPhone smoke test
 
-The initialization configuration sets `ccid.secure_channel` to `scp11b`.
+The initialization configuration defaults `ccid.secure_channel` to `scp11b`.
 Ordinary CCID `C_Login` calls establish the channel inside the module before
 performing the applet's usual authentication. Issuer SD requires no PIN;
 Refresh logs into it to check the secure channel. Public discovery and
@@ -8,6 +8,19 @@ inventory alone do not establish SCP. Factory-provisioned SCP11b-capable YubiKey
 the embedded Yubico root and published intermediates without a device pin.
 Virtual YubiKeys require their own explicitly configured CA certificate and,
 when needed, card intermediates; see [SCP11 configuration](../../../docs/scp11.md).
+
+For an externally provisioned SCP11a card, set the launch environment variables
+`PKCS11RS_CCID_SECURE_CHANNEL=scp11a` and
+`PKCS11RS_CCID_CLIENT_URI=pkcs11:`. Refresh retains the same `C_Login` calls;
+the configured selector chooses an eligible authorized P-256 credential in the
+module's protection-preference order, excluding the target card and its applets.
+Host hardware keys precede ordinary hardware credentials. SCP11c can likewise
+be selected explicitly through `PKCS11RS_CCID_SECURE_CHANNEL=scp11c` with a
+configured client URI. Keep the client URI unset for SCP11b.
+
+The [SCP11a iPhone test guide](../../../docs/scp11-ios-smoke.md) documents the
+qualified Nano/Secure Enclave setup, external provisioning, complete Xcode and
+terminal launch settings, expected diagnostics, and the factory SCP11b scenario.
 
 This small UIKit application links the generated `PKCS11RS.xcframework` and
 passes its NUL-terminated JSON configuration directly through
@@ -56,7 +69,7 @@ login performed during Refresh has a terse line containing the PKCS #11 entry
 point, user type, selector when applicable, and named return value.
 
 Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
-Issuer SD slot to exercise configured SCP11b without a PIN. It reports the
+Issuer SD slot to exercise the configured channel without a PIN. It reports the
 login result and both diagnostics. This smoke check is independent of
 post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
 
@@ -67,7 +80,7 @@ log into additional applets and do not depend on PQC support.
 
 The Secure Enclave host slot has a no-secret login. The app authorizes it with
 `C_Login(CKU_USER, NULL_PTR, 0)` and retains that session while resolving
-YubiHSM credentials. The prototype password below is supplied only to the
+Issuer SD and YubiHSM credentials. The prototype password below is supplied only to the
 selected YubiHSM Auth credential; it is not a host-slot PIN.
 
 The initialization JSON enables NFC discovery. At launch, the app calls

@@ -111,7 +111,7 @@ private func connectorConfiguration() -> ConnectorConfiguration {
             "discovery": true,
         ],
         "ccid": [
-            "secure_channel": "scp11b",
+            "secure_channel": environment["PKCS11RS_CCID_SECURE_CHANNEL"] ?? "scp11b",
         ],
     ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])

@@ -501,7 +501,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             @"discovery" : @YES,
         },
         @"ccid" : @{
-            @"secure_channel" : @"scp11b",
+            @"secure_channel" : environment[@"PKCS11RS_CCID_SECURE_CHANNEL"] ?: @"scp11b",
         },
     };
 

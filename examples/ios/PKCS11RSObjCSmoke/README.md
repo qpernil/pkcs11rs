@@ -31,8 +31,15 @@ apps: the PKCS #11 entry point, user type, selector when applicable, named
 return value, and selected credential when available. Login secrets are
 zeroized after each call.
 
+The launch environment can override the default channel with
+`PKCS11RS_CCID_SECURE_CHANNEL`, as in the Swift app. The
+[SCP11 iPhone qualification guide](../../../docs/scp11-ios-smoke.md) describes
+the SCP11a trust and client credential configuration; each app uses its own
+platform credential and must have a certificate provisioned for that key.
+
 Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
-Issuer SD slot to exercise configured SCP11b without a PIN. It reports the
+Issuer SD slot to exercise the configured secure channel without a PIN
+(SCP11b by default). It reports the
 login result and both diagnostics. This smoke check is independent of
 post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
 
