@@ -106,7 +106,9 @@ pkcs11rs-tool certificate-bundle create \
 ## Dynamic OCE credentials
 
 `C_LoginUser` accepts a PKCS #11 URI selecting an already authorized provider's
-token P-256 private key. The target applet PIN remains the PIN argument.
+token P-256 private key. `ccid.client_uri` or `PKCS11RS_CCID_CLIENT_URI` supplies
+the same selector for `C_Login` and empty-username `C_LoginUser`; a nonempty
+username overrides it. The target applet PIN remains the PIN argument.
 The source must also contain exactly one token X.509 leaf certificate with the
 private key's nonempty `CKA_ID`. The module verifies its public key against the
 bound private key; it never reads the private scalar. Source authorization
@@ -123,6 +125,15 @@ paths fail. A self-issued root is omitted from the uploaded chain. A missing
 intermediate does not trigger provider enumeration; the card rejects any chain
 that cannot reach its provisioned trust.
 
+The chain is sent issuer-first, with the leaf last, using PERFORM SECURITY
+OPERATION before each handshake. The client retains its resolved public chain
+for session recreation, but does not assume the card retains it. Temporary
+OCE public-key storage authorizes the next handshake only; applet selection
+also clears uploaded credentials in the virtual target. GlobalPlatform defines
+an optional persistent OCE public-key mode for SCP11a, which can survive even
+power loss. That option is not qualified for this client or the physical
+YubiKey; see [GlobalPlatform SCP11, sections 4.1 and 7.5](https://globalplatform.org/wp-content/uploads/2023/08/GPC_2.3_F_SCP11_v1.3.0.13_PublicRvw.pdf).
+
 ```sh
 pkcs11rs-tool certificate-bundle create \
   --purpose certificate-collection \
@@ -133,7 +144,8 @@ pkcs11rs-tool certificate-bundle create \
 `scp11.oce_key_id` and `scp11.oce_key_version` select the OCE reference for
 both credential paths. Dynamic mode uses the same card-trust configuration
 as configured mode. Without a configured protocol, a private-key selector
-chooses SCP11a; append `?pkcs11rs-scp=scp11c` for SCP11c. See
+chooses SCP11a. SCP11c requires `ccid.secure_channel=scp11c`; the URI still
+selects the host credential, and cannot request SCP11c itself. See
 [CCID login and recreation](ccid.md#login-selected-secure-channels) for lifetime
 and qualification limits.
 

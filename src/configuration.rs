@@ -138,6 +138,7 @@ struct JsonYubiHsmTlsConfiguration {
 struct JsonCcidConfiguration {
     applications: Option<Vec<String>>,
     secure_channel: Option<String>,
+    client_uri: Option<String>,
     recreate_sessions: Option<bool>,
     #[serde(default)]
     aids: JsonCcidAidConfiguration,
@@ -234,6 +235,7 @@ pub(crate) struct Scp11Configuration {
 #[derive(Clone)]
 pub(crate) struct SecureChannelConfiguration {
     pub(crate) recreate_sessions: bool,
+    pub(crate) client_uri: Option<Vec<u8>>,
     pub(crate) scp03: Scp03Configuration,
     pub(crate) scp11: Scp11Configuration,
 }
@@ -243,6 +245,7 @@ impl SecureChannelConfiguration {
     pub(crate) fn for_test() -> Self {
         Self {
             recreate_sessions: true,
+            client_uri: None,
             scp03: Scp03Configuration {
                 key_material: Scp03KeyMaterialConfiguration::Factory,
                 key_version: 255,
@@ -510,6 +513,15 @@ impl ModuleConfiguration {
                 .map(|protocol| crate::parse_secure_channel(&protocol))
                 .transpose()?,
         };
+        let client_uri = match explicit.ccid.client_uri {
+            Some(uri) => Some(uri),
+            None => environment_text("PKCS11RS_CCID_CLIENT_URI", &mut environment)?,
+        }
+        .map(|uri| {
+            crate::ccid_auth::selection(uri.as_bytes(), protocol)?;
+            Ok::<_, Error>(uri.into_bytes())
+        })
+        .transpose()?;
         let applications = match explicit.ccid.applications {
             Some(applications) => parse_applications(applications)?,
             None => environment_text("PKCS11RS_CCID_APPLICATIONS", &mut environment)?
@@ -627,6 +639,7 @@ impl ModuleConfiguration {
             nfc_discovery,
             secure_channels: SecureChannelConfiguration {
                 recreate_sessions: ccid_recreate_sessions,
+                client_uri,
                 scp03,
                 scp11,
             },
@@ -1015,6 +1028,62 @@ fn encode_path_component(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn configured_ccid_client_uri_validates_protocol_and_json_precedence() {
+        const ENV: &str = "PKCS11RS_CCID_CLIENT_URI";
+        const URI: &str = "pkcs11:object=client;type=private";
+        assert!(
+            resolve(None, &[])
+                .unwrap()
+                .secure_channels
+                .client_uri
+                .is_none()
+        );
+        assert_eq!(
+            resolve(None, &[(ENV, URI)])
+                .unwrap()
+                .secure_channels
+                .client_uri
+                .as_deref(),
+            Some(URI.as_bytes())
+        );
+        let explicit = serde_json::from_value(
+            serde_json::json!({"version":1,"ccid":{"secure_channel":"scp11c", "client_uri":URI}}),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(Some(explicit), &[(ENV, "invalid")])
+                .unwrap()
+                .secure_channels
+                .client_uri
+                .as_deref(),
+            Some(URI.as_bytes())
+        );
+        for invalid in [
+            "",
+            "invalid",
+            "pkcs11:?pin-value=secret",
+            "pkcs11:?pkcs11rs-direct=secret&pkcs11rs-authkey=0001",
+            "pkcs11:object=client;type=private?pkcs11rs-scp=scp11c",
+        ] {
+            assert!(resolve(None, &[(ENV, invalid)]).is_err());
+        }
+        assert!(
+            resolve(
+                None,
+                &[(ENV, URI), ("PKCS11RS_CCID_SECURE_CHANNEL", "scp11b")]
+            )
+            .is_err()
+        );
+        assert!(
+            resolve(
+                None,
+                &[(ENV, URI), ("PKCS11RS_CCID_SECURE_CHANNEL", "scp03")]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn card_intermediate_bundle_respects_precedence_and_trust_boundaries() {

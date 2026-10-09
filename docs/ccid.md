@@ -118,9 +118,11 @@ role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs
 
 PIV, OpenPGP, FIDO2 over CCID, and the Issuer Security Domain support two
 credential paths. `C_Login`, or `C_LoginUser` with an empty username, uses
-the configured SCP protocol and credentials. A nonempty `C_LoginUser`
-username selects an ordinary provider credential through an RFC 7512 PKCS #11
-URI. Its PIN argument still authenticates the target applet; authorize the
+the configured SCP protocol and credentials. Set `ccid.client_uri` (or
+`PKCS11RS_CCID_CLIENT_URI`) to select a provider credential for these calls.
+A nonempty `C_LoginUser` username selects an ordinary provider credential
+through an RFC 7512 PKCS #11 URI, overriding the configured client URI.
+Its PIN argument still authenticates the target applet; authorize the
 source slot separately with its own login policy. No target PIN is forwarded
 to the source or retained for later applet verification. The Issuer SD accepts
 an empty PIN because its authorization comes from the authenticated channel.
@@ -128,10 +130,13 @@ an empty PIN because its authorization comes from the authenticated channel.
 Dynamic selection requires SCP even when `ccid.secure_channel` is omitted.
 Configured protocol selection takes precedence; a conflicting URI protocol
 is rejected. Without a configured protocol, `type=secret-key` selects SCP03
-and a private-key selector selects SCP11a. The vendor query
-`pkcs11rs-scp=scp11c` selects SCP11c explicitly. SCP11b has no client credential
+and a private-key selector selects SCP11a. SCP11c must be selected with
+`ccid.secure_channel=scp11c`; its URI selects only the host credential.
+The URI query `pkcs11rs-scp=scp11c` is rejected. SCP11b has no client credential
 and is available through the configured path. A failed dynamic handshake
-cannot fall back to plaintext. Public discovery can run before login, but
+cannot fall back to plaintext or configured file credentials. A configured
+client URI uses the same source-authorization and recreation rules as an
+explicit username. Public discovery can run before login, but
 PIN management requiring SCP returns `CKR_USER_NOT_LOGGED_IN` before login.
 
 For SCP03, select a token AES key named `<name>.enc`; the same source must
@@ -155,7 +160,7 @@ by label or ID: an unrestricted AES search normally also finds the MAC key.
 
 ```text
 pkcs11:token=client%20keys;object=client.enc;type=secret-key
-pkcs11:token=client%20keys;object=OCE;type=private?pkcs11rs-scp=scp11c
+pkcs11:token=client%20keys;object=OCE;type=private
 ```
 
 Selecting another applet destroys the live channel and can clear applet PIN
