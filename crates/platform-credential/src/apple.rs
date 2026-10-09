@@ -22,6 +22,7 @@ use security_framework::{
 use security_framework_sys::{
     access_control::kSecAccessControlPrivateKeyUsage,
     base::errSecItemNotFound,
+    certificate::SecCertificateCopyKey,
     item::{
         kSecAttrAccessControl, kSecAttrIsPermanent, kSecAttrKeyClass, kSecAttrKeyClassPrivate,
         kSecAttrKeySizeInBits, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom, kSecAttrTokenID,
@@ -280,7 +281,7 @@ fn matching_certificates(
         }
         let certificate =
             unsafe { SecCertificate::wrap_under_get_rule(value.as_CFTypeRef().cast_mut().cast()) };
-        let Ok(key) = certificate.public_key() else {
+        let Some(key) = certificate_public_key(&certificate) else {
             continue;
         };
         let Some(encoded) = key.external_representation() else {
@@ -297,6 +298,13 @@ fn matching_certificates(
     certificates.sort();
     certificates.dedup();
     Ok(certificates)
+}
+
+fn certificate_public_key(certificate: &SecCertificate) -> Option<SecKey> {
+    // SecCertificate::public_key() evaluates OS trust. Discovery only associates
+    // the public certificate with its key; the consuming protocol validates trust.
+    let key = unsafe { SecCertificateCopyKey(certificate.as_concrete_TypeRef()) };
+    (!key.is_null()).then(|| unsafe { SecKey::wrap_under_create_rule(key) })
 }
 
 fn secure_enclave_key_names() -> Result<Vec<String>, PlatformCryptoError> {
@@ -511,6 +519,24 @@ mod tests {
         software_key_agreement::derive_with_signing_key,
         software_signing::{KeyKind, SoftwareSigningKey},
     };
+
+    #[test]
+    fn untrusted_oce_certificate_public_key_is_available_without_os_trust() {
+        let certificate =
+            SecCertificate::from_der(include_bytes!("../tests/fixtures/oce-critical-policy.der"))
+                .expect("parse OCE certificate");
+        let key = certificate_public_key(&certificate).expect("extract public key directly");
+        let point = key.external_representation().expect("export public point");
+        assert_eq!(
+            point
+                .bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "0418dc314288296fcb081e152ae50b1bf354d424d22a608d1a5372c5a8582fd3b99d760b80c20f64411f9aeefabffa1ba1c7428e0d88e70203301953d640a45bd9"
+        );
+        sec_key_from_p256_public(point.bytes()).expect("valid P-256 public point");
+    }
 
     #[test]
     #[ignore = "requires unsandboxed access to the host Secure Enclave"]
