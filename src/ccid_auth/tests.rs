@@ -605,8 +605,6 @@ fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
                             .digest(ca.verifying_key().to_sec1_point(false).as_bytes()),
                     },
                 );
-                // Use the certificate profile supported by the virtual target's validator.
-                // Critical OCE policy extensions require separate target qualification.
                 let intermediate_key = scalar(6);
                 let issuer = if intermediates.is_some() {
                     &intermediate_key
@@ -618,13 +616,12 @@ fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
                 } else {
                     "CN=CA"
                 };
-                let leaf = crate::certificate_builder::p256_certificate(
+                let leaf = crate::certificate_builder::p256_scp11_oce_certificate(
                     scalar(5).verifying_key(),
                     issuer,
                     "CN=OCE",
                     issuer_name,
                     20,
-                    false,
                 );
                 let source = Source::new();
                 let key = source.ec(&leaf);
@@ -687,7 +684,10 @@ fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
                     assert!(connector.send_apdu(&version()).is_err());
                     continue;
                 }
-                assert_eq!(result, CKR_OK as CK_RV);
+                assert_eq!(
+                    result, CKR_OK as CK_RV,
+                    "{protocol:?}, intermediates={intermediates:?}, login_mode={login_mode}"
+                );
                 assert_eq!(diagnostic(&owner, false), protocol.name());
                 assert_eq!(
                     diagnostic(&owner, true).as_bytes(),
