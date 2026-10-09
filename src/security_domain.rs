@@ -368,11 +368,20 @@ impl Client {
     }
 
     pub(crate) fn get_cplc(&self, connector: &dyn Connector) -> Result<Option<Vec<u8>>, Error> {
-        let cplc = self.get_data_optional(connector, TAG_CPLC, Vec::new())?;
-        if cplc.as_ref().is_some_and(|value| value.len() != 42) {
-            return Err(CKR_DATA_INVALID.into());
-        }
-        Ok(cplc)
+        self.get_data_optional(connector, TAG_CPLC, Vec::new())?
+            .map(|encoded| {
+                // YubiKey returns the raw value; GlobalPlatform cards may wrap it in a TLV.
+                let value = if encoded.len() == 42 {
+                    encoded
+                } else {
+                    tlv_value(TAG_CPLC, &encoded)?
+                };
+                if value.len() != 42 {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                Ok(value)
+            })
+            .transpose()
     }
 
     pub(crate) fn get_supported_ca_identifiers(
@@ -1010,6 +1019,24 @@ mod tests {
             1,
             false,
         )
+    }
+
+    #[test]
+    fn cplc_accepts_raw_and_tlv_forms_and_rejects_malformed_responses() {
+        let value = vec![0; 42];
+        for encoded in [value.clone(), encode_tlv(TAG_CPLC, &value).unwrap()] {
+            let connector = ScriptedConnector::new(vec![response(encoded, STATUS_SUCCESS)]);
+            assert_eq!(Client.get_cplc(&connector).unwrap(), Some(value.clone()));
+        }
+        for encoded in [
+            vec![0; 41],
+            encode_tlv(TAG_CPLC, &[0; 41]).unwrap(),
+            encode_tlv(0x9f7e, &value).unwrap(),
+            [encode_tlv(TAG_CPLC, &value).unwrap(), vec![0]].concat(),
+        ] {
+            let connector = ScriptedConnector::new(vec![response(encoded, STATUS_SUCCESS)]);
+            assert!(Client.get_cplc(&connector).is_err());
+        }
     }
 
     #[test]

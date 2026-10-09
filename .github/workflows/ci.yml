@@ -5,8 +5,8 @@ on:
   pull_request:
 
 env:
-  # Match SCP, FIDO presence/protocol handling, and persistent Management state to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: 13247ae412c81d59a68291bf904007798f5826cd
+  # Match SCP metadata, FIDO handling, and persistent Management state to provider integration.
+  VIRTUAL_YUBIKEY_REVISION: b95d5a31760a13a2ac9753acf3ad92ea7f58661c
 
 jobs:
   pkcs11test:

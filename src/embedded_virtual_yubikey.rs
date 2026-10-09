@@ -755,6 +755,128 @@ mod tests {
     }
 
     #[test]
+    fn issuer_sd_cplc_and_inventory_survive_reload_and_protected_scp_reads() {
+        use der::Decode;
+        let profile = DeviceProfile::yubikey_5_8_ccid(42);
+        let mut device = VirtualYubiKey::new(profile.clone());
+        let read = |device: &mut VirtualYubiKey, cla| {
+            let selected = device.transmit(&[0, 0xa4, 4, 0, 8, 0xa0, 0, 0, 1, 0x51, 0, 0, 0]);
+            assert_eq!(&selected[selected.len() - 2..], &[0x90, 0]);
+            device.transmit(&[cla, 0xca, 0x9f, 0x7f, 0])
+        };
+        let original = read(&mut device, 0);
+        assert_eq!(original.len(), 44); // 42-byte value + status.
+        assert_eq!(&original[12..16], &42_u32.to_be_bytes());
+        assert_eq!(&original[42..], &[0x90, 0]);
+        let wrapped = read(&mut device, 0x80);
+        assert_eq!(wrapped.len(), 47);
+        assert_eq!(&wrapped[..3], &[0x9f, 0x7f, 42]);
+        assert_eq!(&wrapped[3..45], &original[..42]);
+        assert_eq!(&wrapped[45..], &[0x90, 0]);
+        let mut restored = VirtualYubiKey::from_persistent_states(
+            profile,
+            &device.piv_persistent_state().unwrap(),
+            &device.hsmauth_persistent_state().unwrap(),
+            &device.security_domain_persistent_state().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read(&mut restored, 0), original);
+        let connector = EmbeddedVirtualYubiKeyConnector::from_device(restored);
+        let aid = &virtual_yubikey_core::ISSUER_SECURITY_DOMAIN_AID;
+        select_application(&connector, aid).unwrap();
+        let baseline = SecurityDomainClient.get_cplc(&connector).unwrap().unwrap();
+        assert_eq!(baseline, original[..42]);
+        let certificates = SecurityDomainClient
+            .get_certificate_bundle(
+                &connector,
+                crate::security_domain::KeyRef { kid: 0x13, kvn: 1 },
+            )
+            .unwrap();
+        let inventory = SecurityDomainClient.discover(&connector).unwrap();
+        let recognition = inventory.card_recognition_data.as_ref().unwrap();
+        assert!(
+            recognition
+                .windows(9)
+                .any(|bytes| bytes == [0x2a, 0x86, 0x48, 0x86, 0xfc, 0x6b, 4, 3, 0x60])
+        );
+        assert!(
+            recognition
+                .windows(10)
+                .any(|bytes| bytes == [0x2a, 0x86, 0x48, 0x86, 0xfc, 0x6b, 4, 0x11, 0x9b, 6])
+        );
+        let root = x509_cert::Certificate::from_der(&certificates[0]).unwrap();
+        let root_ski = root
+            .tbs_certificate()
+            .get_extension::<x509_cert::ext::pkix::SubjectKeyIdentifier>()
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(inventory.ca_identifiers.len(), 1);
+        assert_eq!(
+            inventory.ca_identifiers[0].kind,
+            crate::security_domain::CaIdentifierKind::Klcc
+        );
+        assert_eq!(
+            inventory.ca_identifiers[0].key_ref,
+            crate::security_domain::KeyRef { kid: 0x13, kvn: 1 }
+        );
+        assert_eq!(
+            inventory.ca_identifiers[0].subject_key_identifier,
+            root_ski.0.as_bytes()
+        );
+        let mut metadata_reads = Vec::new();
+        for (tag, data) in [
+            (0x0066_u16, Vec::new()),
+            (0x00e0, Vec::new()),
+            (0x9f7f, Vec::new()),
+            (0xff34, Vec::new()),
+            (0xbf21, vec![0xa6, 4, 0x83, 2, 0x13, 1]),
+        ] {
+            let [p1, p2] = tag.to_be_bytes();
+            for cla in [0, 0x80] {
+                let command = crate::CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1,
+                    p2,
+                    data: data.clone(),
+                    le: Some(256),
+                    extended: false,
+                };
+                let response = connector.send_apdu(&command).unwrap();
+                assert_eq!(response.status, 0x9000);
+                metadata_reads.push((command, response.data));
+            }
+        }
+        let scp11 =
+            Scp11KeySet::scp11b_from_certificates(1, &certificates[1..], &certificates[..1])
+                .unwrap();
+        for use_scp11 in [false, true] {
+            for _ in 0..3 {
+                select_application(&connector, aid).unwrap();
+                let mut session = if use_scp11 {
+                    scp11.authenticate_selected(&connector).unwrap()
+                } else {
+                    Scp03Session::authenticate_selected(
+                        &connector,
+                        &Scp03KeySet::yubikey_factory(),
+                        YUBIKEY_SECURITY_LEVEL,
+                        aid,
+                    )
+                    .unwrap()
+                };
+                for _ in 0..3 {
+                    for (command, expected) in &metadata_reads {
+                        let response = session.transmit(&connector, command).unwrap();
+                        assert_eq!(response.status, 0x9000);
+                        assert_eq!(&response.data, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn host_scp03_implementation_interoperates_with_the_virtual_yubikey() {
         let connector = EmbeddedVirtualYubiKeyConnector::new().unwrap();
         select_application(&connector, &crate::piv::PIV_AID).unwrap();

@@ -48,44 +48,63 @@ fn card_scp_protected_reads_across_operations() {
         Ok(matches[0])
     })
     .unwrap();
-    let mut session = 0;
-    assert_eq!(
-        crate::api::C_OpenSession(
-            slot,
-            CKF_SERIAL_SESSION as _,
-            std::ptr::null_mut(),
-            None,
-            &mut session
-        ),
-        CKR_OK as CK_RV
-    );
     let result = std::panic::catch_unwind(|| {
         let mut baseline = None;
         for _ in 0..3 {
-            let information = crate::with_session_context(session, |ctx| {
-                let connector = ctx.slot.security_domain_provisioning_connector().unwrap();
-                connector
-                    .establish_secure_channel(&crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID)?;
-                // Repeated operations retain one selected applet and channel.
-                // Both responses must pass MAC verification and decryption.
-                let keys = crate::SecurityDomainClient.get_key_information(connector.as_ref())?;
-                let cplc = crate::SecurityDomainClient.get_cplc(connector.as_ref())?;
-                Ok((keys, cplc))
-            })
-            .expect("secure-channel authentication and protected GET DATA failed");
-            assert!(!information.0.is_empty());
-            assert!(information.1.as_ref().is_some_and(|cplc| !cplc.is_empty()));
-            if let Some(before) = &baseline {
-                assert_eq!(before, &information);
-            } else {
-                baseline = Some(information);
+            let mut session = 0;
+            assert_eq!(
+                crate::api::C_OpenSession(
+                    slot,
+                    CKF_SERIAL_SESSION as _,
+                    std::ptr::null_mut(),
+                    None,
+                    &mut session
+                ),
+                CKR_OK as CK_RV
+            );
+            let operations = std::panic::catch_unwind(|| {
+                assert_eq!(
+                    crate::api::C_Login(session, CKU_USER as _, std::ptr::null_mut(), 0),
+                    CKR_OK as CK_RV,
+                    "Issuer SD login must establish the configured secure channel without a PIN"
+                );
+                let mut information = None;
+                for _ in 0..3 {
+                    let current = crate::with_session_context(session, |ctx| {
+                        let connector = ctx.slot.security_domain_provisioning_connector().unwrap();
+                        // Both responses must pass MAC verification and decryption.
+                        let keys =
+                            crate::SecurityDomainClient.get_key_information(connector.as_ref())?;
+                        let cplc = crate::SecurityDomainClient.get_cplc(connector.as_ref())?;
+                        Ok((keys, cplc))
+                    })
+                    .expect("protected GET DATA failed");
+                    assert!(!current.0.is_empty());
+                    let cplc = current
+                        .1
+                        .as_ref()
+                        .expect("qualification requires CPLC metadata");
+                    assert_eq!(cplc.len(), 42);
+                    if let Some(before) = &information {
+                        assert_eq!(before, &current);
+                    }
+                    information = Some(current);
+                }
+                if let Some(before) = &baseline {
+                    assert_eq!(Some(before), information.as_ref());
+                }
+                information.unwrap()
+            });
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+            match operations {
+                Ok(information) => baseline = Some(information),
+                Err(panic) => std::panic::resume_unwind(panic),
             }
         }
         eprintln!(
-            "{serial}: {protocol} authenticated and verified protected reads in three operations"
+            "{serial}: {protocol} authenticated three fresh sessions and verified nine protected read pairs"
         );
     });
-    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);

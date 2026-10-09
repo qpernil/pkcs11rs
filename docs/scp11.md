@@ -276,6 +276,96 @@ reference. It does not expose the GlobalPlatform wildcard deletion behavior.
 Successful mutations invalidate and refresh the Issuer SD object inventory.
 Raw `STORE DATA` and Security Domain reset are deliberately not exposed.
 
+## Read-only SCP qualification
+
+The ignored `card_scp_protected_reads_across_operations` test uses the selected
+card's existing keys. It opens three fresh sessions, performs PIN-free Issuer
+SD logins, and verifies three protected key-information/CPLC read pairs per
+session. Qualification requires a stable 42-byte CPLC value on both targets.
+The virtual card uses the legacy field layout with a synthetic IC serial
+derived from its configured device serial and unspecified production metadata.
+The client accepts both raw YubiKey
+responses and the conventional `9F7F 2A` TLV wrapper.
+Physical qualification uses a factory firmware 5.7.4 YubiKey. Embedded virtual
+qualification verifies public CPLC reads, persistence reload, and three fresh
+SCP03 and SCP11b sessions with three protected reads each. An attached USB
+virtual target must run a worker build with the CPLC handler. These tests do
+not provision or replace physical keys.
+
+### Public Issuer SD data objects
+
+`GET DATA` (`CA`) selects an object with the two-byte `P1-P2` value. For
+GlobalPlatform class `80`, the response includes the outer BER-TLV tag and
+length; ISO class `00` returns its value. The virtual Issuer SD supports both
+response forms for its implemented objects.
+
+A public, unauthenticated scan of all 65,536 `P1-P2` values with class `80`
+on physical YubiKey serial 36707396, firmware 5.7.4, identifies these objects:
+
+| Selector | Object | Observed behavior |
+| --- | --- | --- |
+| `0066` | Card Recognition Data | Readable; advertises protocol implementation options |
+| `00E0` | Key Information Template | Readable; lists existing SCP keys |
+| `9F7F` | CPLC | Readable; 42-byte value |
+| `BF21` | Card certificate bundle | Requires `A6 {83 KID KVN}`; factory `13/01` returns certificates |
+| `FF34` | Card CA identifiers | Readable; identifies the issuer associated with `13/01` |
+
+The scan returns `9000` for the four objects without parameters, `6A80` for
+`BF21` without its required selector, and `6A88` for all other selectors.
+Targeted reads confirm the class `00`/`80` response distinction, including the
+parameterized `BF21` request. `FF33` has no advertised host CA on this factory
+configuration, so `0083` lookup of a provisioned host CA cannot be qualified
+from these results. An absent or parameter-dependent response does not prove
+that a feature is unsupported after provisioning or authentication.
+
+The virtual Issuer SD implements all five observed objects, plus `FF33`
+host CA identifiers and `83` host CA lookup using `A6 {42 CA-ID}`. The
+factory card advertises its signing root's SKI through `FF34`; configured
+certificate-backed host CAs supply their root SKI through `FF33`. Explicit
+issuer identifiers retain precedence, and raw CA public-key imports need
+their identifier stored separately. Unknown host identifiers return `6A88`,
+malformed selectors return `6A80`, and duplicate host identifiers return
+`6985`. Lookup returns a KID/KVN value for class `00` and an `83` TLV for
+class `80`. Replacement or deletion removes the old identifier association.
+Older saved factory identities and configured host CAs recover missing
+metadata without changing their card keys or stored certificate chains.
+
+Virtual recognition data follows the Security Domain format, advertising
+SCP03 option `60` and SCP11 option bytes `9B 06`. It omits optional full-card
+management-version and IIN/CIN claims. Qualification checks all five factory
+objects over SCP03 and SCP11b in both response forms, including long
+certificate-response chaining; provisioned virtual SCP11a/c tests check
+host-CA inventory and lookup publicly and through their established channels.
+Public inventory is distinct from SCP establishment and does not prove
+whether an uploaded OCE public key is retained.
+The physical key's SCP11 implementation option is encoded as `9B 06` in its
+recognition OID. Bit 3 of its first option byte is clear, so it does not
+advertise persistent OCE public-key storage. This agrees with sending the
+OCE chain before each handshake; persistence across selection or power loss
+has not been independently exercised with a provisioned host credential.
+
+The object definitions and response forms are specified in
+[GlobalPlatform Card Specification public review v2.3.1.49, section 11.3](https://globalplatform.org/wp-content/uploads/2025/05/GPC_CardSpecification_v2.3.1.49_PublicRvw.pdf)
+and [SCP11 public review v1.3.0.13, section 7](https://globalplatform.org/wp-content/uploads/2023/08/GPC_2.3_F_SCP11_v1.3.0.13_PublicRvw.pdf).
+These public review documents do not establish that every generic
+GlobalPlatform object is implemented by YubiKey. Yubico documents SCP03 from
+firmware 5.3.0 and SCP11 from 5.7.2 in its
+[technical manual](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-apps-scp.html).
+
+Select one card explicitly and constrain discovery to its Issuer SD:
+
+```sh
+PKCS11RS_TEST_ISSUER_SD_SOURCE=YOUR_SERIAL \
+PKCS11RS_SLOTS_SERIALS=YOUR_SERIAL \
+PKCS11RS_CCID_APPLICATIONS=issuer-sd \
+PKCS11RS_CCID_SECURE_CHANNEL=scp11b \
+cargo test -p pkcs11rs --lib --features embedded-virtual-yubikey \
+  card_scp_protected_reads_across_operations -- --ignored --nocapture --test-threads=1
+```
+
+Use `scp03` to test factory SCP03 instead. Virtual SCP11b testing requires its
+own explicitly configured CA certificate.
+
 ## SCP11b hardware provisioning test
 
 The ignored `provisions_and_authenticates_scp11b_key` test generates a
