@@ -103,7 +103,7 @@ impl BuilderProfile for TestProfile {
             usages |= KeyUsages::KeyEncipherment;
         }
         extensions.push(KeyUsage(usages).to_extension(tbs.subject(), &extensions)?);
-        if self.scp_oce {
+        if self.scp_oce || self.is_ca {
             use der::asn1::OctetString;
             use software_key_core::digest::HashAlgorithm;
             use x509_cert::ext::pkix::{AuthorityKeyIdentifier, SubjectKeyIdentifier};
@@ -128,6 +128,8 @@ impl BuilderProfile for TestProfile {
             };
             extensions.push(subject_id.to_extension(tbs.subject(), &extensions)?);
             extensions.push(issuer_id.to_extension(tbs.subject(), &extensions)?);
+        }
+        if self.scp_oce {
             use x509_cert::ext::pkix::{CertificatePolicies, certpolicy::PolicyInformation};
             let policies = CertificatePolicies(vec![PolicyInformation {
                 policy_identifier: const_oid::ObjectIdentifier::new_unwrap(
@@ -179,7 +181,7 @@ pub(crate) fn p256_certificate(
 }
 
 /// GlobalPlatform OCE key-agreement certificate, matching Yubico's SCP11 fixture policy.
-#[cfg(all(test, not(feature = "abi-tests")))]
+#[cfg(test)]
 pub(crate) fn p256_scp11_oce_certificate(
     subject_key: &VerifyingKey,
     signer: &SigningKey,
