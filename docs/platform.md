@@ -106,6 +106,11 @@ managed key's label and `CKA_ID`, matching both key projections, with its DER
 value readable before login and after logout. Certificates are not generated
 by discovery. Multiple certificates for one key have distinct stable object
 identities. The slot exposes only certificates matching its managed keys.
+Apple discovery extracts certificate public keys directly without evaluating
+system trust. Certificate projection does not make a certificate trusted;
+the consuming protocol applies its own chain, usage, and trust requirements.
+This permits a privately issued SCP11 OCE certificate to accompany an existing
+Secure Enclave key without installing its issuer as an Apple system trust root.
 
 Native keys support P-256 `CKM_ECDH1_DERIVE` and its cofactor variant (P-256 has
 cofactor one). The selective composition layer adds prefixed ECDH, one-use P-256
