@@ -49,8 +49,11 @@ lifetime is distinct from retaining the login secret to authenticate again.
 ### CCID channel recreation
 
 `ccid.recreate_sessions` defaults to `true` for configured and dynamic SCP03/
-SCP11 channels. A dynamic credential URI explicitly selects source authorization
-with this lifetime. Dynamic login retains the exact source provider session and
+SCP11 channels. A dynamic credential URI, supplied as a nonempty `C_LoginUser`
+username or configured through `ccid.client_uri`, explicitly selects source
+authorization with this lifetime. The configured URI is a public selector and
+cannot contain a PIN or direct-password credential. Dynamic login retains the
+exact source provider session and
 bound token-key references, together with the resolved public OCE certificate
 chain. This retained authorization state enables a fresh handshake after
 applet deselection or connection loss; it does not cache the source login

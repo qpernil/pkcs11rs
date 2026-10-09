@@ -1187,6 +1187,14 @@ impl Connector for PcscAppletConnector {
         }
     }
     fn prepare_secure_channel_login(&self, username: &[u8]) -> Result<(), Error> {
+        let username = if username.is_empty() {
+            self.secure_channels
+                .client_uri
+                .as_deref()
+                .unwrap_or(username)
+        } else {
+            username
+        };
         let selected = if username.is_empty() {
             None
         } else {
@@ -1234,7 +1242,7 @@ impl Connector for PcscAppletConnector {
         }
     }
     fn secure_channel_required(&self) -> bool {
-        self.active_protocol().is_some()
+        self.active_protocol().is_some() || self.secure_channels.client_uri.is_some()
     }
     fn reconcile_lost_applet_login(&self) {
         if !self.secure_channels.recreate_sessions {

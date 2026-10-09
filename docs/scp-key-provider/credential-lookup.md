@@ -13,7 +13,9 @@ are described separately below.
 ## CCID provider credentials
 
 PIV, OpenPGP, FIDO2 over CCID, and Issuer SD accept ordinary provider-key
-selectors through `C_LoginUser`. The source is authorized separately; the PIN
+selectors through `C_LoginUser`, or through `ccid.client_uri` for `C_Login`
+and empty-username `C_LoginUser`. A nonempty username overrides that setting.
+The source is authorized separately; the PIN
 argument authenticates the target applet. Native HSM Auth and direct password
 derivation are excluded from this path. SCP03 uses the selected token AES
 `<name>.enc` and its `<name>.mac` companion, with optional `<name>.dek`.
@@ -23,7 +25,8 @@ for that leaf; public intermediates come from configuration.
 
 Dynamic selection implies a required channel. Without a configured protocol,
 `type=secret-key` selects SCP03 and a private-key selector selects SCP11a;
-`pkcs11rs-scp=scp11c` explicitly selects SCP11c. A conflict with the configured
+SCP11c requires `ccid.secure_channel=scp11c`, with the URI selecting its host
+credential. Requesting SCP11c in the URI is rejected. A conflict with the configured
 protocol fails. YubiHSM target-ID and direct-password query attributes are
 rejected. Keys on another applet of the target card are excluded because source
 use would deselect the target during its handshake.

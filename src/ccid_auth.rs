@@ -54,19 +54,20 @@ impl CardCredential {
     }
 }
 
-pub(crate) fn resolve(
-    sources: &auth_slots::AuthSlots,
-    target: &std::sync::Weak<Mutex<SlotContext>>,
-    target_device: &Arc<crate::device::DeviceContext>,
+/// Validate the selector and determine the protocol without provider lookup.
+pub(crate) fn selection(
     username: &[u8],
     configured: Option<SecureChannelProtocol>,
-    configuration: &SecureChannelConfiguration,
-) -> Result<(SecureChannelProtocol, CardCredential), Error> {
+) -> Result<(pkcs11_uri::ClientAuthUri, SecureChannelProtocol), Error> {
     let selector = pkcs11_uri::ClientAuthUri::parse(username)?;
     if selector.direct.is_some() || selector.authkey_id.is_some() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let requested = selector.scp;
+    // SCP11c is an explicit configuration policy, not a URI request.
+    if requested == Some(SecureChannelProtocol::Scp11c) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     if configured.is_some() && requested.is_some() && configured != requested {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
@@ -92,6 +93,24 @@ pub(crate) fn resolve(
     {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
+    Ok((selector, protocol))
+}
+
+pub(crate) fn resolve(
+    sources: &auth_slots::AuthSlots,
+    target: &std::sync::Weak<Mutex<SlotContext>>,
+    target_device: &Arc<crate::device::DeviceContext>,
+    username: &[u8],
+    configured: Option<SecureChannelProtocol>,
+    configuration: &SecureChannelConfiguration,
+) -> Result<(SecureChannelProtocol, CardCredential), Error> {
+    let (selector, protocol) = selection(username, configured)?;
+    let symmetric = protocol == SecureChannelProtocol::Scp03;
+    let class = if symmetric {
+        CKO_SECRET_KEY
+    } else {
+        CKO_PRIVATE_KEY
+    } as CK_ULONG;
     sources
         .find_card_credential(&selector, target, target_device, |session| {
             let mut template = vec![

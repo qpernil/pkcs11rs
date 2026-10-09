@@ -143,6 +143,32 @@ issuers for a dynamically selected OCE leaf certificate. It is independent of
 the configured private-key/full-chain pair. See
 [CCID login-selected channels](ccid.md#login-selected-secure-channels).
 
+`ccid.client_uri`, or `PKCS11RS_CCID_CLIENT_URI`, selects an already authorized
+provider credential for `C_Login` and empty-username `C_LoginUser`. A nonempty
+username overrides the configured selector. The PIN remains the target applet
+PIN; authorize the source slot separately. This selector takes precedence over
+configured SCP key files and a lookup or handshake failure does not fall back
+to them. PIN attributes and direct-password derivation are rejected.
+SCP11c requires explicit protocol configuration; for example:
+
+```json
+{
+  "version": 1,
+  "ccid": {
+    "secure_channel": "scp11c",
+    "client_uri": "pkcs11:token=client%20keys;object=OCE;type=private"
+  },
+  "scp11": {
+    "oce_intermediate_bundle": "/etc/pkcs11rs/oce-intermediates.cbor"
+  }
+}
+```
+
+SCP11b has no host credential and rejects `ccid.client_uri`. With no protocol
+configured, an AES secret-key selector implies SCP03 and a private-key selector
+implies SCP11a. Existing configurations without `client_uri` retain their
+configured-credential behavior.
+
 Experimental I2C YubiHSMs use the same `yubihsm.urls` configuration as USB devices hosted
 by a connector. Configure the bus, address, and required READY GPIO on the
 Linux connector with `--i2c-yubihsm`; see
@@ -303,6 +329,7 @@ native application prompt provider.
 | `yubihsm.tls.ca_certificate_bundle` | `PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE` |
 | `ccid.applications` | `PKCS11RS_CCID_APPLICATIONS` |
 | `ccid.secure_channel` | `PKCS11RS_CCID_SECURE_CHANNEL` |
+| `ccid.client_uri` | `PKCS11RS_CCID_CLIENT_URI` |
 | `ccid.recreate_sessions` | `PKCS11RS_CCID_RECREATE_SESSIONS` |
 | `ccid.aids.piv` | `PKCS11RS_PIV_AID` |
 | `ccid.aids.openpgp` | `PKCS11RS_OPENPGP_AID` |

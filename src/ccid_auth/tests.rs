@@ -375,7 +375,7 @@ fn ccid_dynamic_rejects_yubihsm_only_selectors_and_protocol_conflicts() {
     );
     for selector in [
         b"pkcs11:?pkcs11rs-direct=client&pkcs11rs-authkey=0001".as_slice(),
-        b"pkcs11:object=client.enc;type=secret-key?pkcs11rs-scp=scp11c".as_slice(),
+        b"pkcs11:object=client.enc;type=secret-key?pkcs11rs-scp=scp11a".as_slice(),
         b"pkcs11:object=client.enc;type=secret-key?pkcs11rs-authkey=0001".as_slice(),
     ] {
         assert_eq!(
@@ -384,6 +384,72 @@ fn ccid_dynamic_rejects_yubihsm_only_selectors_and_protocol_conflicts() {
         );
     }
     assert_eq!(source.child.lock().unwrap().sessions.len(), 1);
+}
+
+#[test]
+fn ccid_scp11c_cannot_be_requested_by_username() {
+    for configured in [
+        None,
+        Some(SecureChannelProtocol::Scp11a),
+        Some(SecureChannelProtocol::Scp11c),
+    ] {
+        let source = Source::new();
+        let (owner, _) = target(
+            base(),
+            &source,
+            SecureChannelConfiguration::for_test(),
+            configured,
+        );
+        assert_eq!(
+            login(
+                &owner,
+                b"pkcs11:object=client;type=private?pkcs11rs-scp=scp11c",
+                b"123456"
+            ),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        assert_eq!(source.child.lock().unwrap().sessions.len(), 1);
+    }
+}
+
+#[test]
+fn configured_client_uri_requires_authorization_and_explicit_username_overrides_it() {
+    let source = Source::new();
+    source.aes();
+    let mut config = SecureChannelConfiguration::for_test();
+    config.client_uri = Some(b"pkcs11:object=missing.enc;type=secret-key".to_vec());
+    let (owner, connector) = target(base(), &source, config, None);
+    assert!(connector.secure_channel_required());
+    let ordinary_login = || {
+        owner.call(|| {
+            api::C_Login(
+                owner.handle,
+                CKU_USER as _,
+                b"123456".as_ptr().cast_mut(),
+                6,
+            )
+        })
+    };
+    // Factory transport keys exist, but failure of the configured lookup cannot fall back to them.
+    assert_eq!(ordinary_login(), CKR_KEY_HANDLE_INVALID as CK_RV);
+    let selector = b"pkcs11:object=client.enc;type=secret-key";
+    assert_eq!(login(&owner, selector, b"123456"), CKR_OK as CK_RV);
+    assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
+    assert_eq!(owner.call(|| api::C_Logout(owner.handle)), CKR_OK as CK_RV);
+    assert_eq!(
+        source.owner.call(|| api::C_Logout(source.owner.handle)),
+        CKR_OK as CK_RV
+    );
+    assert_ne!(login(&owner, selector, b"123456"), CKR_OK as CK_RV);
+    assert!(
+        connector
+            .applet
+            .authentication
+            .lock()
+            .unwrap()
+            .credential
+            .is_none()
+    );
 }
 
 #[test]
@@ -463,105 +529,147 @@ fn administer(
 fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
     for protocol in [SecureChannelProtocol::Scp11a, SecureChannelProtocol::Scp11c] {
         for intermediates in [None, Some(false), Some(true)] {
-            let base = base();
-            crate::select_application(base.as_ref(), &SD).unwrap();
-            let mut session = Scp03Session::authenticate_selected(
-                base.as_ref(),
-                &Scp03KeySet::yubikey_factory(),
-                0x33,
-                &SD,
-            )
-            .unwrap();
-            let kid = if protocol == SecureChannelProtocol::Scp11a {
-                0x11
-            } else {
-                0x15
-            };
-            let card = administer(
-                &base,
-                &mut session,
-                Op::GenerateKey {
-                    key_ref: KeyRef { kid, kvn: 2 },
-                    replace_kvn: 0,
-                    curve: 0,
-                },
-            );
-            let ca = scalar(4);
-            let ca_ref = KeyRef { kid: 0x10, kvn: 1 };
-            administer(
-                &base,
-                &mut session,
-                Op::PutPublicKey {
-                    key_ref: ca_ref,
-                    replace_kvn: 0,
-                    encoded: ca
-                        .verifying_key()
-                        .to_public_key_der()
-                        .unwrap()
-                        .as_bytes()
-                        .to_vec(),
-                },
-            );
-            administer(
-                &base,
-                &mut session,
-                Op::StoreCaIssuer {
-                    key_ref: ca_ref,
-                    subject_key_identifier: software_key_core::digest::HashAlgorithm::Sha1
-                        .digest(ca.verifying_key().to_sec1_point(false).as_bytes()),
-                },
-            );
-            // Use the certificate profile supported by the virtual target's validator.
-            // Critical OCE policy extensions require separate target qualification.
-            let intermediate_key = scalar(6);
-            let issuer = if intermediates.is_some() {
-                &intermediate_key
-            } else {
-                &ca
-            };
-            let issuer_name = if intermediates.is_some() {
-                "CN=intermediate"
-            } else {
-                "CN=CA"
-            };
-            let leaf = crate::certificate_builder::p256_certificate(
-                scalar(5).verifying_key(),
-                issuer,
-                "CN=OCE",
-                issuer_name,
-                20,
-                false,
-            );
-            let source = Source::new();
-            let key = source.ec(&leaf);
-            assert!(source.owner.attribute(key, CKA_VALUE).is_err());
-            let mut config = SecureChannelConfiguration::for_test();
-            config.scp11.trust = crate::configuration::Scp11TrustConfiguration::PublicKey(card);
-            config.scp11.key_version = 2;
-            config.scp11.oce_key_id = 0x10;
-            config.scp11.oce_key_version = 1;
-            if intermediates == Some(true) {
-                config
-                    .scp11
-                    .oce_intermediates
-                    .push(crate::certificate_builder::p256_certificate(
-                        intermediate_key.verifying_key(),
-                        &ca,
-                        "CN=intermediate",
-                        "CN=CA",
-                        21,
-                        true,
-                    ));
-            }
-            let (owner, connector) = target(base, &source, config, None);
-            let selector = if protocol == SecureChannelProtocol::Scp11c {
-                b"pkcs11:object=client;type=private?pkcs11rs-scp=scp11c".as_slice()
-            } else {
-                b"pkcs11:object=client;type=private".as_slice()
-            };
-            let result = login(&owner, selector, b"123456");
-            if intermediates == Some(false) {
-                assert_ne!(result, CKR_OK as CK_RV);
+            for login_mode in 0..3 {
+                let base = base();
+                crate::select_application(base.as_ref(), &SD).unwrap();
+                let mut session = Scp03Session::authenticate_selected(
+                    base.as_ref(),
+                    &Scp03KeySet::yubikey_factory(),
+                    0x33,
+                    &SD,
+                )
+                .unwrap();
+                let kid = if protocol == SecureChannelProtocol::Scp11a {
+                    0x11
+                } else {
+                    0x15
+                };
+                let card = administer(
+                    &base,
+                    &mut session,
+                    Op::GenerateKey {
+                        key_ref: KeyRef { kid, kvn: 2 },
+                        replace_kvn: 0,
+                        curve: 0,
+                    },
+                );
+                let ca = scalar(4);
+                let ca_ref = KeyRef { kid: 0x10, kvn: 1 };
+                administer(
+                    &base,
+                    &mut session,
+                    Op::PutPublicKey {
+                        key_ref: ca_ref,
+                        replace_kvn: 0,
+                        encoded: ca
+                            .verifying_key()
+                            .to_public_key_der()
+                            .unwrap()
+                            .as_bytes()
+                            .to_vec(),
+                    },
+                );
+                administer(
+                    &base,
+                    &mut session,
+                    Op::StoreCaIssuer {
+                        key_ref: ca_ref,
+                        subject_key_identifier: software_key_core::digest::HashAlgorithm::Sha1
+                            .digest(ca.verifying_key().to_sec1_point(false).as_bytes()),
+                    },
+                );
+                // Use the certificate profile supported by the virtual target's validator.
+                // Critical OCE policy extensions require separate target qualification.
+                let intermediate_key = scalar(6);
+                let issuer = if intermediates.is_some() {
+                    &intermediate_key
+                } else {
+                    &ca
+                };
+                let issuer_name = if intermediates.is_some() {
+                    "CN=intermediate"
+                } else {
+                    "CN=CA"
+                };
+                let leaf = crate::certificate_builder::p256_certificate(
+                    scalar(5).verifying_key(),
+                    issuer,
+                    "CN=OCE",
+                    issuer_name,
+                    20,
+                    false,
+                );
+                let source = Source::new();
+                let key = source.ec(&leaf);
+                assert!(source.owner.attribute(key, CKA_VALUE).is_err());
+                let mut config = SecureChannelConfiguration::for_test();
+                config.scp11.trust = crate::configuration::Scp11TrustConfiguration::PublicKey(card);
+                config.scp11.key_version = 2;
+                config.scp11.oce_key_id = 0x10;
+                config.scp11.oce_key_version = 1;
+                if intermediates == Some(true) {
+                    config.scp11.oce_intermediates.push(
+                        crate::certificate_builder::p256_certificate(
+                            intermediate_key.verifying_key(),
+                            &ca,
+                            "CN=intermediate",
+                            "CN=CA",
+                            21,
+                            true,
+                        ),
+                    );
+                }
+                let selector = b"pkcs11:object=client;type=private";
+                if login_mode != 0 {
+                    config.client_uri = Some(selector.to_vec());
+                }
+                let configured = (protocol == SecureChannelProtocol::Scp11c).then_some(protocol);
+                let (owner, connector) = target(base, &source, config, configured);
+                let result = match login_mode {
+                    0 => login(&owner, selector, b"123456"),
+                    1 => owner.call(|| {
+                        api::C_Login(
+                            owner.handle,
+                            CKU_USER as _,
+                            b"123456".as_ptr().cast_mut(),
+                            6,
+                        )
+                    }),
+                    _ => owner.call(|| {
+                        api::C_LoginUser(
+                            owner.handle,
+                            CKU_USER as _,
+                            b"123456".as_ptr().cast_mut(),
+                            6,
+                            std::ptr::null_mut(),
+                            0,
+                        )
+                    }),
+                };
+                if intermediates == Some(false) {
+                    assert_ne!(result, CKR_OK as CK_RV);
+                    assert!(
+                        connector
+                            .applet
+                            .authentication
+                            .lock()
+                            .unwrap()
+                            .credential
+                            .is_none()
+                    );
+                    assert!(connector.send_apdu(&version()).is_err());
+                    continue;
+                }
+                assert_eq!(result, CKR_OK as CK_RV);
+                assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
+                switch_away(&connector);
+                assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
+                assert!(source.owner.attribute(key, CKA_VALUE).is_err());
+                // Applet authorization is lost, but the dynamic selection survives until logout.
+                assert_eq!(
+                    owner.call(|| api::C_Logout(owner.handle)),
+                    CKR_USER_NOT_LOGGED_IN as CK_RV
+                );
                 assert!(
                     connector
                         .applet
@@ -571,28 +679,7 @@ fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
                         .credential
                         .is_none()
                 );
-                assert!(connector.send_apdu(&version()).is_err());
-                continue;
             }
-            assert_eq!(result, CKR_OK as CK_RV);
-            assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
-            switch_away(&connector);
-            assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
-            assert!(source.owner.attribute(key, CKA_VALUE).is_err());
-            // Applet authorization is lost, but the dynamic selection survives until logout.
-            assert_eq!(
-                owner.call(|| api::C_Logout(owner.handle)),
-                CKR_USER_NOT_LOGGED_IN as CK_RV
-            );
-            assert!(
-                connector
-                    .applet
-                    .authentication
-                    .lock()
-                    .unwrap()
-                    .credential
-                    .is_none()
-            );
         }
     }
 }
