@@ -131,6 +131,25 @@ static NSString *PKCS11RSAuthenticatedCredential(CK_SESSION_HANDLE session) {
     return description == nil ? @"<invalid UTF-8>" : description;
 }
 
+static NSArray<NSString *> *PKCS11RSAuthenticationDiagnostics(CK_SESSION_HANDLE session) {
+    NSMutableArray<NSString *> *lines = [[NSMutableArray alloc] init];
+    CK_ULONG length = 0;
+    CK_RV result = PKCS11RS_GetSecureChannel(session, NULL_PTR, &length);
+    if (result == CKR_OK) {
+        NSMutableData *value = [NSMutableData dataWithLength:(NSUInteger)length];
+        result = PKCS11RS_GetSecureChannel(session, value.mutableBytes, &length);
+        if (result == CKR_OK) {
+            NSString *channel = [[NSString alloc] initWithBytes:value.bytes length:(NSUInteger)length encoding:NSUTF8StringEncoding];
+            [lines addObject:[NSString stringWithFormat:@"  Secure channel: %@", channel]];
+        }
+    }
+    if (result != CKR_OK) {
+        [lines addObject:[NSString stringWithFormat:@"  Secure channel query failed: %@", PKCS11RSReturnValue(result)]];
+    }
+    [lines addObject:[NSString stringWithFormat:@"  Credential: %@", PKCS11RSAuthenticatedCredential(session)]];
+    return lines;
+}
+
 static NSString *PKCS11RSHex(NSData *value) {
     const unsigned char *bytes = value.bytes;
     NSMutableArray<NSString *> *parts = [[NSMutableArray alloc] initWithCapacity:value.length];
@@ -480,6 +499,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         },
         @"nfc" : @{
             @"discovery" : @YES,
+        },
+        @"ccid" : @{
+            @"secure_channel" : @"scp11b",
         },
     };
 
@@ -1498,6 +1520,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     }
     result = [self loginFidoInSession:session user:CKU_CONTEXT_SPECIFIC];
     [lines addObject:PKCS11RSLoginResult(CKU_CONTEXT_SPECIFIC, result)];
+    [lines addObjectsFromArray:PKCS11RSAuthenticationDiagnostics(session)];
     if (result != CKR_OK) {
         C_DestroyObject(session, projectedKey);
         *operation = @"C_Login(CKU_CONTEXT_SPECIFIC)";
@@ -1583,6 +1606,7 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     }
     result = [self loginFidoInSession:session user:CKU_USER];
     [lines addObject:PKCS11RSLoginResult(CKU_USER, result)];
+    [lines addObjectsFromArray:PKCS11RSAuthenticationDiagnostics(session)];
     if (result != CKR_OK && result != CKR_USER_ALREADY_LOGGED_IN) {
         [lines addObject:@"  user login failed"];
         C_CloseSession(session);
@@ -2134,7 +2158,8 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             }
         }
         CK_SESSION_HANDLE authenticatedSession = CK_INVALID_HANDLE;
-        if (PKCS11RSIsHostTokenLabel(inventory.tokenLabel)) {
+        if (PKCS11RSIsHostTokenLabel(inventory.tokenLabel) ||
+            [inventory.tokenLabel hasPrefix:@"Issuer SD #"]) {
             CK_RV sourceResult = CKR_OK;
             PKCS11RSAuthorizedSession *authorization =
                 [self loginSourceSlot:inventory.slot result:&sourceResult];
@@ -2142,6 +2167,9 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             if (authorization != nil) {
                 [authorizedSessions addObject:authorization];
                 authenticatedSession = authorization.session;
+                for (NSString *line in PKCS11RSAuthenticationDiagnostics(authorization.session)) {
+                    [report appendFormat:@"%@\n", line];
+                }
             }
         }
         if (support.any) {
@@ -2203,10 +2231,11 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
         [report appendFormat:@"\n%@\n",
             PKCS11RSLoginUserResult(@"pkcs11:",
                                     inventory.authenticationResult,
-                                    inventory.authorization == nil
-                                        ? nil
-                                        : inventory.authenticatedCredential)];
+                                    nil)];
         if (inventory.authorization != nil) {
+            for (NSString *line in PKCS11RSAuthenticationDiagnostics(inventory.authorization.session)) {
+                [report appendFormat:@"%@\n", line];
+            }
             if (support.any) {
                 for (NSString *line in [self exercisePostQuantumMechanismsInSession:
                         inventory.authorization.session
