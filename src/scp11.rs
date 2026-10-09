@@ -27,6 +27,10 @@ const YUBICO_ATTESTATION_ROOT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/certificates/yubikey/yubico-attestation-root-1.der"
 ));
+const YUBICO_INTERMEDIATES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/certificates/yubikey/yubico-intermediate.cbor"
+));
 
 pub(crate) type Scp11CertificateCacheKey = (u8, u8, [u8; 32]);
 
@@ -102,18 +106,27 @@ impl Scp11KeySet {
             }
             crate::configuration::Scp11TrustConfiguration::CaCertificate(path) => {
                 let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-                let anchors = vec![crate::certificate_chain::decode(&encoded)?];
+                let mut anchors = vec![crate::certificate_chain::decode(&encoded)?];
+                anchors.extend(configuration.sd_intermediates.clone());
                 (
                     None,
                     Some(crate::certificate_chain::CertificateTrust::new(&anchors)?),
                 )
             }
-            crate::configuration::Scp11TrustConfiguration::Yubico => (
-                None,
-                Some(crate::certificate_chain::CertificateTrust::new(&[
-                    crate::certificate_chain::decode(YUBICO_ATTESTATION_ROOT)?,
-                ])?),
-            ),
+            crate::configuration::Scp11TrustConfiguration::Yubico => {
+                let mut certificates =
+                    vec![crate::certificate_chain::decode(YUBICO_ATTESTATION_ROOT)?];
+                certificates.extend(crate::certificate_chain::decode_bundle(
+                    YUBICO_INTERMEDIATES,
+                )?);
+                certificates.extend(configuration.sd_intermediates.clone());
+                (
+                    None,
+                    Some(crate::certificate_chain::CertificateTrust::new(
+                        &certificates,
+                    )?),
+                )
+            }
         };
         let host =
             if let Some(crate::ccid_auth::CardCredential::Scp11 { key, certificates }) = source {

@@ -176,6 +176,7 @@ struct JsonScp03Configuration {
 struct JsonScp11Configuration {
     sd_public_key: Option<String>,
     sd_ca_certificate: Option<String>,
+    sd_intermediate_bundle: Option<String>,
     key_version: Option<u8>,
     oce_private_key: Option<String>,
     oce_intermediate_bundle: Option<String>,
@@ -221,6 +222,7 @@ pub(crate) struct Scp11OceConfiguration {
 #[derive(Clone)]
 pub(crate) struct Scp11Configuration {
     pub(crate) trust: Scp11TrustConfiguration,
+    pub(crate) sd_intermediates: Vec<Vec<u8>>,
     pub(crate) key_version: u8,
     pub(crate) oce: Option<Scp11OceConfiguration>,
     pub(crate) issuer_sd_aid: Vec<u8>,
@@ -249,6 +251,7 @@ impl SecureChannelConfiguration {
             },
             scp11: Scp11Configuration {
                 trust: Scp11TrustConfiguration::Yubico,
+                sd_intermediates: Vec::new(),
                 key_version: 1,
                 oce: None,
                 oce_intermediates: Vec::new(),
@@ -795,6 +798,20 @@ fn resolve_scp11(
         (None, Some(ca)) => Scp11TrustConfiguration::CaCertificate(ca),
         (Some(_), Some(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
     };
+    let sd_intermediates = resolve_os(
+        explicit.sd_intermediate_bundle,
+        "PKCS11RS_SCP11_SD_INTERMEDIATE_BUNDLE",
+        environment,
+    )?
+    .map(|path| {
+        let bytes = std::fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        crate::certificate_chain::decode_intermediate_bundle(&bytes)
+    })
+    .transpose()?
+    .unwrap_or_default();
+    if matches!(trust, Scp11TrustConfiguration::PublicKey(_)) && !sd_intermediates.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     let key_version = explicit
         .key_version
         .or(environment_byte("PKCS11RS_SCP11_KEY_VERSION", environment)?)
@@ -852,6 +869,7 @@ fn resolve_scp11(
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
     };
     Ok(Scp11Configuration {
+        sd_intermediates,
         oce_intermediates,
         oce_key_version,
         oce_key_id,
@@ -997,6 +1015,58 @@ fn encode_path_component(value: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn card_intermediate_bundle_respects_precedence_and_trust_boundaries() {
+        let path = std::env::temp_dir().join(format!(
+            "pkcs11rs-card-intermediates-{}.cbor",
+            std::process::id()
+        ));
+        let issuer = include_bytes!("fixtures/yubikey-scp11b-issuer.der").to_vec();
+        std::fs::write(
+            &path,
+            crate::certificate_chain::encode_bundle(std::slice::from_ref(&issuer)).unwrap(),
+        )
+        .unwrap();
+        let path_text = path.to_str().unwrap();
+        let env = "PKCS11RS_SCP11_SD_INTERMEDIATE_BUNDLE";
+        let from_env = resolve(None, &[(env, path_text)]).unwrap();
+        assert_eq!(
+            from_env.secure_channels.scp11.sd_intermediates,
+            vec![issuer.clone()]
+        );
+        assert!(from_env.secure_channels.scp11.oce_intermediates.is_empty());
+        let explicit = serde_json::from_value(
+            serde_json::json!({"version":1, "scp11":{"sd_intermediate_bundle":path_text}}),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(Some(explicit), &[(env, "/missing/intermediates.cbor")])
+                .unwrap()
+                .secure_channels
+                .scp11
+                .sd_intermediates,
+            vec![issuer]
+        );
+        assert!(resolve(None, &[(env, "/missing/intermediates.cbor")]).is_err());
+        assert!(
+            resolve(
+                None,
+                &[(env, path_text), ("PKCS11RS_SCP11_SD_PUBLIC_KEY", "04")]
+            )
+            .is_err()
+        );
+        let root = include_bytes!("../certificates/yubikey/yubico-attestation-root-1.der").to_vec();
+        std::fs::write(
+            &path,
+            crate::certificate_chain::encode_bundle(&[root]).unwrap(),
+        )
+        .unwrap();
+        assert!(resolve(None, &[(env, path_text)]).is_err());
+        std::fs::write(&path, b"invalid bundle").unwrap();
+        assert!(resolve(None, &[(env, path_text)]).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn json(value: &str) -> JsonConfiguration {
         serde_json::from_str(value).unwrap()

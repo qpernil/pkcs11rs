@@ -6,6 +6,9 @@ use x509_cert::Certificate;
 
 const FIDO_AAGUID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
 
+#[cfg(test)]
+mod portable_tests;
+
 impl From<CertificateError> for Error {
     fn from(_: CertificateError) -> Self {
         CKR_ARGUMENTS_BAD.into()
@@ -48,6 +51,29 @@ pub(crate) fn encode_bundle(certificates: &[Vec<u8>]) -> Result<Vec<u8>, Error> 
 
 pub(crate) fn decode_bundle(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
     crate::certificate_bundle::decode(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+/// Local intermediates complete a path but must never introduce another root.
+pub(crate) fn decode_intermediate_bundle(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
+    let certificates = decode_bundle(encoded)?;
+    for encoded in &certificates {
+        let parsed = ParsedCertificate::parse(encoded)?;
+        let tbs = parsed.certificate().tbs_certificate();
+        let ca = tbs
+            .get_extension::<BasicConstraints>()
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let usage = tbs
+            .get_extension::<KeyUsage>()
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        if parsed.is_self_issued()
+            || !ca.is_some_and(|(_, constraints)| constraints.ca)
+            || usage.is_some_and(|(_, usage)| !usage.key_cert_sign())
+        {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+    }
+    Ok(certificates)
 }
 
 pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
@@ -385,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn webpki_trust_store_loads_every_published_yubico_ca() {
+    fn trust_store_loads_every_published_yubico_ca() {
         let mut certificates = der_chain(YUBICO_ATTESTATION_ROOT);
         certificates.extend(der_chain(YUBICO_FIDO_ROOT_ONE));
         certificates.extend(der_chain(YUBICO_FIDO_ROOT_TWO));
@@ -394,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn webpki_trust_store_loads_yubico_legacy_and_yubihsm_roots() {
+    fn trust_store_loads_yubico_legacy_and_yubihsm_roots() {
         let legacy = der_chain(YUBICO_PIV_ROOT);
         let _legacy_trust = CertificateTrust::new(&legacy).unwrap();
 
@@ -424,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn webpki_uses_configured_intermediate_to_validate_presented_leaf() {
+    fn configured_intermediate_validates_presented_leaf() {
         let root_key = crate::certificate_builder::p256_key();
         let intermediate_key = crate::certificate_builder::p256_key();
         let leaf_key = crate::certificate_builder::p256_key();

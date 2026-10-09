@@ -16,7 +16,10 @@ The Issuer SD is used separately for Secure Domain management.
 
 SCP11b authenticates the card to the host. On a stock YubiKey with firmware
 5.7.4 or later, the module validates the Security Domain certificate chain
-against its embedded Yubico Attestation Root 1. This supports the factory
+against its embedded Yubico Attestation Root 1 and published Yubico
+intermediates. The portable RFC 5280 path validator processes critical
+certificate policies, verifies signatures and validity, and enforces CA and
+path constraints. Presented certificates cannot add trust anchors. This supports the factory
 SCP11b identity without additional trust configuration.
 
 Custom-provisioned devices may override the factory trust anchor using exactly
@@ -26,6 +29,36 @@ one of:
   encoded as hexadecimal;
 - `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to one canonical DER X.509 CA
   certificate that authenticates the SD certificate chain.
+
+`scp11.sd_intermediate_bundle` or `PKCS11RS_SCP11_SD_INTERMEDIATE_BUNDLE`
+optionally supplies a canonical CBOR collection of card-side CA intermediates.
+These complete the card's chain to the selected root; they do not add trust.
+Self-issued roots and end-entity certificates are rejected in this bundle.
+Factory trust includes the published intermediates even when this setting is
+omitted. A public-key pin cannot be combined with a nonempty intermediate bundle.
+The separate OCE intermediate bundle supplies the host chain sent to the card.
+
+Create a card-intermediate bundle using the certificate-collection purpose:
+
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose certificate-collection \
+  --output /etc/pkcs11rs/card-intermediates.cbor \
+  card-intermediate.pem
+```
+
+Configure the CA certificate and intermediates independently, for example:
+
+```json
+{
+  "version": 1,
+  "ccid": {"applications": ["issuer-sd"], "secure_channel": "scp11b"},
+  "scp11": {
+    "sd_ca_certificate": "/etc/pkcs11rs/card-root.der",
+    "sd_intermediate_bundle": "/etc/pkcs11rs/card-intermediates.cbor"
+  }
+}
+```
 
 In factory or configured CA-certificate mode, the module obtains trust material
 once per connected card and trust policy by temporarily selecting the Issuer
@@ -55,7 +88,8 @@ The configured credential path for SCP11a and SCP11c additionally requires:
 - `PKCS11RS_SCP11_OCE_KEY_ID`: OCE key identifier, default `0`.
 
 The leaf certificate public key must match the configured OCE private key, and
-each certificate must verify the next certificate in the configured chain.
+each certificate's signature must verify against the next issuer in the
+configured chain.
 Use the `scp11-oce` purpose of
 [`pkcs11rs-tool`](pkcs11rs-tool.md) to import DER or PEM certificates, enforce
 these constraints, match the encrypted key, and write the canonical CBOR

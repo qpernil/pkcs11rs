@@ -22,6 +22,10 @@ as PEM by the provider.
 | `yubikey/yubico-intermediate.cbor` | https://developers.yubico.com/PKI/yubico-intermediate.pem | `66adbf87a3538250f75d7ce640bb20455d340acabb81e3a84572ca6b8ceb20a1` |
 
 Attestation Root 1 is embedded as the factory trust anchor for YubiKey SCP11b.
+Its chain is completed with the published intermediate collection. The public
+SCP11b regression certificates under `src/fixtures/yubikey-scp11b-*.der` were
+read from a factory-provisioned firmware 5.7.4 YubiKey on 2026-10-09. They contain
+only public certificate data and exercise the critical GlobalPlatform policies.
 The current root, the two published FIDO roots, and the published
 intermediates are used to classify verified FIDO packed attestations. The PIV
 root is retained as a public reference fixture and used by certificate-chain

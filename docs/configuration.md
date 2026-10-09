@@ -126,7 +126,9 @@ a public key or CA certificate.
 For SCP03 direct keys, replace `bmk` with `enc_key`, `mac_key`, and optionally
 `dek_key`. Hexadecimal byte fields are strings without a required `0x` prefix.
 For SCP11 CA trust, replace `sd_public_key` with `sd_ca_certificate` containing
-the certificate path.
+the certificate path. `scp11.sd_intermediate_bundle` may supply a canonical
+CBOR collection of card CA intermediates; it does not add trusted roots.
+The distinct `oce_intermediate_bundle` supplies the host chain uploaded to the card.
 Numeric byte fields are JSON integers from 0 through 255. `security_level` must
 be a supported SCP03 security-level bit combination. The detailed SCP rules
 remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
@@ -317,6 +319,7 @@ native application prompt provider.
 | `scp03.security_level` | `PKCS11RS_SCP03_SECURITY_LEVEL` |
 | `scp11.sd_public_key` | `PKCS11RS_SCP11_SD_PUBLIC_KEY` |
 | `scp11.sd_ca_certificate` | `PKCS11RS_SCP11_SD_CA_CERTIFICATE` |
+| `scp11.sd_intermediate_bundle` | `PKCS11RS_SCP11_SD_INTERMEDIATE_BUNDLE` |
 | `scp11.key_version` | `PKCS11RS_SCP11_KEY_VERSION` |
 | `scp11.oce_private_key` | `PKCS11RS_SCP11_OCE_PRIVATE_KEY` |
 | `scp11.oce_certificate_bundle` | `PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE` |
