@@ -948,6 +948,7 @@ Detailed configuration:
 - [OpenPGP backend](docs/openpgp.md)
 - [SCP03](docs/scp03.md)
 - [SCP11a, SCP11b, and SCP11c](docs/scp11.md)
+- [SCP requirements and applet key authorization proposal](docs/scp-applet-authorization-proposal.md)
 - [Internal architecture and object graph](docs/architecture.md)
 - [Certificate-bundle authoring and validation](docs/pkcs11rs-tool.md)
 - [Binary object formats](docs/formats.md)

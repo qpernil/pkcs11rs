@@ -14,6 +14,10 @@ credentials as SCP11a, with the SCP11c key referenced by KID `0x15`.
 
 The Issuer SD is used separately for Secure Domain management.
 
+For a proposed device-enforced channel requirement and per-key authorization
+model, see [SCP requirements and applet key authorization](scp-applet-authorization-proposal.md).
+Those policies require firmware support and are not implemented configuration.
+
 SCP11b authenticates the card to the host. On a stock YubiKey with firmware
 5.7.4 or later, the module validates the Security Domain certificate chain
 against its embedded Yubico Attestation Root 1 and published Yubico
@@ -364,7 +368,10 @@ cargo test -p pkcs11rs --lib --features embedded-virtual-yubikey \
 ```
 
 Use `scp03` to test factory SCP03 instead. Virtual SCP11b testing requires its
-own explicitly configured CA certificate.
+own explicitly configured CA certificate. The
+[iPhone smoke app](../examples/ios/PKCS11RSPhoneSmoke/README.md) configures
+SCP11b for its ordinary CCID logins over CryptoTokenKit. Public inventory alone
+does not establish a channel; the module establishes it during login.
 
 ## SCP11b hardware provisioning test
 
