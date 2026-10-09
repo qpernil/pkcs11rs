@@ -215,6 +215,7 @@ pub(crate) struct SecureSession {
     counter: [u8; AES_BLOCK_SIZE],
     mac_chaining_value: [u8; AES_BLOCK_SIZE],
     valid: bool,
+    asymmetric: bool,
 }
 
 pub(crate) struct SymmetricHandshake {
@@ -303,6 +304,9 @@ impl std::fmt::Debug for SecureSession {
 }
 
 impl SecureSession {
+    pub(crate) fn protocol_name(&self) -> &'static str {
+        if self.asymmetric { "scp11" } else { "scp03" }
+    }
     #[cfg(test)]
     pub(crate) fn peer_begin_symmetric(
         encoded: &[u8],
@@ -358,6 +362,7 @@ impl SecureSession {
             counter,
             mac_chaining_value,
             valid: true,
+            asymmetric: false,
         })
     }
 
@@ -670,6 +675,7 @@ impl SecureSession {
             counter: [0; AES_BLOCK_SIZE],
             mac_chaining_value: [0; AES_BLOCK_SIZE],
             valid: true,
+            asymmetric: false,
         };
         let mut authenticate_data = Vec::with_capacity(1 + MAC_LENGTH);
         authenticate_data.push(handshake.sid);
@@ -754,6 +760,7 @@ impl SecureSession {
             counter,
             mac_chaining_value: handshake.receipt,
             valid: true,
+            asymmetric: true,
         }
     }
 
@@ -817,6 +824,7 @@ impl SecureSession {
             counter,
             mac_chaining_value,
             valid: true,
+            asymmetric: false,
         };
         let _ = session.send_command(connector, &Command::close_session());
     }

@@ -27,15 +27,38 @@ key-type helpers while rendering its public and authenticated inventories.
 ## Authenticated credential diagnostics
 
 `PKCS11RS_GetAuthenticatedCredential` returns the RFC 7512 PKCS #11 URI of the
-exact credential that established the current token login. It uses ordinary
+exact credential that established the current token login, for YubiHSM and
+CCID SCP03/SCP11a/SCP11c provider credentials. It uses ordinary
 two-call buffer semantics, and its byte count excludes a NUL terminator. The
 vendor query attribute `pkcs11rs-authkey` records the target Authentication Key
 ID. Direct password authentication is reported as
 `pkcs11:?pkcs11rs-direct=<label>&pkcs11rs-authkey=AAAA`. The URI contains no
 PIN, password, private key, derived secret, or session key. A backend that does
-not expose this metadata returns
-`CKR_FUNCTION_NOT_SUPPORTED`; a supported backend without an active user login
-returns `CKR_USER_NOT_LOGGED_IN`.
+not expose this metadata, or a login without a selected credential, returns
+the literal UTF-8 string `none` with `CKR_OK`. This includes SCP11b, which
+has no client credential, and an inactive token login. File-configured SCP11
+OCE credentials use
+`pkcs11:?pkcs11rs-direct=scp11-oce&pkcs11rs-cert-sha256=<hex>` to identify the
+public leaf certificate without exposing a file path or private material.
+
+`PKCS11RS_GetSecureChannel` uses the same two-call UTF-8 buffer convention.
+It returns the live channel mode: `scp03`, `scp11a`, `scp11b`, or `scp11c`
+for CCID; `scp03` for symmetric YubiHSM establishment; or `scp11` for
+asymmetric YubiHSM establishment. YubiHSM uses its own wire protocol based on
+those SCP families. The literal string `none` with `CKR_OK` means there is
+no active channel. Other backends also return `none`. A YubiHSM public-discovery
+session can have a live channel without a PKCS #11 user login or a user
+credential to report.
+
+These diagnostic queries perform no device I/O and do not select an applet,
+establish or recreate a channel, or authenticate a user. They report local
+state; they do not prove fresh remote liveness. CCID channel status follows
+the selected applet and known connection generation. Applet deselection,
+logout, detected connection loss, failed establishment or secure transport,
+and session cleanup invalidate the associated diagnostics. A retained source
+binding for later channel recreation is not reported as an active channel or
+current credential after applet authorization is lost. Invalid session handles,
+invalid pointers, and undersized buffers retain their ordinary PKCS #11 errors.
 
 `CKA_PKCS11RS_URI` is a read-only UTF-8 RFC 7512 URI computed for every existing
 object. It contains the token label, the token serial when the label does not

@@ -140,10 +140,24 @@ CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetProfileIdName)(
  * Return the UTF-8 PKCS #11 URI of the credential that established the current
  * token login. The first call may pass NULL for pDescription to
  * obtain the required byte count. The count excludes a NUL terminator.
- * Backends that do not expose this metadata return CKR_FUNCTION_NOT_SUPPORTED;
- * a supported backend without a user login returns CKR_USER_NOT_LOGGED_IN.
+ * Return the literal string "none" with CKR_OK when no credential is
+ * available, including unauthenticated or unsupported backends.
  */
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_GetAuthenticatedCredential)(
+  CK_SESSION_HANDLE hSession,
+  CK_UTF8CHAR_PTR pDescription,
+  CK_ULONG_PTR pulDescriptionLen
+);
+
+/*
+ * Query the session's live channel: scp03, scp11a, scp11b, scp11c,
+ * or scp11 (YubiHSM asymmetric). "none" with CKR_OK means no active
+ * channel. This performs no device I/O and
+ * does not establish, refresh, or authenticate a channel. Status describes
+ * known local state, not a fresh device liveness check. Use the same two-call
+ * UTF-8 buffer convention as PKCS11RS_GetAuthenticatedCredential.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_GetSecureChannel)(
   CK_SESSION_HANDLE hSession,
   CK_UTF8CHAR_PTR pDescription,
   CK_ULONG_PTR pulDescriptionLen

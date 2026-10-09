@@ -9,6 +9,23 @@ use p256::ecdsa::SigningKey;
 use spki::EncodePublicKey;
 use virtual_yubikey_core::{DeviceProfile, ISSUER_SECURITY_DOMAIN_AID as SD, VirtualYubiKey};
 
+fn diagnostic(owner: &ProviderSession, credential: bool) -> String {
+    let mut len = 0;
+    let query = |output, len| {
+        owner.call(|| {
+            if credential {
+                api::PKCS11RS_GetAuthenticatedCredential(owner.handle, output, len)
+            } else {
+                api::PKCS11RS_GetSecureChannel(owner.handle, output, len)
+            }
+        })
+    };
+    assert_eq!(query(std::ptr::null_mut(), &mut len), CKR_OK as CK_RV);
+    let mut value = vec![0; len as usize];
+    assert_eq!(query(value.as_mut_ptr(), &mut len), CKR_OK as CK_RV);
+    String::from_utf8(value).unwrap()
+}
+
 struct Source {
     owner: Arc<ProviderSession>,
     child: Arc<Mutex<SlotContext>>,
@@ -233,6 +250,8 @@ fn ccid_dynamic_scp03_login_uses_applet_pin_and_recovers_selected_provider() {
         None,
     );
     let selector = b"pkcs11:token=card%20source;object=client.enc;type=secret-key";
+    assert_eq!(diagnostic(&owner, false), "none");
+    assert_eq!(diagnostic(&owner, true), "none");
     assert_eq!(
         login(&owner, selector, b"000000"),
         CKR_PIN_INCORRECT as CK_RV
@@ -248,6 +267,8 @@ fn ccid_dynamic_scp03_login_uses_applet_pin_and_recovers_selected_provider() {
     );
     assert_eq!(login(&owner, selector, b"123456"), CKR_OK as CK_RV);
     assert!(connector.secure_channel_required());
+    assert_eq!(diagnostic(&owner, false), "scp03");
+    assert!(diagnostic(&owner, true).contains("object=client.enc"));
     assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
     switch_away(&connector);
     // Reconcile lost applet PIN authorization without deleting the SCP selection.
@@ -257,6 +278,8 @@ fn ccid_dynamic_scp03_login_uses_applet_pin_and_recovers_selected_provider() {
         CKR_OK as CK_RV
     );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(diagnostic(&owner, false), "none");
+    assert_eq!(diagnostic(&owner, true), "none");
     assert!(
         connector
             .applet
@@ -268,6 +291,8 @@ fn ccid_dynamic_scp03_login_uses_applet_pin_and_recovers_selected_provider() {
     );
     assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
     assert_eq!(connector.ccid_login_state(), Some(CcidLoginState::Public));
+    assert_eq!(diagnostic(&owner, false), "scp03");
+    assert_eq!(diagnostic(&owner, true), "none");
     assert_eq!(
         owner.call(|| api::C_Logout(owner.handle)),
         CKR_USER_NOT_LOGGED_IN as CK_RV
@@ -294,6 +319,8 @@ fn ccid_dynamic_recreation_disabled_and_source_logout_require_fresh_login() {
         let (owner, connector) = target(base(), &source, config, None);
         let selector = b"pkcs11:object=client.enc;type=secret-key";
         assert_eq!(login(&owner, selector, b"123456"), CKR_OK as CK_RV);
+        assert_eq!(diagnostic(&owner, false), "scp03");
+        assert!(diagnostic(&owner, true).contains("object=client.enc"));
         assert_eq!(
             connector
                 .applet
@@ -661,8 +688,19 @@ fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
                     continue;
                 }
                 assert_eq!(result, CKR_OK as CK_RV);
+                assert_eq!(diagnostic(&owner, false), protocol.name());
+                assert_eq!(
+                    diagnostic(&owner, true).as_bytes(),
+                    source
+                        .owner
+                        .attribute(key, CKA_PKCS11RS_URI as _)
+                        .unwrap()
+                        .as_slice()
+                );
                 assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
                 switch_away(&connector);
+                assert_eq!(diagnostic(&owner, false), "none");
+                assert_eq!(diagnostic(&owner, true), "none");
                 assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
                 assert!(source.owner.attribute(key, CKA_VALUE).is_err());
                 // Applet authorization is lost, but the dynamic selection survives until logout.

@@ -109,7 +109,17 @@ pub(crate) trait Slot {
     /// Describe the credential that authenticated the current token login.
     /// The returned text is diagnostic metadata and must not contain secrets.
     fn authenticated_credential_description(&self) -> Result<String, Error> {
-        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+        self.ccid_login_connector()
+            .ok_or(CKR_FUNCTION_NOT_SUPPORTED)?
+            .authenticated_credential_description()
+    }
+    fn secure_channel_description(&self) -> Result<&'static str, Error> {
+        match self.ccid_login_connector() {
+            Some(connector) => Ok(connector
+                .secure_channel_protocol()?
+                .map_or("none", |protocol| protocol.name())),
+            None => Ok("none"),
+        }
     }
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
         crate::device::DeviceIdentity {

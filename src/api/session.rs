@@ -24,8 +24,42 @@ fn get_authenticated_credential(
     let description_len = unsafe { as_mut(description_len) }?;
     let value = with_session_context(session_handle, |ctx| {
         let (slot, _) = ctx._get_session(session_handle)?;
-        slot.authenticated_credential_description()
+        match slot.authenticated_credential_description() {
+            Err(Error::Generic(rv))
+                if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+                    || rv == CKR_USER_NOT_LOGGED_IN as CK_RV =>
+            {
+                Ok("none".to_owned())
+            }
+            result => result,
+        }
     })?;
+    write_description(&value, description, description_len)
+}
+
+ffi_entry_point! {
+    /// Query the live CCID SCP or YubiHSM channel without establishing one.
+    pub fn PKCS11RS_GetSecureChannel(
+        session_handle: CK_SESSION_HANDLE,
+        description: CK_UTF8CHAR_PTR,
+        description_len: CK_ULONG_PTR,
+    ) -> CK_RV {
+        map((|| {
+            let description_len = unsafe { as_mut(description_len) }?;
+            let value = with_session_context(session_handle, |ctx| {
+                let (slot, _) = ctx._get_session(session_handle)?;
+                slot.secure_channel_description()
+            })?;
+            write_description(value, description, description_len)
+        })())
+    }
+}
+
+fn write_description(
+    value: &str,
+    description: CK_UTF8CHAR_PTR,
+    description_len: &mut CK_ULONG,
+) -> Result<(), Error> {
     let required_len = CK_ULONG::try_from(value.len()).map_err(|_| CKR_DEVICE_ERROR)?;
     if description.is_null() {
         *description_len = required_len;
