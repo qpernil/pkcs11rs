@@ -552,6 +552,78 @@ fn administer(
         .execute_scp11_administration(base, session, prepared)
         .unwrap()
 }
+
+#[test]
+fn ccid_scp11_login_reports_missing_card_credential_on_factory_card() {
+    for configured in [None, Some(SecureChannelProtocol::Scp11c)] {
+        let base = base();
+        crate::select_application(base.as_ref(), &SD).unwrap();
+        let inventory = SecurityDomainClient
+            .get_key_information(base.as_ref())
+            .unwrap();
+        assert!(
+            inventory
+                .iter()
+                .any(|key| key.key_ref == KeyRef { kid: 0x13, kvn: 1 })
+        );
+        assert!(
+            inventory
+                .iter()
+                .all(|key| !matches!(key.key_ref.kid, 0x11 | 0x15))
+        );
+        assert!(
+            !SecurityDomainClient
+                .get_certificate_bundle(base.as_ref(), KeyRef { kid: 0x13, kvn: 1 })
+                .unwrap()
+                .is_empty()
+        );
+
+        let source = Source::new();
+        let leaf = crate::certificate_builder::p256_scp11_oce_certificate(
+            scalar(5).verifying_key(),
+            &scalar(4),
+            "CN=OCE",
+            "CN=CA",
+            20,
+        );
+        source.ec(&leaf);
+        let (owner, connector) = target_application(
+            base.clone(),
+            &source,
+            SecureChannelConfiguration::for_test(),
+            configured,
+            CcidApplication::IssuerSecurityDomain,
+        );
+        assert_eq!(
+            login(&owner, b"pkcs11:", b""),
+            CKR_KEY_HANDLE_INVALID as CK_RV
+        );
+        assert_eq!(diagnostic(&owner, false), "none");
+        assert_eq!(diagnostic(&owner, true), "none");
+        let mut info = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            owner.call(|| api::C_GetSessionInfo(owner.handle, &mut info)),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+        assert!(
+            connector
+                .applet
+                .authentication
+                .lock()
+                .unwrap()
+                .credential
+                .is_none()
+        );
+        assert_eq!(
+            SecurityDomainClient
+                .get_key_information(base.as_ref())
+                .unwrap(),
+            inventory
+        );
+    }
+}
+
 #[test]
 fn ccid_dynamic_scp11_a_and_c_resolve_leaf_by_id_and_recreate() {
     for protocol in [SecureChannelProtocol::Scp11a, SecureChannelProtocol::Scp11c] {

@@ -77,6 +77,11 @@ implicitly trusts a certificate obtained from the card.
 
 Trust-material acquisition occurs lazily during channel establishment at
 login. Later handshakes use the connection-scoped validated-key cache.
+If the selected card KID/KVN has no certificate bundle, login returns
+`CKR_KEY_HANDLE_INVALID` and logs the requested SCP11 variant and key reference.
+For example, an SCP11a login against a factory SCP11b-only card fails this way;
+it does not fall back to SCP11b. Malformed or untrusted certificate bundles
+remain certificate-validation failures.
 
 Optional configuration:
 

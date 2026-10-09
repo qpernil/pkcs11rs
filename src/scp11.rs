@@ -1,6 +1,7 @@
 use crate::{
-    CKK_AES, CKM_AES_CMAC, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
-    CKR_SIGNATURE_INVALID, CKR_USER_PIN_NOT_INITIALIZED, Connector, TokenObjectTemplate,
+    CKK_AES, CKM_AES_CMAC, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_KEY_HANDLE_INVALID,
+    CKR_PIN_INCORRECT, CKR_SIGNATURE_INVALID, CKR_USER_PIN_NOT_INITIALIZED, Connector,
+    TokenObjectTemplate,
     error::Error,
     key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, generic_template, readable_template},
     scp_key_provider::protect_p256,
@@ -232,8 +233,19 @@ impl Scp11KeySet {
             )
         })();
         crate::scp03::select_application(connector, application_aid)?;
+        let certificates = certificates?;
+        if certificates.is_empty() {
+            tracing::warn!(
+                target: "pkcs11rs::scp11",
+                variant = ?self.variant,
+                kid = format_args!("0x{:02x}", self.variant.key_id()),
+                kvn = format_args!("0x{:02x}", self.key_version),
+                "Selected SCP11 card credential has no certificate bundle"
+            );
+            return Err(CKR_KEY_HANDLE_INVALID.into());
+        }
         let card_public_key = card_public_key_from_certificates(
-            &certificates?,
+            &certificates,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )?;
         let point = card_public_key.clone();
