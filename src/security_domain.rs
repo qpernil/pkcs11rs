@@ -266,7 +266,8 @@ impl Client {
                 )
             }
             Scp11Administration::SetAllowlist { key_ref, serials } => {
-                if !matches!(key_ref.kid, KID_SCP11A | KID_SCP11C) || key_ref.kvn == 0 {
+                if !matches!(key_ref.kid, KID_SCP11A | KID_SCP11C | 0x20..=0x2f) || key_ref.kvn == 0
+                {
                     return Err(CKR_ARGUMENTS_BAD.into());
                 }
                 let selector = encode_tlv(0x83, &key_ref.encoded())?;
@@ -1453,6 +1454,22 @@ mod tests {
             )
             .unwrap();
         assert!(allowlist.command.data.ends_with(&hex("70 04 93 02 00 80")));
+        let ca_allowlist = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::SetAllowlist {
+                    key_ref: KeyRef {
+                        kid: 0x20,
+                        kvn: 122,
+                    },
+                    serials: vec![vec![2]],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            ca_allowlist.command.data,
+            hex("a6 04 83 02 20 7a 70 03 93 01 02")
+        );
         assert!(
             Client
                 .prepare_scp11_administration(
