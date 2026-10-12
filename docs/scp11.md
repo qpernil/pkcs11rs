@@ -288,7 +288,11 @@ Temporary private-key material is zeroized.
 certificates in issuer-to-leaf order and verifies that each issuer signs the
 next certificate before sending anything. The CA issuer function stores a
 Subject Key Identifier, and the allowlist function stores positive certificate
-serial numbers for SCP11a or SCP11c. Passing an empty allowlist clears it.
+serial numbers for SCP11a, SCP11c, or an OCE CA public-key reference with KID
+`0x20` through `0x2f`. Physical YubiKey 5.7.4 stores the OCE certificate
+allowlist on the CA reference; it rejects an allowlist on the card's SCP11a
+private-key reference. Passing an empty allowlist clears it. Hardware tests use
+key versions 121, 122, and 127; firmware 5.7.4 rejects import version 128.
 
 `PKCS11RS_SecurityDomainDeleteScp11Key` deletes exactly one nonzero KID/KVN
 reference. It does not expose the GlobalPlatform wildcard deletion behavior.
