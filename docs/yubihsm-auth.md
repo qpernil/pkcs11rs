@@ -776,6 +776,11 @@ on a YubiHSM slot and an existing `CKU_USER` login:
 - `PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation` uses the factory attestation
   key and certificate at reserved ID `0`, then validates the complete target,
   device, Yubico intermediate, and Yubico root chain before installing the pin.
+  The exact factory device CA certificate may omit KeyUsage. This exception
+  applies only to that named issuer during Yubico enrollment, with the fixed
+  embedded Yubico root. Present KeyUsage restrictions, signatures, validity,
+  policies, names, path limits, and the exact attested device-key match remain
+  enforced. Ordinary certificate validation remains strict.
 - `PKCS11RS_YubiHsmEnrollDevicePublicKey` directly pins the public key returned
   by `GET DEVICE PUBLIC KEY` without attestation.
 

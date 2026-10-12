@@ -58,5 +58,12 @@ Both are embedded for
 `PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation`, which validates a factory
 device-public-key attestation before writing the local public-key pin.
 
+`src/fixtures/yubihsm-factory-device.der` and
+`src/fixtures/yubihsm-device-key-attestation.der` are public certificates read
+from physical YubiHSM serial 36799798. They test factory enrollment through the
+embedded Yubico chain, including the device CA's absent KeyUsage extension,
+exact device-key matching, and signature-tampering rejection. They contain no
+private keys. Matching public validation vectors reside in `software-key-core`.
+
 Tests pin these fingerprints, validate current validity periods, and verify
 every exact-DER issuer relationship in the published bundles.
