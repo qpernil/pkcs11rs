@@ -760,6 +760,375 @@ fn yubihsm_platform_provisioning_is_idempotent_and_rejects_policy_conflicts() {
     finalize_for_test();
 }
 
+#[derive(Default)]
+struct TestPlatformCredentialStore {
+    keys: std::sync::Mutex<std::collections::BTreeMap<String, crate::SoftwarePublicKey>>,
+}
+
+impl platform_credential::AuthenticationCredentialStore for TestPlatformCredentialStore {
+    fn generate(
+        &self,
+        name: &str,
+    ) -> Result<crate::SoftwarePublicKey, crate::platform_crypto::PlatformCryptoError> {
+        use crate::platform_crypto::PlatformCryptoError;
+        let mut keys = self.keys.lock().unwrap();
+        if keys.contains_key(name) {
+            return Err(PlatformCryptoError::AlreadyExists);
+        }
+        let key = crate::SoftwareSigningKey::generate(crate::SignatureScheme::EcdsaP256Sha256)
+            .unwrap()
+            .public_key();
+        keys.insert(name.to_owned(), key.clone());
+        Ok(key)
+    }
+    fn list(
+        &self,
+    ) -> Result<
+        Vec<platform_credential::PlatformCredentialInfo>,
+        crate::platform_crypto::PlatformCryptoError,
+    > {
+        Ok(self
+            .keys
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|name| platform_credential::PlatformCredentialInfo {
+                name: name.clone(),
+                algorithm: crate::platform_crypto::PlatformCredentialAlgorithm::P256,
+            })
+            .collect())
+    }
+    fn public_key(
+        &self,
+        name: &str,
+    ) -> Result<crate::SoftwarePublicKey, crate::platform_crypto::PlatformCryptoError> {
+        self.keys
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or(crate::platform_crypto::PlatformCryptoError::NotFound)
+    }
+    fn delete(&self, name: &str) -> Result<(), crate::platform_crypto::PlatformCryptoError> {
+        self.keys
+            .lock()
+            .unwrap()
+            .remove(name)
+            .map(|_| ())
+            .ok_or(crate::platform_crypto::PlatformCryptoError::NotFound)
+    }
+}
+
+fn assert_platform_credential_export_lifecycle(name: &str) {
+    use crate::api::platform_credential::{
+        PKCS11RS_PlatformCredentialDelete as delete,
+        PKCS11RS_PlatformCredentialGenerate as generate,
+        PKCS11RS_PlatformCredentialGetPublicKey as get, PKCS11RS_PlatformCredentialList as list,
+    };
+    let mut len = 0;
+    assert_eq!(
+        generate(
+            name.as_ptr(),
+            name.len() as _,
+            std::ptr::null_mut(),
+            &mut len
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(len, 65);
+    let mut public = [0xa5; 66];
+    len = 64;
+    assert_eq!(
+        generate(
+            name.as_ptr(),
+            name.len() as _,
+            public.as_mut_ptr(),
+            &mut len
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(len, 65);
+    assert_eq!(public, [0xa5; 66]);
+    // Neither a size query nor a short output buffer creates a credential.
+    assert_eq!(
+        get(
+            name.as_ptr(),
+            name.len() as _,
+            public.as_mut_ptr(),
+            &mut len
+        ),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    len = public.len() as _;
+    assert_eq!(
+        generate(
+            name.as_ptr(),
+            name.len() as _,
+            public.as_mut_ptr(),
+            &mut len
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(len, 65);
+    assert_eq!(public[65], 0xa5);
+    assert_eq!(public[0], 4);
+    assert_eq!(
+        generate(
+            name.as_ptr(),
+            name.len() as _,
+            public.as_mut_ptr(),
+            &mut len
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    let mut read = [0xa5; 66];
+    let mut read_len = 64;
+    assert_eq!(
+        get(
+            name.as_ptr(),
+            name.len() as _,
+            read.as_mut_ptr(),
+            &mut read_len
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(read_len, 65);
+    assert_eq!(read, [0xa5; 66]);
+    assert_eq!(
+        get(
+            name.as_ptr(),
+            name.len() as _,
+            read.as_mut_ptr(),
+            &mut read_len
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(read, public);
+    let mut count = 0;
+    assert_eq!(list(std::ptr::null_mut(), &mut count), CKR_OK as CK_RV);
+    assert!(count > 0);
+    let mut entries = vec![
+            crate::api::platform_credential::PKCS11RS_PLATFORM_CREDENTIAL_INFO::default();
+            count as usize
+        ];
+    let required = count;
+    count -= 1;
+    assert_eq!(
+        list(entries.as_mut_ptr(), &mut count),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(count, required);
+    assert!(entries.iter().all(|entry| entry.ulNameLen == 0));
+    assert_eq!(list(entries.as_mut_ptr(), &mut count), CKR_OK as CK_RV);
+    let matches = entries
+        .iter()
+        .filter(|entry| &entry.name[..entry.ulNameLen as usize] == name.as_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].ulAlgorithm,
+        crate::api::platform_credential::PKCS11RS_PLATFORM_CREDENTIAL_ALGORITHM_P256
+    );
+    assert!(matches[0].name[name.len()..].iter().all(|byte| *byte == 0));
+    assert_eq!(delete(name.as_ptr(), name.len() as _), CKR_OK as CK_RV);
+    assert_eq!(
+        get(
+            name.as_ptr(),
+            name.len() as _,
+            read.as_mut_ptr(),
+            &mut read_len
+        ),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        delete(name.as_ptr(), name.len() as _),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(list(std::ptr::null_mut(), &mut count), CKR_OK as CK_RV);
+    entries.resize(
+        count as usize,
+        crate::api::platform_credential::PKCS11RS_PLATFORM_CREDENTIAL_INFO::default(),
+    );
+    assert_eq!(list(entries.as_mut_ptr(), &mut count), CKR_OK as CK_RV);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| &entry.name[..entry.ulNameLen as usize] != name.as_bytes())
+    );
+}
+
+#[test]
+fn platform_credential_exports_complete_an_isolated_lifecycle() {
+    let store = std::sync::Arc::new(TestPlatformCredentialStore::default());
+    crate::platform_crypto::with_test_credential_store(store.clone(), || {
+        assert_platform_credential_export_lifecycle("unit-phone-key");
+        assert!(store.keys.lock().unwrap().is_empty());
+    });
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+#[test]
+#[ignore = "creates and deletes one disposable key in the native platform credential store"]
+fn platform_credential_exports_complete_a_native_lifecycle() {
+    let mut nonce = [0; 8];
+    getrandom::fill(&mut nonce).unwrap();
+    let name = format!("pkcs11rs-lifecycle-{:x}", u64::from_ne_bytes(nonce));
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = crate::api::platform_credential::PKCS11RS_PlatformCredentialDelete(
+                self.0.as_ptr(),
+                self.0.len() as _,
+            );
+        }
+    }
+    let _cleanup = Cleanup(name.clone());
+    assert_platform_credential_export_lifecycle(&name);
+}
+
+#[test]
+fn yubihsm_platform_exports_provision_repair_and_unprovision_the_named_identity() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (slot, peer, _trust) = crate::yubihsm::tests::make_yubihsm_provisioning_test_slot();
+    install_test_slot_with_backend(0x5053, slot);
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            0x5053,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as _,
+            std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_OK as CK_RV
+    );
+    let store = std::sync::Arc::new(TestPlatformCredentialStore::default());
+    crate::platform_crypto::with_test_credential_store(store.clone(), || {
+        let name = b"unit-phone-key";
+        let policy = [0xff; 8];
+        let mut result = 99;
+        let provision = |label: &[u8], result| {
+            crate::api::platform_credential::PKCS11RS_YubiHsmProvisionPlatformCredential(
+                session,
+                name.as_ptr(),
+                name.len() as _,
+                0x1004,
+                label.as_ptr(),
+                label.len() as _,
+                0xffff,
+                policy.as_ptr(),
+                8,
+                policy.as_ptr(),
+                8,
+                result,
+            )
+        };
+        assert_eq!(
+            provision(b"phone", &mut result),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
+        assert_eq!(result, 0);
+        assert!(store.keys.lock().unwrap().is_empty());
+        let mut admin = *b"0001password";
+        assert_eq!(
+            crate::api::C_Login(session, CKU_USER as _, admin.as_mut_ptr(), admin.len() as _),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(provision(b"phone", &mut result), CKR_OK as CK_RV);
+        assert_eq!(
+            result,
+            crate::api::platform_credential::PKCS11RS_PLATFORM_PROVISIONED
+        );
+        let key = store
+            .keys
+            .lock()
+            .unwrap()
+            .get("unit-phone-key")
+            .unwrap()
+            .clone();
+        peer.expose_provisioned_authentication_key(0x1004, "phone", 0xffff, policy, policy);
+        assert_eq!(provision(b"phone", &mut result), CKR_OK as CK_RV);
+        assert_eq!(
+            result,
+            crate::api::platform_credential::PKCS11RS_PLATFORM_ALREADY_PROVISIONED
+        );
+        assert_eq!(
+            provision(b"conflicting label", &mut result),
+            CKR_TEMPLATE_INCONSISTENT as CK_RV
+        );
+        assert_eq!(result, 0);
+        let unprovision = || {
+            crate::api::platform_credential::PKCS11RS_YubiHsmUnprovisionPlatformCredential(
+                session,
+                name.as_ptr(),
+                name.len() as _,
+                0x1004,
+            )
+        };
+        // A different local identity must not remove the HSM's authentication key.
+        store.keys.lock().unwrap().insert(
+            "unit-phone-key".into(),
+            crate::SoftwareSigningKey::generate(crate::SignatureScheme::EcdsaP256Sha256)
+                .unwrap()
+                .public_key(),
+        );
+        assert_eq!(unprovision(), CKR_TEMPLATE_INCONSISTENT as CK_RV);
+        assert!(!peer.deleted_object(0x1004, crate::YUBIHSM_AUTHENTICATION_KEY));
+        store
+            .keys
+            .lock()
+            .unwrap()
+            .insert("unit-phone-key".into(), key.clone());
+        // Removing the device key leaves its projection; provisioning repairs it.
+        crate::with_session_context(session, |ctx| {
+            let key = ctx
+                .resolved_objects()?
+                .into_iter()
+                .find_map(|(_, object)| {
+                    matches!(
+                        object.material,
+                        crate::KeyMaterial::YubiHsm {
+                            id: 0x1004,
+                            object_type: crate::YUBIHSM_AUTHENTICATION_KEY,
+                            ..
+                        }
+                    )
+                    .then_some(object)
+                })
+                .ok_or(crate::Error::from(CKR_OBJECT_HANDLE_INVALID))?;
+            ctx.get_slot(0x5053)?
+                .yubihsm_destroy_native_object(0x5053, &key.unique_id)
+        })
+        .unwrap();
+        assert_eq!(provision(b"phone", &mut result), CKR_OK as CK_RV);
+        assert_eq!(
+            result,
+            crate::api::platform_credential::PKCS11RS_PLATFORM_REPAIRED
+        );
+        peer.expose_provisioned_authentication_key(0x1004, "phone", 0xffff, policy, policy);
+        assert_eq!(unprovision(), CKR_OK as CK_RV);
+        assert_eq!(unprovision(), CKR_OK as CK_RV);
+        assert!(peer.deleted_object(0x1004, crate::YUBIHSM_AUTHENTICATION_KEY));
+        assert_eq!(store.keys.lock().unwrap().get("unit-phone-key"), Some(&key));
+        crate::with_session_context_mut(session, |ctx| {
+            ctx.refresh_slot_token_objects(0x5053)?;
+            assert!(
+                !ctx.resolved_objects()?
+                    .iter()
+                    .any(|(_, object)| object.id == 0x1004_u16.to_be_bytes())
+            );
+            Ok(())
+        })
+        .unwrap();
+    });
+    finalize_for_test();
+}
+
 #[test]
 fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
     let slot = crate::yubihsm::tests::make_yubihsm_connector_named_test_slot();
@@ -1083,6 +1452,9 @@ struct HsmAuthAdminConnector {
     secure_channel_starts: std::cell::Cell<usize>,
     secure_channel_clears: std::cell::Cell<usize>,
     reject_next_management_command: std::cell::Cell<bool>,
+    next_status: std::cell::Cell<Option<(u8, u16)>>,
+    fail_next_transport: std::cell::Cell<Option<u8>>,
+    public_key_override: std::cell::RefCell<Option<Vec<u8>>>,
 }
 
 impl crate::Connector for HsmAuthAdminConnector {
@@ -1124,6 +1496,19 @@ impl crate::Connector for HsmAuthAdminConnector {
         command: &crate::CommandApdu,
     ) -> Result<crate::ResponseApdu, crate::Error> {
         self.commands.borrow_mut().push(command.clone());
+        if self.fail_next_transport.get() == Some(command.ins) {
+            self.fail_next_transport.set(None);
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        if let Some((instruction, status)) = self.next_status.get()
+            && instruction == command.ins
+        {
+            self.next_status.set(None);
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status,
+            });
+        }
         let mutation = matches!(command.ins, 0x01 | 0x02 | 0x06 | 0x08 | 0x0b);
         if mutation && self.reject_next_management_command.replace(false) {
             return Ok(crate::ResponseApdu {
@@ -1135,7 +1520,11 @@ impl crate::Connector for HsmAuthAdminConnector {
             0x05 => Vec::new(),
             0x07 => vec![5, 7, 1],
             0x09 => vec![8],
-            0x0a => HSMAUTH_TEST_PUBLIC_KEY.to_vec(),
+            0x0a => self
+                .public_key_override
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| HSMAUTH_TEST_PUBLIC_KEY.to_vec()),
             _ => Vec::new(),
         };
         Ok(crate::ResponseApdu {
@@ -1551,6 +1940,676 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
         CKR_OK as CK_RV
     );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_explicit_symmetric_import_validates_inputs_and_encodes_policy() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+    let mut management_password = *b"admin";
+    assert_eq!(
+        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
+        CKR_OK as CK_RV
+    );
+    let enc = [0x11; 16];
+    let mac = [0x22; 16];
+    let import = |label: &[u8], enc: &[u8], mac: &[u8], password: &[u8], touch| {
+        crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            enc.as_ptr(),
+            enc.len() as _,
+            mac.as_ptr(),
+            mac.len() as _,
+            password.as_ptr(),
+            password.len() as _,
+            touch,
+        )
+    };
+    for (enc, mac) in [(&enc[..15], &mac[..]), (&enc[..], &mac[..15])] {
+        assert_eq!(
+            import(b"explicit", enc, mac, b"access", 1),
+            CKR_KEY_SIZE_RANGE as CK_RV
+        );
+    }
+    for label in [&b""[..], &b"bad\nlabel"[..], &[0xff][..], &[b'x'; 65][..]] {
+        assert_eq!(
+            import(label, &enc, &mac, b"access", 1),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+    }
+    assert_eq!(
+        import(b"explicit", &enc, &mac, &[0xff], 1),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        import(b"explicit", &enc, &mac, &[b'x'; 17], 1),
+        CKR_PIN_LEN_RANGE as CK_RV
+    );
+    assert_eq!(
+        import(b"explicit", &enc, &mac, b"access", 2),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
+            session,
+            b"explicit".as_ptr(),
+            8,
+            std::ptr::null(),
+            16,
+            mac.as_ptr(),
+            16,
+            b"access".as_ptr(),
+            6,
+            1,
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert!(connector.commands.borrow().is_empty());
+
+    assert_eq!(
+        import(b"explicit", &enc, &mac, b"access", 1),
+        CKR_OK as CK_RV
+    );
+    let commands = connector.commands.borrow();
+    let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
+    assert_short_tlv(put, 0x71, b"explicit");
+    assert_short_tlv(put, 0x74, &[38]);
+    assert_short_tlv(put, 0x75, &enc);
+    assert_short_tlv(put, 0x76, &mac);
+    assert_short_tlv(put, 0x7b, b"admin\0\0\0\0\0\0\0\0\0\0\0");
+    assert_short_tlv(put, 0x73, b"access\0\0\0\0\0\0\0\0\0\0");
+    assert_short_tlv(put, 0x7a, &[1]);
+    // Successful administration refreshes the inventory without another login.
+    assert!(commands.iter().any(|command| command.ins == 0x05));
+    assert_eq!(connector.secure_channel_starts.get(), 1);
+    drop(commands);
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+    let mut management_password = *b"admin";
+    assert_eq!(
+        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
+        CKR_OK as CK_RV
+    );
+    let mut private_key = [0; 32];
+    private_key[31] = 1;
+    for generated in [false, true] {
+        connector.commands.borrow_mut().clear();
+        let call = |label: &[u8], password: &[u8], touch, output, len| {
+            if generated {
+                crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
+                    session,
+                    label.as_ptr(),
+                    label.len() as _,
+                    password.as_ptr(),
+                    password.len() as _,
+                    touch,
+                    output,
+                    len,
+                )
+            } else {
+                crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
+                    session,
+                    label.as_ptr(),
+                    label.len() as _,
+                    private_key.as_ptr(),
+                    32,
+                    password.as_ptr(),
+                    password.len() as _,
+                    touch,
+                    output,
+                    len,
+                )
+            }
+        };
+        assert_eq!(
+            call(
+                b"asymmetric",
+                b"access",
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        let mut len = 0;
+        assert_eq!(
+            call(b"asymmetric", b"access", 0, std::ptr::null_mut(), &mut len),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(len, 65);
+        let mut output = [0xa5; 66];
+        len = 64;
+        assert_eq!(
+            call(b"asymmetric", b"access", 0, output.as_mut_ptr(), &mut len),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(len, 65);
+        assert_eq!(output, [0xa5; 66]);
+        assert_eq!(
+            call(&[0xff], b"access", 0, output.as_mut_ptr(), &mut len),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        assert_eq!(
+            call(b"asymmetric", &[b'x'; 17], 0, output.as_mut_ptr(), &mut len),
+            CKR_PIN_LEN_RANGE as CK_RV
+        );
+        assert_eq!(
+            call(b"asymmetric", b"access", 2, output.as_mut_ptr(), &mut len),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        assert!(connector.commands.borrow().is_empty());
+
+        len = output.len() as _;
+        assert_eq!(
+            call(b"asymmetric", b"access", 0, output.as_mut_ptr(), &mut len),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(len, 65);
+        assert_eq!(&output[..65], &HSMAUTH_TEST_PUBLIC_KEY);
+        assert_eq!(output[65], 0xa5);
+        let commands = connector.commands.borrow();
+        let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
+        assert_short_tlv(put, 0x71, b"asymmetric");
+        assert_short_tlv(put, 0x74, &[39]);
+        assert_short_tlv(put, 0x7d, if generated { &[] } else { &private_key[..] });
+        assert_short_tlv(put, 0x73, b"access\0\0\0\0\0\0\0\0\0\0");
+        assert_short_tlv(put, 0x7a, &[0]);
+        let get_public = commands.iter().find(|command| command.ins == 0x0a).unwrap();
+        assert_short_tlv(get_public, 0x71, b"asymmetric");
+    }
+    connector.commands.borrow_mut().clear();
+    let mut len = 65;
+    let mut output = [0xa5; 65];
+    for (key, key_len, expected) in [
+        (private_key.as_ptr(), 31, CKR_KEY_SIZE_RANGE),
+        (std::ptr::null(), 32, CKR_ARGUMENTS_BAD),
+    ] {
+        assert_eq!(
+            crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
+                session,
+                b"asymmetric".as_ptr(),
+                10,
+                key,
+                key_len,
+                b"access".as_ptr(),
+                6,
+                0,
+                output.as_mut_ptr(),
+                &mut len,
+            ),
+            expected as CK_RV
+        );
+    }
+    assert_eq!(output, [0xa5; 65]);
+    assert!(connector.commands.borrow().is_empty());
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_credential_password_change_uses_admin_authorization_and_clears_rejected_login() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+    let mut management_password = *b"admin";
+    assert_eq!(
+        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
+        CKR_OK as CK_RV
+    );
+    let change = |label: &[u8], password: &[u8]| {
+        crate::api::PKCS11RS_HsmAuthChangeCredentialPassword(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            password.as_ptr(),
+            password.len() as _,
+        )
+    };
+    assert_eq!(change(&[0xff], b"new-access"), CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(change(b"entry", &[0xff]), CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(change(b"entry", &[b'x'; 17]), CKR_PIN_LEN_RANGE as CK_RV);
+    assert!(connector.commands.borrow().is_empty());
+    assert_eq!(change(b"entry", b"new-access"), CKR_OK as CK_RV);
+    let commands = connector.commands.borrow();
+    let change_command = commands.iter().find(|command| command.ins == 0x0b).unwrap();
+    assert_eq!((change_command.p1, change_command.p2), (1, 0));
+    assert_short_tlv(change_command, 0x71, b"entry");
+    assert_short_tlv(change_command, 0x7b, b"admin\0\0\0\0\0\0\0\0\0\0\0");
+    assert_short_tlv(change_command, 0x73, b"new-access\0\0\0\0\0\0");
+    drop(commands);
+    connector.reject_next_management_command.set(true);
+    assert_eq!(change(b"entry", b"replacement"), CKR_PIN_INCORRECT as CK_RV);
+    let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert!(connector.secure_channel_clears.get() > 0);
+    let command_count = connector.commands.borrow().len();
+    assert_eq!(
+        change(b"entry", b"replacement"),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(connector.commands.borrow().len(), command_count);
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_reset_clears_so_authorization_and_secure_channel() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+    let mut management_password = *b"admin";
+    assert_eq!(
+        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
+        CKR_OK as CK_RV
+    );
+    let clears_before_reset = connector.secure_channel_clears.get();
+    assert_eq!(crate::api::PKCS11RS_HsmAuthReset(session), CKR_OK as CK_RV);
+    let commands = connector.commands.borrow();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(
+        (commands[0].ins, commands[0].p1, commands[0].p2),
+        (0x06, 0xde, 0xad)
+    );
+    assert!(commands[0].data.is_empty());
+    drop(commands);
+    let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert!(connector.secure_channel_clears.get() > clears_before_reset);
+    assert_eq!(
+        crate::api::PKCS11RS_HsmAuthReset(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(connector.commands.borrow().len(), 1);
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    finalize_for_test();
+}
+
+fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: CK_RV) {
+    let label = b"entry";
+    let key = [1; 32];
+    let password = b"access";
+    let mut output = [0xa5; 65];
+    let mut len = output.len() as CK_ULONG;
+    let results = [
+        crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            key.as_ptr(),
+            16,
+            key.as_ptr(),
+            16,
+            password.as_ptr(),
+            password.len() as _,
+            0,
+        ),
+        crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            key.as_ptr(),
+            32,
+            password.as_ptr(),
+            password.len() as _,
+            0,
+            output.as_mut_ptr(),
+            &mut len,
+        ),
+        crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            password.as_ptr(),
+            password.len() as _,
+            0,
+            output.as_mut_ptr(),
+            &mut len,
+        ),
+        crate::api::PKCS11RS_HsmAuthChangeCredentialPassword(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            password.as_ptr(),
+            password.len() as _,
+        ),
+        crate::api::PKCS11RS_HsmAuthReset(session),
+    ];
+    assert_eq!(results, [expected; 5]);
+    assert_eq!(output, [0xa5; 65]);
+    // Length queries must enforce authorization as well as actual mutations.
+    assert_eq!(
+        crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            key.as_ptr(),
+            32,
+            password.as_ptr(),
+            password.len() as _,
+            0,
+            std::ptr::null_mut(),
+            &mut len,
+        ),
+        expected
+    );
+    assert_eq!(
+        crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as _,
+            password.as_ptr(),
+            password.len() as _,
+            0,
+            std::ptr::null_mut(),
+            &mut len,
+        ),
+        expected
+    );
+}
+
+#[test]
+fn hsmauth_admin_exports_require_a_valid_native_read_write_so_session() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+    assert_hsmauth_admin_exports_rejected(session, CKR_USER_NOT_LOGGED_IN as CK_RV);
+    assert_hsmauth_admin_exports_rejected(
+        CK_SESSION_HANDLE::MAX,
+        CKR_SESSION_HANDLE_INVALID as CK_RV,
+    );
+    let mut read_only = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            HSMAUTH_ADMIN_SLOT_ID,
+            CKF_SERIAL_SESSION as _,
+            std::ptr::null_mut(),
+            None,
+            &mut read_only,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_hsmauth_admin_exports_rejected(read_only, CKR_SESSION_READ_ONLY as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(read_only), CKR_OK as CK_RV);
+    install_test_slot(96);
+    let unsupported = open_test_session(96);
+    assert_hsmauth_admin_exports_rejected(unsupported, CKR_FUNCTION_NOT_SUPPORTED as CK_RV);
+    assert!(connector.commands.borrow().is_empty());
+    assert_eq!(connector.secure_channel_starts.get(), 0);
+    finalize_for_test();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HsmAuthAdminExport {
+    Symmetric,
+    DerivedSymmetric,
+    Asymmetric,
+    DerivedAsymmetric,
+    Generate,
+    Delete,
+    CredentialPassword,
+    ManagementPassword,
+    Reset,
+}
+
+impl HsmAuthAdminExport {
+    const ALL: [Self; 9] = [
+        Self::Symmetric,
+        Self::DerivedSymmetric,
+        Self::Asymmetric,
+        Self::DerivedAsymmetric,
+        Self::Generate,
+        Self::Delete,
+        Self::CredentialPassword,
+        Self::ManagementPassword,
+        Self::Reset,
+    ];
+
+    fn instruction(self) -> u8 {
+        match self {
+            Self::Delete => 0x02,
+            Self::CredentialPassword => 0x0b,
+            Self::ManagementPassword => 0x08,
+            Self::Reset => 0x06,
+            _ => 0x01,
+        }
+    }
+
+    fn call(self, session: CK_SESSION_HANDLE, output: CK_BYTE_PTR, len: CK_ULONG_PTR) -> CK_RV {
+        use crate::api::*;
+        let label = b"entry";
+        let key = [1; 32];
+        let password = b"access";
+        match self {
+            Self::Symmetric => PKCS11RS_HsmAuthPutSymmetricCredential(
+                session,
+                label.as_ptr(),
+                5,
+                key.as_ptr(),
+                16,
+                key.as_ptr(),
+                16,
+                password.as_ptr(),
+                6,
+                0,
+            ),
+            Self::DerivedSymmetric => PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+                session,
+                label.as_ptr(),
+                5,
+                password.as_ptr(),
+                6,
+                password.as_ptr(),
+                6,
+                0,
+            ),
+            Self::Asymmetric => PKCS11RS_HsmAuthPutAsymmetricCredential(
+                session,
+                label.as_ptr(),
+                5,
+                key.as_ptr(),
+                32,
+                password.as_ptr(),
+                6,
+                0,
+                output,
+                len,
+            ),
+            Self::DerivedAsymmetric => PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+                session,
+                label.as_ptr(),
+                5,
+                password.as_ptr(),
+                6,
+                password.as_ptr(),
+                6,
+                0,
+                output,
+                len,
+            ),
+            Self::Generate => PKCS11RS_HsmAuthGenerateAsymmetricCredential(
+                session,
+                label.as_ptr(),
+                5,
+                password.as_ptr(),
+                6,
+                0,
+                output,
+                len,
+            ),
+            Self::Delete => PKCS11RS_HsmAuthDeleteCredential(session, label.as_ptr(), 5),
+            Self::CredentialPassword => PKCS11RS_HsmAuthChangeCredentialPassword(
+                session,
+                label.as_ptr(),
+                5,
+                password.as_ptr(),
+                6,
+            ),
+            Self::ManagementPassword => {
+                PKCS11RS_HsmAuthChangeManagementPassword(session, password.as_ptr(), 6)
+            }
+            Self::Reset => PKCS11RS_HsmAuthReset(session),
+        }
+    }
+}
+
+#[test]
+fn hsmauth_admin_exports_clear_authorization_after_blocked_management_authentication() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for operation in HsmAuthAdminExport::ALL {
+        for status in [0x63c0, 0x6983] {
+            finalize_for_test();
+            assert_eq!(
+                crate::api::C_Initialize(std::ptr::null_mut()),
+                CKR_OK as CK_RV
+            );
+            let (connector, session) = install_hsmauth_admin_slot();
+            let mut password = *b"admin";
+            assert_eq!(
+                crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
+                CKR_OK as CK_RV
+            );
+            let clears = connector.secure_channel_clears.get();
+            connector
+                .next_status
+                .set(Some((operation.instruction(), status)));
+            let mut output = [0xa5; 65];
+            let mut len = 65;
+            assert_eq!(
+                operation.call(session, output.as_mut_ptr(), &mut len),
+                CKR_PIN_LOCKED as CK_RV,
+                "{operation:?} status {status:04x}"
+            );
+            assert_eq!(output, [0xa5; 65]);
+            let mut info = unsafe { std::mem::zeroed::<CK_SESSION_INFO>() };
+            assert_eq!(
+                crate::api::C_GetSessionInfo(session, &mut info),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+            assert!(connector.secure_channel_clears.get() > clears);
+            let count = connector.commands.borrow().len();
+            assert_eq!(
+                operation.call(session, output.as_mut_ptr(), &mut len),
+                CKR_USER_NOT_LOGGED_IN as CK_RV
+            );
+            assert_eq!(connector.commands.borrow().len(), count);
+        }
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_admin_exports_propagate_transport_failures_without_replaying_mutations() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for operation in HsmAuthAdminExport::ALL {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let (connector, session) = install_hsmauth_admin_slot();
+        let mut password = *b"admin";
+        assert_eq!(
+            crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
+            CKR_OK as CK_RV
+        );
+        connector
+            .fail_next_transport
+            .set(Some(operation.instruction()));
+        let mut output = [0xa5; 65];
+        let mut len = 65;
+        assert_eq!(
+            operation.call(session, output.as_mut_ptr(), &mut len),
+            CKR_DEVICE_ERROR as CK_RV,
+            "{operation:?}"
+        );
+        assert_eq!(output, [0xa5; 65]);
+        assert_eq!(connector.commands.borrow().len(), 1);
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_asymmetric_exports_reject_malformed_device_public_keys_without_writing_output() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for operation in [
+        HsmAuthAdminExport::Asymmetric,
+        HsmAuthAdminExport::DerivedAsymmetric,
+        HsmAuthAdminExport::Generate,
+    ] {
+        for response in [vec![4; 64], vec![5; 65], vec![0; 65]] {
+            finalize_for_test();
+            assert_eq!(
+                crate::api::C_Initialize(std::ptr::null_mut()),
+                CKR_OK as CK_RV
+            );
+            let (connector, session) = install_hsmauth_admin_slot();
+            let mut password = *b"admin";
+            assert_eq!(
+                crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
+                CKR_OK as CK_RV
+            );
+            *connector.public_key_override.borrow_mut() = Some(response);
+            let mut output = [0xa5; 65];
+            let mut len = 65;
+            assert_eq!(
+                operation.call(session, output.as_mut_ptr(), &mut len),
+                CKR_DATA_INVALID as CK_RV,
+                "{operation:?}"
+            );
+            assert_eq!(output, [0xa5; 65]);
+            assert_eq!(len, 65);
+            assert_eq!(
+                connector
+                    .commands
+                    .borrow()
+                    .iter()
+                    .filter(|command| command.ins == 0x01)
+                    .count(),
+                1
+            );
+        }
+    }
     finalize_for_test();
 }
 
