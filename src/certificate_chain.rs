@@ -37,6 +37,16 @@ impl CertificateTrust {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
         self.0.fingerprint()
     }
+
+    pub(crate) fn validate_p256_attestation_chain(
+        &self,
+        certificates: &[Vec<u8>],
+        optional_key_usage_issuer: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        self.0
+            .validate_p256_attestation_chain(certificates, optional_key_usage_issuer)
+            .map_err(Into::into)
+    }
 }
 
 pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
@@ -171,13 +181,6 @@ pub(crate) fn verify_signed_by(certificate: &[u8], signer: &[u8]) -> Result<(), 
     ParsedCertificate::parse(&decode(certificate)?)?
         .verify_signature(&ParsedCertificate::parse(&decode(signer)?)?)
         .map_err(Into::into)
-}
-
-pub(crate) fn validate_p256_public_point(
-    certificates: &[Vec<u8>],
-    trust_anchors: &[Vec<u8>],
-) -> Result<Vec<u8>, Error> {
-    CertificateTrust::new(trust_anchors)?.validate_p256_public_point(certificates)
 }
 
 #[cfg(test)]

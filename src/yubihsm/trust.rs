@@ -78,10 +78,15 @@ impl TrustStore {
             AttestationValidation::Yubico => {
                 let intermediate = crate::certificate_chain::decode(YUBICO_INTERMEDIATE)?;
                 let root = crate::certificate_chain::decode(YUBICO_ROOT)?;
-                crate::certificate_chain::validate_p256_public_point(
-                    &[intermediate, device_certificate, attestation.clone()],
-                    &[root],
-                )?;
+                crate::certificate_chain::CertificateTrust::new(&[root])?
+                    .validate_p256_attestation_chain(
+                        &[
+                            intermediate,
+                            device_certificate.clone(),
+                            attestation.clone(),
+                        ],
+                        &device_certificate,
+                    )?;
             }
         }
         if !bool::from(
@@ -562,5 +567,64 @@ mod tests {
     #[test]
     fn embedded_yubico_intermediate_is_signed_by_embedded_root() {
         crate::certificate_chain::verify_signed_by(YUBICO_INTERMEDIATE, YUBICO_ROOT).unwrap();
+    }
+
+    #[test]
+    fn factory_yubico_device_attestation_validates_and_pins_the_exact_key() {
+        let device = include_bytes!("../fixtures/yubihsm-factory-device.der");
+        let attestation = include_bytes!("../fixtures/yubihsm-device-key-attestation.der");
+        let point = crate::certificate_chain::p256_public_point(attestation).unwrap();
+        let prefix = unused_prefix();
+        let path = entry_path(&point, Some(prefix.as_os_str())).unwrap();
+        let digest = install_attestation(
+            &point,
+            attestation,
+            device,
+            AttestationValidation::Yubico,
+            Some(prefix.as_os_str()),
+        )
+        .unwrap();
+        assert_eq!(digest, fingerprint_bytes(&point).unwrap());
+        validate_device_public_key(&point, Some(prefix.as_os_str())).unwrap();
+        assert_eq!(
+            decode_trust_record(&fs::read(&path).unwrap()).unwrap(),
+            device_spki(&point).unwrap()
+        );
+        fs::remove_file(path).unwrap();
+
+        let (_, other_point) = test_key();
+        let prefix = unused_prefix();
+        assert!(
+            install_attestation(
+                &other_point,
+                attestation,
+                device,
+                AttestationValidation::Yubico,
+                Some(prefix.as_os_str())
+            )
+            .is_err()
+        );
+        assert!(
+            !entry_path(&other_point, Some(prefix.as_os_str()))
+                .unwrap()
+                .exists()
+        );
+        let mut tampered = attestation.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(
+            install_attestation(
+                &point,
+                &tampered,
+                device,
+                AttestationValidation::Yubico,
+                Some(prefix.as_os_str())
+            )
+            .is_err()
+        );
+        assert!(
+            !entry_path(&point, Some(prefix.as_os_str()))
+                .unwrap()
+                .exists()
+        );
     }
 }

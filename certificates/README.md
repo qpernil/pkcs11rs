@@ -1,5 +1,7 @@
 # Yubico public certificates
 
+Hostnames and device/account identifiers below are illustrative; replace them with your own configured values.
+
 These public certificates are runtime trust anchors and test fixtures used by
 the module. Individual certificates are stored as their canonical X.509 DER.
 The published intermediate collection is stored in the project's canonical
@@ -57,6 +59,13 @@ D7:C6:D8:F4:52:08:E2:A5:39:96:FB:5A:8F:4D:63:1B:33:EB:AB:B6:49:56:B3:7B:2A:C1:51
 Both are embedded for
 `PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation`, which validates a factory
 device-public-key attestation before writing the local public-key pin.
+
+`src/fixtures/yubihsm-factory-device.der` and
+`src/fixtures/yubihsm-device-key-attestation.der` are public certificates read
+from physical YubiHSM serial HSM_A_SERIAL. They test factory enrollment through the
+embedded Yubico chain, including the device CA's absent KeyUsage extension,
+exact device-key matching, and signature-tampering rejection. They contain no
+private keys. Matching public validation vectors reside in `software-key-core`.
 
 Tests pin these fingerprints, validate current validity periods, and verify
 every exact-DER issuer relationship in the published bundles.
