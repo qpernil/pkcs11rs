@@ -2752,6 +2752,12 @@ impl ModuleContext {
             })();
 
             let Ok((serial, device_info)) = discovered_identity else {
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    reader = %name,
+                    error = ?discovered_identity.err(),
+                    "CCID management identity discovery failed"
+                );
                 if embedded_id.is_some() {
                     log!(
                         1,

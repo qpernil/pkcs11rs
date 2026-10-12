@@ -975,6 +975,72 @@ per-request connector, APDU, and transport timing.
 
 ## Testing
 
+`HeaderExtensionHardwareTests` in `test_hardware.py` exercises every export in
+`pkcs11rs.h` using explicitly selected YubiKey and YubiHSM serials. It runs
+hardware functions on their corresponding device, platform credentials through
+the native provider, and private-key export on its supported software backend.
+Use a Python environment with `cryptography` and `ykman` on the command path:
+
+```sh
+PKCS11RS_RUN_HEADER_HARDWARE_TESTS=1 \
+PKCS11RS_HEADER_TEST_YUBIKEY=36928477 \
+PKCS11RS_HEADER_TEST_YUBIHSM=36799798 \
+PKCS11RS_HEADER_TEST_ALLOW_RESET=1 \
+python3 -m unittest -v test_hardware.HeaderExtensionHardwareTests
+```
+
+The reset flag authorizes erasing the selected YubiKey's YubiHSM Auth and Issuer
+Security Domain applets. Use disposable devices and factory authentication
+credentials. Temporary HSM authentication objects and native credentials are
+deleted; enrollment pins and software tokens use temporary directories. The
+per-test and per-function results are written to
+`target/header-hardware-results.json`. Successful complete runs also assert
+that every header export was called. Credential-password changes require
+YubiKey 5.8.0; the 5.7.4 qualification asserts `CKR_FUNCTION_NOT_SUPPORTED`.
+
+Physical qualification on YubiKey 36928477 (5.7.4) and YubiHSM 36799798
+passes six qualification groups and calls all 37 exports: 36 have successful
+operations and credential-password change has the expected firmware rejection.
+If PC/SC reports a sharing violation, release the competing smart-card client
+before retrying; GnuPG's `scdaemon` can hold an exclusive connection.
+
+The focused `test_07_hsmauth_credential_password_change_authentication` requires
+firmware 5.8.0 and skips on older keys. It uses fresh management authentication
+through `PKCS11RS_PINENTRY`, creates one temporary symmetric credential for the
+selected HSM's factory authentication key `0001`, verifies login before changing
+the password, then requires the old password to fail and the new one to work.
+It deletes the credential without changing the management password or resetting
+the applet. For a confirmed factory-default management key, explicitly set
+`PKCS11RS_HEADER_TEST_HSMAUTH_FACTORY_MANAGEMENT=1` to use the public all-zero
+factory key instead of pinentry; the test wipes its input buffer after login.
+Run it separately with a distinct results path:
+
+```sh
+PKCS11RS_PINENTRY=/path/to/pinentry \
+PKCS11RS_RUN_HEADER_HARDWARE_TESTS=1 \
+PKCS11RS_HEADER_TEST_YUBIKEY=40353783 \
+PKCS11RS_HEADER_TEST_YUBIHSM=36799798 \
+PKCS11RS_HEADER_TEST_RESULTS=target/header-password-change-5.8-results.json \
+python3 -m unittest -v test_hardware.HeaderExtensionHardwareTests.test_07_hsmauth_credential_password_change_authentication
+```
+
+Physical YubiKey 40353783 (5.8.0), with YubiHSM 36799798, passes this focused
+test using the factory management key: password change returns `CKR_OK`, the
+old credential password returns `CKR_PIN_INCORRECT`, and the new password
+establishes an authenticated SCP03 HSM session. The temporary credential is
+deleted after verification.
+
+On macOS, native credential tests require a signed executable with the project's
+Keychain entitlements and a valid provisioning profile, as described in
+[`docs/pkcs11rs-tool.md`](docs/pkcs11rs-tool.md). The C harness
+`src/fixtures/platform-extension-driver.c` can replace the executable in a copy
+of that provisioned app; compile it with
+`clang -I. src/fixtures/platform-extension-driver.c -o target/header-platform-driver`, embed the
+built module, and sign the module and app with the matching identity and
+entitlements. Set `PKCS11RS_HEADER_TEST_PLATFORM_DRIVER` to the signed harness
+and `PKCS11RS_HEADER_TEST_PLATFORM_MODULE` to its embedded module. The harness
+checks all six platform exports and removes its disposable native/HSM objects.
+
 ### Rust test prerequisites
 
 The hardware-independent Rust test suite has the following external

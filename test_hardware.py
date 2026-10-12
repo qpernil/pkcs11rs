@@ -6,12 +6,18 @@ from __future__ import annotations
 import concurrent.futures
 import ctypes
 import hashlib
+import json
 import os
 import pathlib
 import platform
 import subprocess
 import threading
+import tempfile
+import time
 import unittest
+import uuid
+
+import test_pkcs11 as abi
 
 from test_pkcs11 import (
     CKA_ALWAYS_AUTHENTICATE,
@@ -793,6 +799,430 @@ class HardwareDiscoveryTests(unittest.TestCase):
             for session in control_sessions:
                 self.assertEqual(self.lib.C_Logout(session), CKR_OK)
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+
+
+@unittest.skipUnless(
+    os.environ.get("PKCS11RS_RUN_HEADER_HARDWARE_TESTS") == "1",
+    "set PKCS11RS_RUN_HEADER_HARDWARE_TESTS=1 for the explicitly selected extension targets",
+)
+class HeaderExtensionHardwareTests(abi.HsmAuthExportLifecycleMixin, unittest.TestCase):
+    """All header extensions on their production hardware or native backend."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.yubikey = os.environ["PKCS11RS_HEADER_TEST_YUBIKEY"]
+        cls.yubihsm = os.environ["PKCS11RS_HEADER_TEST_YUBIHSM"]
+        cls.allow_reset = os.environ.get("PKCS11RS_HEADER_TEST_ALLOW_RESET") == "1"
+        HardwareDiscoveryTests.setUpClass.__func__(cls)
+        raw = cls.lib
+        for name, arguments in {
+            "C_InitToken": [CK_ULONG, ctypes.POINTER(CK_BYTE), CK_ULONG, ctypes.POINTER(CK_BYTE)],
+            "C_InitPIN": [CK_ULONG, ctypes.POINTER(CK_BYTE), CK_ULONG],
+        }.items():
+            function = getattr(raw, name)
+            function.argtypes = arguments
+            function.restype = CK_RV
+        names = abi.bind_header_extensions(raw)
+        cls.results = {name: [] for name in names}
+        cls.test_results = {}
+        cls.expected_unsupported = {}
+        cls.report_path = pathlib.Path(os.environ.get(
+            "PKCS11RS_HEADER_TEST_RESULTS", str(pathlib.Path(ROOT) / "target/header-hardware-results.json")))
+
+        class RecordingLibrary:
+            def __getattr__(self, name):
+                function = getattr(raw, name)
+                if name not in cls.results:
+                    return function
+                def call(*arguments):
+                    result = function(*arguments)
+                    cls.results[name].append(result.decode() if isinstance(result, bytes) else result)
+                    return result
+                return call
+
+        cls.lib = RecordingLibrary()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.report_path.parent.mkdir(parents=True, exist_ok=True)
+        cls.report_path.write_text(json.dumps({
+            "yubikey": cls.yubikey, "yubihsm": cls.yubihsm,
+            "module": str(hardware_library_path()),
+            "tests": cls.test_results,
+            "expected_unsupported": cls.expected_unsupported,
+            "complete_header_coverage": all(bool(results) for results in cls.results.values()),
+            "functions": {name: {"returns": results, "called": bool(results),
+                                  "successful_return": any(value == 0 or isinstance(value, str) for value in results)}
+                          for name, results in cls.results.items()},
+        }, indent=2) + "\n")
+        complete = len(cls.test_results) == len(unittest.defaultTestLoader.getTestCaseNames(cls))
+        qualified = all(
+            value == "passed" or (
+                name == "test_07_hsmauth_credential_password_change_authentication"
+                and value == "skipped"
+            )
+            for name, value in cls.test_results.items()
+        )
+        if complete and qualified:
+            missing = [name for name, results in cls.results.items() if not results]
+            if missing:
+                raise AssertionError(f"header functions not exercised: {missing}")
+
+    def tearDown(self) -> None:
+        self.lib.C_Finalize(None)
+        result = self._outcome.result
+        failed = any(test is self for test, _ in result.errors + result.failures)
+        skipped = any(test is self for test, _ in result.skipped)
+        type(self).test_results[self._testMethodName] = "failed" if failed else "skipped" if skipped else "passed"
+
+    @staticmethod
+    def buffer(value: bytes):
+        return (CK_BYTE * len(value)).from_buffer_copy(value)
+
+    def initialize(self, applications, **extra) -> None:
+        self.lib.C_Finalize(None)
+        configuration = {
+            "version": 1, "hardware": {"discovery": True},
+            "slots": {"serials": [self.yubikey, self.yubihsm]},
+            "ccid": {"applications": applications, "recreate_sessions": False},
+            "software": {"slots": []}, "platform": {"enabled": False},
+            "yubihsm": {"urls": [], "recreate_sessions": False},
+        }
+        configuration.update(extra)
+        encoded = ctypes.create_string_buffer(json.dumps(configuration).encode())
+        args = abi.CK_C_INITIALIZE_ARGS()
+        args.pReserved = ctypes.cast(encoded, ctypes.c_void_p)
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(args)), CKR_OK)
+
+    def open_selected(self, serial: str, description: str):
+        deadline = time.monotonic() + 5
+        while True:
+            count = CK_ULONG()
+            self.assertEqual(self.lib.C_GetSlotList(1, None, ctypes.byref(count)), CKR_OK)
+            slots = (CK_ULONG * count.value)()
+            self.assertEqual(self.lib.C_GetSlotList(1, slots, ctypes.byref(count)), CKR_OK)
+            matches = []
+            for slot in slots:
+                info, details = CK_TOKEN_INFO(), CK_SLOT_INFO()
+                self.assertEqual(self.lib.C_GetTokenInfo(slot, ctypes.byref(info)), CKR_OK)
+                self.assertEqual(self.lib.C_GetSlotInfo(slot, ctypes.byref(details)), CKR_OK)
+                if (not serial or bytes(info.serialNumber).decode().strip() == serial) and description in bytes(details.slotDescription).decode():
+                    matches.append(slot)
+            if matches or time.monotonic() >= deadline:
+                break
+            # PC/SC reader visibility can lag after an applet reset/reconnect.
+            time.sleep(0.25)
+        self.assertEqual(len(matches), 1, f"expected one {description} slot on {serial}")
+        session = CK_ULONG()
+        self.assertEqual(self.lib.C_OpenSession(matches[0], CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                                              None, None, ctypes.byref(session)), CKR_OK)
+        return matches[0], session
+
+    def login_hsm(self, session) -> None:
+        # The runner targets a disposable HSM explicitly selected by serial.
+        pin = self.buffer(b"0001password")
+        try:
+            self.assertEqual(self.lib.C_Login(session, CKU_USER, pin, len(pin)), CKR_OK)
+        finally:
+            ctypes.memset(pin, 0, len(pin))
+
+    def diagnostic(self, name, session) -> str:
+        function = getattr(self.lib, name)
+        length = CK_ULONG()
+        self.assertEqual(function(session, None, ctypes.byref(length)), CKR_OK)
+        value = (CK_BYTE * (length.value + 1))(*([0xA5] * (length.value + 1)))
+        short = CK_ULONG(length.value - 1)
+        self.assertEqual(function(session, value, ctypes.byref(short)), abi.CKR_BUFFER_TOO_SMALL)
+        self.assertEqual(short.value, length.value)
+        self.assertEqual(function(session, value, ctypes.byref(length)), CKR_OK)
+        self.assertEqual(value[length.value], 0xA5)
+        return bytes(value[:length.value]).decode()
+
+    def test_01_names_diagnostics_and_inventory_refresh(self) -> None:
+        for name, known, expected in (
+            ("GetMechanismName", abi.CKM_SHA256, b"CKM_SHA256"),
+            ("GetReturnValueName", abi.CKR_OK, b"CKR_OK"),
+            ("GetObjectClassName", abi.CKO_PRIVATE_KEY, b"CKO_PRIVATE_KEY"),
+            ("GetKeyTypeName", abi.CKK_EC, b"CKK_EC"),
+            ("GetAttributeTypeName", abi.CKA_LABEL, b"CKA_LABEL"),
+            ("GetProfileIdName", 1, b"CKP_BASELINE_PROVIDER"),
+        ):
+            function = getattr(self.lib, "PKCS11RS_" + name)
+            self.assertEqual(function(known), expected)
+            self.assertIsNone(function(CK_ULONG(-1).value))
+        self.initialize(["hsmauth"])
+        slot, session = self.open_selected(self.yubikey, "YubiHSM Auth")
+        self.assertEqual(self.diagnostic("PKCS11RS_GetAuthenticatedCredential", session), "none")
+        self.assertEqual(self.diagnostic("PKCS11RS_GetSecureChannel", session), "none")
+        self.assertEqual(self.lib.PKCS11RS_RefreshTokenObjects(slot), CKR_OK)
+
+    def test_02_hsmauth_export_lifecycle(self) -> None:
+        if not self.allow_reset:
+            self.skipTest("YubiHSM Auth reset requires PKCS11RS_HEADER_TEST_ALLOW_RESET=1")
+        self.initialize(["hsmauth"])
+        slot, session = self.open_selected(self.yubikey, "YubiHSM Auth")
+        info = CK_TOKEN_INFO()
+        self.assertEqual(self.lib.C_GetTokenInfo(slot, ctypes.byref(info)), CKR_OK)
+        self.expected_hsmauth_password_change = (CKR_OK if (info.firmwareVersion.major, info.firmwareVersion.minor) >= (5, 80)
+                                                else abi.CKR_FUNCTION_NOT_SUPPORTED)
+        if self.expected_hsmauth_password_change != CKR_OK:
+            type(self).expected_unsupported["PKCS11RS_HsmAuthChangeCredentialPassword"] = {
+                "return": abi.CKR_FUNCTION_NOT_SUPPORTED, "required_firmware": "5.8.0",
+                "tested_firmware": f"{info.firmwareVersion.major}.{info.firmwareVersion.minor // 10}.{info.firmwareVersion.minor % 10}",
+            }
+        self.assert_hsmauth_export_lifecycle(session)
+
+    def test_03_security_domain_export_lifecycle(self) -> None:
+        if not self.allow_reset:
+            self.skipTest("Security Domain qualification requires explicit reset permission")
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+        import datetime
+
+        def initialize_scp(version):
+            key = bytes(range(0x40, 0x50)).hex()
+            self.initialize(["issuer-sd"], ccid={"applications": ["issuer-sd"], "secure_channel": "scp03", "recreate_sessions": False},
+                            scp03={"key_version": version, "enc_key": key, "mac_key": key, "dek_key": key})
+            _, session = self.open_selected(self.yubikey, "Issuer")
+            pin = self.buffer(b"")
+            self.assertEqual(self.lib.C_Login(session, CKU_USER, pin, 0), CKR_OK)
+            self.assertEqual(self.diagnostic("PKCS11RS_GetSecureChannel", session), "scp03")
+            return session
+
+        session = initialize_scp(255)
+        key = self.buffer(bytes(range(0x40, 0x50)))
+        keys = abi.PKCS11RS_SCP03_KEY_SET(key, 16, key, 16, key, 16)
+        recovery_path = self.report_path.with_name("header-test-scp03-recovery.json")
+        recovery_path.write_text(json.dumps({"version": 1, "slots": {"serials": [self.yubikey]},
+            "ccid": {"applications": ["issuer-sd"], "secure_channel": "scp03"},
+            "scp03": {"key_version": 126, "enc_key": bytes(key).hex(), "mac_key": bytes(key).hex(), "dek_key": bytes(key).hex()}}))
+        try:
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainPutScp03KeySet(session, 126, 0, ctypes.byref(keys)), CKR_OK)
+            session = initialize_scp(126)
+            length = CK_ULONG()
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainGenerateScp11Key(session, 0x13, 127, 0, 0, None, ctypes.byref(length)), CKR_OK)
+            public = (CK_BYTE * length.value)()
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainGenerateScp11Key(session, 0x13, 127, 0, 0, public, ctypes.byref(length)), CKR_OK)
+            subject_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes(public))
+            ca_key = ec.generate_private_key(ec.SECP256R1())
+            ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pkcs11rs hardware test CA")])
+            now = datetime.datetime.now(datetime.timezone.utc)
+            def certificate(subject, public_key, serial, ca):
+                return (x509.CertificateBuilder().subject_name(subject).issuer_name(ca_name)
+                        .public_key(public_key).serial_number(serial)
+                        .not_valid_before(now - datetime.timedelta(days=1))
+                        .not_valid_after(now + datetime.timedelta(days=1))
+                        .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)
+                        .sign(ca_key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+            root = self.buffer(certificate(ca_name, ca_key.public_key(), 1, True))
+            leaf = self.buffer(certificate(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pkcs11rs card test")]), subject_key, 2, False))
+            chain = (abi.PKCS11RS_BYTE_BUFFER * 2)(abi.PKCS11RS_BYTE_BUFFER(root, len(root)), abi.PKCS11RS_BYTE_BUFFER(leaf, len(leaf)))
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainStoreScp11CertificateChain(session, 0x13, 127, chain, 2), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainDeleteScp11Key(session, 0x13, 127, 1), CKR_OK)
+            private = self.buffer(ca_key.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+            try:
+                self.assertEqual(self.lib.PKCS11RS_SecurityDomainPutScp11PrivateKey(session, 0x11, 121, 0, private, len(private)), CKR_OK)
+            finally:
+                ctypes.memset(private, 0, len(private))
+            identifier = self.buffer(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()).digest)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainStoreScp11CaIssuer(session, 0x11, 121, identifier, len(identifier)), CKR_OK)
+            serial = self.buffer(b"\x02")
+            serials = (abi.PKCS11RS_BYTE_BUFFER * 1)(abi.PKCS11RS_BYTE_BUFFER(serial, len(serial)))
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainDeleteScp11Key(session, 0x11, 121, 1), CKR_OK)
+            public_import = self.buffer(ca_key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainPutScp11PublicKey(session, 0x20, 122, 0, public_import, len(public_import)), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainSetScp11Allowlist(session, 0x20, 122, serials, 1), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainSetScp11Allowlist(session, 0x20, 122, None, 0), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainDeleteScp11Key(session, 0x20, 122, 1), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_SecurityDomainDeleteScp03KeySet(session, 126, 1), CKR_OK)
+        finally:
+            self.lib.C_Finalize(None)
+            subprocess.run(["ykman", "--device", self.yubikey, "sd", "reset", "--force"], check=True)
+            recovery_path.unlink(missing_ok=True)
+
+    def test_07_hsmauth_credential_password_change_authentication(self) -> None:
+        """Change one disposable credential and authenticate with both passwords."""
+        self.initialize(["hsmauth"])
+        slot, session = self.open_selected(self.yubikey, "YubiHSM Auth")
+        info = CK_TOKEN_INFO()
+        self.assertEqual(self.lib.C_GetTokenInfo(slot, ctypes.byref(info)), CKR_OK)
+        if (info.firmwareVersion.major, info.firmwareVersion.minor) < (5, 80):
+            self.skipTest("positive credential-password change requires firmware 5.8.0")
+        _, hsm_session = self.open_selected(self.yubihsm, "YubiHSM ")
+        label_bytes = ("pkcs11rs-password-" + uuid.uuid4().hex[:12]).encode()
+        label = self.buffer(label_bytes)
+        derivation = self.buffer(b"password")  # Factory HSM authentication key 0001.
+        old, new = self.buffer(b"old-test-access"), self.buffer(b"new-test-access")
+        created = False
+
+        def login_management():
+            if os.environ.get("PKCS11RS_HEADER_TEST_HSMAUTH_FACTORY_MANAGEMENT") == "1":
+                factory = self.buffer(b"00000000000000000000000000000000")
+                try:
+                    self.assertEqual(self.lib.C_Login(session, abi.CKU_SO, factory, len(factory)), CKR_OK)
+                finally:
+                    ctypes.memset(factory, 0, len(factory))
+            else:
+                self.assertEqual(self.lib.C_Login(session, abi.CKU_SO, None, 0), CKR_OK)
+
+        def authenticate(password, expected):
+            pin = self.buffer(b":0001" + label_bytes + b"@" + self.yubikey.encode() + b":" + bytes(password))
+            try:
+                self.assertEqual(self.lib.C_Login(hsm_session, CKU_USER, pin, len(pin)), expected)
+                if expected == CKR_OK:
+                    self.assertEqual(self.diagnostic("PKCS11RS_GetSecureChannel", hsm_session), "scp03")
+                    self.assertEqual(self.lib.C_Logout(hsm_session), CKR_OK)
+            finally:
+                ctypes.memset(pin, 0, len(pin))
+
+        try:
+            # Fresh pinentry by default; the public factory key is an explicit opt-in.
+            login_management()
+            self.assertEqual(self.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+                session, label, len(label), derivation, len(derivation), old, len(old), 0), CKR_OK)
+            created = True
+            authenticate(old, CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeCredentialPassword(
+                session, label, len(label), new, len(new)), CKR_OK)
+            authenticate(old, abi.CKR_PIN_INCORRECT)
+            authenticate(new, CKR_OK)
+        finally:
+            try:
+                self.lib.C_Logout(hsm_session)
+                if created:
+                    result = self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label))
+                    if result == abi.CKR_USER_NOT_LOGGED_IN:
+                        login_management()
+                        result = self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label))
+                    self.assertEqual(result, CKR_OK, f"failed to remove disposable credential {label_bytes.decode()}")
+            finally:
+                for value in (derivation, old, new):
+                    ctypes.memset(value, 0, len(value))
+                self.lib.C_Logout(session)
+                self.lib.C_CloseSession(hsm_session)
+                self.lib.C_CloseSession(session)
+
+    def test_04_yubihsm_enrollment_exports_validate_factory_attestation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pkcs11rs-hardware-trust-") as directory:
+            self.initialize(["hsmauth"], yubihsm={"urls": [], "recreate_sessions": False,
+                            "device_trust_prefix": directory + os.sep})
+            _, session = self.open_selected(self.yubihsm, "YubiHSM ")
+            self.login_hsm(session)
+            fingerprints = []
+            for name, extra in (
+                ("PKCS11RS_YubiHsmEnrollDeviceAttestation", [0]),
+                ("PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation", []),
+                ("PKCS11RS_YubiHsmEnrollDevicePublicKey", []),
+            ):
+                function = getattr(self.lib, name)
+                length = CK_ULONG()
+                self.assertEqual(function(session, *extra, None, ctypes.byref(length)), CKR_OK)
+                self.assertEqual(length.value, 32)
+                fingerprint = (CK_BYTE * 32)()
+                self.assertEqual(function(session, *extra, fingerprint, ctypes.byref(length)), CKR_OK)
+                fingerprints.append(bytes(fingerprint))
+                entry = pathlib.Path(directory, bytes(fingerprint).hex() + ".cbor")
+                self.assertTrue(entry.is_file())
+                self.assertTrue(entry.read_bytes())
+            self.assertEqual(fingerprints[0], fingerprints[1])
+            self.assertEqual(fingerprints[1], fingerprints[2])
+            self.assertEqual(self.diagnostic("PKCS11RS_GetSecureChannel", session), "scp03")
+
+    def test_05_native_platform_lifecycle_and_hsm_provisioning_exports(self) -> None:
+        driver = os.environ.get("PKCS11RS_HEADER_TEST_PLATFORM_DRIVER")
+        if driver:
+            module = os.environ.get("PKCS11RS_HEADER_TEST_PLATFORM_MODULE", str(hardware_library_path()))
+            completed = subprocess.run([driver, module, self.yubihsm, "7e50"], capture_output=True, text=True)
+            for line in completed.stdout.splitlines():
+                name, _, result = line.partition(" ")
+                if name in self.results and result.isdigit():
+                    self.results[name].append(int(result))
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            return
+        self.initialize(["hsmauth"])
+        _, session = self.open_selected(self.yubihsm, "YubiHSM ")
+        self.login_hsm(session)
+        name = self.buffer(("pkcs11rs-header-" + uuid.uuid4().hex).encode())
+        public = (CK_BYTE * 65)()
+        length = CK_ULONG(65)
+        generated = False
+        provisioned = False
+        authkey_id = 0x7E50
+        try:
+            self.assertEqual(self.lib.PKCS11RS_PlatformCredentialGenerate(name, len(name), public, ctypes.byref(length)), CKR_OK)
+            generated = True
+            read = (CK_BYTE * 65)()
+            self.assertEqual(self.lib.PKCS11RS_PlatformCredentialGetPublicKey(name, len(name), read, ctypes.byref(length)), CKR_OK)
+            self.assertEqual(bytes(read), bytes(public))
+            count = CK_ULONG()
+            self.assertEqual(self.lib.PKCS11RS_PlatformCredentialList(None, ctypes.byref(count)), CKR_OK)
+            entries = (abi.PKCS11RS_PLATFORM_CREDENTIAL_INFO * count.value)()
+            self.assertEqual(self.lib.PKCS11RS_PlatformCredentialList(entries, ctypes.byref(count)), CKR_OK)
+            self.assertTrue(any(bytes(entry.name[:entry.ulNameLen]) == bytes(name) for entry in entries))
+            label = self.buffer(b"pkcs11rs header test")
+            capabilities = self.buffer(bytes(8))
+            result = CK_ULONG()
+            for expected in (1, 2):
+                self.assertEqual(self.lib.PKCS11RS_YubiHsmProvisionPlatformCredential(
+                    session, name, len(name), authkey_id, label, len(label), 0xffff,
+                    capabilities, 8, capabilities, 8, ctypes.byref(result)), CKR_OK)
+                provisioned = True
+                self.assertEqual(result.value, expected)
+            self.assertEqual(self.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential(session, name, len(name), authkey_id), CKR_OK)
+            provisioned = False
+            self.assertEqual(self.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential(session, name, len(name), authkey_id), CKR_OK)
+            self.assertEqual(self.lib.PKCS11RS_PlatformCredentialDelete(name, len(name)), CKR_OK)
+            generated = False
+        finally:
+            if provisioned:
+                self.assertEqual(self.lib.PKCS11RS_YubiHsmUnprovisionPlatformCredential(session, name, len(name), authkey_id), CKR_OK)
+            if generated:
+                self.assertEqual(self.lib.PKCS11RS_PlatformCredentialDelete(name, len(name)), CKR_OK)
+
+    def test_06_software_private_key_export_on_its_supported_backend(self) -> None:
+        storage = tempfile.TemporaryDirectory(prefix="pkcs11rs-header-export-")
+        self.addCleanup(storage.cleanup)
+        self.initialize(["hsmauth"], software={"slots": [{"name": "header-export"}]},
+                        slots={"serials": [self.yubikey, self.yubihsm, "0"]}, storage={"tokens": storage.name})
+        slot, session = self.open_selected("", "pkcs11rs software slot: header-export")
+        self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+        so_pin = self.buffer(b"disposable SO password")
+        label = self.buffer(b"header export".ljust(32))
+        self.assertEqual(self.lib.C_InitToken(slot, so_pin, len(so_pin), label), CKR_OK)
+        _, session = self.open_selected("", "pkcs11rs software slot: header-export")
+        user_pin = self.buffer(b"disposable USER password")
+        try:
+            self.assertEqual(self.lib.C_Login(session, abi.CKU_SO, so_pin, len(so_pin)), CKR_OK)
+            self.assertEqual(self.lib.C_InitPIN(session, user_pin, len(user_pin)), CKR_OK)
+            self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+            self.assertEqual(self.lib.C_Login(session, CKU_USER, user_pin, len(user_pin)), CKR_OK)
+        finally:
+            ctypes.memset(so_pin, 0, len(so_pin))
+            ctypes.memset(user_pin, 0, len(user_pin))
+        fields = [HardwareDiscoveryTests.scalar_attribute(abi.CKA_CLASS, abi.CKO_PRIVATE_KEY),
+                  HardwareDiscoveryTests.scalar_attribute(abi.CKA_KEY_TYPE, abi.CKK_EC),
+                  HardwareDiscoveryTests.scalar_attribute(abi.CKA_TOKEN, 0, CK_BYTE),
+                  HardwareDiscoveryTests.scalar_attribute(abi.CKA_EXTRACTABLE, 1, CK_BYTE),
+                  HardwareDiscoveryTests.scalar_attribute(abi.CKA_SENSITIVE, 0, CK_BYTE),
+                  HardwareDiscoveryTests.bytes_attribute(abi.CKA_EC_PARAMS, bytes.fromhex("06082a8648ce3d030107")),
+                  HardwareDiscoveryTests.bytes_attribute(abi.CKA_VALUE, bytes(31) + b"\x01")]
+        template = (CK_ATTRIBUTE * len(fields))(*(attribute for attribute, _ in fields))
+        key = CK_ULONG()
+        self.assertEqual(self.lib.C_CreateObject(session, template, len(template), ctypes.byref(key)), CKR_OK)
+        password = self.buffer(b"disposable export password")
+        try:
+            length = CK_ULONG()
+            self.assertEqual(self.lib.PKCS11RS_SoftwareExportPrivateKey(session, key, password, len(password), None, ctypes.byref(length)), CKR_OK)
+            encrypted = (CK_BYTE * length.value)()
+            self.assertEqual(self.lib.PKCS11RS_SoftwareExportPrivateKey(session, key, password, len(password), encrypted, ctypes.byref(length)), CKR_OK)
+            from cryptography.hazmat.primitives import serialization
+            restored = serialization.load_der_private_key(bytes(encrypted), bytes(password))
+            self.assertEqual(restored.private_numbers().private_value, 1)
+        finally:
+            ctypes.memset(password, 0, len(password))
+            self.assertEqual(self.lib.C_DestroyObject(session, key), CKR_OK)
 
 
 if __name__ == "__main__":

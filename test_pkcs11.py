@@ -701,10 +701,225 @@ class CK_FUNCTION_LIST_3_2(ctypes.Structure):
     ]
 
 
-class EmbeddedVirtualYubiKeyAbiTests(unittest.TestCase):
+def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
+    library.PKCS11RS_HsmAuthPutSymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        CK_BYTE,
+    ]
+    library.PKCS11RS_HsmAuthPutSymmetricCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        CK_BYTE,
+    ]
+    library.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthPutAsymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        CK_BYTE,
+        ctypes.POINTER(CK_BYTE),
+        ctypes.POINTER(CK_ULONG),
+    ]
+    library.PKCS11RS_HsmAuthPutAsymmetricCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        CK_BYTE,
+        ctypes.POINTER(CK_BYTE),
+        ctypes.POINTER(CK_ULONG),
+    ]
+    library.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthGenerateAsymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        CK_BYTE,
+        ctypes.POINTER(CK_BYTE),
+        ctypes.POINTER(CK_ULONG),
+    ]
+    library.PKCS11RS_HsmAuthGenerateAsymmetricCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthDeleteCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+    ]
+    library.PKCS11RS_HsmAuthDeleteCredential.restype = CK_RV
+    library.PKCS11RS_HsmAuthChangeCredentialPassword.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+    ]
+    library.PKCS11RS_HsmAuthChangeCredentialPassword.restype = CK_RV
+    library.PKCS11RS_HsmAuthChangeManagementPassword.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
+    ]
+    library.PKCS11RS_HsmAuthChangeManagementPassword.restype = CK_RV
+    library.PKCS11RS_HsmAuthReset.argtypes = [CK_ULONG]
+    library.PKCS11RS_HsmAuthReset.restype = CK_RV
+
+
+def bind_header_extensions(library: ctypes.CDLL) -> list[str]:
+    """Bind every extension using its checked-in header declaration."""
+    aliases = {
+        "CK_BYTE": CK_BYTE, "CK_BBOOL": CK_BYTE, "CK_UTF8CHAR": CK_BYTE,
+        "char": ctypes.c_char,
+        "PKCS11RS_SCP03_KEY_SET": PKCS11RS_SCP03_KEY_SET,
+        "PKCS11RS_BYTE_BUFFER": PKCS11RS_BYTE_BUFFER,
+        "PKCS11RS_PLATFORM_CREDENTIAL_INFO": PKCS11RS_PLATFORM_CREDENTIAL_INFO,
+    }
+    for name in ("CK_RV", "CK_ULONG", "CK_MECHANISM_TYPE", "CK_OBJECT_CLASS",
+                 "CK_KEY_TYPE", "CK_ATTRIBUTE_TYPE", "CK_PROFILE_ID",
+                 "CK_SESSION_HANDLE", "CK_OBJECT_HANDLE", "CK_SLOT_ID"):
+        aliases[name] = CK_ULONG
+    for name in ("CK_BYTE_PTR", "CK_UTF8CHAR_PTR"):
+        aliases[name] = ctypes.POINTER(CK_BYTE)
+    aliases["CK_ULONG_PTR"] = ctypes.POINTER(CK_ULONG)
+    aliases["PKCS11RS_PLATFORM_CREDENTIAL_INFO_PTR"] = ctypes.POINTER(PKCS11RS_PLATFORM_CREDENTIAL_INFO)
+
+    def ctype(declaration: str):
+        declaration = re.sub(r"\bconst\b", "", declaration).strip()
+        pointers = declaration.count("*")
+        result = aliases[declaration.replace("*", "").strip()]
+        for _ in range(pointers):
+            result = ctypes.POINTER(result)
+        return result
+
+    names = []
+    for result, name, arguments in re.findall(
+        r"CK_DECLARE_FUNCTION\(([^,]+),\s*(PKCS11RS_\w+)\)\s*\((.*?)\);",
+        (ROOT / "pkcs11rs.h").read_text(), re.S,
+    ):
+        function = getattr(library, name)
+        function.restype = ctypes.c_char_p if result.strip() == "const char *" else ctype(result)
+        function.argtypes = [ctype(re.sub(r"\b\w+\s*$", "", argument).strip())
+                             for argument in arguments.split(",")]
+        names.append(name)
+    if not names:
+        raise ValueError("pkcs11rs.h has no extension function declarations")
+    return names
+
+
+class HsmAuthExportLifecycleMixin:
+    def assert_hsmauth_export_lifecycle(self, session) -> None:
+        def buffer(value: bytes):
+            return (CK_BYTE * len(value)).from_buffer_copy(value)
+
+        def find(label) -> int:
+            attribute = CK_ATTRIBUTE(CKA_LABEL, ctypes.cast(label, CK_VOID_PTR), len(label))
+            self.assertEqual(self.lib.C_FindObjectsInit(session, ctypes.byref(attribute), 1), CKR_OK)
+            try:
+                handles = (CK_ULONG * 8)()
+                found = CK_ULONG()
+                self.assertEqual(self.lib.C_FindObjects(session, handles, 8, ctypes.byref(found)), CKR_OK)
+                return found.value
+            finally:
+                self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        label = buffer(b"explicit-symmetric")
+        enc, mac, password = buffer(bytes(range(16))), buffer(bytes(range(16, 32))), buffer(b"access")
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
+            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_USER_NOT_LOGGED_IN)
+        factory = buffer(b"00000000000000000000000000000000")
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
+            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
+        self.assertGreater(find(label), 0)
+        replacement = buffer(b"new-access")
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeCredentialPassword(
+            session, label, len(label), replacement, len(replacement)),
+            getattr(self, "expected_hsmauth_password_change", CKR_OK))
+        management = buffer(b"new-admin")
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeManagementPassword(
+            session, management, len(management)), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label)), CKR_OK)
+        self.assertEqual(find(label), 0)
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, management, len(management)), CKR_OK)
+
+        derived_label = buffer(b"derived-symmetric")
+        derivation = buffer(b"derivation-password")
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+            session, derived_label, len(derived_label), derivation, len(derivation),
+            password, len(password), 0), CKR_OK)
+        self.assertGreater(find(derived_label), 0)
+        private = buffer(bytes(31) + b"\x01")
+        imports = (
+            ("imported", self.lib.PKCS11RS_HsmAuthPutAsymmetricCredential, [private, len(private)]),
+            ("derived", self.lib.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential, [derivation, len(derivation)]),
+            ("generated", self.lib.PKCS11RS_HsmAuthGenerateAsymmetricCredential, []),
+        )
+        for name, function, key_args in imports:
+            with self.subTest(operation=name):
+                asymmetric_label = buffer(name.encode())
+                arguments = [session, asymmetric_label, len(asymmetric_label), *key_args,
+                             password, len(password), 0]
+                public_len = CK_ULONG()
+                self.assertEqual(function(*arguments, None, ctypes.byref(public_len)), CKR_OK)
+                self.assertEqual(public_len.value, 65)
+                self.assertEqual(find(asymmetric_label), 0)
+                public = (CK_BYTE * 66)(*([0xA5] * 66))
+                public_len.value = 64
+                self.assertEqual(function(*arguments, public, ctypes.byref(public_len)), CKR_BUFFER_TOO_SMALL)
+                self.assertEqual(bytes(public), bytes([0xA5] * 66))
+                self.assertEqual(find(asymmetric_label), 0)
+                public_len.value = len(public)
+                self.assertEqual(function(*arguments, public, ctypes.byref(public_len)), CKR_OK)
+                self.assertEqual(public_len.value, 65)
+                self.assertEqual(public[0], 4)
+                self.assertEqual(public[65], 0xA5)
+                if name == "imported":
+                    self.assertEqual(bytes(public[:65]), bytes.fromhex(
+                        "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+                        "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"))
+                self.assertGreater(find(asymmetric_label), 0)
+                self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(
+                    session, asymmetric_label, len(asymmetric_label)), CKR_OK)
+                self.assertEqual(find(asymmetric_label), 0)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthReset(session), CKR_OK)
+        self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
+        self.assertEqual(find(derived_label), 0)
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
+            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label)), CKR_OK)
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+        self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+
+
+class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.lib = load_embedded_virtual_yubikey_library()
+        bind_hsmauth_exports(cls.lib)
         cls.lib.C_Initialize.argtypes = [ctypes.c_void_p]
         cls.lib.C_Initialize.restype = CK_RV
         cls.lib.C_Finalize.argtypes = [ctypes.c_void_p]
@@ -834,6 +1049,31 @@ class EmbeddedVirtualYubiKeyAbiTests(unittest.TestCase):
             CKR_OK,
         )
         return bytes(value)
+
+    def test_hsmauth_exports_complete_credential_and_management_lifecycles(self) -> None:
+        configuration = ctypes.create_string_buffer(
+            b'{"version":1,"hardware":{"discovery":false},'
+            b'"software":{"slots":[]},"platform":{"enabled":false},'
+            b'"yubihsm":{"urls":[]},"ccid":{"applications":["hsmauth"]},'
+            b'"embedded":{"readers":[{"id":"abi-hsmauth","name":"HSM Auth ABI Reader","serial":42,'
+            b'"applets":["hsmauth"]}]}}'
+        )
+        init_args = CK_C_INITIALIZE_ARGS()
+        init_args.pReserved = ctypes.cast(configuration, ctypes.c_void_p)
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_OK)
+        count = CK_ULONG()
+        self.assertEqual(self.lib.C_GetSlotList(1, None, ctypes.byref(count)), CKR_OK)
+        self.assertEqual(count.value, 1)
+        slots = (CK_ULONG * count.value)()
+        self.assertEqual(self.lib.C_GetSlotList(1, slots, ctypes.byref(count)), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(slots[0], CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                                   None, None, ctypes.byref(session)),
+            CKR_OK,
+        )
+
+        self.assert_hsmauth_export_lifecycle(session)
 
     def test_resident_fido_assertion_requires_per_operation_login(self) -> None:
         configuration = ctypes.create_string_buffer(
@@ -1597,89 +1837,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.PKCS11RS_YubiHsmEnrollDevicePublicKey.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthPutSymmetricCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            CK_BYTE,
-        ]
-        cls.lib.PKCS11RS_HsmAuthPutSymmetricCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            CK_BYTE,
-        ]
-        cls.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthPutAsymmetricCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            CK_BYTE,
-            ctypes.POINTER(CK_BYTE),
-            ctypes.POINTER(CK_ULONG),
-        ]
-        cls.lib.PKCS11RS_HsmAuthPutAsymmetricCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            CK_BYTE,
-            ctypes.POINTER(CK_BYTE),
-            ctypes.POINTER(CK_ULONG),
-        ]
-        cls.lib.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthGenerateAsymmetricCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            CK_BYTE,
-            ctypes.POINTER(CK_BYTE),
-            ctypes.POINTER(CK_ULONG),
-        ]
-        cls.lib.PKCS11RS_HsmAuthGenerateAsymmetricCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthDeleteCredential.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-        ]
-        cls.lib.PKCS11RS_HsmAuthDeleteCredential.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthChangeCredentialPassword.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-        ]
-        cls.lib.PKCS11RS_HsmAuthChangeCredentialPassword.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthChangeManagementPassword.argtypes = [
-            CK_ULONG,
-            ctypes.POINTER(CK_BYTE),
-            CK_ULONG,
-        ]
-        cls.lib.PKCS11RS_HsmAuthChangeManagementPassword.restype = CK_RV
-        cls.lib.PKCS11RS_HsmAuthReset.argtypes = [CK_ULONG]
-        cls.lib.PKCS11RS_HsmAuthReset.restype = CK_RV
+        bind_hsmauth_exports(cls.lib)
         cls.lib.PKCS11RS_SoftwareExportPrivateKey.argtypes = [
             CK_ULONG,
             CK_ULONG,

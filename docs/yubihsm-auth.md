@@ -895,7 +895,8 @@ login:
   the private key internally.
 - `PKCS11RS_HsmAuthDeleteCredential` deletes one credential by label.
 - `PKCS11RS_HsmAuthChangeCredentialPassword` changes one credential password
-  using the retained management key.
+  using the retained management key. This command requires YubiKey firmware
+  5.8.0 or later; firmware 5.7.4 returns `CKR_FUNCTION_NOT_SUPPORTED`.
 - `PKCS11RS_HsmAuthChangeManagementPassword` changes the applet management
   key and updates the retained SO state.
 - `PKCS11RS_HsmAuthReset` resets the complete YubiHSM Auth application and

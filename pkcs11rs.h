@@ -429,6 +429,7 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthDeleteCredential)(
   CK_ULONG ulLabelLen
 );
 
+/* Requires YubiKey firmware 5.8.0 or later. */
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeCredentialPassword)(
   CK_SESSION_HANDLE hSession,
   const CK_UTF8CHAR *pLabel,

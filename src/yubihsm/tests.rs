@@ -152,6 +152,7 @@ pub(crate) struct ProtocolPeer {
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
     native_session_commands: Cell<bool>,
+    native_provisioning_commands: Cell<bool>,
     native_ecdh_commands: Cell<bool>,
     objects: RefCell<Vec<u16>>,
     metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
@@ -229,6 +230,7 @@ impl ProtocolPeer {
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             native_session_commands: Cell::new(false),
+            native_provisioning_commands: Cell::new(false),
             native_ecdh_commands: Cell::new(false),
             objects: RefCell::new(vec![1]),
             metadata_objects: RefCell::new(HashMap::new()),
@@ -693,6 +695,18 @@ impl ProtocolPeer {
                     .borrow_mut()
                     .push((inner.command, inner.data.clone()));
                 if inner.command == CommandCode::PutAuthenticationKey as u8 {
+                    return None;
+                }
+                if self.native_provisioning_commands.get()
+                    && inner.command == CommandCode::DeleteObject as u8
+                    && inner.data.len() == 3
+                    && inner.data[2] == YUBIHSM_AUTHENTICATION_KEY
+                {
+                    // Provisioning uses the real virtual device. Its deletion
+                    // must remove the key there as well as fixture metadata.
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    self.listed_authkeys.borrow_mut().remove(&id);
+                    self.visible_authkey_info.borrow_mut().remove(&id);
                     return None;
                 }
                 if self.native_ecdh_commands.get()
@@ -1612,6 +1626,7 @@ pub(crate) fn make_yubihsm_native_hmac_test_slot() -> (Box<dyn crate::Slot>, Tes
 pub(crate) fn make_yubihsm_provisioning_test_slot()
 -> (Box<dyn crate::Slot>, Rc<ProtocolPeer>, TestTrustEntry) {
     let peer = Rc::new(ProtocolPeer::new());
+    peer.native_provisioning_commands.set(true);
     let trust = TestTrustEntry::new();
     let mut slot = crate::YubiHsmSlot::new(
         peer.clone(),
