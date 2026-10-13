@@ -23,6 +23,28 @@ default. Scoped authorization tokens and session keys have backend-specific
 lifetimes; opt-in session recovery and configured discovery credentials are
 explicit exceptions. See the [authentication secret retention policy](docs/authentication-secrets.md).
 
+## Architecture at a glance
+
+![Architecture of pkcs11rs and the related virtual-device projects](docs/diagrams/architecture.svg)
+
+Start with the [project ecosystem](docs/architecture.md#project-ecosystem)
+for the full project directory, embedded cores, workspace components, and
+runtime boundaries. The stack spans PKCS #11, platform-protected keys,
+post-quantum cryptography, secure channels, iOS integration, virtual USB
+devices, and experimental I2C HSM access. For the
+USB kernel and privilege boundary, see the existing
+[USB gadget architecture diagram](https://github.com/qpernil/virtual-yubikey/blob/main/docs/usb-gadget-architecture.md)
+and its [printable PDF](https://github.com/qpernil/virtual-yubikey/blob/main/output/pdf/usb-gadget-architecture.pdf).
+
+The two optional in-process backends have distinct roles:
+[named software slots](docs/software.md) expose general-purpose software
+PKCS #11 tokens; [embedded virtual YubiKey readers](#embedded-virtual-yubikey-readers)
+emulate YubiKey applets and protocol state. Both use host-held keys. See the
+[backend comparison](docs/architecture.md#optional-software-slots-and-embedded-virtual-yubikeys).
+
+For each component's purpose and use cases, see
+[choosing pkcs11rs components](docs/component-guide.md).
+
 ## Feature map
 
 The short version is that one PKCS #11 module can present YubiKey applets,

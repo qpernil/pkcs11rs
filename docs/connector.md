@@ -102,6 +102,46 @@ for profile setup, wiring, and the connector/qualification commands.
 
 ## Embedded virtual YubiHSMs
 
+### Choosing a YubiHSM deployment
+
+For the roles of the provider, software slots, virtual YubiKeys, platform
+credentials, tools, and validation clients, see the
+[component guide](component-guide.md).
+
+**Use the connector's embedded virtual YubiHSM to test YubiHSM workflows when
+you do not own a YubiHSM and do not want to set up a Raspberry Pi.** It provides
+the YubiHSM command, authentication, object, and persistence behavior through
+the normal connector API, without a USB device or gadget setup. Examples
+include using `yubihsm-shell` through the connector, developing a PKCS #11
+client, exercising YubiHSM login and provisioning, or testing an iOS
+application's remote-HSM workflow.
+
+An embedded YubiHSM is a deployment of the same virtual YubiHSM core, not a
+different kind of HSM. The USB worker wraps that core in a host-visible USB
+device; the connector can instead host it directly in its process.
+
+| Your purpose | Use | Why |
+| --- | --- | --- |
+| Test YubiHSM workflows without buying an HSM or setting up a Pi. | [Connector-embedded virtual YubiHSM](#embedded-virtual-yubihsms). | Run the software HSM in the connector and connect your client over HTTP(S). |
+| Test USB discovery, framing, disconnect/reconnect, or a client that needs a USB HSM. | [Virtual YubiHSM USB worker](https://github.com/qpernil/virtual-yubihsm). | Presents the software HSM over actual USB, requiring a Linux USB device controller and gadget setup. |
+| Keep private keys in a physical HSM or qualify behavior against physical firmware. | Physical YubiHSM. | Provides the hardware key boundary and actual device behavior that a software implementation cannot establish. |
+
+Physical and virtual USB YubiHSMs can both be used directly over USB or reached
+through the connector. The connector may expose attached USB HSMs and embedded
+virtual HSMs together. Choosing the connector determines how the client reaches
+the HSM; choosing physical hardware or the virtual core determines where the
+device behavior and keys live. A virtual instance exercises its implemented
+compatibility surface and selected firmware profile, not every physical-device
+behavior. The USB and embedded deployments share the core and persistent
+runtime; a state file has one owning process at a time.
+
+For general PKCS #11 software cryptography without YubiHSM protocol behavior,
+use a [named software slot](software.md). The
+[experimental I2C frontend](#experimental-i2c-yubihsms) serves
+I2C transport experiments rather than the hardware-free testing use case.
+
+### Build and configuration
+
 On Unix, including Linux and macOS, the connector can compile
 `virtual-yubihsm-core` and its optional `persistent-runtime` feature directly
 into the process. Build the release binary with:

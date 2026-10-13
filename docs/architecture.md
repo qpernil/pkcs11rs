@@ -1,5 +1,117 @@
 # Architecture
 
+## Project ecosystem
+
+![Architecture of pkcs11rs and the related virtual-device projects](diagrams/architecture.svg)
+
+[Open the full-size diagram](diagrams/architecture.svg). Solid arrows show
+protocol or API paths; replies return over the same path. Dashed arrows show
+the supervisor's resource and lifecycle control. Shared-library consumers are
+listed in their cards instead of drawing dependency arrows across the runtime
+paths. This is a project map, not a deployment inventory: optional components
+and alternative device profiles do not all run on one machine.
+
+For why and when to use each component, see
+[choosing pkcs11rs components](component-guide.md).
+
+Platform key stores supply credentials for YubiHSM login and SCP11a/c.
+See the [component guide](component-guide.md#access-and-administration) for
+credential roles and requirements.
+
+### Optional software slots and embedded virtual YubiKeys
+
+These are separate in-process backends. Both use host-held software keys, but
+they expose different token behavior:
+
+| | Named software slots | Embedded virtual YubiKey |
+| --- | --- | --- |
+| Purpose | General-purpose software PKCS #11 tokens. | Emulate YubiKey applets, protocols, and device state. |
+| Slot model | Each configured token name creates one independent software slot. | A configurable virtual CCID reader follows normal applet discovery and exposes the configured, supported applet slots. |
+| Cryptographic behavior | Full software mechanism set and general-purpose software private/secret keys. | YubiKey applet capabilities and policy, with the same scoped software composition used by device/applet slots. |
+| Enablement | Explicit `software.slots` configuration or `PKCS11RS_SOFTWARE_SLOTS`; no named slots by default. | The `embedded-virtual-yubikey` build feature plus explicit `embedded.readers` configuration; no embedded readers by default. |
+| Persistence | Session objects; encrypted token objects when token storage is configured. | Persistent logical-device and applet state. |
+
+Neither path needs a USB gadget worker or supervisor, and neither gives
+private keys physical YubiKey protection. `software-key-core` is the shared
+cryptographic library beneath these backends, not an additional token or slot.
+See [named software slots](software.md) and
+[embedded reader configuration](configuration.md#embedded-virtual-yubikey-readers).
+
+### Projects and ownership
+
+| Project | Implemented role and connections |
+| --- | --- |
+| [pkcs11rs](https://github.com/qpernil/pkcs11rs) | PKCS #11 provider, platform credentials, tooling, iOS examples, and the separate connector executable. Local devices and HTTP(S) YubiHSM endpoints become slots; named software tokens use the shared software provider. |
+| [software-key-core](https://github.com/qpernil/software-key-core) | Protocol-neutral software keys, cryptographic constructions, X.509 adapters, and optional durable-state helpers. Shared by pkcs11rs, its platform-credential package, and the virtual YubiKey and YubiHSM cores. Protocol authorization and object policy remain with each consumer. |
+| [virtual-yubikey](https://github.com/qpernil/virtual-yubikey) | YubiKey-compatible USB worker and transport-neutral `virtual-yubikey-core`. Implements Management, FIDO, PIV, OpenPGP, HSM Auth, Issuer Security Domain, secure messaging, and applet state. The core also provides pkcs11rs's optional embedded readers. |
+| [virtual-yubihsm](https://github.com/qpernil/virtual-yubihsm) | YubiHSM protocol core, USB worker, and experimental I2C frontend. Its shared persistent runtime also backs virtual HSMs embedded in the connector; the core is used directly by tests. |
+| [usb-gadget-supervisor](https://github.com/qpernil/usb-gadget-supervisor) | Privileged ConfigFS, FunctionFS, UDC, process, and typed-resource lifecycle. Its `usb-gadget-worker` crate supplies the shared USB personality and control contract. Workers own protocol payloads, device state, and UI. |
+
+### Components inside the pkcs11rs workspace
+
+| Component | Responsibility |
+| --- | --- |
+| `pkcs11rs` | C ABI, initialization, discovery, slots, sessions, objects, backend routing, secure messaging, and software composition. |
+| `pkcs11rs-connector` | Independent HTTP(S) server with per-device command gates, native USB, optional experimental I2C endpoints, and optional embedded virtual YubiHSMs. Its async runtime is separate from the provider and iOS XCFramework. |
+| `pkcs11rs-local-hardware` | Shared native YubiHSM USB implementation with blocking provider and asynchronous connector frontends. |
+| `platform-credential` | Platform-protected P-256 keys and credential management: Apple Secure Enclave and Windows TPM-backed CNG. Linux native TPM credentials remain [planned](linux-tpm2-plan.md). |
+| `yubihsm-auth-client` | Transport-independent YubiHSM Auth applet protocol client. |
+| `pkcs11rs-tool` | Certificate-bundle authoring/validation and platform-credential management. |
+| iOS examples, integration/conformance tests, and `xtask` | Application integration, validation, and build support. |
+
+The external [pkcs11-tester](https://github.com/qpernil/pkcs11-tester) and
+[pkcs11test](https://github.com/qpernil/pkcs11test) projects are PKCS #11
+validation clients. [libusb-tester](https://github.com/qpernil/libusb-tester)
+contains separate USB/PKCS #11 experiments and an HTTP bridge. Upstream clients
+such as ykman, yubico-piv-tool, GnuPG, and yubihsm-shell exercise
+their respective device protocols; they are not dependencies of the provider.
+
+The pinned [signatures fork](https://github.com/qpernil/signatures) supplies
+the ML-DSA implementation used by software-key-core and pkcs11rs validation.
+It is an upstream cryptographic dependency rather than a deployed service.
+
+### Runtime and security boundaries
+
+- Physical and virtual YubiKeys and YubiHSMs use the same host USB transports;
+  the virtual USB worker supplies the device-side protocol implementation.
+  Platform credentials instead use the operating system's protected-key API;
+  named software slots use host software cryptography and configured storage.
+- A YubiHSM reached through the connector uses pkcs11rs → HTTP(S) connector →
+  a physical or virtual USB YubiHSM, an experimental I2C endpoint, or a
+  `virtual-yubihsm-core` hosted inside the connector. The authenticated YubiHSM secure
+  session terminates in the device/core, independently of connector TLS.
+  The connector is a [private-network component](connector.md#deployment-boundary).
+- An embedded virtual YubiKey runs its logical core and state directly inside
+  pkcs11rs. An embedded virtual YubiHSM runs inside the connector. Neither
+  embedded path needs USB gadget setup or the supervisor.
+- For USB workers, the supervisor owns FunctionFS `ep0`, publishes descriptors,
+  binds the UDC, and passes data-endpoint descriptors to the worker. Ordinary
+  USB protocol traffic travels directly between the Linux endpoints and worker.
+  A single UDC serves one selected device profile at a time.
+- Virtual-device keys and state are software-held; protocol compatibility does
+  not provide the hardware protection of a physical security token or HSM.
+
+The existing
+[USB gadget architecture guide and Mermaid diagram](https://github.com/qpernil/virtual-yubikey/blob/main/docs/usb-gadget-architecture.md)
+([PDF](https://github.com/qpernil/virtual-yubikey/blob/main/output/pdf/usb-gadget-architecture.pdf))
+explains the host, UDC, ConfigFS, FunctionFS, supervisor, and worker path in
+detail. Related ownership references are the
+[supervisor architecture](https://github.com/qpernil/usb-gadget-supervisor/blob/main/docs/architecture.md)
+and [YubiHSM architecture](https://github.com/qpernil/virtual-yubihsm#architecture).
+
+The SVG is generated with Python's standard library from
+[render_architecture.py](diagrams/render_architecture.py):
+
+```sh
+python3 docs/diagrams/render_architecture.py
+```
+
+Update its labels and routes with the project table when ownership or supported
+paths change. The overview describes the local manifests and architecture
+references; it does not claim hardware qualification beyond those references.
+
+## Provider ownership
+
 pkcs11rs separates the process-wide PKCS #11 lifecycle, independently locked
 slot state, session-owned operations, backend behavior, and physical
 transports. The current ownership graph is:

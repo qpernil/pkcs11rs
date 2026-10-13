@@ -10,15 +10,12 @@ tool access I2C HSMs through the connector's HTTP API.
 
 ## Oscilloscope experiments
 
-This is a companion to the Raspberry Pi display-bus experiments described in
-the [Virtual Trezor I2C display plan](https://github.com/qpernil/virtual-trezor/blob/main/docs/i2c-display-plan.md),
-which uses a Siglent SDS824X HD to observe SCL, SDA, and timing markers. The
-HSM experiment adds request/response traffic and READY signaling to
-that bench setup. Capture SCL and SDA together with READY to
-inspect response latency, header/body pauses, and response completion.
+Use an oscilloscope such as the Siglent SDS824X HD to capture SCL and SDA
+together with READY. Inspect request/response traffic, response latency,
+header/body pauses, and response completion.
 
-Record the measured SCL rate separately from the configured adapter rate; the
-display plan documents the Pi 4 clock-scaling discrepancy found with the scope.
+Record the measured SCL rate separately from the configured adapter rate;
+Pi 4 clock scaling can make the actual rate differ from the configured rate.
 Follow the target driver's
 [hardware and oscilloscope validation plan](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/hardware-test-plan.md)
 for wiring, signal-integrity checks, and evidence to retain. These experiments
