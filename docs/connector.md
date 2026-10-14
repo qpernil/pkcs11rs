@@ -601,6 +601,13 @@ but the application does not yet extract the verified identity or restrict it
 to particular devices or commands. Every certificate accepted by that CA
 therefore has the same access.
 
+Connector regression tests exercise real TLS 1.2 and TLS 1.3 connections.
+They verify server trust and hostname checks, successful mTLS requests over
+HTTP/1.1 and HTTP/2, and rejection of missing, untrusted, expired, or
+server-only client certificates. Run this matrix with
+`cargo test --locked -p pkcs11rs-connector tls_tests`. These checks validate
+transport authentication; the public-exposure requirements below remain.
+
 ### Post-quantum TLS status
 
 Connector TLS currently uses Rustls with its `ring` cryptographic provider and

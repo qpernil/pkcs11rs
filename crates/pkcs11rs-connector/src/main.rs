@@ -380,6 +380,9 @@ fn validate_args(args: &Args) -> Result<(), BoxError> {
 
 #[cfg(test)]
 mod tests {
+    #[path = "tls.rs"]
+    mod tls_tests;
+
     use super::*;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
