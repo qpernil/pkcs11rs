@@ -6,7 +6,7 @@ on:
 
 env:
   # Match SCP metadata, FIDO handling, and persistent Management state to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: b95d5a31760a13a2ac9753acf3ad92ea7f58661c
+  VIRTUAL_YUBIKEY_REVISION: 41baadedb336a047daf283a4fe4d8975cce54687
 
 jobs:
   pkcs11test:

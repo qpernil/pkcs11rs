@@ -61,7 +61,7 @@ clap = { version = "4.5.60", features = ["derive", "env"] }
 futures-util = "0.3.31"
 hyper-util = { version = "0.1.20", features = ["server-auto", "tokio"] }
 pkcs11rs-local-hardware = { path = "../pkcs11rs-local-hardware", default-features = false, features = ["async-tokio"] }
-rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
