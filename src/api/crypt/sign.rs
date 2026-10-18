@@ -209,7 +209,9 @@ fn shared_ml_dsa_sign(
         .map_err(|error| match error {
             MlDsaError::RandomnessUnavailable => Error::from(CKR_RANDOM_NO_RNG),
             MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),
-            MlDsaError::InvalidSeedLength => Error::from(CKR_KEY_TYPE_INCONSISTENT),
+            MlDsaError::InvalidSeedLength
+            | MlDsaError::InvalidExpandedPrivateKey
+            | MlDsaError::InvalidPrivateKey => Error::from(CKR_KEY_TYPE_INCONSISTENT),
             MlDsaError::InvalidPublicKey
             | MlDsaError::InvalidSignature
             | MlDsaError::SigningFailed => Error::from(CKR_FUNCTION_FAILED),

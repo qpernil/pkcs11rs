@@ -440,6 +440,9 @@ fn piv_pq_private_import(
             3 => MlDsaParameterSet::MlDsa87,
             _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
         };
+        if seed.len() != 32 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
         let key =
             SoftwareSigningKey::from_serialized_for_kind(KeyKind::MlDsa(parameter_set), &seed)
                 .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
@@ -1035,7 +1038,7 @@ fn yubihsm_import_command(
                 YubiHsmCommand::put_object(
                     YubiHsmCommandCode::PutAsymmetricKey,
                     &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
-                    key.seed().as_ref(),
+                    key.seed().ok_or(CKR_TEMPLATE_INCONSISTENT)?.as_ref(),
                 )?,
                 CKO_PRIVATE_KEY as _,
                 YUBIHSM_ASYMMETRIC_KEY,
@@ -1498,6 +1501,22 @@ fn build_imported_key_material(
         }
         (class, key_type)
             if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_ML_DSA as CK_KEY_TYPE =>
+        {
+            let parameter_set = required_parameter_set(&mut components)?;
+            let public_key = components
+                .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            if crate::ml_dsa_public_key_info(parameter_set, &public_key).is_none() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::MlDsa {
+                parameter_set,
+                public_key: public_key.to_vec(),
+            })
+        }
+        (class, key_type)
+            if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
                 && key_type == CKK_ML_KEM as CK_KEY_TYPE =>
         {
             let parameter_set = required_parameter_set(&mut components)?;
@@ -1628,14 +1647,45 @@ fn build_imported_key_material(
         }
         (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_ML_DSA as CK_KEY_TYPE =>
+        {
+            use software_key_core::post_quantum::{MlDsaError, MlDsaPrivateKey};
+            let parameter = required_parameter_set(&mut components)?;
+            let parameter_set = match parameter {
+                x if x == CKP_ML_DSA_44 as CK_ULONG => MlDsaParameterSet::MlDsa44,
+                x if x == CKP_ML_DSA_65 as CK_ULONG => MlDsaParameterSet::MlDsa65,
+                x if x == CKP_ML_DSA_87 as CK_ULONG => MlDsaParameterSet::MlDsa87,
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            };
+            let seed = components.remove(&(CKA_SEED as CK_ATTRIBUTE_TYPE));
+            let expanded = components.remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE));
+            let key = match (seed.as_deref(), expanded.as_deref()) {
+                (Some(seed), Some(expanded)) => {
+                    MlDsaPrivateKey::from_seed_and_expanded(parameter_set, seed, expanded)
+                }
+                (Some(seed), None) => MlDsaPrivateKey::from_seed_slice(parameter_set, seed),
+                (None, Some(expanded)) => {
+                    MlDsaPrivateKey::from_expanded_private_key(parameter_set, expanded)
+                }
+                (None, None) => return Err(CKR_TEMPLATE_INCOMPLETE.into()),
+            }
+            .map_err(|error| {
+                Error::from(match error {
+                    MlDsaError::InvalidSeedLength => CKR_KEY_SIZE_RANGE,
+                    _ => CKR_ATTRIBUTE_VALUE_INVALID,
+                })
+            })?;
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::MlDsa(key),
+            ))
+        }
+        (class, key_type)
+            if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                 && key_type == CKK_ML_KEM as CK_KEY_TYPE =>
         {
             let parameter_set = required_parameter_set(&mut components)?;
             let seed = components.remove(&(CKA_SEED as CK_ATTRIBUTE_TYPE));
             let expanded = components.remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE));
-            if seed.is_some() == expanded.is_some() {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
             let shared_parameter_set = match parameter_set {
                 x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
                     software_key_core::post_quantum::MlKemParameterSet::MlKem512
@@ -1648,19 +1698,24 @@ fn build_imported_key_material(
                 }
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
-            let key = if let Some(seed) = seed {
-                software_key_core::post_quantum::MlKemPrivateKey::from_seed_slice(
-                    shared_parameter_set,
-                    &seed,
-                )
-                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?
-            } else {
-                software_key_core::post_quantum::MlKemPrivateKey::from_expanded_private_key(
-                    shared_parameter_set,
-                    expanded.as_deref().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
-                )
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
-            };
+            use software_key_core::post_quantum::{MlKemError, MlKemPrivateKey};
+            let key = match (seed.as_deref(), expanded.as_deref()) {
+                (Some(seed), Some(expanded)) => {
+                    MlKemPrivateKey::from_seed_and_expanded(shared_parameter_set, seed, expanded)
+                }
+                (Some(seed), None) => MlKemPrivateKey::from_seed_slice(shared_parameter_set, seed),
+                (None, Some(expanded)) => {
+                    MlKemPrivateKey::from_expanded_private_key(shared_parameter_set, expanded)
+                }
+                (None, None) => return Err(CKR_TEMPLATE_INCOMPLETE.into()),
+            }
+            .map_err(|error| {
+                Error::from(match error {
+                    MlKemError::RandomnessUnavailable => CKR_RANDOM_NO_RNG,
+                    MlKemError::InvalidSeedLength => CKR_KEY_SIZE_RANGE,
+                    _ => CKR_ATTRIBUTE_VALUE_INVALID,
+                })
+            })?;
             let material = SoftwarePrivateKeyMaterial::MlKem(key);
             KeyMaterial::SoftwarePrivate(material)
         }

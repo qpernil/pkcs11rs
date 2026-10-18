@@ -407,7 +407,14 @@ template must contain `CKA_PARAMETER_SET` with `CKP_ML_DSA_44`,
 `CKK_ML_DSA`; both expose `CKA_PARAMETER_SET`. Public `CKA_VALUE` is the raw
 FIPS 204 encoded public key. Private `CKA_SEED` is the 32-byte generation seed
 and private `CKA_VALUE` is the expanded FIPS 204 private key; the normal
-PKCS #11 sensitive-attribute rules protect both private values.
+PKCS #11 sensitive-attribute rules protect both private values. Software import
+accepts `CKA_SEED`, expanded `CKA_VALUE`, or both; when both are present the
+complete expanded encoding must match the seed expansion. Expanded ML-DSA
+imports check coefficient ranges, `tr`/`t0` algebraic consistency and a
+signing/verification pairwise test in
+[software-key-core](https://github.com/qpernil/software-key-core/blob/main/docs/ml-dsa-key-validation.md).
+Expanded-only keys have no recoverable `CKA_SEED`. Native virtual PIV and
+YubiHSM import commands retain their seed-only wire formats.
 
 `CKM_ML_DSA` without a parameter uses an empty context and hedge-preferred
 signing. A `CK_SIGN_ADDITIONAL_CONTEXT` parameter may supply a context of at
@@ -415,7 +422,9 @@ most 255 bytes and select `CKH_HEDGE_PREFERRED`, `CKH_HEDGE_REQUIRED`, or
 `CKH_DETERMINISTIC_REQUIRED`. Verification uses the supplied context and
 ignores the hedge choice. Persistent generated keys are stored using the
 standard ML-DSA PKCS #8 seed encoding inside the software token's existing
-encrypted private-key record.
+encrypted private-key record. Expanded-only imports use the RFC 9881 expanded
+encoding in that same record. PKCS #8 import also accepts the combined form
+and checks all supplied seed, expanded and public material for consistency.
 
 `CKM_HASH_ML_DSA` signs and verifies an already-computed digest using FIPS 204
 HashML-DSA. It requires `CK_HASH_SIGN_ADDITIONAL_CONTEXT`: the same context and
@@ -448,7 +457,18 @@ template must contain `CKA_PARAMETER_SET` with `CKP_ML_KEM_512`,
 use `CKK_ML_KEM`; both expose `CKA_PARAMETER_SET`. Public `CKA_VALUE` is the
 raw FIPS 203 encapsulation key. Private `CKA_SEED` is the 64-byte generation
 seed and private `CKA_VALUE` is the expanded FIPS 203 decapsulation key; the
-normal PKCS #11 sensitive-attribute rules protect both private values.
+normal PKCS #11 sensitive-attribute rules protect both private values. Software import
+accepts `CKA_SEED`, expanded `CKA_VALUE`, or both; when both are present the
+complete expanded encoding must match the seed expansion.
+Expanded-only keys have no recoverable `CKA_SEED`. Native virtual PIV and
+YubiHSM import commands retain their seed-only wire formats.
+
+Expanded private imports through `CKA_VALUE` use the shared
+[ML-KEM import validation](https://github.com/qpernil/software-key-core/blob/main/docs/ml-kem-key-validation.md).
+Encoding/hash checks precede a randomized encapsulation/decapsulation pairwise
+test for every parameter set. Inconsistent pairs return
+`CKR_ATTRIBUTE_VALUE_INVALID`; unavailable randomness returns `CKR_RANDOM_NO_RNG`.
+Seed imports derive the complete pair internally.
 
 `CKM_ML_KEM` takes no mechanism parameter. `C_EncapsulateKey` requires a
 public key with `CKA_ENCAPSULATE=CK_TRUE`, returns the parameter-set-sized
@@ -461,7 +481,10 @@ The KEM operations use the PKCS #11 3.2 function-table entries. The mechanisms
 and key-pair generation remain discoverable through every supported interface,
 but the 2.40, 3.0, and 3.1 tables have no KEM operation slots. Persistent
 generated keys use the standard ML-KEM PKCS #8 seed encoding inside the
-software token's existing encrypted private-key record; public ML-KEM objects
+software token's existing encrypted private-key record; expanded-only keys use
+the RFC 9935 expanded encoding. PKCS #8 and attribute imports also accept both
+seed and expanded forms together and require a complete match, including `z`.
+Public ML-KEM objects
 use the existing software-backed public-object record.
 
 ### Concrete hybrid KEMs

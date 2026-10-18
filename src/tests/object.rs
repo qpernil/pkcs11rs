@@ -2,6 +2,129 @@ use super::*;
 use crate::{CKA_PKCS11RS_URI, SoftwarePrivateKeyMaterialExt};
 
 #[test]
+fn ml_dsa_import_supports_seed_expanded_and_consistent_both_for_all_variants() {
+    use software_key_core::post_quantum::{MlDsaParameterSet, MlDsaPrivateKey};
+    for (params, mut parameter) in [
+        (MlDsaParameterSet::MlDsa44, CKP_ML_DSA_44 as CK_ULONG),
+        (MlDsaParameterSet::MlDsa65, CKP_ML_DSA_65 as CK_ULONG),
+        (MlDsaParameterSet::MlDsa87, CKP_ML_DSA_87 as CK_ULONG),
+    ] {
+        let key = MlDsaPrivateKey::from_seed(params, [7; 32]);
+        for (has_seed, has_expanded, mismatch) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+            let mut key_type = CKK_ML_DSA as CK_KEY_TYPE;
+            let mut seed = [7; 32];
+            let mut expanded = key.expanded_private_key().to_vec();
+            if mismatch {
+                expanded[64] ^= 1;
+            }
+            let mut template = vec![
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter),
+            ];
+            if has_seed {
+                template.push(bytes_attribute(CKA_SEED as CK_ATTRIBUTE_TYPE, &mut seed));
+            }
+            if has_expanded {
+                template.push(bytes_attribute(
+                    CKA_VALUE as CK_ATTRIBUTE_TYPE,
+                    &mut expanded,
+                ));
+            }
+            let result = crate::parse_create_object_template(&template);
+            if mismatch {
+                assert_eq!(
+                    CK_RV::from(result.unwrap_err()),
+                    CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+                );
+                continue;
+            }
+            let crate::KeyMaterial::SoftwarePrivate(material) = result.unwrap().material else {
+                panic!("software private key");
+            };
+            let crate::SoftwarePrivateKeyMaterial::Signing(crate::SoftwareSigningKey::MlDsa(
+                imported,
+            )) = &material
+            else {
+                panic!("ML-DSA");
+            };
+            assert_eq!(imported.public_key(), key.public_key());
+            assert_eq!(imported.seed().is_some(), has_seed);
+            let der = crate::software_storage::material_to_pkcs8(&material).unwrap();
+            let restored = crate::software_storage::material_from_bare_pkcs8(&der).unwrap();
+            assert_eq!(restored.ml_dsa_seed().is_some(), has_seed);
+            assert_eq!(restored.private_value(), material.private_value());
+        }
+        let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+        let mut key_type = CKK_ML_DSA as CK_KEY_TYPE;
+        let mut public = key.public_key();
+        let template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter),
+            bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut public),
+        ];
+        assert!(matches!(
+            crate::parse_create_object_template(&template)
+                .unwrap()
+                .material,
+            crate::KeyMaterial::Public(crate::PublicKeyMaterial::MlDsa { .. })
+        ));
+    }
+}
+
+#[test]
+fn ml_kem_both_representations_must_match_and_seedless_pkcs8_round_trips() {
+    use software_key_core::post_quantum::{MlKemParameterSet, MlKemPrivateKey};
+    for (params, mut parameter) in [
+        (MlKemParameterSet::MlKem512, CKP_ML_KEM_512 as CK_ULONG),
+        (MlKemParameterSet::MlKem768, CKP_ML_KEM_768 as CK_ULONG),
+        (MlKemParameterSet::MlKem1024, CKP_ML_KEM_1024 as CK_ULONG),
+    ] {
+        let key = MlKemPrivateKey::from_seed(params, [7; 64]);
+        let expanded = key.expanded_private_key();
+        let imported = MlKemPrivateKey::from_expanded_private_key(params, &expanded).unwrap();
+        let material = crate::SoftwarePrivateKeyMaterial::MlKem(imported);
+        let der = crate::software_storage::material_to_pkcs8(&material).unwrap();
+        let restored = crate::software_storage::material_from_bare_pkcs8(&der).unwrap();
+        assert!(restored.ml_kem_seed().is_none());
+        assert_eq!(restored.private_value(), material.private_value());
+        for mismatch in [false, true] {
+            let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+            let mut key_type = CKK_ML_KEM as CK_KEY_TYPE;
+            let mut seed = [7; 64];
+            let mut value = expanded.to_vec();
+            if mismatch {
+                *value.last_mut().unwrap() ^= 1;
+            }
+            let template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter),
+                bytes_attribute(CKA_SEED as CK_ATTRIBUTE_TYPE, &mut seed),
+                bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+            ];
+            let result = crate::parse_create_object_template(&template);
+            if mismatch {
+                assert_eq!(
+                    CK_RV::from(result.unwrap_err()),
+                    CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+}
+
+#[test]
 fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
     let key = software_key_core::post_quantum::MlKemPrivateKey::from_seed(
         software_key_core::post_quantum::MlKemParameterSet::MlKem512,
@@ -58,6 +181,60 @@ fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
             .material,
         crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem(_))
     ));
+}
+
+#[test]
+fn ml_kem_expanded_private_import_checks_pairs_for_every_parameter_set() {
+    use software_key_core::post_quantum::{MlKemParameterSet, MlKemPrivateKey};
+    for (parameter_set, mut parameter) in [
+        (
+            MlKemParameterSet::MlKem512,
+            CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE,
+        ),
+        (
+            MlKemParameterSet::MlKem768,
+            CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE,
+        ),
+        (
+            MlKemParameterSet::MlKem1024,
+            CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE,
+        ),
+    ] {
+        let original = MlKemPrivateKey::from_seed(parameter_set, [7; 64]);
+        let unrelated = MlKemPrivateKey::from_seed(parameter_set, [9; 64]);
+        let private_pke_length = parameter_set.public_key_length() - 32;
+        for mismatched in [false, true] {
+            let mut expanded = original.expanded_private_key().to_vec();
+            if mismatched {
+                expanded[..private_pke_length]
+                    .copy_from_slice(&unrelated.expanded_private_key()[..private_pke_length]);
+            }
+            let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+            let mut key_type = CKK_ML_KEM as CK_KEY_TYPE;
+            let mut decapsulate = CK_TRUE as CK_BBOOL;
+            let template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter),
+                scalar_attribute(CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE, &mut decapsulate),
+                bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut expanded),
+            ];
+            let result = crate::parse_create_object_template(&template);
+            if mismatched {
+                assert_eq!(
+                    CK_RV::from(result.unwrap_err()),
+                    CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+                );
+            } else {
+                assert!(matches!(
+                    result.unwrap().material,
+                    crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem(
+                        _
+                    ))
+                ));
+            }
+        }
+    }
 }
 
 #[test]
