@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # Match SCP metadata, FIDO handling, and persistent Management state to provider integration.

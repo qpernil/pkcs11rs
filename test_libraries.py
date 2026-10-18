@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
-import subprocess
+from subprocess import run as run_cargo
 
 ROOT = Path(__file__).resolve().parent
 ENVIRONMENT = {
@@ -47,7 +47,7 @@ def build_library(variant: str) -> Path:
     if not target.is_absolute():
         target = ROOT / target
     target = target.resolve()
-    subprocess.run([
+    run_cargo([
         "cargo", "build", "--locked", "-p", "pkcs11rs",
         *FEATURES[variant], "--target-dir", str(target),
     ], cwd=ROOT, check=True)
