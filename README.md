@@ -1266,6 +1266,17 @@ them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
 `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`; select one device with
 `PKCS11RS_TEST_YUBIHSM_SOURCE` when more than one is present.
 
+The ignored `provisions_symmetric_qualification_login_from_platform` test adds
+the known qualification login (`1007`, `reserve-symmetric`, password `password`)
+using an existing full-access macOS platform credential. It requires
+`PKCS11RS_TEST_QUALIFICATION_LOGIN_APPLY=1`, one explicit
+`PKCS11RS_TEST_QUALIFICATION_TARGET` serial, `PKCS11RS_TEST_QUALIFICATION_URL`,
+and `PKCS11RS_TEST_QUALIFICATION_ADMIN_URI`. Run it in the signed application
+scope that owns the source key. Local hardware discovery is disabled. It never
+replaces an occupied credential; an existing `1007` must have the expected
+policy and pass authentication. Existing objects and discovery permissions are
+preserved. This deliberately known full-access password is for test devices.
+
 The two-device concurrency tests first run one RSA signing workload on one HSM
 and one client thread. The second phase runs the identical workload on two
 freely scheduled client threads, one per HSM, without any client-side lock or

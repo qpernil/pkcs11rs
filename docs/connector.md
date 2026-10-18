@@ -937,3 +937,29 @@ commands on the same connection. Borrowed buffers deliberately fit the exact
 response length. These hardware tests are ignored in ordinary CI and require
 both the explicit serial and the virtual gadget's manufacturer descriptor.
 They send only unencrypted Echo commands and require no authentication.
+
+## Slow-operation qualification
+
+`tools/connector-slow-operations.py` measures RSA-4096 key generation and
+public-only RSA-4096 wrap-key import through explicitly selected modern API
+serials. It requires the official Python `yubihsm` SDK and `requests`; use
+`--help` for target, authentication, and report arguments. Preflight is read-only
+unless `--allow-key-operations` is supplied. `--qualification-login` selects the
+known test password described in the README; ordinary credentials are prompted
+for each fresh authenticated session.
+
+The tool imports the same public PEM on every target, measures Echo latency on
+other selected targets, and optionally queues 80 Echo requests during an extra
+public-wrap import with `--overload`. The global HTTP request cap can reject
+requests to otherwise idle devices when one device's queue fills it. Reports
+include individual operation times, probe latencies, overload response counts,
+and inventory restoration. They use supplied aliases rather than device
+identifiers. These measurements include secure-channel, transport, and object
+storage costs; they do not isolate cryptographic primitive performance.
+
+Every mutation uses a unique label and device-assigned object ID. Cleanup
+requires the exact new label and type, refuses pre-existing or changed objects,
+and verifies the complete visible object inventory afterward. Existing objects,
+authentication keys, and device settings are preserved. Mutations are never
+retried. An interrupted or transport-failed run can require manual inspection;
+the report retains the pending object's unique label for that purpose.

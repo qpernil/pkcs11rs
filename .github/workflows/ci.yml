@@ -58,6 +58,9 @@ jobs:
       - name: Test physical RSA qualification device-selection guards
         run: python -m unittest discover -s tools -p 'test_openpgp_rsa_matrix.py'
 
+      - name: Test connector benchmark cleanup ownership guards
+        run: python -m unittest discover -s tools -p 'test_connector_slow_operations.py'
+
       - name: Run full pkcs11test suite on disposable software tokens
         run: >-
           python integration/run_pkcs11test.py
