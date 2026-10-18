@@ -401,9 +401,10 @@ fn ml_dsa_verify(
         signature,
     )
     .map_err(|error| match error {
-        MlDsaError::InvalidPublicKey | MlDsaError::InvalidSeedLength => {
-            Error::from(CKR_KEY_TYPE_INCONSISTENT)
-        }
+        MlDsaError::InvalidPublicKey
+        | MlDsaError::InvalidSeedLength
+        | MlDsaError::InvalidExpandedPrivateKey
+        | MlDsaError::InvalidPrivateKey => Error::from(CKR_KEY_TYPE_INCONSISTENT),
         MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),
         MlDsaError::InvalidSignature => Error::from(CKR_SIGNATURE_INVALID),
         MlDsaError::RandomnessUnavailable | MlDsaError::SigningFailed => {

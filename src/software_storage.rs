@@ -2101,6 +2101,16 @@ pub(crate) fn material_from_bare_pkcs8(
         // DER parsing and the shared RSA import boundary validate key identity.
         return Ok(material);
     }
+    // RFC 9881 / RFC 9935 allow seed, expanded, and combined CHOICEs and
+    // an optional public key. The shared PQC decoders validate the DER and all
+    // supplied redundant material; normalization need not preserve its bytes.
+    if matches!(
+        &material,
+        SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(_))
+            | SoftwarePrivateKeyMaterial::MlKem(_)
+    ) {
+        return Ok(material);
+    }
     if material_to_pkcs8(&material)?.as_slice() != encoded {
         return Err(CKR_DATA_INVALID.into());
     }

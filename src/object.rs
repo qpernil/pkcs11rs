@@ -192,7 +192,7 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
 
     fn ml_dsa_seed(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Signing(SoftwareSigningKey::MlDsa(key)) => Some(key.seed().to_vec()),
+            Self::Signing(SoftwareSigningKey::MlDsa(key)) => key.seed().map(|seed| seed.to_vec()),
             _ => None,
         }
     }
