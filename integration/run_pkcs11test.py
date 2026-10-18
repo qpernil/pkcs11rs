@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
-import platform
 import re
 import shutil
 import subprocess
@@ -14,7 +13,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 
-from run_clients import ClientTests, ROOT
+from run_clients import ClientTests, ROOT, build_library
 
 
 def parse_test_names(output: str) -> list[str]:
@@ -127,12 +126,7 @@ def main() -> int:
 
     # No arbitrary module or hardware endpoint option: -I is destructive.
     # Build the production software backend with hardware support excluded.
-    target = ROOT / "target/client-tests"
-    subprocess.run(["cargo", "build", "--locked", "-p", "pkcs11rs", "--no-default-features",
-                    "--target-dir", str(target)], cwd=ROOT, check=True)
-    filename = {"Darwin": "libpkcs11rs.dylib", "Windows": "pkcs11rs.dll"}.get(
-        platform.system(), "libpkcs11rs.so")
-    module = target / "debug" / filename
+    module = build_library("software")
     ClientTests.options = argparse.Namespace(
         module=module, provider=None, pkcs11_tool=options.pkcs11_tool,
         openssl=options.openssl, hardware_token=None, discovery_pin_env=None,

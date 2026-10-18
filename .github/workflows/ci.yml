@@ -5,8 +5,9 @@ on:
   pull_request:
 
 env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # Match SCP metadata, FIDO handling, and persistent Management state to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: 9895c563b77c9b0754a3c06f7af17b059f2b75eb
+  VIRTUAL_YUBIKEY_REVISION: 229f9cb410a0fc6824440b0c27c11993f0945033
 
 jobs:
   pkcs11test:
@@ -36,6 +37,9 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -106,6 +110,11 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+        with:
+          variant: ${{ matrix.features }}
+
       - name: Test embedded firmware forwarding
         run: >-
           cargo test --locked -p pkcs11rs-connector --no-default-features
@@ -139,6 +148,9 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -179,7 +191,7 @@ jobs:
         run: cargo test --locked
 
       - name: Run published cryptographic known-answer tests
-        run: cargo test --manifest-path ../software-key-core/Cargo.toml --locked kat_
+        run: cargo test --release --manifest-path ../software-key-core/Cargo.toml --locked kat_
 
       - name: Run portable provider tests
         run: cargo test --locked -p pkcs11rs --no-default-features --lib
@@ -191,13 +203,13 @@ jobs:
         run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
 
       - name: Run complete PQC provider matrix
-        run: cargo test --locked -p pkcs11rs --lib --no-default-features --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
+        run: cargo test --release --locked -p pkcs11rs --lib --no-default-features --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
 
       - name: Run full PQC matrix through the connector-embedded HSM
         run: |
-          cargo build --locked -p pkcs11rs-connector --no-default-features --features firmware-full
+          cargo build --release --locked -p pkcs11rs-connector --no-default-features --features firmware-full
           state_dir=$(mktemp -d)
-          target/debug/pkcs11rs-connector --listen 127.0.0.1:12346 \
+          target/release/pkcs11rs-connector --listen 127.0.0.1:12346 \
             --hardware-discovery false --virtual-yubihsm "99001001=$state_dir" \
             > "$RUNNER_TEMP/pqc-connector.log" 2>&1 &
           connector_pid=$!
@@ -215,18 +227,24 @@ jobs:
               raise SystemExit("PQC connector did not become ready")
           PYREADY
           PKCS11RS_PQC_SERIAL=99001001 PKCS11RS_PQC_ENDPOINT=http://127.0.0.1:12346 \
-            PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --locked -p pkcs11rs --lib \
+            PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --release --locked -p pkcs11rs --lib \
             --no-default-features --features embedded-virtual-yubikey \
             pqc_matrix_deployed_yubihsm -- --ignored --nocapture --test-threads=1
 
       - name: Run all virtual FIDO ML-DSA credential variants
-        run: cargo test --manifest-path ../virtual-yubikey/Cargo.toml --locked -p virtual-yubikey-core ml_dsa_credentials_persist_and_complete_verified_assertions
+        run: cargo test --release --manifest-path ../virtual-yubikey/Cargo.toml --locked -p virtual-yubikey-core ml_dsa_credentials_persist_and_complete_verified_assertions
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Test shared-library build reuse
+        run: python -m unittest discover -s integration -p 'test_library_builds.py'
+
+      - name: Build shared libraries for Python ABI tests
+        run: python test_libraries.py --github-env
 
       - name: Run Python ABI tests
         run: python test_pkcs11.py
@@ -275,6 +293,9 @@ jobs:
 
       - name: Install Rust 1.95
         uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
 
       - name: Install native dependencies
         run: |
@@ -344,6 +365,9 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -441,6 +465,12 @@ jobs:
           path: target/client-results.json
           if-no-files-found: warn
 
+      - name: Test shared-library build reuse
+        run: python -m unittest discover -s integration -p 'test_library_builds.py'
+
+      - name: Build shared libraries for Python ABI tests
+        run: python test_libraries.py --github-env
+
       - name: Run Python ABI tests
         run: python test_pkcs11.py
 
@@ -482,6 +512,9 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
       - name: Install Linux native dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -517,6 +550,9 @@ jobs:
           git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
       - name: Install Python
         uses: actions/setup-python@v7
         with:
@@ -540,6 +576,12 @@ jobs:
 
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests
+
+      - name: Test shared-library build reuse
+        run: python -m unittest discover -s integration -p 'test_library_builds.py'
+
+      - name: Build shared libraries for Python ABI tests
+        run: python test_libraries.py --github-env
 
       - name: Run Python ABI tests
         run: python test_pkcs11.py

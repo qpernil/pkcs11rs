@@ -22,6 +22,10 @@ from urllib.parse import quote
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from test_libraries import build_library  # noqa: E402
+
 TOKEN = "client integration"
 
 
@@ -610,11 +614,7 @@ def main() -> int:
     else:
         options.provider = None
     if options.module is None:
-        subprocess.run(["cargo", "build", "--locked", "-p", "pkcs11rs", "--no-default-features",
-                        "--target-dir", str(ROOT / "target/client-tests")], cwd=ROOT, check=True)
-        filename = {"Darwin": "libpkcs11rs.dylib", "Windows": "pkcs11rs.dll"}.get(
-            platform.system(), "libpkcs11rs.so")
-        options.module = ROOT / "target/client-tests/debug" / filename
+        options.module = build_library("software")
     if not options.module.is_file():
         parser.error(f"Module does not exist: {options.module}")
     options.module = options.module.resolve()

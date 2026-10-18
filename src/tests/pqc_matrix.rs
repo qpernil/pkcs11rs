@@ -711,16 +711,28 @@ fn run_matrix(backend: Backend) {
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "full PQC qualification runs with --release"
+)]
 fn pqc_matrix_software() {
     run_matrix(Backend::Software);
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "full PQC qualification runs with --release"
+)]
 fn pqc_matrix_virtual_yubihsm_secure_channel() {
     run_matrix(Backend::YubiHsm);
 }
 
 #[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "full PQC qualification runs with --release"
+)]
 #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
 fn pqc_matrix_virtual_piv_apdus() {
     run_matrix(Backend::Piv);
