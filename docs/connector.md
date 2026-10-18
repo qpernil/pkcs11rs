@@ -646,6 +646,12 @@ in [Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md).
 
 HTTP transport stages are bounded independently from HSM processing:
 
+- At most 256 TCP connections are admitted by default, including idle HTTP
+  connections and incomplete TLS handshakes. Set `--http-max-connections` to
+  change the limit.
+- At most 32 TLS handshakes are admitted concurrently by default. Set
+  `--tls-max-concurrent-handshakes` to change the limit. A completed handshake
+  releases its handshake reservation while the connection remains counted.
 - TLS handshakes and HTTP/1 header reads have five-second deadlines.
 - The complete request body has a five-second deadline and an 8,192-byte limit.
 - HTTP/2 request header lists are limited to 16 KiB.
@@ -654,6 +660,22 @@ HTTP transport stages are bounded independently from HSM processing:
 - At most 64 HTTP requests are processed concurrently by default. Use
   `--http-max-in-flight-requests` to change the limit. Excess requests receive
   `503 Service Unavailable` immediately.
+
+Connection and handshake capacity is reserved in the accept loop before a
+connection task is spawned or TLS/HTTP processing starts. If either applicable
+limit is full, the newly accepted socket is closed immediately; no waiting
+connection task or handshake queue is created, and no HTTP response is sent.
+This is separate from the request-level `503` response on an admitted
+connection. HTTP/2 streams share their connection's TCP reservation and remain
+subject to the request limit. All three limits must be positive and within
+Tokio's semaphore capacity; none can be disabled with zero.
+
+Handshake errors, failed client authentication, timeouts, cancellation, and
+server shutdown release their reservations. The connection reservation remains
+attached to the IO stream until it is dropped. The limits apply globally to one
+listener, rather than per IP or client identity. They bound admitted application
+resources; the kernel listen backlog and upstream network traffic need separate
+operating-system or network controls.
 
 There is no overall HTTP handler deadline. Once a complete request has entered
 the command handler, it may wait indefinitely for its device gate. After it
@@ -721,7 +743,8 @@ remain fail-closed in the connector itself.
 
 ### Resource and denial-of-service controls
 
-- Bound accepted TCP connections before they reach the HTTP request middleware.
+- Add per-source connection admission or network rate limits so one peer cannot
+  monopolize the bounded global connection and TLS-handshake capacity.
 - Add authenticated-client and device-aware rate or admission limits so one
   identity cannot consume the global request capacity. The current global
   in-flight limit bounds total queued and executing work but does not provide
@@ -810,6 +833,8 @@ client and does not change the connector's inventory or policy.
 --legacy-serial SERIAL
 --i2c-response-timeout-seconds SECONDS
 --http-max-in-flight-requests COUNT
+--http-max-connections COUNT
+--tls-max-concurrent-handshakes COUNT
 --tls-certificate PATH
 --tls-key PATH
 --tls-client-ca PATH

@@ -182,7 +182,8 @@ software mechanism list for session keys.
 - The asynchronous multi-device connector exposes every attached YubiHSM by
   verified serial, serializes requests per device, runs different devices
   concurrently, handles detach/reconnect without unsafe replay, and supports
-  HTTPS plus optional mutual TLS. See
+  HTTPS plus optional mutual TLS. Connection and concurrent TLS-handshake limits
+  reject overload before per-connection tasks are spawned. See
   [Multi-device connector](docs/connector.md).
 - A connector build can host persisted `virtual-yubihsm-core` instances beside
   physical USB devices. Independent actor threads adapt the core's shared
