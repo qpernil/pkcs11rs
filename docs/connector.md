@@ -996,3 +996,6 @@ to three and `PKCS11RS_RSA_BENCHMARK_BITS` to `2048,3072,4096`. Run in the signe
 application scope owning the existing platform key. Local hardware discovery
 is disabled. Every operation compares all pre-existing object metadata after
 cleanup; credentials and device provisioning are preserved.
+
+Measured release costs and qualification methodology are recorded in
+[RSA validation performance](rsa-validation-performance.md).

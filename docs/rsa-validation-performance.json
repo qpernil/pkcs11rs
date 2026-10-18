@@ -1,0 +1,1338 @@
+{
+  "measurement_date": "2026-10-18",
+  "units": "seconds",
+  "shared_core_commit": "9e168f3280461bc8abadf21f55db19821391380c",
+  "virtual_hsm_source_commit": "3fe9570ec92fae5ade2b131bccbb0182f5a779ee",
+  "after_pi_prebuilt_commit": "92cce087ca7f0238ea9669394ddd369c282ab8de",
+  "connector_source_commit": "87c4d1c6f54c8245a53dfd226b99781b5d14bd5f",
+  "mac_paired_samples": [
+    {
+      "bits": 1024,
+      "generate": {
+        "after": 0.012458167,
+        "before": 0.006267625
+      },
+      "private_import": {
+        "after": 0.006262084,
+        "before": 1.8917e-05
+      },
+      "private_operation": {
+        "after": 0.0001651625,
+        "before": 0.0001700979
+      },
+      "public_import": {
+        "after": 0.000357041,
+        "before": 1.25e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 1024,
+      "generate": {
+        "after": 0.010671041,
+        "before": 0.005178958
+      },
+      "private_import": {
+        "after": 0.005535917,
+        "before": 1.5084e-05
+      },
+      "private_operation": {
+        "after": 0.0001609854,
+        "before": 0.00015380835
+      },
+      "public_import": {
+        "after": 0.000304042,
+        "before": 4.1e-08
+      },
+      "sample": 2
+    },
+    {
+      "bits": 1024,
+      "generate": {
+        "after": 0.013230417,
+        "before": 0.007135375
+      },
+      "private_import": {
+        "after": 0.005310708,
+        "before": 2.0959e-05
+      },
+      "private_operation": {
+        "after": 0.00016102709999999998,
+        "before": 0.00015824795
+      },
+      "public_import": {
+        "after": 0.000294709,
+        "before": 1.25e-07
+      },
+      "sample": 3
+    },
+    {
+      "bits": 1280,
+      "generate": {
+        "after": 0.028238208,
+        "before": 0.023922167
+      },
+      "private_import": {
+        "after": 0.009617,
+        "before": 2.3625e-05
+      },
+      "private_operation": {
+        "after": 0.0002683917,
+        "before": 0.00031610000000000004
+      },
+      "public_import": {
+        "after": 0.000558833,
+        "before": 1.25e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 1280,
+      "generate": {
+        "after": 0.027111083,
+        "before": 0.020860375
+      },
+      "private_import": {
+        "after": 0.009715708,
+        "before": 2.4e-05
+      },
+      "private_operation": {
+        "after": 0.00027151875000000004,
+        "before": 0.00031133125
+      },
+      "public_import": {
+        "after": 0.000573166,
+        "before": 1.25e-07
+      },
+      "sample": 2
+    },
+    {
+      "bits": 1280,
+      "generate": {
+        "after": 0.026837875,
+        "before": 0.022199375
+      },
+      "private_import": {
+        "after": 0.009401416,
+        "before": 2.2833e-05
+      },
+      "private_operation": {
+        "after": 0.00026600835,
+        "before": 0.0003155875
+      },
+      "public_import": {
+        "after": 0.000693834,
+        "before": 1.25e-07
+      },
+      "sample": 3
+    },
+    {
+      "bits": 2048,
+      "generate": {
+        "after": 0.074387625,
+        "before": 0.050395125
+      },
+      "private_import": {
+        "after": 0.0317125,
+        "before": 3.9083e-05
+      },
+      "private_operation": {
+        "after": 0.00072947085,
+        "before": 0.0008740625000000001
+      },
+      "public_import": {
+        "after": 0.002021541,
+        "before": 1.67e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 2048,
+      "generate": {
+        "after": 0.070527375,
+        "before": 0.045078458
+      },
+      "private_import": {
+        "after": 0.0315355,
+        "before": 3.7875e-05
+      },
+      "private_operation": {
+        "after": 0.00073136455,
+        "before": 0.0008697167
+      },
+      "public_import": {
+        "after": 0.002018875,
+        "before": 8.3e-08
+      },
+      "sample": 2
+    },
+    {
+      "bits": 2048,
+      "generate": {
+        "after": 0.061698416,
+        "before": 0.036771042
+      },
+      "private_import": {
+        "after": 0.0328275,
+        "before": 4.2791e-05
+      },
+      "private_operation": {
+        "after": 0.0007307458,
+        "before": 0.00087439375
+      },
+      "public_import": {
+        "after": 0.002092291,
+        "before": 1.67e-07
+      },
+      "sample": 3
+    },
+    {
+      "bits": 2304,
+      "generate": {
+        "after": 0.499855542,
+        "before": 0.456878
+      },
+      "private_import": {
+        "after": 0.048127375,
+        "before": 5.0959e-05
+      },
+      "private_operation": {
+        "after": 0.0010160625,
+        "before": 0.00101669585
+      },
+      "public_import": {
+        "after": 0.002994209,
+        "before": 1.25e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 2304,
+      "generate": {
+        "after": 0.146048,
+        "before": 0.098973334
+      },
+      "private_import": {
+        "after": 0.047791041,
+        "before": 4.4583e-05
+      },
+      "private_operation": {
+        "after": 0.001017525,
+        "before": 0.0010152812500000001
+      },
+      "public_import": {
+        "after": 0.002856291,
+        "before": 2.5e-07
+      },
+      "sample": 2
+    },
+    {
+      "bits": 2304,
+      "generate": {
+        "after": 0.174743333,
+        "before": 0.125484708
+      },
+      "private_import": {
+        "after": 0.049684958,
+        "before": 4.1416e-05
+      },
+      "private_operation": {
+        "after": 0.0010336167,
+        "before": 0.0010422042
+      },
+      "public_import": {
+        "after": 0.00304725,
+        "before": 5.83e-07
+      },
+      "sample": 3
+    },
+    {
+      "bits": 3072,
+      "generate": {
+        "after": 0.252250209,
+        "before": 0.140829208
+      },
+      "private_import": {
+        "after": 0.111312875,
+        "before": 6.5208e-05
+      },
+      "private_operation": {
+        "after": 0.0021069479,
+        "before": 0.0020951771
+      },
+      "public_import": {
+        "after": 0.006918917,
+        "before": 3.75e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 3072,
+      "generate": {
+        "after": 0.235365083,
+        "before": 0.127150458
+      },
+      "private_import": {
+        "after": 0.1113845,
+        "before": 6.2917e-05
+      },
+      "private_operation": {
+        "after": 0.0021538125000000003,
+        "before": 0.0021590208
+      },
+      "public_import": {
+        "after": 0.006861542,
+        "before": 3.75e-07
+      },
+      "sample": 2
+    },
+    {
+      "bits": 3072,
+      "generate": {
+        "after": 0.395470792,
+        "before": 0.282367667
+      },
+      "private_import": {
+        "after": 0.112392708,
+        "before": 7.1459e-05
+      },
+      "private_operation": {
+        "after": 0.0021112479,
+        "before": 0.00208904585
+      },
+      "public_import": {
+        "after": 0.007000667,
+        "before": 3.75e-07
+      },
+      "sample": 3
+    },
+    {
+      "bits": 4096,
+      "generate": {
+        "after": 1.052556625,
+        "before": 0.746610916
+      },
+      "private_import": {
+        "after": 0.329666334,
+        "before": 8.9125e-05
+      },
+      "private_operation": {
+        "after": 0.004706425,
+        "before": 0.0047126104
+      },
+      "public_import": {
+        "after": 0.018709292,
+        "before": 5.42e-07
+      },
+      "sample": 1
+    },
+    {
+      "bits": 4096,
+      "generate": {
+        "after": 0.716896833,
+        "before": 0.409049333
+      },
+      "private_import": {
+        "after": 0.311007042,
+        "before": 0.000100334
+      },
+      "private_operation": {
+        "after": 0.0047146728999999995,
+        "before": 0.0047077479
+      },
+      "public_import": {
+        "after": 0.016886333,
+        "before": 5.41e-07
+      },
+      "sample": 2
+    },
+    {
+      "bits": 4096,
+      "generate": {
+        "after": 1.684485666,
+        "before": 1.366138709
+      },
+      "private_import": {
+        "after": 0.31388925,
+        "before": 9.5541e-05
+      },
+      "private_operation": {
+        "after": 0.0047119292,
+        "before": 0.00471785
+      },
+      "public_import": {
+        "after": 0.016815666,
+        "before": 5e-07
+      },
+      "sample": 3
+    }
+  ],
+  "end_to_end": [
+    {
+      "target": "ubuntu4 embedded",
+      "phase": "before",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": true,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.0012013380182906985
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.0012422639993019402
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.0011423199903219938
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.0010509860003367066
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.001025189005304128
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.0010227260063402355
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 0.2537537919706665
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 0.3299214370199479
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 1.0799315110198222
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.0012331150355748832
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.0012144859647378325
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.0011914120404981077
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.0010759110446088016
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.0010236329981125891
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.0010188180021941662
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 1.2121277989936061
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 2.1528948309714906
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 1.232689082971774
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 0.0013417640002444386
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 0.0013531349832192063
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 0.0013729319907724857
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.0010977819911204278
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.0010705409804359078
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.0010872639832086861
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 3.889936955005396
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 7.332244827004615
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 10.20897126296768
+        }
+      ]
+    },
+    {
+      "target": "ubuntu4 embedded",
+      "phase": "after",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": true,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.2419876009807922
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.24325171700911596
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "seconds": 0.24308958603069186
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.019559748005121946
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.02022484299959615
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "seconds": 0.01737475796835497
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 0.9614882990135811
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 0.6675122050219215
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "seconds": 1.0505241509526968
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.8920162509893999
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.8946094649727456
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "seconds": 0.8924448440084234
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.06532825401518494
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.05589928902918473
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "seconds": 0.06844924698816612
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 4.049125113990158
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 2.802769609959796
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "seconds": 2.489563120994717
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 2.4710379500174895
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 2.5789470649906434
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "seconds": 2.4696162570035085
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.12671193399000913
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.12736136303283274
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "seconds": 0.13311977696139365
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 8.745924382994417
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 6.489719026954845
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "seconds": 5.63345742499223
+        }
+      ]
+    },
+    {
+      "target": "raspberrypi-1",
+      "phase": "before",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": true,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.010357875
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.010476833
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.010605416
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.009814375
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.00981925
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.009914583
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 0.692450084
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 1.252795708
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 4.406476625
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.013092583
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.013106334
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.013493208
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.0128765
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.012920333
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.01286425
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 32.509645667
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 5.660577542
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 10.890431125
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.016620167
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.016530041
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.016555625
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.01592625
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.015977875
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.016017667
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 42.785494292
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 56.484285417
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 60.916308
+        }
+      ]
+    },
+    {
+      "target": "raspberrypi-1",
+      "phase": "after",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": false,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.974936917
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.997304875
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 1.028354042
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.070423292
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.105744916
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.068251042
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 4.571326416
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 6.4700985
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 5.083835917
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 3.879268083
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 3.878297916
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 3.86468125
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.233251917
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.27993975
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.24128825
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 11.640761125000001
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 7.182641458
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 21.553102167
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 10.447706916
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 10.538877791
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 10.523165542
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.534013458
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.558724834
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.534084958
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 63.099707083
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 25.419749125
+        }
+      ]
+    },
+    {
+      "target": "raspberrypi-2",
+      "phase": "before",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": true,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.019450375
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.010493125
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.01052975
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.009896708
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.009946125
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.009881292
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 3.756341417
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 0.734363
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 1.214108416
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.013172875
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.013058542
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.012989417
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.012530833
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.012590625
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.012961125
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 22.989252209
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 4.88697075
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 6.340156917
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.016738375
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.0166085
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.016792583
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.015953333
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.015922666
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.0157665
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 12.674877167
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 44.672358
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 9.295907709
+        }
+      ]
+    },
+    {
+      "target": "raspberrypi-2",
+      "phase": "after",
+      "recorded_samples_confirm_inventory_restoration": true,
+      "complete": true,
+      "samples": [
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 0.97001075
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 0.924106708
+        },
+        {
+          "bits": 2048,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 0.930350375
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.074370625
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.068584375
+        },
+        {
+          "bits": 2048,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.072402625
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 2.385896125
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 1.9250993749999998
+        },
+        {
+          "bits": 2048,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 3.561726209
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 3.461079167
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 3.537292958
+        },
+        {
+          "bits": 3072,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 3.600309458
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.217788791
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.203391625
+        },
+        {
+          "bits": 3072,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.202553166
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 11.27860125
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 7.876766417
+        },
+        {
+          "bits": 3072,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 9.069335542
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 1,
+          "seconds": 10.139007334
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 2,
+          "seconds": 10.277094458
+        },
+        {
+          "bits": 4096,
+          "operation": "private_import",
+          "sample": 3,
+          "seconds": 10.329908541
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 1,
+          "seconds": 0.533708625
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 2,
+          "seconds": 0.516828041
+        },
+        {
+          "bits": 4096,
+          "operation": "public_import",
+          "sample": 3,
+          "seconds": 0.504095334
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 1,
+          "seconds": 41.001097042
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 2,
+          "seconds": 22.347284334
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 30.811874
+        }
+      ]
+    }
+  ],
+  "cleanup_pending": [
+    {
+      "target": "raspberrypi-1",
+      "phase": "after"
+    }
+  ]
+}
