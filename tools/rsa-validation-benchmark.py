@@ -85,7 +85,7 @@ def main():
             session = login(hsm, alias)
             try:
                 info = AuthenticationKey(session, args.authkey).get_info()
-                required = (CAPABILITY.GENERATE_ASYMMETRIC_KEY | CAPABILITY.PUT_ASYMMETRIC_KEY |
+                required = (CAPABILITY.GENERATE_ASYMMETRIC_KEY | CAPABILITY.PUT_ASYMMETRIC |
                             CAPABILITY.DELETE_ASYMMETRIC_KEY | CAPABILITY.PUBLIC_WRAP_KEY_WRITE |
                             CAPABILITY.PUBLIC_WRAP_KEY_DELETE)
                 if (info.capabilities & required != required or not info.domains & 1 or
