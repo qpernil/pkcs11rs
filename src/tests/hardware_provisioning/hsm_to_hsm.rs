@@ -2543,3 +2543,260 @@ fn provisions_symmetric_qualification_login_from_platform() {
         std::panic::resume_unwind(error);
     }
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "benchmarks temporary RSA objects on one explicitly selected remote HSM"]
+fn benchmarks_rsa_validation_from_platform() {
+    use std::{collections::BTreeMap, io::Read, time::Instant};
+    if std::env::var("PKCS11RS_RSA_BENCHMARK_APPLY").as_deref() != Ok("1") {
+        eprintln!("set PKCS11RS_RSA_BENCHMARK_APPLY=1 to enable temporary key operations");
+        return;
+    }
+    let _guard = TEST_LOCK.lock().unwrap();
+    let target = required("PKCS11RS_TEST_QUALIFICATION_TARGET");
+    let alias = required("PKCS11RS_RSA_BENCHMARK_ALIAS");
+    let phase = required("PKCS11RS_RSA_BENCHMARK_PHASE");
+    assert!(matches!(phase.as_str(), "before" | "after"));
+    let output = std::path::PathBuf::from(required("PKCS11RS_RSA_BENCHMARK_OUTPUT"));
+    assert!(!output.exists(), "choose a fresh benchmark output path");
+    let url = required("PKCS11RS_TEST_QUALIFICATION_URL");
+    let admin_uri = required("PKCS11RS_TEST_QUALIFICATION_ADMIN_URI");
+    let samples = std::env::var("PKCS11RS_RSA_BENCHMARK_SAMPLES")
+        .unwrap_or_else(|_| "3".into())
+        .parse::<usize>()
+        .unwrap();
+    assert!(samples > 0);
+    let selected_bits =
+        std::env::var("PKCS11RS_RSA_BENCHMARK_BITS").unwrap_or_else(|_| "2048,3072,4096".into());
+    let selected_bits: Vec<usize> = selected_bits
+        .split(',')
+        .map(|bits| bits.parse().unwrap())
+        .collect();
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1, "hardware": {"discovery": false}, "slots": {"serials": [target]},
+            "software": {"slots": []}, "platform": {"enabled": true},
+            "yubihsm": {"urls": [url], "public_discovery": "0001password", "recreate_sessions": false}
+        })),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let platform_slot = crate::with_context(|context| {
+            let slots = context.slot_contexts.read().unwrap();
+            let matches: Vec<_> = slots
+                .iter()
+                .filter_map(|(id, child)| {
+                    (child.lock().unwrap().slot.kind() == crate::SlotKind::Host).then_some(*id)
+                })
+                .collect();
+            assert_eq!(matches.len(), 1);
+            Ok(matches[0])
+        })
+        .unwrap();
+        let mut source_session = 0;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                platform_slot,
+                CKF_SERIAL_SESSION as _,
+                std::ptr::null_mut(),
+                None,
+                &mut source_session
+            ),
+            CKR_OK as CK_RV
+        );
+        login(source_session, "", "native platform source");
+        let session = open(&target);
+        login(session, &admin_uri, "existing platform administrator");
+        let snapshot = |session| -> BTreeMap<(u16, u8), Vec<u8>> {
+            inventory(session)
+                .into_iter()
+                .map(|(id, kind, _)| {
+                    (
+                        (id, kind),
+                        command(session, &crate::YubiHsmCommand::get_object_info(id, kind))
+                            .unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let baseline = snapshot(session);
+        let mut report = serde_json::json!({"phase":phase,"target":alias,"results":[],"inventories_restored":false});
+        std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        let fixtures: [(usize, u8, &[u8]); 3] = [
+            (
+                2048,
+                crate::YUBIHSM_ALGO_RSA_2048,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../software-key-core/tests/vectors/wycheproof/rsa_oaep_2048_sha256_mgf1sha256_test.json.gz"
+                )),
+            ),
+            (
+                3072,
+                crate::YUBIHSM_ALGO_RSA_3072,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../software-key-core/tests/vectors/wycheproof/rsa_oaep_3072_sha256_mgf1sha256_test.json.gz"
+                )),
+            ),
+            (
+                4096,
+                crate::YUBIHSM_ALGO_RSA_4096,
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../software-key-core/tests/vectors/wycheproof/rsa_oaep_4096_sha256_mgf1sha256_test.json.gz"
+                )),
+            ),
+        ];
+        for (bits, algorithm, fixture) in fixtures {
+            if !selected_bits.contains(&bits) {
+                continue;
+            }
+            let mut text = String::new();
+            flate2::read::GzDecoder::new(fixture)
+                .read_to_string(&mut text)
+                .unwrap();
+            let data: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let hex = data["testGroups"][0]["privateKeyPkcs8"].as_str().unwrap();
+            let encoded: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            let key = crate::SoftwareSigningKey::from_pkcs8_der_for_kind(
+                crate::KeyKind::Rsa { modulus_bits: bits },
+                &encoded,
+            )
+            .unwrap();
+            let [p, q, _, _, _] = key.rsa_crt_components().unwrap();
+            let mut factors = crate::Zeroizing::new(vec![0; bits / 8]);
+            assert!(p.len() <= bits / 16 && q.len() <= bits / 16);
+            factors[bits / 16 - p.len()..bits / 16].copy_from_slice(&p);
+            factors[bits / 8 - q.len()..].copy_from_slice(&q);
+            let crate::SoftwarePublicKey::Rsa { modulus, .. } = key.public_key() else {
+                unreachable!()
+            };
+            for operation in ["private_import", "public_import", "generate"] {
+                for sample in 1..=samples {
+                    let _ = crate::api::C_Logout(session);
+                    login(session, &admin_uri, "existing platform administrator");
+                    assert_eq!(snapshot(session), baseline);
+                    let mut nonce = [0u8; 12];
+                    getrandom::fill(&mut nonce).unwrap();
+                    let label = format!(
+                        "p11-rsa-{}",
+                        nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                    );
+                    let kind = if operation == "public_import" {
+                        crate::YUBIHSM_PUBLIC_WRAP_KEY
+                    } else {
+                        crate::YUBIHSM_ASYMMETRIC_KEY
+                    };
+                    let params = crate::YubiHsmObjectParameters {
+                        id: 0,
+                        label: &label,
+                        domains: 1,
+                        capabilities: [0; 8],
+                        algorithm,
+                    };
+                    let request = match operation {
+                        "generate" => crate::YubiHsmCommand::generate_object(
+                            crate::YubiHsmCommandCode::GenerateAsymmetricKey,
+                            &params,
+                        ),
+                        "private_import" => crate::YubiHsmCommand::put_object(
+                            crate::YubiHsmCommandCode::PutAsymmetricKey,
+                            &params,
+                            &factors,
+                        ),
+                        _ => crate::YubiHsmCommand::put_delegated_object(
+                            crate::YubiHsmCommandCode::PutPublicWrapKey,
+                            &crate::yubihsm::DelegatedObjectParameters {
+                                object: params,
+                                delegated_capabilities: [0; 8],
+                            },
+                            &modulus,
+                        ),
+                    }
+                    .unwrap();
+                    report["pending"] = serde_json::json!({"label":label,"type":kind});
+                    std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+                    eprintln!(
+                        "RSA benchmark {alias} {phase} RSA-{bits} {operation} sample {sample}: starting"
+                    );
+                    let started = Instant::now();
+                    let reply = command(session, &request);
+                    let elapsed = started.elapsed().as_secs_f64();
+                    let _ = crate::api::C_Logout(session);
+                    login(
+                        session,
+                        &admin_uri,
+                        "existing platform administrator cleanup",
+                    );
+                    let matches: Vec<_> = inventory(session)
+                        .into_iter()
+                        .filter(|(id, object_type, _)| {
+                            *object_type == kind
+                                && object_info(session, *id, *object_type).label == label
+                        })
+                        .collect();
+                    assert!(
+                        matches.len() <= 1,
+                        "ambiguous benchmark label; refusing cleanup"
+                    );
+                    let mut observed_public = None;
+                    for (id, object_type, _) in &matches {
+                        observed_public = Some(command(
+                            session,
+                            &crate::YubiHsmCommand::get_public_key(*id, Some(*object_type)),
+                        ));
+                        assert!(
+                            !baseline.contains_key(&(*id, *object_type)),
+                            "refusing to delete a pre-existing object"
+                        );
+                        delete_labeled_object_if_present(session, *id, *object_type, &label);
+                    }
+                    assert_eq!(
+                        snapshot(session),
+                        baseline,
+                        "inventory changed after benchmark cleanup"
+                    );
+                    let id = crate::parse_yubihsm_object_id(
+                        &reply.expect("benchmark operation failed; owned objects cleaned"),
+                    )
+                    .unwrap();
+                    assert_eq!(matches.len(), 1);
+                    assert_eq!(matches[0].0, id);
+                    let observed_public =
+                        crate::YubiHsmPublicKey::parse(&observed_public.unwrap().unwrap()).unwrap();
+                    assert_eq!(observed_public.algorithm, algorithm);
+                    assert_eq!(observed_public.key.len() * 8, bits);
+                    if operation != "generate" {
+                        assert_eq!(observed_public.key, modulus);
+                    }
+                    report.as_object_mut().unwrap().remove("pending");
+                    report["inventories_restored"] = true.into();
+                    let row = serde_json::json!({"target":alias,"bits":bits,"operation":operation,"sample":sample,"seconds":elapsed});
+                    eprintln!("{row}");
+                    report["results"].as_array_mut().unwrap().push(row);
+                    std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+                }
+            }
+        }
+        assert_eq!(snapshot(session), baseline);
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_Logout(source_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(source_session), CKR_OK as CK_RV);
+    }));
+    finalize_for_test();
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
