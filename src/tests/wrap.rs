@@ -1343,7 +1343,10 @@ fn install_yubihsm_wrap_test_objects(
 ) {
     let public_key = crate::YubiHsmPublicKey {
         algorithm: crate::YUBIHSM_ALGO_RSA_2048,
-        key: vec![0xa5; 256],
+        key: {
+            use rsa::traits::PublicKeyParts;
+            crate::certificate_builder::rsa_key().n().to_bytes_be()
+        },
     };
     let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;

@@ -18,6 +18,13 @@ appropriate PKCS #11 error instead of being omitted.
 
 The minimum supported Rust version is 1.95.
 
+RSA generation and new private/public software-key imports use the common
+[`software-key-core` RSA API](https://github.com/qpernil/software-key-core/blob/main/docs/rsa-key-validation.md).
+The software slot and both virtual devices share size-dependent quality
+validation, CRT recalculation and private-key pairwise tests. Protocol-specific
+size/exponent acceptance remains separate. Trusted persistence restoration
+reconstructs existing keys without repeating import-time tests.
+
 Ordinary login PINs and passwords are not retained for later operations by
 default. Scoped authorization tokens and session keys have backend-specific
 lifetimes; opt-in session recovery and configured discovery credentials are

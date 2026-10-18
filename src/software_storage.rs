@@ -17,8 +17,7 @@ use pkcs8::{
     pkcs5::pbes2,
     spki::{AlgorithmIdentifierOwned, AlgorithmIdentifierRef, ObjectIdentifier},
 };
-use rsa::RsaPrivateKey;
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
+use rsa::pkcs1::EncodeRsaPrivateKey;
 #[cfg(unix)]
 use std::fs::File;
 use std::{
@@ -28,10 +27,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 use zeroize::Zeroizing;
 
@@ -2042,12 +2038,9 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         if info.algorithm.parameters != Some(AnyRef::NULL) {
             return Err(CKR_DATA_INVALID.into());
         }
-        let mut key = RsaPrivateKey::from_pkcs1_der(info.private_key.as_bytes())
-            .map_err(|_| CKR_DATA_INVALID)?;
-        key.precompute().map_err(|_| CKR_DATA_INVALID)?;
-        return Ok(SoftwarePrivateKeyMaterial::Signing(
-            SoftwareSigningKey::Rsa(Arc::new(key)),
-        ));
+        return SoftwareSigningKey::restore_rsa_pkcs1(info.private_key.as_bytes())
+            .map(SoftwarePrivateKeyMaterial::Signing)
+            .map_err(|_| CKR_DATA_INVALID.into());
     }
     if info.algorithm.oid == EC_PUBLIC_KEY_OID {
         let parameters = info.algorithm.parameters.as_ref().ok_or(CKR_DATA_INVALID)?;
@@ -2099,7 +2092,15 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
 pub(crate) fn material_from_bare_pkcs8(
     encoded: &[u8],
 ) -> Result<SoftwarePrivateKeyMaterial, Error> {
-    let material = material_from_pkcs8(encoded)?;
+    let mut material = material_from_pkcs8(encoded)?;
+    if let SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(key)) = &material {
+        material = SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(
+            key.validate_for_import().map_err(|_| CKR_DATA_INVALID)?,
+        ));
+        // Supplied CRT values and equivalent private exponents are normalized;
+        // DER parsing and the shared RSA import boundary validate key identity.
+        return Ok(material);
+    }
     if material_to_pkcs8(&material)?.as_slice() != encoded {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -2253,15 +2254,14 @@ mod tests {
 
     #[test]
     fn every_software_private_material_round_trips_through_standard_pkcs8() {
-        let mut rsa = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
-        rsa.precompute().unwrap();
+        let rsa = SoftwareSigningKey::generate_rsa(1024).unwrap();
         let signing = |algorithm, value: Vec<u8>| {
             SoftwarePrivateKeyMaterial::Signing(
                 SoftwareSigningKey::from_serialized(algorithm, &value).unwrap(),
             )
         };
         let materials = vec![
-            SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(Arc::new(rsa))),
+            SoftwarePrivateKeyMaterial::Signing(rsa),
             signing(SignatureScheme::EcdsaP224Sha224, scalar(28)),
             signing(SignatureScheme::EcdsaP256Sha256, scalar(32)),
             signing(SignatureScheme::EcdsaP384Sha384, scalar(48)),

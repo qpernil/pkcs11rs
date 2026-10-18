@@ -963,3 +963,36 @@ and verifies the complete visible object inventory afterward. Existing objects,
 authentication keys, and device settings are preserved. Mutations are never
 retried. An interrupted or transport-failed run can require manual inspection;
 the report retains the pending object's unique label for that purpose.
+
+## RSA validation and performance qualification
+
+Embedded virtual RSA generation and private import use the same
+[shared RSA API and NIST validation references](https://github.com/qpernil/software-key-core/blob/main/docs/rsa-key-validation.md)
+as the software slot and virtual YubiKey. Public-only import retains partial
+public-key validation; it cannot reconstruct unavailable factors or perform a
+private-key pairwise test. Validation is paid at creation/import, not ordinary
+key use or trusted restoration. Algorithms and exponent 65537 remain the
+virtual YubiHSM's acceptance policy. These checks do not claim FIPS module
+validation. Physical YubiHSM firmware is unaffected.
+
+`tools/rsa-validation-benchmark.py` measures explicitly selected virtual targets
+using published Wycheproof RSA-2048/3072/4096 test keys, fresh labelled temporary
+objects and exact ownership-checked cleanup. Both phases use identical imported
+keys; key generation remains random and should be compared using distributions.
+The report records pending cleanup identity before each mutation and never
+replays an uncertain creation command. Use `--phase before` or `--phase after`,
+a fresh `--output`, and `--allow-key-operations`; without that last flag it
+performs identity/permission/inventory preflight only. Authentication follows
+the existing explicitly selected qualification-login or interactive-password
+workflow.
+
+The ignored macOS `benchmarks_rsa_validation_from_platform` test uses an existing
+platform administrator instead of adding a password credential. It requires
+`PKCS11RS_RSA_BENCHMARK_APPLY=1`, the same explicit target/URL/admin-URI variables
+as the qualification-login provisioning test, and
+`PKCS11RS_RSA_BENCHMARK_ALIAS`, `PKCS11RS_RSA_BENCHMARK_PHASE`, and a fresh
+`PKCS11RS_RSA_BENCHMARK_OUTPUT`. Optional `PKCS11RS_RSA_BENCHMARK_SAMPLES` defaults
+to three and `PKCS11RS_RSA_BENCHMARK_BITS` to `2048,3072,4096`. Run in the signed
+application scope owning the existing platform key. Local hardware discovery
+is disabled. Every operation compares all pre-existing object metadata after
+cleanup; credentials and device provisioning are preserved.

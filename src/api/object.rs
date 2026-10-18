@@ -1468,7 +1468,11 @@ fn build_imported_key_material(
             let modulus = required_big_num(&mut components, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
             let exponent =
                 required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
-            let key = RsaPublicKey::new(modulus, exponent)
+            // Preserve this adapter's existing public-key size acceptance policy.
+            if modulus.bits() > RsaPublicKey::MAX_SIZE {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            let key = software_key_core::rsa_keys::import_public(modulus, exponent)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             KeyMaterial::Public(PublicKeyMaterial::Rsa(key))
         }
@@ -1562,14 +1566,14 @@ fn build_imported_key_material(
                 (None, None, None) => {}
                 _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
             }
-            let mut key =
-                RsaPrivateKey::from_components(modulus, public_exponent, private_exponent, primes)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            key.precompute()
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
-                SoftwareSigningKey::Rsa(Arc::new(key)),
-            ))
+            let key = SoftwareSigningKey::from_rsa_components(
+                modulus,
+                public_exponent,
+                private_exponent,
+                primes,
+            )
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key))
         }
         (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS

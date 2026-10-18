@@ -29,6 +29,23 @@ pub(crate) fn p256_key() -> SigningKey {
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
+pub(crate) fn software_rsa_key() -> crate::SoftwareSigningKey {
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+    static KEY: OnceLock<crate::SoftwareSigningKey> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let key = rsa_key();
+        crate::SoftwareSigningKey::from_rsa_components(
+            key.n().clone(),
+            key.e().clone(),
+            key.d().clone(),
+            key.primes().to_vec(),
+        )
+        .expect("validated RSA test fixture")
+    })
+    .clone()
+}
+
+#[cfg(any(test, feature = "abi-tests"))]
 pub(crate) fn rsa_key() -> RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
