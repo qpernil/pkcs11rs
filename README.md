@@ -1144,9 +1144,20 @@ Run the hardware-independent Python ABI tests:
 python3 test_pkcs11.py
 ```
 
-The Python ABI suite builds the shared library with its deterministic test
-backend, loads the resulting `.so`, `.dylib`, or `.dll`, and exercises its
-exported PKCS #11 entry points.
+The Python ABI suite loads the shared library and exercises its exported
+PKCS #11 entry points. CI builds its `abi-tests` and hardware-free
+`embedded-virtual-yubikey` configurations with
+`python test_libraries.py --github-env`, then supplies `PKCS11RS_ABI_TEST_LIBRARY` and
+`PKCS11RS_EMBEDDED_VIRTUAL_YUBIKEY_TEST_LIBRARY` to Python and OASIS tests.
+A supplied path must exist; tests never silently rebuild a missing supplied
+library. Local runs build any unspecified configuration automatically.
+
+All configurations and the production software client fixtures share Cargo's
+build directory and dependency artifacts. Libraries loaded by ctypes use
+separate content-addressed copies, so rebuilding another feature configuration
+does not overwrite an open DLL or alias a previously loaded library. CI caches
+Cargo dependencies and compilation artifacts, excluding test-library copies,
+cloned client sources, token state and logs.
 
 Run the production-module external client suite with OpenSC and libp11's
 OpenSSL 3 provider:
@@ -1368,7 +1379,7 @@ Published cryptographic KATs run offline in `software-key-core` and are also
 required by this repository's CI:
 
 ```console
-cargo test --manifest-path ../software-key-core/Cargo.toml --locked kat_
+cargo test --release --manifest-path ../software-key-core/Cargo.toml --locked kat_
 ```
 
 The [coverage inventory](https://github.com/qpernil/software-key-core/blob/main/docs/known-answer-tests.md)
@@ -1379,7 +1390,9 @@ parameters, direct/multipart equivalence, hash-state lifetime and embedded
 PIV/YubiHSM signing transports.
 
 CI requires the `pqc_matrix` provider suite across software slots, virtual PIV
-APDUs, and the virtual YubiHSM secure channel. Each backend exercises:
+APDUs, and the virtual YubiHSM secure channel in release builds. Full matrices
+are ignored by ordinary debug test runs; focused key-validation regression tests
+remain enabled in debug. Each backend exercises:
 
 - ML-DSA-44/65/87 with pure signing, every supported client-prehashed
   `CKM_HASH_ML_DSA` hash, and all ten hash-specific signing mechanisms;
@@ -1393,7 +1406,7 @@ APDUs, and the virtual YubiHSM secure channel. Each backend exercises:
 Run the complete provider matrix without discovering physical hardware:
 
 ```console
-cargo test --locked -p pkcs11rs --lib --no-default-features \
+cargo test --release --locked -p pkcs11rs --lib --no-default-features \
   --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
 ```
 
@@ -1419,7 +1432,7 @@ when that range is occupied. Existing objects are preserved.
 
 ```console
 PKCS11RS_PQC_SERIAL=12345678 PKCS11RS_PQC_ENDPOINT=usb \
-  PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --locked -p pkcs11rs --lib \
+  PKCS11RS_PQC_FACTORY_AUTH=1 cargo test --release --locked -p pkcs11rs --lib \
   pqc_matrix_deployed_yubihsm -- --ignored --nocapture --test-threads=1
 ```
 

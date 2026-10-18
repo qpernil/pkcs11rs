@@ -17,6 +17,8 @@ import tempfile
 import threading
 import unittest
 
+import test_libraries
+
 
 ROOT = pathlib.Path(__file__).resolve().parent
 ABI_TARGET = ROOT / "target" / "abi-tests"
@@ -229,18 +231,13 @@ CK_UNAVAILABLE_INFORMATION = (1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1
 
 
 def library_path() -> pathlib.Path:
-    system = platform.system()
-    if system == "Darwin":
-        name = "libpkcs11rs.dylib"
-    elif system == "Windows":
-        name = "pkcs11rs.dll"
-    else:
-        name = "libpkcs11rs.so"
-    return ABI_TARGET / "debug" / name
+    return (test_libraries.selected_library("abi")
+            or ABI_TARGET / "debug" / test_libraries.filename())
 
 
 def embedded_virtual_yubikey_library_path() -> pathlib.Path:
-    return EMBEDDED_VIRTUAL_YUBIKEY_TARGET / "debug" / library_path().name
+    return (test_libraries.selected_library("embedded")
+            or EMBEDDED_VIRTUAL_YUBIKEY_TARGET / "debug" / test_libraries.filename())
 
 
 def openssl_pkcs11_provider_path() -> pathlib.Path | None:
@@ -286,44 +283,11 @@ def openssl_pkcs11_provider_path() -> pathlib.Path | None:
 
 
 def load_library() -> ctypes.CDLL:
-    path = library_path()
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--locked",
-            "-p",
-            "pkcs11rs",
-            "--features",
-            "abi-tests",
-            "--target-dir",
-            str(ABI_TARGET),
-        ],
-        cwd=ROOT,
-        check=True,
-    )
-    return ctypes.CDLL(str(path))
+    return ctypes.CDLL(str(test_libraries.ensure_library("abi")))
 
 
 def load_embedded_virtual_yubikey_library() -> ctypes.CDLL:
-    path = embedded_virtual_yubikey_library_path()
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--locked",
-            "-p",
-            "pkcs11rs",
-            "--no-default-features",
-            "--features",
-            "embedded-virtual-yubikey",
-            "--target-dir",
-            str(EMBEDDED_VIRTUAL_YUBIKEY_TARGET),
-        ],
-        cwd=ROOT,
-        check=True,
-    )
-    return ctypes.CDLL(str(path))
+    return ctypes.CDLL(str(test_libraries.ensure_library("embedded")))
 
 
 CK_BYTE = ctypes.c_ubyte

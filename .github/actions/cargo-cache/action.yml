@@ -1,0 +1,41 @@
+name: Cargo compilation cache
+description: Cache dependencies across runs without storing test binaries or fixture state.
+inputs:
+  variant:
+    description: Additional matrix feature identity
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Identify Rust compiler and flags
+      id: compiler
+      shell: bash
+      run: |
+        cargo_cache_fingerprint=$( { rustc -vV; printf '%s\n' "${RUSTFLAGS-}"; } | sha256sum | cut -d' ' -f1)
+        echo "fingerprint=$cargo_cache_fingerprint" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/debug/deps/*.rlib
+          target/debug/deps/*.rmeta
+          target/debug/deps/*.d
+          target/debug/deps/*.so
+          target/debug/deps/*.dylib
+          target/debug/deps/*.dll
+          target/debug/deps/*.lib
+          target/debug/.fingerprint
+          target/debug/build
+          target/release/deps/*.rlib
+          target/release/deps/*.rmeta
+          target/release/deps/*.d
+          target/release/deps/*.so
+          target/release/deps/*.dylib
+          target/release/deps/*.dll
+          target/release/deps/*.lib
+          target/release/.fingerprint
+          target/release/build
+        key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ inputs.variant }}-${{ steps.compiler.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain*') }}
+        restore-keys: |
+          cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ inputs.variant }}-${{ steps.compiler.outputs.fingerprint }}-
