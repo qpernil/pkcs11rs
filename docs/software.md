@@ -284,7 +284,12 @@ its last owner is dropped. This does not change persisted key encodings.
   OAEP decryption, PKCS #1 signatures, and PSS signatures.
 - Weierstrass EC: NIST P-224, P-256, P-384, P-521, secp256k1,
   brainpoolP256r1, brainpoolP384r1, and brainpoolP512r1; ECDSA and ECDH.
-- Edwards: Ed25519 and Ed448 signing.
+- Edwards: Ed25519 and Ed448 signing. Private imports use 32-byte and 57-byte
+  seeds; every correctly sized seed is valid input. Shared public-key validation
+  rejects weak and noncanonical points; Ed25519 verification uses Dalek strict
+  verification and Ed448 uses checked subgroup validation. See the
+  [Edwards validation policy](https://github.com/qpernil/software-key-core/blob/main/docs/edwards-key-validation.md)
+  for the precise checks and RFC 8032 references.
 - Montgomery: X25519 and X448 key agreement.
 - ML-DSA: FIPS 204 parameter sets ML-DSA-44, ML-DSA-65, and ML-DSA-87;
   key-pair generation plus pure and prehashed signing and verification with
