@@ -55,7 +55,7 @@ Values below are medians in milliseconds, shown as before → after.
 | ubuntu4 embedded | 4096 | 1.353 → 2471.038 | 1.087 → 127.361 | 7332.245 → 6489.719 |
 | raspberrypi-1 | 2048 | 10.477 → 997.305 | 9.819 → 70.423 | 1252.796 → 5083.836 |
 | raspberrypi-1 | 3072 | 13.106 → 3878.298 | 12.877 → 241.288 | 10890.431 → 11640.761 |
-| raspberrypi-1 | 4096 | 16.556 → 10523.166 | 15.978 → 534.085 | 56484.285 → 44259.728 (2 samples) |
+| raspberrypi-1 | 4096 | 16.556 → 10523.166 | 15.978 → 534.085 | 56484.285 → 48732.649 |
 | raspberrypi-2 | 2048 | 10.530 → 930.350 | 9.897 → 72.403 | 1214.108 → 2385.896 |
 | raspberrypi-2 | 3072 | 13.059 → 3537.293 | 12.591 → 203.392 | 6340.157 → 9069.336 |
 | raspberrypi-2 | 4096 | 16.738 → 10277.094 | 15.923 → 516.828 | 12674.877 → 30811.874 |
@@ -64,12 +64,11 @@ Generation is not paired by RNG seed in these end-to-end runs. With only three
 samples, its differences cannot isolate validation overhead. The in-process
 paired experiment provides the stronger comparison for generation overhead.
 
-Qualification status: all import samples and all Ubuntu/raspberrypi-2 runs
-completed with inventory restoration. The raspberrypi-1 after run has two
-recorded RSA-4096 generation samples; its last attempted sample is excluded
-because the lab SSH tunnel was lost before cleanup could be confirmed. Its
-unique temporary-object identity remains in the local recovery report and
-must be checked before further mutation on that target.
+All 162 planned end-to-end samples passed, with object inventories restored.
+Two supplemental RSA-4096 import confirmation samples are listed separately in
+the data and excluded from the planned three-sample medians. The interrupted
+attempt's uniquely labelled temporary object was inspected and deleted; only
+completed, cleanup-verified measurements enter the tables.
 
 [Machine-readable samples](rsa-validation-performance.json) contain no private
 keys or authentication credentials. The shared validation design and NIST

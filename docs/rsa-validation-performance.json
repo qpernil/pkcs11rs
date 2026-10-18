@@ -828,7 +828,7 @@
       "target": "raspberrypi-1",
       "phase": "after",
       "recorded_samples_confirm_inventory_restoration": true,
-      "complete": false,
+      "complete": true,
       "samples": [
         {
           "bits": 2048,
@@ -985,6 +985,12 @@
           "operation": "generate",
           "sample": 2,
           "seconds": 25.419749125
+        },
+        {
+          "bits": 4096,
+          "operation": "generate",
+          "sample": 3,
+          "seconds": 48.732649291
         }
       ]
     },
@@ -1329,10 +1335,22 @@
       ]
     }
   ],
-  "cleanup_pending": [
+  "cleanup_pending": [],
+  "additional_verification_samples": [
     {
-      "target": "raspberrypi-1",
-      "phase": "after"
+      "target": "i2c-A",
+      "bits": 4096,
+      "operation": "private_import",
+      "sample": 1,
+      "seconds": 9.321589
+    },
+    {
+      "target": "i2c-A",
+      "bits": 4096,
+      "operation": "public_import",
+      "sample": 1,
+      "seconds": 0.45935625
     }
-  ]
+  ],
+  "interrupted_attempt_cleanup_confirmed": true
 }
