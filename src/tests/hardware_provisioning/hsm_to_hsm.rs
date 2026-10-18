@@ -2395,3 +2395,151 @@ fn yubihsm_to_yubihsm_symmetric_cbc() {
 fn yubihsm_to_yubihsm_symmetric_ecb() {
     symmetric_cross_hsm(SymmetricPath::Ecb);
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "adds the known qualification password login to one explicitly selected HSM"]
+fn provisions_symmetric_qualification_login_from_platform() {
+    if std::env::var("PKCS11RS_TEST_QUALIFICATION_LOGIN_APPLY").as_deref() != Ok("1") {
+        eprintln!(
+            "set PKCS11RS_TEST_QUALIFICATION_LOGIN_APPLY=1 to provision the qualification login"
+        );
+        return;
+    }
+    let _guard = TEST_LOCK.lock().unwrap();
+    let target = required("PKCS11RS_TEST_QUALIFICATION_TARGET");
+    let url = required("PKCS11RS_TEST_QUALIFICATION_URL");
+    let admin_uri = required("PKCS11RS_TEST_QUALIFICATION_ADMIN_URI");
+    assert!(admin_uri.starts_with("pkcs11:"));
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "hardware": {"discovery": false},
+            "slots": {"serials": [target]},
+            "software": {"slots": []},
+            "platform": {"enabled": true},
+            "yubihsm": {"urls": [url], "public_discovery": "0001password", "recreate_sessions": false}
+        })),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as _, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let platform_slot = crate::with_context(|context| {
+            let slots = context.slot_contexts.read().unwrap();
+            let matches: Vec<_> = slots
+                .iter()
+                .filter_map(|(id, child)| {
+                    (child.lock().unwrap().slot.kind() == crate::SlotKind::Host).then_some(*id)
+                })
+                .collect();
+            assert_eq!(matches.len(), 1, "expected one native platform slot");
+            Ok(matches[0])
+        })
+        .unwrap();
+        let mut source_session = 0;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                platform_slot,
+                CKF_SERIAL_SESSION as _,
+                std::ptr::null_mut(),
+                None,
+                &mut source_session
+            ),
+            CKR_OK as CK_RV
+        );
+        login(source_session, "", "native platform source");
+        let session = open(&target);
+        login(session, &admin_uri, "existing platform administrator");
+        eprintln!("existing platform administrator authenticated successfully");
+        let before = inventory(session);
+        let metadata: Vec<_> = before
+            .iter()
+            .map(|(id, kind, _)| {
+                (
+                    *id,
+                    *kind,
+                    command(session, &crate::YubiHsmCommand::get_object_info(*id, *kind)).unwrap(),
+                )
+            })
+            .collect();
+        let id = 0x1007;
+        let label = "reserve-symmetric";
+        let present = before
+            .iter()
+            .any(|(old, kind, _)| *old == id && *kind == crate::YUBIHSM_AUTHENTICATION_KEY);
+        if !present {
+            let keys = crate::yubico_password_kdf(b"password").unwrap();
+            let parameters = crate::yubihsm::DelegatedObjectParameters {
+                object: crate::YubiHsmObjectParameters {
+                    id,
+                    label,
+                    domains: u16::MAX,
+                    capabilities: [0xff; 8],
+                    algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                },
+                delegated_capabilities: [0xff; 8],
+            };
+            let response = command(
+                session,
+                &crate::YubiHsmCommand::put_delegated_object(
+                    crate::YubiHsmCommandCode::PutAuthenticationKey,
+                    &parameters,
+                    keys.as_slice(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(crate::parse_yubihsm_object_id(&response).unwrap(), id);
+        }
+        let info = crate::YubiHsmObjectInfo::parse(
+            &command(
+                session,
+                &crate::YubiHsmCommand::get_object_info(id, crate::YUBIHSM_AUTHENTICATION_KEY),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(info.label, label);
+        assert_eq!(
+            info.algorithm,
+            crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION
+        );
+        assert_eq!(info.domains, u16::MAX);
+        assert_eq!(info.capabilities, [0xff; 8]);
+        assert_eq!(info.delegated_capabilities, [0xff; 8]);
+        for (old_id, kind, expected) in metadata {
+            assert_eq!(
+                command(
+                    session,
+                    &crate::YubiHsmCommand::get_object_info(old_id, kind)
+                )
+                .unwrap(),
+                expected,
+                "existing object metadata changed"
+            );
+        }
+        let after = inventory(session);
+        assert_eq!(after.len(), before.len() + usize::from(!present));
+        assert!(before.iter().all(|entry| after.contains(entry)));
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        login(session, "1007password", "qualification password login");
+        let echo = b"qualification password login";
+        assert_eq!(
+            command(session, &crate::YubiHsmCommand::echo(echo).unwrap()).unwrap(),
+            echo
+        );
+        assert_eq!(inventory(session), after);
+        eprintln!(
+            "qualification login verified; all existing objects and the discovery credential were preserved"
+        );
+    }));
+    finalize_for_test();
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
