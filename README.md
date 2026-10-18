@@ -1157,7 +1157,8 @@ build directory and dependency artifacts. Libraries loaded by ctypes use
 separate content-addressed copies, so rebuilding another feature configuration
 does not overwrite an open DLL or alias a previously loaded library. CI caches
 Cargo dependencies and compilation artifacts, excluding test-library copies,
-cloned client sources, token state and logs.
+cloned client sources, token state and logs. A newer CI run cancels an older
+run of the same workflow on the same branch or pull request.
 
 Run the production-module external client suite with OpenSC and libp11's
 OpenSSL 3 provider:
