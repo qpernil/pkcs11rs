@@ -6,13 +6,13 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::sync::atomic::AtomicUsize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-struct Authority {
-    certificate: Certificate,
+pub(super) struct Authority {
+    pub(super) certificate: Certificate,
     key: KeyPair,
 }
 
 impl Authority {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -21,7 +21,7 @@ impl Authority {
         Self { certificate, key }
     }
 
-    fn client(&self, expired: bool, wrong_usage: bool) -> (Certificate, KeyPair) {
+    pub(super) fn client(&self, expired: bool, wrong_usage: bool) -> (Certificate, KeyPair) {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -41,7 +41,7 @@ impl Authority {
     }
 }
 
-fn client_config(
+pub(super) fn client_config(
     server_certificate: CertificateDer<'static>,
     version: &'static rustls::SupportedProtocolVersion,
     identity: Option<&(Certificate, KeyPair)>,

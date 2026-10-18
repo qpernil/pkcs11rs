@@ -109,6 +109,11 @@ jobs:
           --features "${{ matrix.features }}"
           embedded_firmware_profile_is_forwarded_to_the_core
 
+      - name: Test connection and TLS handshake admission
+        run: >-
+          cargo test --locked -p pkcs11rs-connector --no-default-features
+          --features "${{ matrix.features }}" admission
+
       - name: Test TLS and mandatory mTLS for both protocol versions
         run: >-
           cargo test --locked -p pkcs11rs-connector --no-default-features

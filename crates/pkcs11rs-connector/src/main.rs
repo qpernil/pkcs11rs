@@ -1,3 +1,4 @@
+mod admission;
 mod api;
 mod http_timeout;
 mod i2c;
@@ -6,6 +7,7 @@ mod tls;
 #[cfg(all(embedded_virtual_yubihsm, unix))]
 mod virtual_hsm;
 
+use admission::Admission;
 use api::{AppState, router};
 use clap::{Parser, ValueEnum};
 use http_timeout::WriteTimeoutAcceptor;
@@ -20,11 +22,15 @@ use std::{
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ServerFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
+// Subprocess tests share this lock: children can retain listening sockets
+// between fork and exec even when the descriptors are close-on-exec.
 #[cfg(test)]
 static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
 const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
+const DEFAULT_TLS_MAX_CONCURRENT_HANDSHAKES: usize = 32;
 const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 const DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS: u64 = 500;
 
@@ -144,6 +150,14 @@ struct Args {
     /// Maximum number of HTTP requests processed concurrently across all connections.
     #[arg(long, default_value_t = 64)]
     http_max_in_flight_requests: usize,
+
+    /// Maximum open TCP connections, including idle connections and TLS handshakes.
+    #[arg(long, default_value_t = DEFAULT_HTTP_MAX_CONNECTIONS)]
+    http_max_connections: usize,
+
+    /// Maximum simultaneous TLS handshakes; excess connections are closed immediately.
+    #[arg(long, default_value_t = DEFAULT_TLS_MAX_CONCURRENT_HANDSHAKES)]
+    tls_max_concurrent_handshakes: usize,
 
     /// Discover and serve locally attached physical YubiHSMs. Ignored without embedded support.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -313,6 +327,17 @@ fn connector_server(
     app: axum::Router,
     handle: axum_server::Handle<SocketAddr>,
 ) -> Result<ServerFuture, BoxError> {
+    let admission = Admission::new(
+        app,
+        args.http_max_connections,
+        args.tls_certificate
+            .as_ref()
+            .map(|_| args.tls_max_concurrent_handshakes),
+    );
+    let make_service = tower::service_fn({
+        let admission = admission.clone();
+        move |_: SocketAddr| std::future::ready(admission.admit())
+    });
     let server: ServerFuture = match (&args.tls_certificate, &args.tls_key) {
         (Some(certificate), Some(key)) => {
             let config = tls::server_config(certificate, key, args.tls_client_ca.as_deref())?;
@@ -322,22 +347,24 @@ fn connector_server(
                 axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
             )
             .map(|acceptor| {
-                WriteTimeoutAcceptor::new(
+                admission.acceptor(WriteTimeoutAcceptor::new(
                     acceptor.handshake_timeout(HTTP_STAGE_TIMEOUT),
                     HTTP_STAGE_TIMEOUT,
-                )
+                ))
             })
             .handle(handle);
             configure_http(&mut server);
-            Box::pin(server.serve(app.into_make_service()))
+            Box::pin(server.serve(make_service))
         }
         (None, None) => {
             tracing::info!(address = %args.listen, "listening with HTTP");
             let mut server = axum_server::bind(args.listen)
-                .map(|acceptor| WriteTimeoutAcceptor::new(acceptor, HTTP_STAGE_TIMEOUT))
+                .map(|acceptor| {
+                    admission.acceptor(WriteTimeoutAcceptor::new(acceptor, HTTP_STAGE_TIMEOUT))
+                })
                 .handle(handle);
             configure_http(&mut server);
-            Box::pin(server.serve(app.into_make_service()))
+            Box::pin(server.serve(make_service))
         }
         _ => unreachable!("clap requires the TLS certificate and key together"),
     };
@@ -360,11 +387,23 @@ fn validate_args(args: &Args) -> Result<(), BoxError> {
     if args.i2c_response_timeout_seconds == 0 {
         return Err("--i2c-response-timeout-seconds must be greater than zero".into());
     }
-    if args.http_max_in_flight_requests == 0 {
-        return Err("--http-max-in-flight-requests must be greater than zero".into());
-    }
-    if args.http_max_in_flight_requests > tokio::sync::Semaphore::MAX_PERMITS {
-        return Err("--http-max-in-flight-requests is too large".into());
+    for (name, value) in [
+        (
+            "http-max-in-flight-requests",
+            args.http_max_in_flight_requests,
+        ),
+        ("http-max-connections", args.http_max_connections),
+        (
+            "tls-max-concurrent-handshakes",
+            args.tls_max_concurrent_handshakes,
+        ),
+    ] {
+        if value == 0 {
+            return Err(format!("--{name} must be greater than zero").into());
+        }
+        if value > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(format!("--{name} is too large").into());
+        }
     }
     if args.tls_certificate.is_none()
         && !args.listen.ip().is_loopback()
@@ -380,6 +419,8 @@ fn validate_args(args: &Args) -> Result<(), BoxError> {
 
 #[cfg(test)]
 mod tests {
+    #[path = "admission.rs"]
+    mod admission_tests;
     #[path = "tls.rs"]
     mod tls_tests;
 
@@ -431,6 +472,7 @@ mod tests {
             return;
         }
 
+        let _network_guard = NETWORK_TEST_LOCK.blocking_lock();
         let mut child = Command::new(env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -586,6 +628,7 @@ mod tests {
             .to_vec();
         drop(sender);
         connection.abort();
+        let _ = connection.await;
         (version, body)
     }
 
@@ -626,6 +669,8 @@ mod tests {
             i2c_response_timeout_seconds: 30,
             serials: None,
             http_max_in_flight_requests: 64,
+            http_max_connections: DEFAULT_HTTP_MAX_CONNECTIONS,
+            tls_max_concurrent_handshakes: DEFAULT_TLS_MAX_CONCURRENT_HANDSHAKES,
             hardware_discovery: true,
             i2c_yubihsms: Vec::new(),
             virtual_yubihsms: Vec::new(),
@@ -660,6 +705,7 @@ mod tests {
             }
             return;
         }
+        let _network_guard = NETWORK_TEST_LOCK.blocking_lock();
         for (case, value) in [
             ("absent", None),
             ("environment", Some("123,456")),
@@ -867,7 +913,23 @@ mod tests {
                 .serve(app.into_make_service())
                 .await
         });
-        assert_eq!(second_handle.listening().await, Some(address));
+        if second_handle.listening().await != Some(address) {
+            #[cfg(target_os = "linux")]
+            if let Ok(table) = fs::read_to_string("/proc/net/tcp") {
+                let port = format!(":{:04X}", address.port());
+                for row in table.lines().filter(|row| {
+                    row.split_whitespace()
+                        .nth(1)
+                        .is_some_and(|local| local.ends_with(&port))
+                }) {
+                    eprintln!("Socket state for {address}: {row}");
+                }
+            }
+            panic!(
+                "second HTTP server failed to bind {address}: {:?}",
+                second_server.await
+            );
+        }
 
         let stream = TcpStream::connect(address).await.unwrap();
         let (_, body) = send_http2(
