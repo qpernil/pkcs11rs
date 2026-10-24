@@ -68,7 +68,11 @@ their respective device protocols; they are not dependencies of the provider.
 
 The pinned [signatures fork](https://github.com/qpernil/signatures) supplies
 the ML-DSA implementation used by software-key-core and pkcs11rs validation.
-It is an upstream cryptographic dependency rather than a deployed service.
+It contains only the focused upstream matrix stack-usage PR. Expanded-key
+import validation belongs to
+[software-key-core](https://github.com/qpernil/software-key-core/blob/main/docs/ml-dsa-key-validation.md)
+and uses the dependency's existing public API. This is a cryptographic
+dependency rather than a deployed service.
 
 ### Runtime and security boundaries
 

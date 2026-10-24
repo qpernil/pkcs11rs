@@ -10,8 +10,8 @@ concurrency:
 
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  # Match SCP/FIDO state and standalone PQC import/persistence to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: c67ee9011f7ae6342be151c7de00366ea7de4421
+  # Match shared-core integration and the minimal ML-DSA PR lockfile.
+  VIRTUAL_YUBIKEY_REVISION: 7d1e52ec91b0da009c9a310a947231bae0db298f
 
 jobs:
   pkcs11test:
