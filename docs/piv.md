@@ -166,9 +166,13 @@ structure, including all three hedging modes and contexts up to 255 bytes;
 the client sends provisional PIV `GENERAL AUTHENTICATE` tags `88` (context) and
 `89` (hedging mode). Public verification and ML-KEM encapsulation run in the
 module; private signing and decapsulation run in the PIV applet. Private import
-accepts a 32-byte ML-DSA or 64-byte ML-KEM `CKA_SEED`, which is sent through
-the applet's private tag `09`; expanded private keys are not accepted for PIV
-import. Key generation and import require management authentication. Protect
+accepts a 32-byte ML-DSA or 64-byte ML-KEM `CKA_SEED`, expanded private
+`CKA_VALUE`, or both. Shared software-key-core validation rejects malformed
+or inconsistent components. The adapter sends a retained seed through private
+tag `09`, or the expanded key through private tag `0A` when no seed is present.
+The virtual applet also accepts both tags and checks their consistency.
+Persistence retains seedless keys in expanded form and preserves existing
+seed records. Key generation and import require management authentication. Protect
 private-key import APDUs with SCP03 or SCP11 when confidentiality is required.
 `CKM_ECDH1_DERIVE` and
 `CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;

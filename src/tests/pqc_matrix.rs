@@ -425,6 +425,202 @@ fn assert_kem(
     }
 }
 
+// Exercise the same PKCS #11 import templates against all local backends.
+// No hardware or deployed endpoint participates in this fixture.
+fn assert_standalone_imports(backend: Backend, session: CK_SESSION_HANDLE, piv: bool) {
+    use software_key_core::post_quantum::{
+        MlDsaParameterSet as Dsa, MlDsaPrivateKey, MlKemParameterSet as Kem, MlKemPrivateKey,
+        ml_kem_encapsulate, verify_ml_dsa,
+    };
+    for (index, case) in cases().iter().take(6).enumerate() {
+        let signing = index < 3;
+        let (seed, expanded, public) = if signing {
+            let key = MlDsaPrivateKey::from_seed(
+                [Dsa::MlDsa44, Dsa::MlDsa65, Dsa::MlDsa87][index],
+                [7; 32],
+            );
+            (vec![7; 32], key.expanded_private_key(), key.public_key())
+        } else {
+            let key = MlKemPrivateKey::from_seed(
+                [Kem::MlKem512, Kem::MlKem768, Kem::MlKem1024][index - 3],
+                [7; 64],
+            );
+            (vec![7; 64], key.expanded_private_key(), key.public_key())
+        };
+        for form in 0..3 {
+            let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+            let mut key_type = if signing { CKK_ML_DSA } else { CKK_ML_KEM } as CK_KEY_TYPE;
+            let mut parameter = case.parameter.unwrap();
+            let mut token = CK_BBOOL::from(!matches!(backend, Backend::Software));
+            let mut yes = CK_TRUE as CK_BBOOL;
+            // PIV provisioning uses the SO role, which cannot create private
+            // PKCS #11 metadata. Device private operations still require USER.
+            let mut private_metadata = CK_BBOOL::from(!piv);
+            let mut id = if piv {
+                vec![5]
+            } else {
+                (0x7d00_u16 + index as u16 * 4 + form)
+                    .to_be_bytes()
+                    .to_vec()
+            };
+            let mut seed = seed.clone();
+            let mut expanded = expanded.to_vec();
+            let mut template = vec![
+                scalar_attribute(CKA_CLASS as _, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as _, &mut key_type),
+                scalar_attribute(CKA_PARAMETER_SET as _, &mut parameter),
+                scalar_attribute(CKA_TOKEN as _, &mut token),
+                scalar_attribute(CKA_PRIVATE as _, &mut private_metadata),
+                scalar_attribute(
+                    if signing { CKA_SIGN } else { CKA_DECAPSULATE } as _,
+                    &mut yes,
+                ),
+                bytes_attribute(CKA_ID as _, &mut id),
+            ];
+            if form != 1 {
+                template.push(bytes_attribute(CKA_SEED as _, &mut seed));
+            }
+            if form != 0 {
+                template.push(bytes_attribute(CKA_VALUE as _, &mut expanded));
+            }
+            let mut private = 0;
+            if form == 2 {
+                seed[0] ^= 1;
+                assert_eq!(
+                    crate::api::C_CreateObject(
+                        session,
+                        template.as_mut_ptr(),
+                        template.len() as _,
+                        &mut private
+                    ),
+                    CKR_ATTRIBUTE_VALUE_INVALID as CK_RV,
+                    "{backend:?} {} inconsistent seed/expanded pair",
+                    case.name
+                );
+                assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+                seed[0] ^= 1;
+            }
+            assert_eq!(
+                crate::api::C_CreateObject(
+                    session,
+                    template.as_mut_ptr(),
+                    template.len() as _,
+                    &mut private
+                ),
+                CKR_OK as CK_RV,
+                "{backend:?} {} import form {form}",
+                case.name
+            );
+            if piv {
+                assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+                login(session, CKU_USER as _, b"123456");
+            }
+            let mut mechanism = CK_MECHANISM {
+                mechanism: case.operation,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            if signing {
+                let mut message = b"imported PQC key".to_vec();
+                assert_eq!(
+                    crate::api::C_SignInit(session, &mut mechanism, private),
+                    CKR_OK as CK_RV
+                );
+                let mut signature = vec![0; case.output_length];
+                let mut length = signature.len() as CK_ULONG;
+                assert_eq!(
+                    crate::api::C_Sign(
+                        session,
+                        message.as_mut_ptr(),
+                        message.len() as _,
+                        signature.as_mut_ptr(),
+                        &mut length
+                    ),
+                    CKR_OK as CK_RV
+                );
+                verify_ml_dsa(
+                    [Dsa::MlDsa44, Dsa::MlDsa65, Dsa::MlDsa87][index],
+                    &public,
+                    &message,
+                    &[],
+                    &signature,
+                )
+                .unwrap();
+            } else {
+                let (mut ciphertext, expected) = ml_kem_encapsulate(
+                    [Kem::MlKem512, Kem::MlKem768, Kem::MlKem1024][index - 3],
+                    &public,
+                )
+                .unwrap();
+                let mut secret_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+                let mut no = CK_FALSE as CK_BBOOL;
+                let mut secret_template = [
+                    scalar_attribute(CKA_KEY_TYPE as _, &mut secret_type),
+                    scalar_attribute(CKA_TOKEN as _, &mut no),
+                    scalar_attribute(CKA_SENSITIVE as _, &mut no),
+                    scalar_attribute(CKA_EXTRACTABLE as _, &mut yes),
+                ];
+                let mut secret = 0;
+                assert_eq!(
+                    crate::api::C_DecapsulateKey(
+                        session,
+                        &mut mechanism,
+                        private,
+                        secret_template.as_mut_ptr(),
+                        secret_template.len() as _,
+                        ciphertext.as_mut_ptr(),
+                        ciphertext.len() as _,
+                        &mut secret
+                    ),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(read_value(session, secret), expected.as_slice());
+                assert_eq!(
+                    crate::api::C_DestroyObject(session, secret),
+                    CKR_OK as CK_RV
+                );
+            }
+            if piv {
+                assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+                login(
+                    session,
+                    CKU_SO as _,
+                    b"010203040506070801020304050607080102030405060708",
+                );
+            }
+            // For PIV the next import replaces this isolated fixture's slot.
+            // Remove HSM public projections before their associated private key.
+            if !piv {
+                let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+                let mut find = [
+                    bytes_attribute(CKA_ID as _, &mut id),
+                    scalar_attribute(CKA_CLASS as _, &mut public_class),
+                ];
+                assert_eq!(
+                    crate::api::C_FindObjectsInit(session, find.as_mut_ptr(), find.len() as _),
+                    CKR_OK as CK_RV
+                );
+                let (mut public_handle, mut count) = (0, 0);
+                assert_eq!(
+                    crate::api::C_FindObjects(session, &mut public_handle, 1, &mut count),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+                if count != 0 {
+                    assert_eq!(
+                        crate::api::C_DestroyObject(session, public_handle),
+                        CKR_OK as CK_RV
+                    );
+                }
+                assert_eq!(
+                    crate::api::C_DestroyObject(session, private),
+                    CKR_OK as CK_RV
+                );
+            }
+        }
+    }
+}
+
 fn run_matrix(backend: Backend) {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -565,6 +761,9 @@ fn run_matrix(backend: Backend) {
             );
             login(session, CKU_USER as _, b"0001password");
         }
+    }
+    if !matches!(backend, Backend::DeployedYubiHsm) {
+        assert_standalone_imports(backend, session, piv);
     }
     let mut cleanup = DeployedKeyCleanup {
         session,

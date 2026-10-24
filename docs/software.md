@@ -413,8 +413,11 @@ complete expanded encoding must match the seed expansion. Expanded ML-DSA
 imports check coefficient ranges, `tr`/`t0` algebraic consistency and a
 signing/verification pairwise test in
 [software-key-core](https://github.com/qpernil/software-key-core/blob/main/docs/ml-dsa-key-validation.md).
-Expanded-only keys have no recoverable `CKA_SEED`. Native virtual PIV and
-YubiHSM import commands retain their seed-only wire formats.
+Expanded-only keys have no recoverable `CKA_SEED`. Software tokens, virtual
+PIV, and virtual YubiHSM use the same shared import validation and retain the
+seed when available or the expanded key otherwise. Their native transport
+encodings are documented in [PIV](piv.md) and
+[virtual YubiHSM PQC keys](yubihsm-post-quantum.md).
 
 `CKM_ML_DSA` without a parameter uses an empty context and hedge-preferred
 signing. A `CK_SIGN_ADDITIONAL_CONTEXT` parameter may supply a context of at
@@ -460,8 +463,11 @@ seed and private `CKA_VALUE` is the expanded FIPS 203 decapsulation key; the
 normal PKCS #11 sensitive-attribute rules protect both private values. Software import
 accepts `CKA_SEED`, expanded `CKA_VALUE`, or both; when both are present the
 complete expanded encoding must match the seed expansion.
-Expanded-only keys have no recoverable `CKA_SEED`. Native virtual PIV and
-YubiHSM import commands retain their seed-only wire formats.
+Expanded-only keys have no recoverable `CKA_SEED`. Software tokens, virtual
+PIV, and virtual YubiHSM use the same shared import validation and retain the
+seed when available or the expanded key otherwise. Their native transport
+encodings are documented in [PIV](piv.md) and
+[virtual YubiHSM PQC keys](yubihsm-post-quantum.md).
 
 Expanded private imports through `CKA_VALUE` use the shared
 [ML-KEM import validation](https://github.com/qpernil/software-key-core/blob/main/docs/ml-kem-key-validation.md).
