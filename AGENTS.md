@@ -1,3 +1,11 @@
+# Dependency scope
+
+- Treat dependencies, including our own forks and PR branches, as read-only
+  unless explicitly asked to work on that dependency or PR. Consuming a
+  dependency does not authorize modifying it.
+- Upstream PRs have a fixed scope. Keep unrelated consolidation and downstream
+  adaptations out of them; inspect the full PR diff before every push.
+
 # Authentication secrets
 
 - Follow [the authentication secret retention policy](docs/authentication-secrets.md).
