@@ -11,7 +11,7 @@ concurrency:
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # Match SCP/FIDO state and standalone PQC import/persistence to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: 34e959924880cde4c3afa9ebf93dff13e1645e30
+  VIRTUAL_YUBIKEY_REVISION: c67ee9011f7ae6342be151c7de00366ea7de4421
 
 jobs:
   pkcs11test:
@@ -352,11 +352,11 @@ jobs:
 
       - name: Check workspace advisories and licenses
         working-directory: pkcs11rs
-        run: cargo deny --all-features check advisories licenses
+        run: cargo deny --workspace --all-features --locked check advisories licenses
 
       - name: Check binding generator advisories and licenses
         working-directory: pkcs11rs/xtask
-        run: cargo deny --all-features check advisories licenses
+        run: cargo deny --workspace --all-features --locked check advisories licenses
 
   macos:
     runs-on: macos-latest

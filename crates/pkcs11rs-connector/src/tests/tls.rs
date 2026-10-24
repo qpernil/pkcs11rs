@@ -6,6 +6,38 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::sync::atomic::AtomicUsize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn pem_loader_accepts_bundles_and_certificate_chains() {
+    let (pem, _) = PemFiles::self_signed_localhost();
+    let certificate = fs::read_to_string(&pem.certificate).unwrap();
+    let key = fs::read_to_string(&pem.key).unwrap();
+    fs::write(&pem.certificate, certificate.repeat(2)).unwrap();
+    fs::write(&pem.key, format!("{certificate}{key}")).unwrap();
+    tls::server_config(&pem.certificate, &pem.key, None).unwrap();
+}
+
+#[test]
+fn pem_loader_rejects_missing_or_malformed_identity_material() {
+    let (pem, _) = PemFiles::self_signed_localhost();
+    let certificate = fs::read(&pem.certificate).unwrap();
+    let key = fs::read(&pem.key).unwrap();
+    for invalid in [
+        certificate.as_slice(),
+        b"-----BEGIN PRIVATE KEY-----\n!\n-----END PRIVATE KEY-----\n",
+    ] {
+        fs::write(&pem.key, invalid).unwrap();
+        assert!(tls::server_config(&pem.certificate, &pem.key, None).is_err());
+    }
+    fs::write(&pem.key, key).unwrap();
+    for invalid in [
+        b"".as_slice(),
+        b"-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n",
+    ] {
+        fs::write(&pem.certificate, invalid).unwrap();
+        assert!(tls::server_config(&pem.certificate, &pem.key, None).is_err());
+    }
+}
+
 pub(super) struct Authority {
     pub(super) certificate: Certificate,
     key: KeyPair,

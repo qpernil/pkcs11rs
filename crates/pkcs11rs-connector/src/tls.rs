@@ -1,5 +1,6 @@
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
-use std::{fs::File, io::BufReader, path::Path, sync::Arc};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use std::{path::Path, sync::Arc};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -12,9 +13,7 @@ pub fn server_config(
     if server_certificates.is_empty() {
         return Err(format!("{} contains no certificates", certificate_path.display()).into());
     }
-    let private_key =
-        rustls_pemfile::private_key(&mut BufReader::new(File::open(private_key_path)?))?
-            .ok_or_else(|| format!("{} contains no private key", private_key_path.display()))?;
+    let private_key = PrivateKeyDer::from_pem_file(private_key_path)?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ServerConfig::builder_with_provider(provider)
@@ -44,8 +43,8 @@ pub fn server_config(
     Ok(config)
 }
 
-fn certificates(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, BoxError> {
-    rustls_pemfile::certs(&mut BufReader::new(File::open(path)?))
+fn certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, BoxError> {
+    CertificateDer::pem_file_iter(path)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
