@@ -11,7 +11,7 @@ concurrency:
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # Match SCP/FIDO state and standalone PQC import/persistence to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: d4e17f32f615e39458a397390906bd0a0df2b205
+  VIRTUAL_YUBIKEY_REVISION: 34e959924880cde4c3afa9ebf93dff13e1645e30
 
 jobs:
   pkcs11test:
