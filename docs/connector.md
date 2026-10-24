@@ -593,6 +593,10 @@ pkcs11rs-connector \
   --tls-client-ca /etc/pkcs11rs/client-ca.pem
 ```
 
+PEM certificates and private keys are parsed directly by `rustls-pki-types`.
+Certificate chains and mixed PEM bundles are supported; missing identity
+material and malformed PEM are rejected before the listener starts.
+
 The TLS configuration supports TLS 1.3 and TLS 1.2 and advertises HTTP/2 and
 HTTP/1.1 through ALPN. HTTPS without `--tls-client-ca` authenticates the server
 to the client but permits any network client that can reach the listener to
@@ -604,7 +608,8 @@ therefore has the same access.
 Connector regression tests exercise real TLS 1.2 and TLS 1.3 connections.
 They verify server trust and hostname checks, successful mTLS requests over
 HTTP/1.1 and HTTP/2, and rejection of missing, untrusted, expired, or
-server-only client certificates. Run this matrix with
+server-only client certificates. They also cover PEM bundles, certificate
+chains, and missing or malformed identity material. Run this matrix with
 `cargo test --locked -p pkcs11rs-connector tls_tests`. These checks validate
 transport authentication; the public-exposure requirements below remain.
 

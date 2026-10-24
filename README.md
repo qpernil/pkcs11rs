@@ -373,6 +373,14 @@ backend. No separately installed `libhidapi` is required.
 Remote YubiHSM Connector HTTPS uses rustls and does not require OpenSSL or
 libcurl.
 
+Dependency-policy checks cover every Cargo workspace member, all features,
+and the checked-in lockfile:
+
+```sh
+cargo deny --workspace --all-features --locked check advisories licenses
+cargo deny --manifest-path xtask/Cargo.toml --workspace --all-features --locked check advisories licenses
+```
+
 ## Build
 
 The first-party `software-key-core`, `virtual-yubikey-core`, and
