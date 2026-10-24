@@ -424,57 +424,74 @@ fn piv_pq_private_import(
     templ: &[CK_ATTRIBUTE],
     key_type: CK_KEY_TYPE,
 ) -> Result<piv::PrivateKeyImport, Error> {
-    if template_attribute(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE).is_some() {
-        return Err(CKR_TEMPLATE_INCONSISTENT.into());
-    }
+    use software_key_core::post_quantum::{
+        MlDsaError, MlDsaPrivateKey, MlKemError, MlKemPrivateKey,
+    };
     let parameter = read_ulong_template_attribute(
         template_attribute(templ, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
             .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
     )
     .map_err(Error::from)?;
-    let seed = required_template_value(templ, CKA_SEED as CK_ATTRIBUTE_TYPE)?;
-    let (algorithm, public) = if key_type == CKK_ML_DSA as CK_KEY_TYPE {
-        let parameter_set = match parameter {
-            1 => MlDsaParameterSet::MlDsa44,
-            2 => MlDsaParameterSet::MlDsa65,
-            3 => MlDsaParameterSet::MlDsa87,
+    let component = |kind| {
+        template_attribute(templ, kind)
+            .map(|attribute| read_attribute_value(attribute).map(Zeroizing::new))
+            .transpose()
+            .map_err(Error::from)
+    };
+    let seed = component(CKA_SEED as CK_ATTRIBUTE_TYPE)?;
+    let expanded = component(CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
+    if seed.is_none() && expanded.is_none() {
+        return Err(CKR_TEMPLATE_INCOMPLETE.into());
+    }
+    let seed = seed.as_deref().map(Vec::as_slice);
+    let expanded = expanded.as_deref().map(Vec::as_slice);
+    let (algorithm, public, serialized, has_seed) = if key_type == CKK_ML_DSA as CK_KEY_TYPE {
+        let (parameters, algorithm) = match parameter {
+            1 => (MlDsaParameterSet::MlDsa44, piv::Algorithm::MlDsa44),
+            2 => (MlDsaParameterSet::MlDsa65, piv::Algorithm::MlDsa65),
+            3 => (MlDsaParameterSet::MlDsa87, piv::Algorithm::MlDsa87),
             _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
         };
-        if seed.len() != 32 {
-            return Err(CKR_KEY_SIZE_RANGE.into());
-        }
         let key =
-            SoftwareSigningKey::from_serialized_for_kind(KeyKind::MlDsa(parameter_set), &seed)
-                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-        let SoftwarePublicKey::MlDsa { public_key, .. } = key.public_key() else {
-            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-        };
-        let algorithm = match parameter {
-            1 => piv::Algorithm::MlDsa44,
-            2 => piv::Algorithm::MlDsa65,
-            _ => piv::Algorithm::MlDsa87,
-        };
-        (algorithm, public_key)
+            MlDsaPrivateKey::from_components(parameters, seed, expanded).map_err(|error| {
+                Error::from(match error {
+                    MlDsaError::InvalidSeedLength => CKR_KEY_SIZE_RANGE,
+                    MlDsaError::RandomnessUnavailable => CKR_RANDOM_NO_RNG,
+                    _ => CKR_ATTRIBUTE_VALUE_INVALID,
+                })
+            })?;
+        (
+            algorithm,
+            key.public_key(),
+            key.serialized(),
+            key.seed().is_some(),
+        )
     } else {
-        let parameter_set = match parameter {
-            1 => software_key_core::post_quantum::MlKemParameterSet::MlKem512,
-            2 => software_key_core::post_quantum::MlKemParameterSet::MlKem768,
-            3 => software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+        use software_key_core::post_quantum::MlKemParameterSet::*;
+        let (parameters, algorithm) = match parameter {
+            1 => (MlKem512, piv::Algorithm::MlKem512),
+            2 => (MlKem768, piv::Algorithm::MlKem768),
+            3 => (MlKem1024, piv::Algorithm::MlKem1024),
             _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
         };
         let key =
-            software_key_core::post_quantum::MlKemPrivateKey::from_seed_slice(parameter_set, &seed)
-                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-        let algorithm = match parameter {
-            1 => piv::Algorithm::MlKem512,
-            2 => piv::Algorithm::MlKem768,
-            _ => piv::Algorithm::MlKem1024,
-        };
-        (algorithm, key.public_key())
+            MlKemPrivateKey::from_components(parameters, seed, expanded).map_err(|error| {
+                Error::from(match error {
+                    MlKemError::InvalidSeedLength => CKR_KEY_SIZE_RANGE,
+                    MlKemError::RandomnessUnavailable => CKR_RANDOM_NO_RNG,
+                    _ => CKR_ATTRIBUTE_VALUE_INVALID,
+                })
+            })?;
+        (
+            algorithm,
+            key.public_key(),
+            key.serialized(),
+            key.seed().is_some(),
+        )
     };
     Ok(piv::PrivateKeyImport {
         algorithm,
-        components: vec![(0x09, seed)],
+        components: vec![(if has_seed { 0x09 } else { 0x0a }, serialized)],
         public_key: MetadataPublicKey::Raw(public),
     })
 }
@@ -1038,7 +1055,7 @@ fn yubihsm_import_command(
                 YubiHsmCommand::put_object(
                     YubiHsmCommandCode::PutAsymmetricKey,
                     &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
-                    key.seed().ok_or(CKR_TEMPLATE_INCONSISTENT)?.as_ref(),
+                    &key.serialized(),
                 )?,
                 CKO_PRIVATE_KEY as _,
                 YUBIHSM_ASYMMETRIC_KEY,
@@ -1053,12 +1070,12 @@ fn yubihsm_import_command(
                 MlKem768 => YUBIHSM_ALGO_ML_KEM_768,
                 MlKem1024 => YUBIHSM_ALGO_ML_KEM_1024,
             };
-            let seed = key.seed().ok_or(CKR_TEMPLATE_INCONSISTENT)?;
+            let serialized = key.serialized();
             Ok((
                 YubiHsmCommand::put_object(
                     YubiHsmCommandCode::PutAsymmetricKey,
                     &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
-                    &seed,
+                    &serialized,
                 )?,
                 CKO_PRIVATE_KEY as _,
                 YUBIHSM_ASYMMETRIC_KEY,
@@ -1659,16 +1676,14 @@ fn build_imported_key_material(
             };
             let seed = components.remove(&(CKA_SEED as CK_ATTRIBUTE_TYPE));
             let expanded = components.remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE));
-            let key = match (seed.as_deref(), expanded.as_deref()) {
-                (Some(seed), Some(expanded)) => {
-                    MlDsaPrivateKey::from_seed_and_expanded(parameter_set, seed, expanded)
-                }
-                (Some(seed), None) => MlDsaPrivateKey::from_seed_slice(parameter_set, seed),
-                (None, Some(expanded)) => {
-                    MlDsaPrivateKey::from_expanded_private_key(parameter_set, expanded)
-                }
-                (None, None) => return Err(CKR_TEMPLATE_INCOMPLETE.into()),
+            if seed.is_none() && expanded.is_none() {
+                return Err(CKR_TEMPLATE_INCOMPLETE.into());
             }
+            let key = MlDsaPrivateKey::from_components(
+                parameter_set,
+                seed.as_deref().map(Vec::as_slice),
+                expanded.as_deref().map(Vec::as_slice),
+            )
             .map_err(|error| {
                 Error::from(match error {
                     MlDsaError::InvalidSeedLength => CKR_KEY_SIZE_RANGE,
@@ -1699,16 +1714,14 @@ fn build_imported_key_material(
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             use software_key_core::post_quantum::{MlKemError, MlKemPrivateKey};
-            let key = match (seed.as_deref(), expanded.as_deref()) {
-                (Some(seed), Some(expanded)) => {
-                    MlKemPrivateKey::from_seed_and_expanded(shared_parameter_set, seed, expanded)
-                }
-                (Some(seed), None) => MlKemPrivateKey::from_seed_slice(shared_parameter_set, seed),
-                (None, Some(expanded)) => {
-                    MlKemPrivateKey::from_expanded_private_key(shared_parameter_set, expanded)
-                }
-                (None, None) => return Err(CKR_TEMPLATE_INCOMPLETE.into()),
+            if seed.is_none() && expanded.is_none() {
+                return Err(CKR_TEMPLATE_INCOMPLETE.into());
             }
+            let key = MlKemPrivateKey::from_components(
+                shared_parameter_set,
+                seed.as_deref().map(Vec::as_slice),
+                expanded.as_deref().map(Vec::as_slice),
+            )
             .map_err(|error| {
                 Error::from(match error {
                     MlKemError::RandomnessUnavailable => CKR_RANDOM_NO_RNG,

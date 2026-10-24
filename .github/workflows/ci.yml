@@ -10,8 +10,8 @@ concurrency:
 
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  # Match SCP metadata, FIDO handling, and persistent Management state to provider integration.
-  VIRTUAL_YUBIKEY_REVISION: 229f9cb410a0fc6824440b0c27c11993f0945033
+  # Match SCP/FIDO state and standalone PQC import/persistence to provider integration.
+  VIRTUAL_YUBIKEY_REVISION: d4e17f32f615e39458a397390906bd0a0df2b205
 
 jobs:
   pkcs11test:
@@ -208,6 +208,12 @@ jobs:
 
       - name: Run complete PQC provider matrix
         run: cargo test --release --locked -p pkcs11rs --lib --no-default-features --features embedded-virtual-yubikey pqc_matrix -- --test-threads=1
+
+      - name: Test shared PQC import encodings and virtual-device persistence
+        run: |
+          cargo test --release --manifest-path ../software-key-core/Cargo.toml --locked raw_private_encodings_share
+          cargo test --release --manifest-path ../virtual-yubikey/Cargo.toml --locked -p virtual-yubikey-core standalone_pqc_imports
+          cargo test --release --manifest-path ../virtual-yubihsm/Cargo.toml --locked -p virtual-yubihsm-core post_quantum_
 
       - name: Run full PQC matrix through the connector-embedded HSM
         run: |

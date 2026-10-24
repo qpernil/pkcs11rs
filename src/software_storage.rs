@@ -2367,6 +2367,84 @@ mod tests {
     }
 
     #[test]
+    fn seedless_pqc_keys_survive_encrypted_store_reopen_and_fresh_login() {
+        use software_key_core::post_quantum::{
+            MlDsaParameterSet as Dsa, MlDsaPrivateKey, MlKemParameterSet as Kem, MlKemPrivateKey,
+            ml_kem_encapsulate, verify_ml_dsa,
+        };
+        let directory = TestDirectory::new();
+        let store = open_store("seedless PQC", directory.0.clone());
+        let so = store.init_token(b"test SO pin", [b' '; 32]).unwrap();
+        store.init_user_pin(b"fresh test user pin", &so).unwrap();
+        drop(so);
+        let (_, master) = store.login(b"fresh test user pin").unwrap();
+        let mut expected = Vec::new();
+        for parameters in [Dsa::MlDsa44, Dsa::MlDsa65, Dsa::MlDsa87] {
+            let key = MlDsaPrivateKey::from_seed(parameters, [7; 32]);
+            expected.push(SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::MlDsa(
+                    MlDsaPrivateKey::from_expanded_private_key(
+                        parameters,
+                        &key.expanded_private_key(),
+                    )
+                    .unwrap(),
+                ),
+            ));
+        }
+        for parameters in [Kem::MlKem512, Kem::MlKem768, Kem::MlKem1024] {
+            let key = MlKemPrivateKey::from_seed(parameters, [7; 64]);
+            expected.push(SoftwarePrivateKeyMaterial::MlKem(
+                MlKemPrivateKey::from_expanded_private_key(parameters, &key.expanded_private_key())
+                    .unwrap(),
+            ));
+        }
+        for (index, material) in expected.iter().enumerate() {
+            let mut original = object(material.clone());
+            original.id = vec![index as u8];
+            original.sign = index < 3;
+            original.decapsulate = index >= 3;
+            original.derive = false;
+            store.put_object(7, &master, &original).unwrap();
+        }
+        drop(master);
+        drop(store);
+
+        let reopened = open_store("seedless PQC", directory.0.clone());
+        assert!(reopened.login(b"incorrect test pin").is_err());
+        let (_, master) = reopened.login(b"fresh test user pin").unwrap();
+        let (restored, _) = reopened.load_objects(9, &master).unwrap();
+        assert_eq!(restored.len(), expected.len());
+        for record in restored {
+            let original = &expected[record.id[0] as usize];
+            let KeyMaterial::SoftwarePrivate(material) = record.material else {
+                panic!("private key record");
+            };
+            assert_eq!(material.private_value(), original.private_value());
+            match material {
+                SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(key)) => {
+                    assert!(key.seed().is_none());
+                    let signature = key.sign_deterministic(b"restored key", &[]).unwrap();
+                    verify_ml_dsa(
+                        key.parameter_set(),
+                        &key.public_key(),
+                        b"restored key",
+                        &[],
+                        &signature,
+                    )
+                    .unwrap();
+                }
+                SoftwarePrivateKeyMaterial::MlKem(key) => {
+                    assert!(key.seed().is_none());
+                    let (ciphertext, shared) =
+                        ml_kem_encapsulate(key.parameter_set(), &key.public_key()).unwrap();
+                    assert_eq!(key.decapsulate(&ciphertext).unwrap(), shared);
+                }
+                _ => panic!("standalone PQC key"),
+            }
+        }
+    }
+
+    #[test]
     fn persistent_ml_kem_private_key_preserves_decapsulation_policy() {
         let master_key = [0x3c; MASTER_KEY_LENGTH];
         let mut original = object(SoftwarePrivateKeyMaterial::MlKem(

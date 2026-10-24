@@ -1127,6 +1127,25 @@ impl Client {
         };
         let mut request = Zeroizing::new(Vec::new());
         for (tag, component) in &key.components {
+            if *tag == 0x0a {
+                use software_key_core::post_quantum::{
+                    MlDsaParameterSet as Dsa, MlKemParameterSet as Kem,
+                };
+                let expanded_length = match key.algorithm {
+                    Algorithm::MlDsa44 => Dsa::MlDsa44.expanded_private_key_length(),
+                    Algorithm::MlDsa65 => Dsa::MlDsa65.expanded_private_key_length(),
+                    Algorithm::MlDsa87 => Dsa::MlDsa87.expanded_private_key_length(),
+                    Algorithm::MlKem512 => Kem::MlKem512.expanded_private_key_length(),
+                    Algorithm::MlKem768 => Kem::MlKem768.expanded_private_key_length(),
+                    Algorithm::MlKem1024 => Kem::MlKem1024.expanded_private_key_length(),
+                    _ => return Err(CKR_DATA_INVALID.into()),
+                };
+                if component.len() != expanded_length {
+                    return Err(CKR_KEY_SIZE_RANGE.into());
+                }
+                request.extend_from_slice(&encode_tlv(*tag, component)?);
+                continue;
+            }
             if component.is_empty() || component.len() > element_length {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }

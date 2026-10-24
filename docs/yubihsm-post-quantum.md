@@ -28,7 +28,14 @@ checks, per-object usage flags, and `CKA_ALLOWED_MECHANISMS` select the transpor
 path without a separate command filter.
 
 Key-pair generation uses the existing `GenerateAsymmetricKey` command. Private
-seed imports use `PutAsymmetricKey`, and public projection uses `GetPublicKey`.
+seed, expanded, or combined imports use `PutAsymmetricKey`, and public
+projection uses `GetPublicKey`. Raw native import accepts the exact-length
+seed, expanded key, or seed followed by expanded key; shared software-key-core
+validation rejects malformed and inconsistent material. PKCS #11 imports accept
+`CKA_SEED`, expanded `CKA_VALUE`, or both, and send a validated seed when
+available or the expanded key otherwise. Device persistence uses the same
+seed-preferred representation and restores existing seed records as well as
+expanded-only keys. Reported object lengths remain the logical seed lengths.
 ML-DSA signing uses virtual command `0x0d`, preserving PKCS #11 deterministic,
 required-randomization, preferred-randomization, and context semantics.
 Its single wire format is `key ID (u16 BE) | hedge mode (u8) | prehash (u8) |
