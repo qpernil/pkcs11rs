@@ -62,7 +62,7 @@ or device worker.
 | `software-key-core` | Providers and virtual devices need the same software key operations and durable-state helpers. | Shares cryptographic implementations while consumers retain their protocol and authorization policy. See [software-key-core](https://github.com/qpernil/software-key-core). |
 | `pkcs11rs-local-hardware` | The provider and connector need consistent native YubiHSM USB behavior. | Shares blocking and asynchronous frontends over the same device implementation. See [connector architecture](architecture.md#companion-multi-device-connector). |
 | `usb-gadget-supervisor` and `usb-gadget-worker` | You are running a virtual USB worker on Linux. | Separate privileged USB setup and resource lifecycle from protocol traffic and state. Embedded devices do not need them. See [supervisor architecture](https://github.com/qpernil/usb-gadget-supervisor/blob/main/docs/architecture.md). |
-| Pinned `signatures` fork | The software providers need the project's ML-DSA implementation. | A cryptographic dependency, not an additional service. See [software-key-core dependencies](https://github.com/qpernil/software-key-core/blob/main/Cargo.toml). |
+| Upstream [RustCrypto/signatures](https://github.com/RustCrypto/signatures) | The software providers need the ML-DSA implementation. | A cryptographic dependency, not an additional service. See [software-key-core dependencies](https://github.com/qpernil/software-key-core/blob/main/Cargo.toml). |
 
 ## Existing clients and validation
 
