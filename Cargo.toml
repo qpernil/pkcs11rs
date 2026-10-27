@@ -80,7 +80,7 @@ x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
-ml-dsa = { git = "https://github.com/qpernil/signatures.git", rev = "a08a14910652a3737b8de83d18ad33704853d9db", features = ["zeroize"] }
+ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", features = ["zeroize"] }
 num-bigint-dig = "0.8.6"
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 signature = "3.0.0"
