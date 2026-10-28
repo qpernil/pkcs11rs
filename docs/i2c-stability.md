@@ -199,9 +199,10 @@ exchange deadlines are unchanged.
 Enclave `reserve` credential and target Authentication Key `1003`. Its `read`
 mode repeatedly invokes `C_GetSessionInfo`, which performs an authenticated
 GetStorageInfo request rather than reading a cached public key. Its `sign` mode
-requires an explicitly selected existing RSA signing pair and verifies each
-signature over a domain-labelled test message. `inventory` reports public
-object identity/attributes for before/after comparison. The client has no key
+requires an explicitly selected existing RSA private signing key and signs a
+domain-labelled test message. It checks the response length; it does not
+cryptographically verify signatures or require separate public-key objects.
+`inventory` reports public object identity/attributes for before/after comparison. The client has no key
 creation, import, modification or deletion mode, disables local hardware
 discovery and transparent session recreation, and stops on the first error.
 Run read and signing roles in separate processes so PKCS #11 context locking

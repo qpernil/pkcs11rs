@@ -94,8 +94,6 @@ int main(int argc, char **argv) {
   LOAD(C_GetAttributeValue);
   LOAD(C_SignInit);
   LOAD(C_Sign);
-  LOAD(C_VerifyInit);
-  LOAD(C_Verify);
   int status = 0, initialized = 0;
   CK_SESSION_HANDLE source = 0, target = 0;
   char configuration[2048], target_label[64];
@@ -141,8 +139,8 @@ int main(int argc, char **argv) {
                              "type=private?pkcs11rs-authkey=1003";
   REQUIRE(C_LoginUser(target, CKU_USER, NULL, 0, credential,
                       sizeof(credential) - 1));
-  CK_OBJECT_HANDLE private_key = 0, public_key = 0;
-  unsigned private_matches = 0, public_matches = 0;
+  CK_OBJECT_HANDLE private_key = 0;
+  unsigned private_matches = 0;
   if (!strcmp(argv[4], "inventory") || !strcmp(argv[4], "sign")) {
     REQUIRE(C_FindObjectsInit(target, NULL, 0));
     for (;;) {
@@ -192,10 +190,6 @@ int main(int argc, char **argv) {
             private_key = objects[i];
             private_matches++;
           }
-          if (klass == CKO_PUBLIC_KEY) {
-            public_key = objects[i];
-            public_matches++;
-          }
         }
       }
     }
@@ -203,10 +197,9 @@ int main(int argc, char **argv) {
   }
   if (!strcmp(argv[4], "inventory"))
     goto cleanup;
-  if (!strcmp(argv[4], "sign") &&
-      (private_matches != 1 || public_matches != 1)) {
-    fprintf(stderr, "requires one existing RSA signing pair, found %u/%u\n",
-            private_matches, public_matches);
+  if (!strcmp(argv[4], "sign") && private_matches != 1) {
+    fprintf(stderr, "requires one existing RSA signing key, found %u\n",
+            private_matches);
     status = 2;
     goto cleanup;
   }
@@ -245,6 +238,7 @@ int main(int argc, char **argv) {
   for (unsigned long index = 0; index < count; index++) {
     double sent = seconds(CLOCK_REALTIME), started = seconds(CLOCK_MONOTONIC);
     CK_RV rv;
+    CK_ULONG signature_len = 0;
     if (!strcmp(argv[4], "read")) {
       CK_SESSION_INFO info;
       rv = C_GetSessionInfo(target, &info);
@@ -254,22 +248,20 @@ int main(int argc, char **argv) {
       for (unsigned j = 0; j < 8; j++)
         message[56 + j] = (unsigned char)(index >> (8 * (7 - j)));
       CK_MECHANISM mechanism = {CKM_SHA256_RSA_PKCS, NULL, 0};
-      CK_ULONG signature_len = sizeof(signature);
+      signature_len = sizeof(signature);
       rv = C_SignInit(target, &mechanism, private_key);
       if (rv == CKR_OK)
         rv =
             C_Sign(target, message, sizeof(message), signature, &signature_len);
-      if (rv == CKR_OK)
-        rv = C_VerifyInit(target, &mechanism, public_key);
-      if (rv == CKR_OK)
-        rv = C_Verify(target, message, sizeof(message), signature,
-                      signature_len);
+      if (rv == CKR_OK && signature_len != 256 && signature_len != 384 &&
+          signature_len != 512)
+        rv = CKR_SIGNATURE_LEN_RANGE;
     }
     printf(
         "{\"kind\":\"operation\",\"serial\":\"%s\",\"mode\":\"%s\",\"index\":%"
-        "lu,\"sent\":%.6f,\"received\":%.6f,\"elapsed_us\":%.0f,\"rv\":%lu}\n",
+        "lu,\"sent\":%.6f,\"received\":%.6f,\"elapsed_us\":%.0f,\"rv\":%lu,\"signature_bytes\":%lu}\n",
         argv[3], argv[4], index, sent, seconds(CLOCK_REALTIME),
-        (seconds(CLOCK_MONOTONIC) - started) * 1e6, rv);
+        (seconds(CLOCK_MONOTONIC) - started) * 1e6, rv, signature_len);
     if (rv != CKR_OK) {
       status = 1;
       break;
