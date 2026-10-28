@@ -59,6 +59,7 @@ def main():
 
     def write_request(request, deadline):
         fcntl.flock(bus, fcntl.LOCK_EX)
+        fcntl.ioctl(bus, 0x0701, 0)  # Never replay a partial transfer after arbitration loss.
         listen_for(1 << 4)
         while select.select([ready], [], [], 0)[0]:
             os.read(ready, 48)
@@ -101,6 +102,7 @@ def main():
                 check_deadline(deadline, "response ready")
                 time.sleep(0.0001)
             fcntl.flock(bus, fcntl.LOCK_EX)
+            fcntl.ioctl(bus, 0x0701, 0)
             header = read(3)
             if header != b"\x81" + request[1:3]:
                 raise RuntimeError(f"wrong header {header.hex()}, expected 81{request[1:3].hex()}")

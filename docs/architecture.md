@@ -689,17 +689,18 @@ a native CryptoTokenKit CCID provider, while remote HTTP(S) connector slots
 remain available to the provider.
 
 The daemon is currently a private-network component, not a public security
-boundary. It implements TLS and optional mTLS, bounded request bodies and
-global in-flight admission, firmware-aware frame validation, serial routing,
-per-device serialization, hot-plug discovery, preservation of its listener and
-claimed USB handles across system suspend, and recovery after an uncertain USB
-failure. A failed command is never replayed; its handle is discarded and a
-later request reopens the same transient USB device, verifies its serial, and
-claims it inside the per-device gate before submitting a new command. The
+boundary. It implements TLS and optional mTLS, bounded TCP connections and TLS
+handshakes, bounded request bodies and global in-flight admission, firmware-aware
+frame validation, serial routing, per-device serialization, and hot-plug discovery.
+It preserves its listener and claimed USB handles across system suspend and
+recovers after an uncertain USB failure. A failed command is never replayed;
+its handle is discarded and a later request reopens the same transient USB
+device, verifies its serial, and claims it inside the per-device gate before
+submitting a new command. The
 daemon deliberately has no complete-handler deadline that could race an active
-USB command. Device-aware client authorization, accepted TCP connection limits,
-and per-client fairness remain future work. See the [connector deployment
-boundary and Internet-readiness checklist](connector.md#deployment-boundary)
+USB command. Device-aware client authorization and per-client fairness remain
+future work. See the
+[connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
 for the authoritative status.
 
 ## Failure boundaries
