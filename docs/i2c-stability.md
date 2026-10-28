@@ -122,6 +122,27 @@ proven absent before testing; fresh authenticated cleanup restores the exact
 not replayed. The [validation record](i2c-fairness-validation.json) retains source
 revisions, per-target results, frame counts, error phases and evidence limits.
 
+### READY-only isolation
+
+An idle peer's READY transitions reproduce a byte mismatch and request
+`EREMOTEIO` errors while the other target runs non-mutating echoes. No requests
+or new responses are sent to the toggling peer. Level-only toggling still fails
+with its BSC driver unloaded and its SDA/SCL pins as inputs, so FIFO publication
+is unnecessary for this reproduction. That disabled-peripheral control uses
+push-pull level changes; it does not alone prove an identical electrical
+mechanism to the original open-drain edge. The release/high and output/low
+control matching open-drain states also reproduces corruption with the BSC
+idle. Readback, unchanged pin-mode rewrites, and direction changes that keep
+READY high pass the finite controls.
+
+These results point toward the READY signal path or controller input/pad,
+ground or probe interaction. They do not establish the physical route or prove
+that every earlier PQC failure has the same cause. The disconnected-READY-wire
+control requires physical bench access and remains pending. See the target
+[READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
+for complete counts and experiment limits. No firmware or lock-policy change
+was made for these controls.
+
 ## PQC provider qualification
 
 The deployed `pqc_matrix_deployed_yubihsm` suite passes single-target baselines
