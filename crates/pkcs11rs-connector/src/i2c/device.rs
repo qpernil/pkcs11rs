@@ -1,13 +1,19 @@
 use super::{
     I2cYubiHsmSpec, ReadyGpioSpec,
+    fair_queue::{FairQueue, Turn},
     timing::{ExchangeTiming, Phase},
 };
 use crate::registry::TransportError;
 use gpiocdev_uapi::v2 as gpio;
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
-    os::fd::AsRawFd,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, MetadataExt},
+    },
+    sync::{Arc, Mutex, OnceLock, Weak},
     thread,
     time::{Duration, Instant},
 };
@@ -178,10 +184,45 @@ fn disable_adapter_retries(bus: &File) -> Result<(), TransportError> {
     Ok(())
 }
 
-struct BusLock(File);
+// Character-device aliases must share admission even when their paths/inodes differ.
+#[derive(Eq, Hash, PartialEq)]
+enum BusIdentity {
+    Adapter(u64),
+    File(u64, u64),
+}
+
+fn bus_queue(bus: &File) -> Result<Arc<FairQueue>, TransportError> {
+    static QUEUES: OnceLock<Mutex<HashMap<BusIdentity, Weak<FairQueue>>>> = OnceLock::new();
+    let metadata = bus
+        .metadata()
+        .map_err(|e| device_error("identify I2C bus", e))?;
+    let identity = if metadata.file_type().is_char_device() {
+        BusIdentity::Adapter(metadata.rdev())
+    } else {
+        BusIdentity::File(metadata.dev(), metadata.ino())
+    };
+    let mut queues = QUEUES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    queues.retain(|_, queue| queue.strong_count() != 0);
+    if let Some(queue) = queues.get(&identity).and_then(Weak::upgrade) {
+        return Ok(queue);
+    }
+    let queue = Arc::new(FairQueue::default());
+    queues.insert(identity, Arc::downgrade(&queue));
+    Ok(queue)
+}
+
+struct BusLock {
+    lock: File,
+    // Remains alive until after flock is unlocked in Drop.
+    _turn: Turn,
+}
 
 impl BusLock {
     fn acquire(bus: &File, deadline: Instant) -> Result<Self, TransportError> {
+        let turn = bus_queue(bus)?.acquire(deadline)?;
         let lock = bus
             .try_clone()
             .map_err(|error| device_error("duplicate I2C bus descriptor", error))?;
@@ -192,7 +233,7 @@ impl BusLock {
                 )));
             }
             if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Self(lock));
+                return Ok(Self { lock, _turn: turn });
             }
             let error = io::Error::last_os_error();
             match error.kind() {
@@ -207,7 +248,7 @@ impl BusLock {
 impl Drop for BusLock {
     fn drop(&mut self) {
         // The owned duplicate keeps the open file description alive until unlock.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -395,7 +436,21 @@ mod tests {
             .open(&path)
             .unwrap();
         let second = File::open(&path).unwrap();
+        let external = File::open(&path).unwrap();
         std::fs::remove_file(path).unwrap();
+        assert!(Arc::ptr_eq(
+            &bus_queue(&first).unwrap(),
+            &bus_queue(&second).unwrap()
+        ));
+        assert_eq!(
+            unsafe { libc::flock(external.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        assert!(BusLock::acquire(&first, Instant::now() + Duration::from_millis(5)).is_err());
+        assert_eq!(
+            unsafe { libc::flock(external.as_raw_fd(), libc::LOCK_UN) },
+            0
+        );
         let held = BusLock::acquire(&first, Instant::now() + Duration::from_secs(1)).unwrap();
         assert!(BusLock::acquire(&second, Instant::now() + Duration::from_millis(5)).is_err());
         drop(held);

@@ -29,6 +29,16 @@ bus lock from request writing through the target's cleanup acknowledgment
 reacquires it for the three-byte header and exact-length body reads. A per-device
 gate keeps each HSM single-flight. Separate targets can compute concurrently,
 but shared-bus concurrency remains unqualified.
+
+Connector workers enter a FIFO admission queue for each wire phase. Character
+handles for the same physical adapter share the queue even through device-node
+aliases. A queued peer precedes a busy worker's next acquisition, and expired
+waiters remove their positions. The existing exchange deadline covers both
+queue and advisory-lock waits. The queue position is released after the
+advisory lock is unlocked, including error exits; neither is held during target
+computation. Other processes still coordinate through the advisory lock, whose
+fairness across processes is not guaranteed by this in-process queue.
+
 READY stays asserted after reading; a new request clears previous transmit state. The
 acknowledgment includes a short assertion when READY was already inactive,
 so the controller waits for an edge rather than trusting an old level. It arms
