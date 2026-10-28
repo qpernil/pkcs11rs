@@ -9,10 +9,11 @@ the iOS XCFramework.
 > **Security status:** the connector is suitable for loopback, a trusted
 > private network, or access through a tightly controlled VPN or reverse proxy.
 > It is not approved for direct exposure to the public Internet. HTTPS, mTLS,
-> bounded HTTP admission, YubiHSM frame validation, firmware-aware USB limits,
-> transport timeouts, hot-plug handling, and continuity across system suspend
-> are implemented. Device-aware authorization, connection and client rate
-> limits, and the remaining operational controls are listed in
+> bounded TCP connections, TLS handshakes and HTTP admission, YubiHSM frame
+> validation, firmware-aware USB limits, transport timeouts, hot-plug handling,
+> and continuity across system suspend are implemented. Device-aware
+> authorization, per-source connection admission, per-client rate limits, and
+> the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
 ## Experimental I2C YubiHSMs
@@ -63,7 +64,18 @@ A command is one I2C write followed by a three-byte response-header read and
 an exact-length payload read. The connector holds the shared bus lock through
 the request's cleanup acknowledgment, releases it while the HSM computes, then
 reacquires it for the entire response read. Different targets can compute
-concurrently. All other clients must cooperate in this advisory bus lock.
+concurrently. Shared-bus concurrency remains unqualified; see the
+[I2C qualification limits](i2c-stability.md#qualification-limits). All other
+clients must cooperate in this advisory bus lock. Within one connector process,
+workers acquire each wire phase in FIFO order per physical adapter, with the
+exchange deadline covering queued admission. This prevents an active target
+from repeatedly bypassing a queued peer without holding the bus during
+computation. Fairness between separate processes is outside this queue.
+Before each request and response wire phase, the connector sets the Linux
+adapter retry count to zero under that lock. Arbitration loss must return an
+error rather than replaying a partially consumed reply or a command with
+uncertain side effects. This setting applies to the entire adapter; cooperating
+clients must preserve it.
 Requests and responses use the same 8,192-byte total frame limit as the USB and
 HTTP transports. The target frontend refuses to start if its kernel driver
 reports a smaller maximum transfer.
