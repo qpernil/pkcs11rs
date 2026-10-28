@@ -135,13 +135,24 @@ control matching open-drain states also reproduces corruption with the BSC
 idle. Readback, unchanged pin-mode rewrites, and direction changes that keep
 READY high pass the finite controls.
 
-These results point toward the READY signal path or controller input/pad,
-ground or probe interaction. They do not establish the physical route or prove
-that every earlier PQC failure has the same cause. The disconnected-READY-wire
-control requires physical bench access and remains pending. See the target
+The connected/disconnected/reconnected comparison implicates the connected
+READY path. The fixed-output high/low control fails after eight successful
+echoes with the lead connected; disconnecting only the lead at controller
+GPIO22 passes all 500 echoes (1,449,901 payload bytes over 7,153 GPIO cycles).
+Reconnecting the same lead restores request-write `EREMOTEIO` after 67 successful
+echoes and 674 GPIO cycles. Electrical checks verify both wiring states. The
+failing request waits 11 microseconds for the bus lock. The idle peer's BSC
+transaction and byte counters remain zero during the two physical controls.
+
+These finite results do not separate wire coupling, controller pad/input,
+and ground/probe effects, qualify authenticated PQC concurrency, or prove that
+every earlier failure has this cause. C3 probe retention was requested but not
+independently verified; no new time-aligned waveform is claimed. A short
+READY/ground pair routed away from SDA/SCL, then a spare controller input if
+needed, can distinguish routing from pad effects. See the target
 [READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
-for complete counts and experiment limits. No firmware or lock-policy change
-was made for these controls.
+for complete counts and limits. No firmware or lock-policy change was made;
+diagnostic jobs are stopped and the original READY connection is restored.
 
 ## PQC provider qualification
 
