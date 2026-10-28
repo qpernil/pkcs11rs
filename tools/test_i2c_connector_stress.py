@@ -1,5 +1,7 @@
 """Exercise real HTTP exchanges and persisted evidence without hardware."""
 import http.server
+import importlib.util
+import socket
 import json
 from pathlib import Path
 import subprocess
@@ -8,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 TOOL = Path(__file__).with_name("i2c-connector-stress.py")
 
@@ -59,6 +62,58 @@ class ConnectorStressTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def scope_result(self, status, initial="Ready"):
+        spec = importlib.util.spec_from_file_location("stress", TOOL)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        client, server = socket.socketpair()
+        commands, errors = [], []
+
+        def instrument():
+            queries = 0
+            try:
+                with server, server.makefile("rb") as stream:
+                    for line in stream:
+                        command = line.decode().strip()
+                        commands.append(command)
+                        if command == "*OPC?":
+                            server.sendall(b"1\n")
+                        elif command == ":TRIG:STAT?":
+                            queries += 1
+                            answer = initial if queries == 1 else status
+                            server.sendall((answer + "\n").encode())
+            except Exception as error:
+                errors.append(error)
+
+        thread = threading.Thread(target=instrument)
+        thread.start()
+        try:
+            with mock.patch.object(module.socket, "create_connection", return_value=client):
+                result = module.freeze_scope("instrument")
+        finally:
+            client.close()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        return result, commands
+
+    def test_scope_freeze_uses_documented_stop_and_checks_status(self):
+        result, commands = self.scope_result("Stop")
+        self.assertTrue(result["stopped"])
+        self.assertNotIn("error", result)
+        self.assertEqual(commands, [":TRIG:STAT?", ":TRIGger:STOP", ":TRIG:STAT?"])
+
+    def test_scope_preserves_an_already_stopped_acquisition(self):
+        result, commands = self.scope_result("Stop", initial="Stop")
+        self.assertTrue(result["stopped"])
+        self.assertTrue(result["preserved"])
+        self.assertEqual(commands, [":TRIG:STAT?"])
+
+    def test_scope_armed_reply_is_not_reported_as_a_frozen_capture(self):
+        result, _ = self.scope_result("Arm")
+        self.assertFalse(result["stopped"])
+        self.assertIn("did not report Stop", result["error"])
 
     def test_two_serials_compare_complete_echo_frames(self):
         result, summary, failure, received = self.exercise("pass", serials=("1", "2"))

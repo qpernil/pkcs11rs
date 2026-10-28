@@ -39,6 +39,16 @@ advisory lock is unlocked, including error exits; neither is held during target
 computation. Other processes still coordinate through the advisory lock, whose
 fairness across processes is not guaranteed by this in-process queue.
 
+Workers handle their waits sequentially: bus admission, request cleanup
+acknowledgment, computation READY, then response admission. A worker queued for
+the bus has no separate event-loop duty needed by another worker. Blocking
+`flock` would avoid the polling race but has no timed-acquisition argument;
+closing its descriptor from another thread is not reliable cancellation on
+Linux, particularly when duplicates retain the open file description. The
+queue preserves bounded admission without asynchronous descriptor closure or
+process-wide signal handlers. See the Linux [flock](https://man7.org/linux/man-pages/man2/flock.2.html)
+and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
+
 READY stays asserted after reading; a new request clears previous transmit state. The
 acknowledgment includes a short assertion when READY was already inactive,
 so the controller waits for an edge rather than trusting an old level. It arms
@@ -69,9 +79,10 @@ transmit-refill latency. The target repository passes 27 Rust unit tests and
 Clippy with warnings denied. Both Pis build the kernel module against their
 running kernel.
 
-The connector's Linux I2C build passes 61 unit tests; the production firmware
-feature combination passes 67. Both pass Clippy with warnings denied. Its Mac
-I2C-targeted suite passes nine tests. The connector and raw stress tool disable
+The connector's Linux `experimental-i2c` build passes 67 unit tests, including
+FIFO admission, deadline cancellation and external advisory-lock exclusion.
+The Mac connector build without default features passes 65 tests. Both pass
+Clippy with warnings denied. The connector and raw stress tool disable
 implicit adapter retries under each wire-phase lock. Other bus clients must preserve this adapter-wide policy;
 retrying a partially consumed reply also loses framing.
 
@@ -175,9 +186,11 @@ request, and retains the expected and available actual echo response. In-flight
 requests may finish before the tool exits. Requests are never retried. Use the
 recorded seed and per-request index to reproduce the generated echo bytes.
 
-An optional `--scope-host ADDRESS` forces and stops a preconfigured Siglent
-acquisition on the first failure and saves the command timing and returned
-status. Configure SCL/SDA/READY channels and a suitable acquisition window before
+An optional `--scope-host ADDRESS` stops a preconfigured Siglent acquisition
+on the first failure and verifies the returned `Stop` status. It preserves an
+already stopped acquisition and never forces or rearms a replacement record.
+The evidence includes command timing, status history and any capture error.
+Configure SCL/SDA/READY channels and a suitable acquisition window before
 the run; this option does not configure or retrieve waveforms. A timeout can be
 reported after the initiating wire event has left a short acquisition window.
 Scope-command failure is recorded separately from the transport failure.
@@ -212,8 +225,9 @@ GetStorageInfo request rather than reading a cached public key. Its `sign` mode
 requires an explicitly selected existing RSA private signing key and signs a
 domain-labelled test message. It checks the response length; it does not
 cryptographically verify signatures or require separate public-key objects.
-`inventory` reports public object identity/attributes for before/after comparison. The client has no key
-creation, import, modification or deletion mode, disables local hardware
+`inventory` reports public object identity/attributes for before/after comparison.
+The client has no key creation, import, modification or deletion mode, disables
+local hardware
 discovery and transparent session recreation, and stops on the first error.
 Run read and signing roles in separate processes so PKCS #11 context locking
 does not serialize their traffic. The optional shared start barrier makes both

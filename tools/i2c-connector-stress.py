@@ -26,20 +26,45 @@ def save_json(path, value):
 
 
 def freeze_scope(host):
-    """Force the configured acquisition, then stop; retain timing, not assumptions."""
-    event = {"command_time": time.time()}
+    """Stop the configured acquisition and verify state without rearming it."""
+    event = {"command_time": time.time(), "stopped": False}
     try:
         with socket.create_connection((host, 5025), timeout=2) as scope:
-            scope.sendall(b":TRIG:MODE FTRIG\n")
-            time.sleep(0.15)
-            scope.sendall(b":STOP\n:TRIG:STAT?\n")
-            reply = bytearray()
-            while not reply.endswith(b"\n"):
-                chunk = scope.recv(4096)
-                if not chunk:
-                    raise EOFError("scope closed before status reply")
-                reply.extend(chunk)
-            event["status"] = reply.decode().strip()
+            def reply():
+                value = bytearray()
+                while not value.endswith(b"\n"):
+                    chunk = scope.recv(1)
+                    if not chunk:
+                        raise EOFError("scope closed before reply")
+                    value.extend(chunk)
+                    if len(value) > 4096:
+                        raise ValueError("oversized scope reply")
+                return value.decode().strip()
+
+            scope.sendall(b":TRIG:STAT?\n")
+            event["initial_status"] = reply()
+            if event["initial_status"].lower() == "stop":
+                # Preserve a hardware-triggered single acquisition.
+                event.update(status=event["initial_status"], stopped=True, preserved=True)
+                event["finished"] = time.time()
+                return event
+
+            # Send the documented command alone. Do not force/rearm and overwrite
+            # a record that may already contain the failing transaction.
+            scope.sendall(b":TRIGger:STOP\n")
+            time.sleep(0.2)
+            deadline = time.monotonic() + 2
+            event["status_history"] = []
+            while True:
+                scope.sendall(b":TRIG:STAT?\n")
+                event["status"] = reply()
+                event["status_history"].append(event["status"])
+                event["stopped"] = event["status"].lower() == "stop"
+                if event["stopped"]:
+                    break
+                if time.monotonic() >= deadline:
+                    raise ValueError("scope did not report Stop")
+                time.sleep(0.05)
     except Exception as error:
         event["error"] = repr(error)
     event["finished"] = time.time()
@@ -142,7 +167,7 @@ def main():
     parser.add_argument("--seed", type=int, default=91)
     parser.add_argument("--max-payload", type=int, default=8000)
     parser.add_argument("--timeout", type=float, default=10)
-    parser.add_argument("--scope-host", help="optional preconfigured Siglent; freeze at first error")
+    parser.add_argument("--scope-host", help="optional preconfigured Siglent; stop and verify capture at first error")
     args = parser.parse_args()
     endpoint = urlsplit(args.url)
     if endpoint.scheme != "http" or not endpoint.hostname or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment or endpoint.username or endpoint.password:

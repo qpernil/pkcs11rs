@@ -66,7 +66,11 @@ the request's cleanup acknowledgment, releases it while the HSM computes, then
 reacquires it for the entire response read. Different targets can compute
 concurrently. Shared-bus concurrency remains unqualified; see the
 [I2C qualification limits](i2c-stability.md#qualification-limits). All other
-clients must cooperate in this advisory bus lock.
+clients must cooperate in this advisory bus lock. Within one connector process,
+workers acquire each wire phase in FIFO order per physical adapter, with the
+exchange deadline covering queued admission. This prevents an active target
+from repeatedly bypassing a queued peer without holding the bus during
+computation. Fairness between separate processes is outside this queue.
 Before each request and response wire phase, the connector sets the Linux
 adapter retry count to zero under that lock. Arbitration loss must return an
 error rather than replaying a partially consumed reply or a command with
