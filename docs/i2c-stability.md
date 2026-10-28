@@ -94,6 +94,34 @@ directories. The finite PQC qualification below uses the original configured
 with the original controller SDA hold register `0x00010001`. No timing overlay
 or diagnostic kernel probe is installed.
 
+## Fair-acquisition bench validation
+
+On the documented Pi 5 / two Pi 3B+ bench, FIFO acquisition passes the seeded
+3,000-echo workload with the same 8,582,931 payload bytes as the polling-lock
+baseline. Maximum individual lock wait is 186 ms rather than 2.74 s; maximum
+exchange duration is 739 ms rather than 2.75 s. Total workload time remains
+approximately 398–399 s. Median exchange latency rises from 189 ms to
+237–251 ms because waiting is distributed between peers instead of allowing
+one to run ahead. The p95 falls from 867–882 ms to 558 ms.
+
+Isolated PQC matrices pass on both targets, each returning 406 authenticated
+signature frames at each of 2,444, 3,340 and 4,652 bytes. Concurrent matrices
+remain unqualified: two paired runs reproduce request/read transport errors.
+The repeat records `EAGAIN` during the 0x24 payload read, followed by `EIO` on
+0x25's header read; the controller logs lost arbitration and a spurious STOP.
+The stopped scope record contains only 306 of the expected 2,441 payload bytes,
+with a STOP condition approximately 0.1 microsecond after the peer READY
+assertion. Channel/probe skew is uncalibrated. This timing correlation is an
+investigation lead, not a demonstrated peripheral, driver or electrical cause;
+other peer READY assertions during response reads succeed.
+
+All driver error counters remain zero even during these failures. Those
+counters therefore do not establish shared-bus integrity. The fixture IDs were
+proven absent before testing; fresh authenticated cleanup restores the exact
+99/21-object inventories after failed automatic cleanup. Failed commands are
+not replayed. The [validation record](i2c-fairness-validation.json) retains source
+revisions, per-target results, frame counts, error phases and evidence limits.
+
 ## PQC provider qualification
 
 The deployed `pqc_matrix_deployed_yubihsm` suite passes single-target baselines
@@ -112,9 +140,10 @@ import tests remain separate from this deployed matrix.
 
 The fixture refuses occupied IDs in `7e40`–`7e48` and removes its temporary
 public and private objects. Read-only inventory comparisons verify preservation
-of all existing objects: 56 on serial `24000001` and 17 on serial `25000002`.
-See the [qualification record](i2c-pqc-qualification.json) for the tested revision,
-individual results, source revisions, inventory digests and concurrency limits.
+of all existing objects. The fair-acquisition validation restores the current
+99/21-object inventories. The earlier [qualification record](i2c-pqc-qualification.json)
+retains the original 56/17-object snapshots, construction coverage and transport
+failure evidence; those snapshots are historical test baselines.
 
 ### Qualification limits
 

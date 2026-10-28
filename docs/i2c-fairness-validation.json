@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-10-28T19:27:36.792889+00:00",
+  "connector_revision": "2fa70e560f873134845bbac7ae73b9ff3d005ab0",
+  "scope_hook_revision": "f2568d5",
+  "target_driver_revision": "431d2af07e19dc9262362e86a87c17bb889c35b0",
+  "target_driver_srcversion": "DDD74292F38B114AAEF9E9D",
+  "provider_test_binary_sha256": "4fca2762f2a71ff2c27719dc6b52a7e37dd755d19415accfbc3b3d18577fcec8",
+  "scope": "Siglent SDS824X HD SDS08A0D914831 192.168.1.91:5025",
+  "lock_scope": "FIFO per process and physical adapter for each wire phase; existing advisory flock and exchange deadline; released during computation",
+  "concurrent_pqc_status": "failed; not qualified",
+  "echo": {
+    "passed": true,
+    "requests": 3000,
+    "seed": 91,
+    "payload_bytes": 8582931,
+    "before_elapsed_seconds": 399.11,
+    "after_elapsed_seconds": 397.71207101497566,
+    "max_individual_lock_wait_us": 186454,
+    "max_exchange_us": 738539,
+    "comparison": {
+      "0x24": {
+        "total_us": {
+          "before": {
+            "median": 189368,
+            "p95": 867186,
+            "max": 2752586
+          },
+          "after": {
+            "median": 251461,
+            "p95": 558032,
+            "max": 738399
+          }
+        },
+        "request_lock_us": {
+          "before": {
+            "median": 5,
+            "p95": 702318,
+            "max": 2737984
+          },
+          "after": {
+            "median": 56114,
+            "p95": 184143,
+            "max": 186454
+          }
+        },
+        "response_lock_us": {
+          "before": {
+            "median": 2,
+            "p95": 3,
+            "max": 918141
+          },
+          "after": {
+            "median": 56598,
+            "p95": 184693,
+            "max": 186311
+          }
+        },
+        "lock_wait_us": {
+          "before": {
+            "median": 7,
+            "p95": 703906,
+            "max": 2740042
+          },
+          "after": {
+            "median": 112769,
+            "p95": 368659,
+            "max": 371014
+          }
+        }
+      },
+      "0x25": {
+        "total_us": {
+          "before": {
+            "median": 189388,
+            "p95": 882387,
+            "max": 2526848
+          },
+          "after": {
+            "median": 236815,
+            "p95": 558206,
+            "max": 738539
+          }
+        },
+        "request_lock_us": {
+          "before": {
+            "median": 5,
+            "p95": 738986,
+            "max": 2381558
+          },
+          "after": {
+            "median": 69970,
+            "p95": 184197,
+            "max": 184817
+          }
+        },
+        "response_lock_us": {
+          "before": {
+            "median": 2,
+            "p95": 3,
+            "max": 1193726
+          },
+          "after": {
+            "median": 72320,
+            "p95": 184834,
+            "max": 185014
+          }
+        },
+        "lock_wait_us": {
+          "before": {
+            "median": 7,
+            "p95": 739334,
+            "max": 2381561
+          },
+          "after": {
+            "median": 118190,
+            "p95": 368744,
+            "max": 369352
+          }
+        }
+      }
+    }
+  },
+  "pqc_cases": {
+    "isolated-24": {
+      "wall_seconds": 134.99824905395508,
+      "clients": [
+        {
+          "serial": "24000001",
+          "exit_code": 0
+        }
+      ],
+      "first_error": null,
+      "targets": {
+        "24000001": {
+          "reported_test_seconds": 134.93,
+          "exchange_count": 2106,
+          "transport_errors": [],
+          "large_response_frame_histogram": {
+            "2444": 406,
+            "2620": 1,
+            "3340": 406,
+            "4652": 406
+          },
+          "max_individual_lock_wait_us": 27,
+          "log_sha256": "41d4d6d6e16d984f6477be419311b55b0a02c7492c9568557894b207b54bcde2"
+        }
+      }
+    },
+    "isolated-25": {
+      "wall_seconds": 132.65613794326782,
+      "clients": [
+        {
+          "serial": "25000002",
+          "exit_code": 0
+        }
+      ],
+      "first_error": null,
+      "targets": {
+        "25000002": {
+          "reported_test_seconds": 132.54,
+          "exchange_count": 2028,
+          "transport_errors": [],
+          "large_response_frame_histogram": {
+            "2444": 406,
+            "2620": 1,
+            "3340": 406,
+            "4652": 406
+          },
+          "max_individual_lock_wait_us": 27,
+          "log_sha256": "3a9e8be3d1aba80efa12b5b72b45e1a883f6e49481f34bf5feaf23973abb1736"
+        }
+      }
+    },
+    "paired": {
+      "wall_seconds": 146.9275848865509,
+      "clients": [
+        {
+          "serial": "24000001",
+          "exit_code": 101
+        },
+        {
+          "serial": "25000002",
+          "exit_code": 0
+        }
+      ],
+      "first_error": {
+        "at": 1793214444.357683,
+        "serial": "24000001",
+        "line": "thread 'test::common::pqc_matrix::pqc_matrix_deployed_yubihsm' (426888) panicked at src/tests/key.rs:4818:9:"
+      },
+      "targets": {
+        "24000001": {
+          "reported_test_seconds": 39.91,
+          "exchange_count": 830,
+          "transport_errors": [
+            {
+              "exchange_id": 1623,
+              "bus": "/dev/i2c-1",
+              "address": 36,
+              "request_bytes": 316,
+              "response_bytes": 0,
+              "outcome": "error",
+              "last_phase": "request_write",
+              "total_us": 7597,
+              "request_lock_us": 3709,
+              "request_setup_us": 59,
+              "request_write_us": 3827,
+              "cleanup_ack_us": 0,
+              "response_ready_us": 0,
+              "response_lock_us": 0,
+              "response_setup_us": 0,
+              "header_read_us": 0,
+              "body_read_us": 0,
+              "completed": 1793214444.355515,
+              "started_estimate": 1793214444.347918
+            }
+          ],
+          "large_response_frame_histogram": {
+            "2444": 238,
+            "2620": 1
+          },
+          "max_individual_lock_wait_us": 60160,
+          "log_sha256": "12f1d6e8211d61286c3b063083f220a1dad3e391ed13f9437974bf1fbf89af67"
+        },
+        "25000002": {
+          "reported_test_seconds": 146.81,
+          "exchange_count": 2028,
+          "transport_errors": [],
+          "large_response_frame_histogram": {
+            "2444": 406,
+            "2620": 1,
+            "3340": 406,
+            "4652": 406
+          },
+          "max_individual_lock_wait_us": 59138,
+          "log_sha256": "35366a6886855e25b034d6b2039a2c916edb76bf08f96814e2df929dc270fdf1"
+        }
+      }
+    },
+    "paired-repeat": {
+      "wall_seconds": 51.559589862823486,
+      "clients": [
+        {
+          "serial": "24000001",
+          "exit_code": 101
+        },
+        {
+          "serial": "25000002",
+          "exit_code": 101
+        }
+      ],
+      "first_error": {
+        "at": 1793215115.3004138,
+        "serial": "24000001",
+        "line": "thread 'test::common::pqc_matrix::pqc_matrix_deployed_yubihsm' (452901) panicked at src/tests/key.rs:4818:9:"
+      },
+      "targets": {
+        "24000001": {
+          "reported_test_seconds": 51.11,
+          "exchange_count": 916,
+          "transport_errors": [
+            {
+              "exchange_id": 1800,
+              "bus": "/dev/i2c-1",
+              "address": 36,
+              "request_bytes": 92,
+              "response_bytes": 0,
+              "outcome": "error",
+              "last_phase": "body_read",
+              "total_us": 71506,
+              "request_lock_us": 51463,
+              "request_setup_us": 170,
+              "request_write_us": 2203,
+              "cleanup_ack_us": 317,
+              "response_ready_us": 4814,
+              "response_lock_us": 5276,
+              "response_setup_us": 0,
+              "header_read_us": 128,
+              "body_read_us": 7131,
+              "completed": 1793215115.298036,
+              "started_estimate": 1793215115.22653
+            }
+          ],
+          "large_response_frame_histogram": {
+            "2444": 325,
+            "2620": 1
+          },
+          "max_individual_lock_wait_us": 60001,
+          "log_sha256": "007cf6c4817c66bf3340992a59427b11c68a13156aee0dde7683fc238c25ccd1"
+        },
+        "25000002": {
+          "reported_test_seconds": 51.11,
+          "exchange_count": 883,
+          "transport_errors": [
+            {
+              "exchange_id": 1801,
+              "bus": "/dev/i2c-1",
+              "address": 37,
+              "request_bytes": 316,
+              "response_bytes": 0,
+              "outcome": "error",
+              "last_phase": "header_read",
+              "total_us": 15047,
+              "request_lock_us": 11,
+              "request_setup_us": 83,
+              "request_write_us": 7346,
+              "cleanup_ack_us": 206,
+              "response_ready_us": 7254,
+              "response_lock_us": 18,
+              "response_setup_us": 0,
+              "header_read_us": 125,
+              "body_read_us": 0,
+              "completed": 1793215115.298168,
+              "started_estimate": 1793215115.2831209
+            }
+          ],
+          "large_response_frame_histogram": {
+            "2444": 370,
+            "2620": 1
+          },
+          "max_individual_lock_wait_us": 58573,
+          "log_sha256": "4fcdf5845d59e19a80267d1fbe01a3afc948f27d00d301146f16034940e5df85"
+        }
+      }
+    }
+  },
+  "repeat_errors": [
+    {
+      "serial": "24000001",
+      "phase": "body_read",
+      "errno": 11,
+      "message": "Resource temporarily unavailable",
+      "kernel": "lost arbitration"
+    },
+    {
+      "serial": "25000002",
+      "phase": "header_read",
+      "errno": 5,
+      "message": "Input/output error",
+      "kernel": "spurious STOP detected"
+    }
+  ],
+  "scope_finding": {
+    "capture_verified_stopped": true,
+    "record_seconds": 0.2,
+    "overview_export_interval_seconds": 4e-07,
+    "detail_sample_interval_seconds": 1e-08,
+    "aborted_0x24_body_data_bytes": 306,
+    "expected_body_data_bytes": 2441,
+    "following_0x25_header_data_bytes": 2,
+    "expected_header_data_bytes": 3,
+    "sda_stop_after_peer_ready_threshold_crossing_seconds": 1.1e-07,
+    "interpretation": "Physical STOP during incomplete read coincides with peer READY assertion. Probe/channel skew is uncalibrated; this is correlation and does not establish peripheral/driver/electrical causation. Other peer READY assertions during reads succeeded.",
+    "first_paired_capture_limit": "Original hook returned Arm; first paired waveform is not a confirmed failure capture."
+  },
+  "inventory_restored": {
+    "24000001": {
+      "objects": 99,
+      "fixture_objects": [],
+      "unchanged": true
+    },
+    "25000002": {
+      "objects": 21,
+      "fixture_objects": [],
+      "unchanged": true
+    }
+  },
+  "counters_before": {
+    "raspberrypi-1": "rx_transactions=16643 rx_bytes=15621411 rx_overruns=0 rx_dropped=0 tx_transactions=16643 tx_bytes=28704287 tx_underruns=0 tx_discarded=0 interrupts=14283821 timer_runs=241984629\n",
+    "raspberrypi-2": "rx_transactions=23163 rx_bytes=13223251 rx_overruns=0 rx_dropped=0 tx_transactions=23163 tx_bytes=25621204 tx_underruns=0 tx_discarded=0 interrupts=12620588 timer_runs=242477654\n"
+  },
+  "counters_after": {
+    "raspberrypi-1": "rx_transactions=26148 rx_bytes=20513572 rx_overruns=0 rx_dropped=0 tx_transactions=26148 tx_bytes=40030301 tx_underruns=0 tx_discarded=0 interrupts=19799470 timer_runs=252230174\n",
+    "raspberrypi-2": "rx_transactions=30860 rx_bytes=18138957 rx_overruns=0 rx_dropped=0 tx_transactions=30860 tx_bytes=39795093 tx_underruns=0 tx_discarded=0 interrupts=19465300 timer_runs=252723057\n"
+  },
+  "cleanup": {
+    "production": {
+      "exit_code": 0,
+      "stdout": "2296854 Wed Oct 28 01:25:52 2026 /usr/local/bin/pkcs11rs-connector --listen 0.0.0.0:12345 --allow-insecure-http --virtual-yubihsm 99000001=/var/lib/pkcs11rs-connector/virtual-yubihsm-99000001\n",
+      "stderr": ""
+    },
+    "port": {
+      "exit_code": 0,
+      "stdout": "State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\n",
+      "stderr": ""
+    },
+    "temporary_units": {
+      "exit_code": 4,
+      "stdout": "inactive\ninactive\ninactive\n",
+      "stderr": ""
+    },
+    "kernel": {
+      "exit_code": 0,
+      "stdout": "2026-10-28T20:18:35+01:00 ubuntu4 kernel: i2c_designware 1f00074000.i2c: i2c_dw_handle_tx_abort: lost arbitration\n2026-10-28T20:18:35+01:00 ubuntu4 kernel: i2c_designware 1f00074000.i2c: spurious STOP detected\n",
+      "stderr": ""
+    },
+    "source": {
+      "exit_code": 0,
+      "stdout": "2fa70e560f873134845bbac7ae73b9ff3d005ab0\n",
+      "stderr": ""
+    }
+  },
+  "scope_left_stopped_on_failure": true,
+  "validation": {
+    "mac_connector_tests": 65,
+    "linux_connector_tests": 67,
+    "clippy": "passed with warnings denied on Mac and Linux",
+    "diagnostic_python_tests": 7,
+    "fixture_policy": "IDs 7e40-7e48 absent before tests; only proven new fixture public projections/private keys removed; exact original inventories restored; no failed commands replayed"
+  },
+  "evidence_paths": "Paths in the investigation report are relative to the accompanying fair-pqc evidence bundle; raw logs and waveforms are not repository tracked."
+}
