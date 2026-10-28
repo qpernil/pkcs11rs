@@ -1,0 +1,370 @@
+{
+  "schema_version": 3,
+  "qualification_date": "2026-10-27",
+  "recorded_at_utc": "2026-10-27T22:45:50.056502+00:00",
+  "suite": "pqc_matrix_deployed_yubihsm",
+  "concurrent_client_status": "not_qualified",
+  "pipelined_shared_bus_status": "not_qualified",
+  "implementation": {
+    "connector_source_blob": "3701b120356f5ac2a9bda33856581329130129b6",
+    "provider_test_commit": "938b4de6d1debb5abcd64826efa0e2190e8a6b04",
+    "target_driver_commit": "431d2af07e19dc9262362e86a87c17bb889c35b0",
+    "target_driver_source_blob": "bc54a6bb027dfb8e8f608e4793cd4904ca40b528",
+    "target_driver_module_srcversion": "DDD74292F38B114AAEF9E9D",
+    "virtual_yubihsm_prebuilt_sha256": "fdb4b82081435975aa8b314003263c6b71dff3c9d01ad4d16403e0b9b8e2f2e9",
+    "driver_source_identical_to_tested_commit": "04b581b5e2fc51e5e84d56ad6481652f33715977"
+  },
+  "transport": {
+    "controller": "ubuntu4",
+    "kind": "I2C through temporary loopback HTTP connector and multiplexed SSH tunnel",
+    "targets": {
+      "24000001": {
+        "host": "raspberrypi-1",
+        "i2c_address": "0x24",
+        "controller_ready_gpio": 23
+      },
+      "25000002": {
+        "host": "raspberrypi-2",
+        "i2c_address": "0x25",
+        "controller_ready_gpio": 22
+      }
+    },
+    "controller_model": "Raspberry Pi 5 / RP1 DesignWare",
+    "configured_scl_hz": 400000,
+    "sda_hold_register": "0x00010001",
+    "runtime_timing_overlay": false,
+    "bus_lock_scope": "request through cleanup acknowledgment; released during computation; reacquired through complete header/body read",
+    "adapter_retry_count": 0
+  },
+  "authentication": {
+    "source": "existing macOS Secure Enclave credential",
+    "name": "reserve",
+    "target_authentication_key_id": "0x1003",
+    "signed_host_bundle_identifier": "io.github.qpernil.pkcs11rs.tool",
+    "new_credentials_created": false,
+    "credential_permissions_changed": false
+  },
+  "construction_coverage": [
+    "ML-DSA-44",
+    "ML-DSA-65",
+    "ML-DSA-87",
+    "ML-KEM-512",
+    "ML-KEM-768",
+    "ML-KEM-1024",
+    "MLKEM768-P256",
+    "MLKEM768-X25519",
+    "MLKEM1024-P384"
+  ],
+  "fixture_policy": {
+    "native_key_id_range": "0x7e40-0x7e48",
+    "preexisting_id_collision_check": true,
+    "cleanup_public_projection_before_private_key": true,
+    "uncertain_mutations_not_blindly_replayed": true
+  },
+  "single_target_baseline_runs": {
+    "24000001": {
+      "status": "passed",
+      "duration_seconds": 126.64,
+      "completed_constructions": [
+        "ML-DSA-44",
+        "ML-DSA-65",
+        "ML-DSA-87",
+        "ML-KEM-512",
+        "ML-KEM-768",
+        "ML-KEM-1024",
+        "MLKEM768-P256",
+        "MLKEM768-X25519",
+        "MLKEM1024-P384"
+      ],
+      "local_log": "target/i2c-pqc-qualification-24000001-isolated.log",
+      "log_sha256": "21f02150ac19ee44b5f8ce6d693e99b8ad2fc89362b51a55ba1f39a2fef6f5c2"
+    },
+    "25000002": {
+      "status": "passed",
+      "duration_seconds": 124.02,
+      "completed_constructions": [
+        "ML-DSA-44",
+        "ML-DSA-65",
+        "ML-DSA-87",
+        "ML-KEM-512",
+        "ML-KEM-768",
+        "ML-KEM-1024",
+        "MLKEM768-P256",
+        "MLKEM768-X25519",
+        "MLKEM1024-P384"
+      ],
+      "local_log": "target/i2c-pqc-qualification-25000002-isolated.log",
+      "log_sha256": "dc0e332facc527253bf87997f083759dd5ab57d64e938ee42d9b7f1a3f474c2b"
+    }
+  },
+  "investigation": {
+    "scope": {
+      "instrument": "Siglent SDS824X HD",
+      "probe_attenuation": 10,
+      "wiring": "shared controller/target breadboard bus",
+      "configured_scl_hz": 400000,
+      "uninterrupted_clock_approx_hz": 391000,
+      "ringing_establishes_threshold_crossing": false,
+      "capture_paths": [
+        "target/i2c-scope-first-edge.png",
+        "target/i2c-scope-after-restart.png"
+      ]
+    },
+    "implemented_policy": "request through cleanup acknowledgment; released during computation; reacquired through complete header/body read",
+    "precise_peripheral_or_electrical_mechanism": "not established",
+    "retained_driver_hardening": [
+      "finish receive only when the same FR snapshot reports RX idle and FIFO empty",
+      "TX FIFO refill threshold 14/16 improves interrupt-latency tolerance; not a demonstrated cure for concurrent shared-bus failures"
+    ],
+    "retry_policy": "Linux adapter retries zero; uncertain commands and partially consumed replies are never replayed",
+    "root_cause_established": false,
+    "serialization_classification": "historical successful experiment; workaround excluded from implementation",
+    "failure_scope": "shared I2C transport; ordinary echo and read-only SDK requests reproduce failures without PQC computation",
+    "observed_failure_policy": "release the shared bus lock during computation and response publication",
+    "observed_failures": {
+      "controller_errors": [
+        "data NACK / EREMOTEIO",
+        "arbitration loss / EAGAIN"
+      ],
+      "silent_reply_failure": {
+        "outer_frame_bytes": 2444,
+        "first_differing_byte_offset": 187,
+        "differing_bytes": 2251,
+        "differing_bits": 9068,
+        "fifo_underrun_counter": 0,
+        "evidence": "target/i2c-frame-fingerprints-400k-detail.jsonl"
+      },
+      "clock_rate_reduction": {
+        "configured_hz": 100000,
+        "read_only_sdk_reads_per_target_passed": 1000,
+        "full_paired_matrix_passed": false,
+        "signing_echo_arbitration_loss_reproduced": true
+      },
+      "sda_hold_adjustment": {
+        "tested_tx_ns": [
+          300,
+          915
+        ],
+        "full_paired_matrix_passed": false
+      }
+    }
+  },
+  "cleanup": {
+    "status": "verified",
+    "temporary_controller_and_tunnel_removed": true,
+    "kernel_diagnostic_probes_removed": true,
+    "controller_debug_tracing_removed": true,
+    "temporary_credential_enabled_hosts_removed": true,
+    "production_connector_pid_unchanged": 1678307,
+    "production_binary_redeployed": false,
+    "scope_original_settings_restored": true,
+    "runtime_timing_overlays_remaining": false
+  },
+  "final_inventories": {
+    "24000001": {
+      "original_objects": 56,
+      "final_objects": 56,
+      "metadata_unchanged": true,
+      "canonical_metadata_sha256": "339ac94438c9095456bde787a59f37cc799e5cdc1fde465053d7750e8becffa4",
+      "digest_encoding": "UTF-8 json.dumps(sort_keys=True,separators=(comma,colon)), no newline"
+    },
+    "25000002": {
+      "original_objects": 17,
+      "final_objects": 17,
+      "metadata_unchanged": true,
+      "canonical_metadata_sha256": "5a32205557ec16cb1cfa9470a19c94b334fd3f39a7cba8248eb919c0cf32a9e8",
+      "digest_encoding": "UTF-8 json.dumps(sort_keys=True,separators=(comma,colon)), no newline"
+    }
+  },
+  "validation": {
+    "linux_i2c_connector_unit_tests": 61,
+    "linux_full_firmware_connector_unit_tests": 67,
+    "mac_i2c_targeted_tests": 9,
+    "target_repository_rust_unit_tests": 27,
+    "actual_c_driver_model": "passed",
+    "clippy_warnings_denied": "passed"
+  },
+  "historical_serialized_experiment": {
+    "classification": "passed finite experiment; workaround excluded from implementation",
+    "implementation": {
+      "connector_commit": "7a485dc9f09218b84d71f93b243a06dcda183c7b",
+      "provider_test_commit": "938b4de6d1debb5abcd64826efa0e2190e8a6b04",
+      "target_driver_implementation_commit": "04b581b5e2fc51e5e84d56ad6481652f33715977",
+      "target_driver_contract_commit": "f610d789b4fa5892a2a9d78a83a2aa419d60592e",
+      "target_driver_module_srcversion": "DDD74292F38B114AAEF9E9D",
+      "virtual_yubihsm_prebuilt_sha256": "fdb4b82081435975aa8b314003263c6b71dff3c9d01ad4d16403e0b9b8e2f2e9"
+    },
+    "bus_lock_scope": "complete exchange including computation and response publication",
+    "concurrent_client_runs": [
+      {
+        "serial": "24000001",
+        "round": 1,
+        "exit_code": 0,
+        "wall_seconds": 252.08338687499054,
+        "local_log": "target/i2c-pqc-24000001-serialized-final-round1.log",
+        "log_sha256": "d38929f95d06d1fa487e63e006de46fd21703fea999b1af5a60432fc84e5a3a8",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      },
+      {
+        "serial": "25000002",
+        "round": 1,
+        "exit_code": 0,
+        "wall_seconds": 250.96272779101855,
+        "local_log": "target/i2c-pqc-25000002-serialized-final-round1.log",
+        "log_sha256": "c41a53a240cc350fe1361e074aaae8a3baadb2e9f5e03edd54eb4673437fbb68",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      },
+      {
+        "serial": "24000001",
+        "round": 2,
+        "exit_code": 0,
+        "wall_seconds": 251.5606712079898,
+        "local_log": "target/i2c-pqc-24000001-serialized-final-round2.log",
+        "log_sha256": "c6867dfd9dd6b634f66e7c225ff62d1e892c5b3ec2c3f59533fc5c21d48cb9d4",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      },
+      {
+        "serial": "25000002",
+        "round": 2,
+        "exit_code": 0,
+        "wall_seconds": 250.5331602919905,
+        "local_log": "target/i2c-pqc-25000002-serialized-final-round2.log",
+        "log_sha256": "79c88806e2db3db41877217e4c4aad114c29df8e9f15fa76b83352d86463e22c",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      },
+      {
+        "serial": "24000001",
+        "round": 3,
+        "exit_code": 0,
+        "wall_seconds": 253.99384374998044,
+        "local_log": "target/i2c-pqc-24000001-serialized-final-round3.log",
+        "log_sha256": "73b98ec2b12524e51f38f29aa6d7869d03e9b8126301663a82a4ea6a1257ff8c",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      },
+      {
+        "serial": "25000002",
+        "round": 3,
+        "exit_code": 0,
+        "wall_seconds": 252.74605791599606,
+        "local_log": "target/i2c-pqc-25000002-serialized-final-round3.log",
+        "log_sha256": "2347d759883c415b458c1d9a4cfa91f66f07b348343d5939c6f5628a2fb48db0",
+        "completed_constructions": [
+          "ML-DSA-44",
+          "ML-DSA-65",
+          "ML-DSA-87",
+          "ML-KEM-512",
+          "ML-KEM-768",
+          "ML-KEM-1024",
+          "MLKEM768-P256",
+          "MLKEM768-X25519",
+          "MLKEM1024-P384"
+        ]
+      }
+    ],
+    "qualification_limits": {
+      "same_adapter_computation_overlap": false,
+      "separate_adapters_independent": true,
+      "long_commands_delay_peer_clients": true,
+      "standalone_expanded_key_import_included": false,
+      "electrical_compliance_or_unbounded_irq_latency_proven": false
+    },
+    "target_counters": {
+      "24000001": {
+        "host": "raspberrypi-1",
+        "driver_stats": {
+          "rx_transactions": 10487,
+          "rx_bytes": 3287319,
+          "rx_overruns": 0,
+          "rx_dropped": 0,
+          "tx_transactions": 10487,
+          "tx_bytes": 16117195,
+          "tx_underruns": 0,
+          "tx_discarded": 0,
+          "interrupts": 7589152,
+          "timer_runs": 4217761
+        },
+        "module_srcversion": "DDD74292F38B114AAEF9E9D"
+      },
+      "25000002": {
+        "host": "raspberrypi-2",
+        "driver_stats": {
+          "rx_transactions": 7065,
+          "rx_bytes": 860786,
+          "rx_overruns": 0,
+          "rx_dropped": 0,
+          "tx_transactions": 7065,
+          "tx_bytes": 13234302,
+          "tx_underruns": 0,
+          "tx_discarded": 0,
+          "interrupts": 6103615,
+          "timer_runs": 4710822
+        },
+        "module_srcversion": "DDD74292F38B114AAEF9E9D"
+      }
+    },
+    "controller_log": {
+      "local_path": "target/i2c-pqc-serialized-controller.log",
+      "sha256": "5aa41a3aa09c86250be1b741832dad9440f663ea0ad3d77d6044f9104a24e8f2",
+      "http_completions": 17596,
+      "error_outcomes": 0,
+      "kernel_errors_during_validation": 0
+    }
+  },
+  "qualification_limits": {
+    "shared_bus_concurrency": "not_qualified",
+    "same_adapter_computation_overlap": true,
+    "separate_adapters_independent": true,
+    "standalone_expanded_key_import_included": false,
+    "electrical_compliance_or_unbounded_irq_latency_proven": false
+  }
+}

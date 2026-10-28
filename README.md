@@ -1447,7 +1447,11 @@ PKCS11RS_PQC_SERIAL=12345678 PKCS11RS_PQC_ENDPOINT=usb \
 
 The full deployed matrix has been validated against Ubuntu4's connector-embedded
 virtual YubiHSM (`99000001`, HTTP) and Ubuntu3's virtual YubiHSM gadget
-(`12345678`, USB). Deployed I2C acceptance remains a separate lab check.
+(`12345678`, USB), and both I2C virtual YubiHSMs (`24000001` and `25000002`)
+through Ubuntu4's connector. The I2C runs use the existing Secure Enclave
+`reserve` credential at Authentication Key `1003`. Single-target baselines pass;
+concurrent operation on their shared I2C bus remains unqualified. See
+[I2C qualification and limits](docs/i2c-stability.md#pqc-provider-qualification).
 
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.

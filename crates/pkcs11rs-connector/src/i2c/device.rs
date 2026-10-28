@@ -10,6 +10,7 @@ use std::{
 };
 
 const I2C_SLAVE: libc::c_ulong = 0x0703;
+const I2C_RETRIES: libc::c_ulong = 0x0701;
 const FRAME_HEADER_LENGTH: usize = 3;
 const MAX_FRAME_LENGTH: usize = 8_192;
 const MAX_FRAME_DATA_LENGTH: usize = MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH;
@@ -93,6 +94,7 @@ impl YubiHsmI2cDevice {
         validate_request(request)?;
         let deadline = Instant::now() + timeout;
         let bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        disable_adapter_retries(&self.bus)?;
         self.ready.listen_for(gpio::LineFlags::EDGE_RISING)?;
         self.ready.discard_events()?;
         write_transaction(&mut self.bus, request).map_err(|error| {
@@ -115,6 +117,7 @@ impl YubiHsmI2cDevice {
             return Err(self.response_timeout(timeout));
         }
         let _bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        disable_adapter_retries(&self.bus)?;
         let mut header = [0_u8; FRAME_HEADER_LENGTH];
         read_transaction(&mut self.bus, &mut header)
             .map_err(|error| device_error("read I2C response header", error))?;
@@ -146,6 +149,19 @@ impl YubiHsmI2cDevice {
             self.endpoint.address, timeout
         ))
     }
+}
+
+fn disable_adapter_retries(bus: &File) -> Result<(), TransportError> {
+    // Linux can replay an entire transfer after arbitration loss, including a
+    // partially consumed reply or a command with uncertain side effects. This
+    // adapter-wide setting must be applied while holding the shared bus lock.
+    if unsafe { libc::ioctl(bus.as_raw_fd(), I2C_RETRIES, 0 as libc::c_ulong) } != 0 {
+        return Err(device_error(
+            "disable I2C adapter retries",
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
 }
 
 struct BusLock(File);
@@ -335,6 +351,15 @@ fn read_transaction(bus: &mut File, bytes: &mut [u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_retry_policy_fails_closed_when_ioctl_is_unsupported() {
+        let unsupported = File::open("/dev/null").unwrap();
+        assert_eq!(
+            disable_adapter_retries(&unsupported).unwrap_err().kind(),
+            crate::registry::TransportErrorKind::DeviceTransport
+        );
+    }
 
     #[test]
     fn bus_lock_serializes_independent_handles_and_releases_on_drop() {

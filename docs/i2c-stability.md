@@ -24,10 +24,12 @@ provide lab evidence for a particular setup, not general electrical qualificatio
 ## Exchange contract
 
 Use driver ABI 3 with READY configured on both ends. The controller holds the
-bus lock through request writing and the target's cleanup acknowledgment
-(physical rising READY edge), releases the bus during computation, then
-reacquires it to read the three-byte header and exact-length body. READY stays
-asserted after reading; a new request clears previous transmit state. The
+bus lock from request writing through the target's cleanup acknowledgment
+(physical rising READY edge), releases it while waiting for computation, then
+reacquires it for the three-byte header and exact-length body reads. A per-device
+gate keeps each HSM single-flight. Separate targets can compute concurrently,
+but shared-bus concurrency remains unqualified.
+READY stays asserted after reading; a new request clears previous transmit state. The
 acknowledgment includes a short assertion when READY was already inactive,
 so the controller waits for an edge rather than trusting an old level. It arms
 rising-only detection before writing, then falling-only detection followed by
@@ -52,33 +54,76 @@ margins remain hardware qualification concerns.
 ## Validation
 
 The actual C driver functions pass FIFO/serializer model checks for staged reads,
-abandoned last bytes and superseded worker results. The Linux connector passes
-34 unit tests and Clippy with warnings denied; its Mac suite passes 33 tests.
-The frontend passes Linux target checking, and both Pis build the kernel module.
+abandoned last bytes, superseded worker results, receive-tail completion and
+transmit-refill latency. The target repository passes 27 Rust unit tests and
+Clippy with warnings denied. Both Pis build the kernel module against their
+running kernel.
 
-Both targets pass 1,000 simultaneous randomized exchanges each (about 1.55 MB
-of declared payload per target), with a 5 ms header/body gap and every tenth
-response left one byte unread. The run includes bounded four-core CPU load.
-Neither target reports an overrun or underrun.
+The connector's Linux I2C build passes 61 unit tests; the production firmware
+feature combination passes 67. Both pass Clippy with warnings denied. Its Mac
+I2C-targeted suite passes nine tests. The connector and raw stress tool disable
+implicit adapter retries under each wire-phase lock. Other bus clients must preserve this adapter-wide policy;
+retrying a partially consumed reply also loses framing.
 
-A hardware recovery probe delays one worker write by two seconds, then sends
-two replacement requests. Only the newest response is returned. The driver
-records one replaced pending request and one discarded stale worker result.
-Reproduce with `--supersede-every 1` and a response-write delay injected on the
-target; the test uses synthetic echo data and does not require authentication.
+The hardware topology is Ubuntu4 (Pi 5/RP1) controlling raspberrypi-1 (`0x24`,
+serial 24000001, READY GPIO23) and raspberrypi-2 (`0x25`, serial 25000002,
+READY GPIO22). Targets use GPIO17 for READY and separate qualification state
+directories. The finite PQC qualification below uses the original configured
+400 kHz rate, approximately 391 kHz during uninterrupted scope clock bursts,
+with the original controller SDA hold register `0x00010001`. No timing overlay
+or diagnostic kernel probe is installed.
 
-All 31 supported `yubihsm-shell` cases pass against each HSM (77.80 s and
-95.33 s), while the other HSM answers continuous byte-exact HTTP echo requests.
-The unsupported SSH-template and wrapped-object cases remain excluded.
-During Pi 1's suite, Pi 2 serves 5,387 echoes with 2.67 ms median and 79.19 ms
-maximum latency across the 180-second measurement window. An isolated reverse
-RSA check serves 763 Pi 1 echoes with 2.64 ms median and 15.03 ms maximum
-latency across 25 seconds. HTTP smoke, managed and extension qualification
-also pass on both targets.
+## PQC provider qualification
 
-The topology is ubuntu4 controlling raspberrypi-1 (`0x24`, serial 24000001,
-READY GPIO23) and raspberrypi-2 (`0x25`, serial 25000002, READY GPIO22).
-Targets use GPIO17 for READY and separate qualification state directories.
+The deployed `pqc_matrix_deployed_yubihsm` suite passes single-target baselines
+on both I2C targets through Ubuntu4's connector. Concurrent shared-bus operation
+remains unqualified. The suite uses the existing Secure Enclave `reserve`
+credential and Authentication Key `1003`, without changing credentials or
+discovery-role permissions. The signed macOS test host has the credential's Keychain access
+group; local hardware discovery is disabled.
+
+Coverage includes ML-DSA-44/65/87, ML-KEM-512/768/1024, and the three concrete
+hybrid KEMs (`MLKEM768-P256`, `MLKEM768-X25519`, `MLKEM1024-P384`). The matrix
+checks token key generation, pure and prehashed signatures, multipart operations,
+contexts and hedging, signature rejection, KEM buffer retries, secret agreement,
+invalid ciphertexts, and mismatched hybrid constructions. Standalone expanded-key
+import tests remain separate from this deployed matrix.
+
+The fixture refuses occupied IDs in `7e40`–`7e48` and removes its temporary
+public and private objects. Read-only inventory comparisons verify preservation
+of all existing objects: 56 on serial `24000001` and 17 on serial `25000002`.
+See the [qualification record](i2c-pqc-qualification.json) for the tested revision,
+individual results, source revisions, inventory digests and concurrency limits.
+
+### Qualification limits
+
+Shared-bus concurrency reproduces NACKs, arbitration loss, truncated requests
+and full-length replies that fail MAC verification. Failures occur while the
+bus lock is released during computation and response publication. Independent
+SDK reads and ordinary echo requests reproduce failures too. A captured
+2,444-byte reply differs from the target's output after its first 187 bytes,
+without a recorded FIFO underrun.
+
+The qualification record retains a historical complete-exchange serialization
+experiment: three paired rounds passed all six matrices, each in approximately
+250–254 seconds, with the exact 56/17-object baseline inventories preserved.
+Targets reported zero receive overruns, drops and transmit underruns, and the
+validation connector reported no error outcomes. That workaround is excluded
+from the implementation; its results do not qualify the retained concurrency
+behavior.
+
+The precise peripheral or electrical mechanism is not established. Scope ringing
+alone does not demonstrate a threshold crossing. Reducing the rate to 100 kHz
+or increasing controller SDA hold did not qualify pipelined operation. The
+receive-tail fix corrects a reproduced driver race, and earlier transmit refill
+improves tolerance of interrupt latency; they do not by themselves resolve
+pipelined shared-bus failures.
+
+An interrupted generation can leave a device key and PKCS #11 metadata even
+when the API returns an error. Do not blindly replay the operation. Compare
+the inventory with the pre-run snapshot, establish a fresh authorized session,
+and remove only proven test-owned objects. Delete an owned public projection
+before its private key so cleanup does not retain a detached public object.
 
 ## Reproduction
 
