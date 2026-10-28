@@ -180,3 +180,38 @@ The HTTP success, mismatch, error and timeout evidence paths are exercised with:
 ```sh
 python3 -m unittest discover -s tools -p test_i2c_connector_stress.py -v
 ```
+
+### Exchange phase timing
+
+Enable `RUST_LOG=pkcs11rs_connector::i2c::timing=debug` on a diagnostic connector
+to record one metadata-only timing entry per attempted exchange. Each entry
+identifies the bus, address, exchange ID, request/response lengths, result and
+last phase. It separates request-lock wait, request setup, request write,
+cleanup acknowledgment, response READY wait, response-lock wait, response setup,
+header read and body read, in microseconds. Read phases include their adjacent
+validation/allocation work. Response length is recorded for completed frames.
+Errors retain elapsed time through the failed phase. Entries are emitted after
+the bus locks are released; command bytes, credentials and session keys are not
+logged. Timing is disabled at ordinary log levels. Lock scope, retry policy and
+exchange deadlines are unchanged.
+
+`tools/i2c-authenticated-probe.c` is a macOS lab client using the existing Secure
+Enclave `reserve` credential and target Authentication Key `1003`. Its `read`
+mode repeatedly invokes `C_GetSessionInfo`, which performs an authenticated
+GetStorageInfo request rather than reading a cached public key. Its `sign` mode
+requires an explicitly selected existing RSA signing pair and verifies each
+signature over a domain-labelled test message. `inventory` reports public
+object identity/attributes for before/after comparison. The client has no key
+creation, import, modification or deletion mode, disables local hardware
+discovery and transparent session recreation, and stops on the first error.
+Run read and signing roles in separate processes so PKCS #11 context locking
+does not serialize their traffic. The optional shared start barrier makes both
+authenticated sessions ready before measurements begin.
+
+Build it against this checkout's headers and run it in a signed host with the
+existing platform-credential access group, as described in the qualification
+record. It accepts the module path, connector URL, serial, mode, operation count,
+optional RSA key ID as hex bytes, and optional barrier directory. No password is
+accepted or retained. Select only keys already present in the baseline inventory;
+compare inventories afterward. The credential stays on the Mac, so this client
+is distinct from the controller-local unauthenticated echo diagnostic.

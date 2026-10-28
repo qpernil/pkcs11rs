@@ -1,4 +1,7 @@
-use super::{I2cYubiHsmSpec, ReadyGpioSpec};
+use super::{
+    I2cYubiHsmSpec, ReadyGpioSpec,
+    timing::{ExchangeTiming, Phase},
+};
 use crate::registry::TransportError;
 use gpiocdev_uapi::v2 as gpio;
 use std::{
@@ -93,10 +96,14 @@ impl YubiHsmI2cDevice {
         let timeout = self.timeout;
         validate_request(request)?;
         let deadline = Instant::now() + timeout;
+        let mut timing =
+            ExchangeTiming::new(&self.endpoint.bus, self.endpoint.address, request.len());
         let bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        timing.enter(Phase::RequestSetup);
         disable_adapter_retries(&self.bus)?;
         self.ready.listen_for(gpio::LineFlags::EDGE_RISING)?;
         self.ready.discard_events()?;
+        timing.enter(Phase::RequestWrite);
         write_transaction(&mut self.bus, request).map_err(|error| {
             if matches!(error.raw_os_error(), Some(libc::EREMOTEIO | libc::ENXIO)) {
                 TransportError::endpoint_unavailable(format!("write I2C request: {error}"))
@@ -106,6 +113,7 @@ impl YubiHsmI2cDevice {
         })?;
         // Arm a single edge: Linux's both-edge threaded handler infers the
         // direction from a later pin reading and can mislabel a fast pulse.
+        timing.enter(Phase::CleanupAck);
         if !self.ready.wait_for_ack(deadline)? {
             return Err(TransportError::device(
                 "I2C target did not acknowledge request cleanup",
@@ -113,12 +121,16 @@ impl YubiHsmI2cDevice {
         }
         self.ready.listen_for(gpio::LineFlags::EDGE_FALLING)?;
         drop(bus_lock);
+        timing.enter(Phase::ResponseReady);
         if !self.ready.wait_for_level(true, deadline)? {
             return Err(self.response_timeout(timeout));
         }
+        timing.enter(Phase::ResponseLock);
         let _bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        timing.enter(Phase::ResponseSetup);
         disable_adapter_retries(&self.bus)?;
         let mut header = [0_u8; FRAME_HEADER_LENGTH];
+        timing.enter(Phase::HeaderRead);
         read_transaction(&mut self.bus, &mut header)
             .map_err(|error| device_error("read I2C response header", error))?;
         if header[0] != request[0] | 0x80 && header[0] != 0x7f {
@@ -135,11 +147,13 @@ impl YubiHsmI2cDevice {
         if length != 0 {
             let start = response.len();
             response.resize(start + length, 0);
+            timing.enter(Phase::BodyRead);
             read_transaction(&mut self.bus, &mut response[start..])
                 .map_err(|error| device_error("read I2C response payload", error))?;
         }
         // READY remains asserted. The next request clears any unread data;
         // the controller's exact-length read is the successful completion.
+        timing.complete(response.len());
         Ok(response)
     }
 
