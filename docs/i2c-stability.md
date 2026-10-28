@@ -133,3 +133,50 @@ Stop the connector before the raw tool claims its READY lines:
 python3 tools/i2c-stress.py 0x24 --ready /dev/gpiochip0:23 --count 1000 --payload-gap-ms 5
 python3 tools/i2c-stress.py 0x25 --ready /dev/gpiochip0:22 --count 1000 --abandon-every 10
 ```
+
+### Controller-local connector echo diagnostics
+
+Run `tools/i2c-connector-stress.py` on the controller with a loopback connector
+URL so an SSH forwarding interruption cannot be mistaken for an I2C failure.
+The tool sends only unauthenticated, non-mutating echo commands and compares
+complete response frames. It does not create sessions, discover USB hardware,
+or change HSM objects. Use a temporary connector with explicit I2C endpoints
+and hardware discovery disabled; no other process may own those READY lines.
+For the documented bench topology:
+
+```sh
+target/release/pkcs11rs-connector --listen 127.0.0.1:22346 \
+  --hardware-discovery false --serials 24000001,25000002 \
+  --i2c-yubihsm /dev/i2c-1@0x24=/dev/gpiochip0:23 \
+  --i2c-yubihsm /dev/i2c-1@0x25=/dev/gpiochip0:22
+```
+
+From another controller terminal, with access to the same checkout:
+
+```sh
+python3 tools/i2c-connector-stress.py --serials 24000001 25000002 \
+  --count 1000 --output /tmp/i2c-connector-evidence
+```
+
+The evidence directory must not exist. It contains per-request JSONL records,
+a run configuration, and the final result. The first HTTP error, timeout or
+byte mismatch stops new requests to both targets, records the attempted
+request, and retains the expected and available actual echo response. In-flight
+requests may finish before the tool exits. Requests are never retried. Use the
+recorded seed and per-request index to reproduce the generated echo bytes.
+
+An optional `--scope-host ADDRESS` forces and stops a preconfigured Siglent
+acquisition on the first failure and saves the command timing and returned
+status. Configure SCL/SDA/READY channels and a suitable acquisition window before
+the run; this option does not configure or retrieve waveforms. A timeout can be
+reported after the initiating wire event has left a short acquisition window.
+Scope-command failure is recorded separately from the transport failure.
+
+Stop the temporary connector after the run and verify release of the bus and
+READY lines. Retain target counter snapshots before and after the experiment.
+Finite echo success does not qualify concurrent authenticated/PQC workloads.
+The HTTP success, mismatch, error and timeout evidence paths are exercised with:
+
+```sh
+python3 -m unittest discover -s tools -p test_i2c_connector_stress.py -v
+```
