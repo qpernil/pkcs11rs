@@ -1526,7 +1526,9 @@ under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
 always see first-party edits immediately; there is no dependency-source switch
 or generated override. CI checks out the `virtual-yubikey` revision specified
 by `VIRTUAL_YUBIKEY_REVISION` in its workflow so the embedded PreviewSign
-producer uses the same DER signature contract as the host parser.
+producer uses the same DER signature contract as the host parser. The pinned
+revision's standalone lockfile must also match the current shared-core manifests,
+because CI runs the virtual-device persistence tests in that workspace.
 
 The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,

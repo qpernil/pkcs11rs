@@ -11,7 +11,7 @@ concurrency:
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
   # Match shared-core integration and the upstream ML-DSA lockfile.
-  VIRTUAL_YUBIKEY_REVISION: f741864b2fe182d588897ba9545ac813d0ec9e27
+  VIRTUAL_YUBIKEY_REVISION: 9acc64d602d4aa868c033296e57e30d3f86dbbc9
 
 jobs:
   pkcs11test:
