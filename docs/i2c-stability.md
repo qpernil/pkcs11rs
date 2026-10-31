@@ -146,15 +146,74 @@ echoes and 674 GPIO cycles. Electrical checks verify both wiring states. The
 failing request waits 11 microseconds for the bus lock. The idle peer's BSC
 transaction and byte counters remain zero during the two physical controls.
 
-These finite results do not separate wire coupling, controller pad/input,
-and ground/probe effects, qualify authenticated PQC concurrency, or prove that
-every earlier failure has this cause. C3 probe retention was requested but not
-independently verified; no new time-aligned waveform is claimed. A short
-READY/ground pair routed away from SDA/SCL, then a spare controller input if
-needed, can distinguish routing from pad effects. See the target
-[READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
-for complete counts and limits. No firmware or lock-policy change was made;
-diagnostic jobs are stopped and the original READY connection is restored.
+Follow-up controls retain the same GPIO17 high/low pulse workload:
+
+| READY path / controller input | Successful echoes before failure | Failure |
+|---|---:|---|
+| Breadboard, GPIO22, C3 tip disconnected | 85 | Request-write `EAGAIN`, lost arbitration |
+| Direct jumper, GPIO22, C3 tip disconnected | 13 | Response-payload `EAGAIN`, lost arbitration |
+| Direct jumper, GPIO24, C3 tip disconnected | 43 | Request-write `EREMOTEIO` |
+| Direct jumper, GPIO24, repeated for scope | 11 | Full-length 3,136-byte reply differs at byte 915 |
+
+A 100-echo baseline without pulses passes after bus recovery and again with
+GPIO24 connected. The idle peer's transaction/byte counters remain zero.
+GPIO22 specifically, READY breadboard contacts and C3's tip are therefore not
+required for this finite reproduction. Other scope/ground paths, wire loading,
+shared controller effects and target output/ground coupling remain unresolved.
+The I2C diagnostic sources and loaded target module match the earlier controls;
+other dependency/binary changes limit direct comparisons across the lab reboot.
+
+A byte-correlated capture uses hardware single acquisition, triggered on an
+I2C write to address `0x24` with first data byte `0x01` (echo). Each arm sends
+one 3,133-byte echo, preventing later device-info traffic from replacing the
+record. The clean capture matches the complete saved request and response body.
+With READY pulsing, five echoes pass and the sixth fails with request-write
+`EAGAIN` and kernel lost arbitration. Its scope record matches the first 2,604
+saved request bytes. The next byte (zero-based request offset 2,604) should be
+`0x9D`; the wire presents eight data bits `0x9C`, then clocks stop before ACK.
+SDA remains low while SCL stays high. A native 20 ns excerpt preserves that bit.
+
+This establishes the actual on-wire failure, but not which device holds SDA
+low or why. C3 remains disconnected, so no READY-edge timing is available;
+receiver thresholds and probe skew are uncalibrated. Recovery with low/release
+clocks and STOP restores idle-high lines; four no-pulse echoes then pass.
+The failed acquisition remains stopped and no uncertain HSM mutation is replayed.
+
+A post-abort output-isolation control identifies the addressed target as the
+held-low source. After a 4,668-byte echo write loses arbitration, disconnecting
+only idle Pi2's GPIO18 SDA output (input mode) leaves SDA low. Restoring Pi2
+ALT3 leaves it low. Disconnecting only addressed Pi1's SDA output raises SDA;
+restoring Pi1 ALT3 pulls it low again. No clocks, READY configuration changes,
+service restarts or physical rewiring occur during those checks. Pi1 then
+reports `FR=0x32` (`RXBUSY=1`, `TXBUSY=0`); idle Pi2 reports `FR=0x12`.
+
+The BSC hardware generates receiver ACKs, so receive-busy does not imply a
+high-impedance SDA output. These observations fit a receive/ACK state waiting for another clock.
+They identify the post-abort holder, not the cause of the original bad bit or
+whether a driver transition or hardware misalignment initiated it. Recovery
+clocks and STOP restore the bus; four subsequent echoes pass and both flag
+registers return to `0x12`. Both SDA muxes are restored; original services
+remain running.
+
+The separate NACK capture's roughly 23 microsecond READY pulse is the intended
+cleanup acknowledgement. Its first cleanup rise overlaps the following
+`0x06` device-info write by about 40 microseconds after that write starts.
+The target logs record the partial echo and complete device-info request;
+this recovery overlap remains distinct from the original arbitration loss.
+
+Diagnostic wiring currently connects Pi2 GPIO17 (pin 11) directly to controller
+GPIO24 (pin 18), with C3 disconnected. The documented normal bench mapping is GPIO22;
+no production configuration was changed. Any subsequent two-target diagnostic must use
+GPIO24 explicitly or restore the physical GPIO22 connection first. Diagnostic
+jobs are stopped. The next measurement should trace receive completion and
+BSC reconfiguration against wire timing to distinguish driver transitions from
+hardware loss of alignment.
+
+See the target [SDA output isolation](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/sda-output-isolation.json),
+[correlated failure capture](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-failure-capture.json)
+and [READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
+for counts, source revisions and limits. Concurrent authenticated PQC remains
+unqualified; no firmware or lock-policy change was made for these controls.
 
 ## PQC provider qualification
 
