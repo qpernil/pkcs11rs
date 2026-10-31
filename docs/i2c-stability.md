@@ -72,6 +72,19 @@ and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
 
 ## Validation
 
+The [explicit-recovery validation](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json)
+passes normal and intentionally abandoned reads, both-target connector traffic,
+8176-byte application requests and reconnects. Each open performs one recovery;
+successful normal exchanges add none. The 67 connector tests on the Mac, 17
+Linux I2C tests, and the target C model pass.
+
+The original manual READY2 pulse trigger remains reproducible: 78 Pi1 echoes
+pass before request-write arbitration loss leaves SDA low. Pi2 has no I2C traffic
+in that control. Removing routine BSC resets and GPIO edge reconfiguration does
+not eliminate this failure. Bus clear and explicit reconnect recovery restore
+idle-high lines, and four subsequent echoes per target pass. This is a separate
+qualification limit from the implemented normal/recovery contract.
+
 The actual C driver functions pass FIFO/serializer model checks for staged reads,
 abandoned last bytes, superseded worker results, receive-tail completion and
 transmit-refill latency. The target repository passes 27 Rust unit tests and
