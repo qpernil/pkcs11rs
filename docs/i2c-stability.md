@@ -25,12 +25,32 @@ provide lab evidence for a particular setup, not general electrical qualificatio
 
 ## Exchange contract
 
-Use driver ABI 3 with READY configured on both ends. The controller holds the
-bus lock from request writing through the target's cleanup acknowledgment
-(physical rising READY edge), releases it while waiting for computation, then
-reacquires it for the three-byte header and exact-length body reads. A per-device
-gate keeps each HSM single-flight. Separate targets can compute concurrently,
-but shared-bus concurrency remains unqualified.
+Use target character-device ABI 3 with READY and wire protocol 4 on both ends.
+[The transport contract](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/response-transport.md)
+defines the versioned request envelope and explicit recovery exchange.
+
+Normal requests follow a fully consumed response and leave target BSC enabled in
+I2C mode. They carry a 16-byte version/length/token/CRC envelope, leaving 8176
+application-request bytes within Linux's 8192-byte write limit; responses retain
+the 8192-byte limit. The shared bus lock covers the write and physical rising
+READY acknowledgment, and separately the complete header/body response read.
+READY detection stays rising-only for the lifetime of the connection. Response
+readiness is checked by bounded 100 microsecond level polling without changing
+GPIO edge configuration. The existing `cleanup_ack` timing metric measures the
+request acknowledgment; it does not imply a normal peripheral purge.
+
+Opening or reconnecting performs explicit driver-level recovery before DeviceInfo.
+The controller consumes and verifies the recovery version/token response while
+holding the bus lock. Any incomplete or uncertain exchange closes the transport;
+a later connection recovers before another command. The failed command is never
+replayed. Only explicit recovery purges old target transmit state. Corrupt, partial
+or legacy request frames are rejected before reaching the HSM worker. A failed
+recovery leaves the endpoint unavailable; it does not clear a physically stuck bus.
+
+FIFO flags cannot prove that an old serializer byte was consumed, so other
+controllers must implement the same completion/recovery contract. Module/service
+lifecycle changes require quiescent traffic. Old and new wire implementations
+must be upgraded together. Shared-bus qualification remains required.
 
 Connector workers enter a FIFO admission queue for each wire phase. Character
 handles for the same physical adapter share the queue even through device-node
@@ -51,27 +71,6 @@ queue preserves bounded admission without asynchronous descriptor closure or
 process-wide signal handlers. See the Linux [flock](https://man7.org/linux/man-pages/man2/flock.2.html)
 and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
 
-READY stays asserted after reading; a new request clears previous transmit state. The
-acknowledgment includes a short assertion when READY was already inactive,
-so the controller waits for an edge rather than trusting an old level. It arms
-rising-only detection before writing, then falling-only detection followed by
-a level check for the response. Linux both-edge reporting can misclassify the
-short inactive interval by sampling the pin after the response is already ready.
-
-Only actual response bytes are queued. A new request invalidates the previous
-result and replaces the single pending request; an older computation may finish
-but cannot publish its stale result. This restores synchronization without
-undoing side effects or making replay of uncertain commands safe.
-
-A physical Pi 3B+ test queued A1 B2 C3 without a driver or guard: after reading
-two bytes, FIFO level and TXBUSY were both zero, but the next read returned C3.
-The flags remained identical after that final byte. Queuing and reading another
-complete response without a reset succeeded. This is why the driver avoids
-inferring completion and clears transmit state at the next request instead.
-
-All bus clients must cooperate in the advisory lock. Target activation, close
-and unload still require quiescent bus traffic. Linux IRQ latency and electrical
-margins remain hardware qualification concerns.
 
 ## Validation
 

@@ -7,6 +7,7 @@ import random
 import select
 import struct
 import time
+import zlib
 
 
 def main():
@@ -52,18 +53,18 @@ def main():
         if time.monotonic() >= deadline:
             raise TimeoutError(stage)
 
-    def listen_for(edge):
-        config = bytearray(272)
-        struct.pack_into("Q", config, 0, (1 << 2) | (1 << 8) | edge)
-        fcntl.ioctl(ready, 0xC110B40D, config)
+    def wire(request, recovery=False, token=0):
+        header = b"BSC\x04" + bytes([2 if recovery else 1, 0])
+        frame = header + len(request).to_bytes(2, "big") + token.to_bytes(4, "big") + request
+        return frame + zlib.crc32(frame).to_bytes(4, "big")
 
-    def write_request(request, deadline):
+    def write_request(request, deadline, recovery=False, token=0):
         fcntl.flock(bus, fcntl.LOCK_EX)
         fcntl.ioctl(bus, 0x0701, 0)  # Never replay a partial transfer after arbitration loss.
-        listen_for(1 << 4)
         while select.select([ready], [], [], 0)[0]:
             os.read(ready, 48)
-        if os.write(bus, request) != len(request):
+        encoded = wire(request, recovery, token)
+        if os.write(bus, encoded) != len(encoded):
             raise RuntimeError("short request write")
         while True:
             check_deadline(deadline, "request cleanup acknowledgement")
@@ -74,9 +75,24 @@ def main():
                 raise RuntimeError("short GPIO event")
             if struct.unpack_from("I", event, 8)[0] == 1:
                 break
-        listen_for(1 << 5)
-        fcntl.flock(bus, fcntl.LOCK_UN)
+        if not recovery:
+            fcntl.flock(bus, fcntl.LOCK_UN)
 
+    def recover(deadline):
+        token = time.monotonic_ns() & 0xffffffff
+        try:
+            write_request(b"", deadline, recovery=True, token=token)
+            while not asserted():
+                check_deadline(deadline, "recovery response")
+                time.sleep(0.0001)
+            expected = b"\x80\x00\x08BSC\x04" + token.to_bytes(4, "big")
+            if read(len(expected)) != expected:
+                raise RuntimeError("target did not confirm wire protocol 4 recovery")
+        finally:
+            fcntl.flock(bus, fcntl.LOCK_UN)
+
+    recover(time.monotonic() + 5)
+    needs_recovery = False
     rng = random.Random(args.seed)
     boundaries = [0, 1, 2, 12, 13, 14, 15, 16, 17, 31, 32, 255, 256, 1024, 3133]
     sizes = [n for n in boundaries if n <= args.max_payload]
@@ -90,11 +106,15 @@ def main():
         request = b"\x01" + length.to_bytes(2, "big") + payload
         deadline = time.monotonic() + 5
         try:
+            if needs_recovery:
+                recover(deadline)
+                needs_recovery = False
             write_request(request, deadline)
             if args.supersede_every and (index + 1) % args.supersede_every == 0:
                 # Let a deliberately delayed worker enter its response write.
                 time.sleep(0.05)
                 for _ in range(2):
+                    recover(deadline)
                     payload = bytes((byte + 1) % 256 for byte in payload)
                     request = b"\x01" + length.to_bytes(2, "big") + payload
                     write_request(request, deadline)
@@ -109,6 +129,7 @@ def main():
             if length:
                 time.sleep(args.payload_gap_ms / 1000)
                 abandon = args.abandon_every and (index + 1) % args.abandon_every == 0
+                needs_recovery = bool(abandon)
                 wanted = length - 1 if abandon else length
                 response = read(wanted) if wanted else b""
                 if response != payload[:wanted]:

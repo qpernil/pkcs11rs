@@ -6,6 +6,8 @@ mod fair_queue;
 mod timing;
 #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
 mod transport;
+#[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
+mod wire;
 
 use crate::{BoxError, registry::DeviceRegistry};
 use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
