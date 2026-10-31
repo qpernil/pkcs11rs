@@ -3,6 +3,8 @@ mod device;
 #[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
 mod fair_queue;
 #[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
+mod recovery;
+#[cfg(any(test, all(feature = "experimental-i2c", target_os = "linux")))]
 mod timing;
 #[cfg(all(feature = "experimental-i2c", target_os = "linux"))]
 mod transport;
