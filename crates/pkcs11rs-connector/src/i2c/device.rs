@@ -1,6 +1,7 @@
 use super::{
     I2cYubiHsmSpec, ReadyGpioSpec,
     fair_queue::{FairQueue, Turn},
+    recovery,
     timing::{ExchangeTiming, Phase},
 };
 use crate::registry::TransportError;
@@ -26,6 +27,7 @@ const MAX_FRAME_DATA_LENGTH: usize = MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH;
 const BUS_LOCK_RETRY_DELAY: Duration = Duration::from_millis(2);
 const DEVICE_INFO_REQUEST: [u8; 3] = [0x06, 0x00, 0x00];
 const DEVICE_INFO_RESPONSE: u8 = 0x86;
+const READY_POLL_INTERVAL: Duration = Duration::from_micros(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct I2cDeviceIdentity {
@@ -79,8 +81,22 @@ impl YubiHsmI2cDevice {
             endpoint,
             timeout,
         };
+        device.recover()?;
         let identity = device.identity()?;
         Ok((device, identity))
+    }
+
+    fn recover(&mut self) -> Result<(), TransportError> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TOKENS: AtomicU32 = AtomicU32::new(1);
+        let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+        let reply = self.exchange(&recovery::request(token), true)?;
+        if reply.as_slice() != recovery::reply(token).as_slice() {
+            return Err(TransportError::device(
+                "I2C frontend does not confirm explicit recovery support",
+            ));
+        }
+        Ok(())
     }
 
     fn identity(&mut self) -> Result<I2cDeviceIdentity, TransportError> {
@@ -99,6 +115,10 @@ impl YubiHsmI2cDevice {
     }
 
     pub(super) fn transmit(&mut self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+        self.exchange(request, false)
+    }
+
+    fn exchange(&mut self, request: &[u8], hold_bus: bool) -> Result<Vec<u8>, TransportError> {
         let timeout = self.timeout;
         validate_request(request)?;
         let deadline = Instant::now() + timeout;
@@ -107,7 +127,6 @@ impl YubiHsmI2cDevice {
         let bus_lock = BusLock::acquire(&self.bus, deadline)?;
         timing.enter(Phase::RequestSetup);
         disable_adapter_retries(&self.bus)?;
-        self.ready.listen_for(gpio::LineFlags::EDGE_RISING)?;
         self.ready.discard_events()?;
         timing.enter(Phase::RequestWrite);
         write_transaction(&mut self.bus, request).map_err(|error| {
@@ -117,22 +136,29 @@ impl YubiHsmI2cDevice {
                 device_error("write I2C request", error)
             }
         })?;
-        // Arm a single edge: Linux's both-edge threaded handler infers the
-        // direction from a later pin reading and can mislabel a fast pulse.
+        // Rising detection remains fixed throughout this connection.
         timing.enter(Phase::CleanupAck);
         if !self.ready.wait_for_ack(deadline)? {
             return Err(TransportError::device(
-                "I2C target did not acknowledge request cleanup",
+                "I2C target did not acknowledge request acceptance",
             ));
         }
-        self.ready.listen_for(gpio::LineFlags::EDGE_FALLING)?;
-        drop(bus_lock);
+        let _recovery_lock = if hold_bus {
+            Some(bus_lock)
+        } else {
+            drop(bus_lock);
+            None
+        };
         timing.enter(Phase::ResponseReady);
         if !self.ready.wait_for_level(true, deadline)? {
             return Err(self.response_timeout(timeout));
         }
         timing.enter(Phase::ResponseLock);
-        let _bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        let _bus_lock = if hold_bus {
+            None
+        } else {
+            Some(BusLock::acquire(&self.bus, deadline)?)
+        };
         timing.enter(Phase::ResponseSetup);
         disable_adapter_retries(&self.bus)?;
         let mut header = [0_u8; FRAME_HEADER_LENGTH];
@@ -157,8 +183,8 @@ impl YubiHsmI2cDevice {
             read_transaction(&mut self.bus, &mut response[start..])
                 .map_err(|error| device_error("read I2C response payload", error))?;
         }
-        // READY remains asserted. The next request clears any unread data;
-        // the controller's exact-length read is the successful completion.
+        // READY remains asserted. A complete read permits the next normal request.
+        // Any transport failure closes this connection; reopening recovers first.
         timing.complete(response.len());
         Ok(response)
     }
@@ -301,17 +327,6 @@ impl ReadyLine {
         Ok(Self { lines })
     }
 
-    fn listen_for(&self, edge: gpio::LineFlags) -> Result<(), TransportError> {
-        gpio::set_line_config(
-            &self.lines,
-            gpio::LineConfig {
-                flags: gpio::LineFlags::INPUT | gpio::LineFlags::BIAS_PULL_UP | edge,
-                ..Default::default()
-            },
-        )
-        .map_err(|error| device_error("configure READY edge", error))
-    }
-
     fn read_edge(&self) -> Result<u32, TransportError> {
         let mut words = [0_u64; std::mem::size_of::<gpio::LineEdgeEvent>() / 8];
         let length = gpio::read_event(&self.lines, &mut words)
@@ -372,13 +387,8 @@ impl ReadyLine {
             if remaining.is_zero() {
                 return Ok(false);
             }
-            match gpio::wait_event(&self.lines, remaining) {
-                Ok(false) => return Ok(false),
-                Err(gpio::Error::Os(gpio::Errno(libc::EINTR))) => continue,
-                Err(error) => return Err(device_error("wait for READY GPIO edge", error)),
-                Ok(true) => {}
-            }
-            self.read_edge()?;
+            // Avoid changing GPIO edge configuration during a connection.
+            thread::sleep(remaining.min(READY_POLL_INTERVAL));
         }
     }
 }

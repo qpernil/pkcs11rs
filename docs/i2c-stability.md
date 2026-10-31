@@ -23,12 +23,30 @@ provide lab evidence for a particular setup, not general electrical qualificatio
 
 ## Exchange contract
 
-Use driver ABI 3 with READY configured on both ends. The controller holds the
-bus lock from request writing through the target's cleanup acknowledgment
-(physical rising READY edge), releases it while waiting for computation, then
-reacquires it for the three-byte header and exact-length body reads. A per-device
-gate keeps each HSM single-flight. Separate targets can compute concurrently,
-but shared-bus concurrency remains unqualified.
+Use target character-device ABI 3 with READY and the explicit recovery capability.
+[The exchange contract](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/response-transport.md)
+keeps ordinary application requests and responses unchanged, including the
+8192-byte limits. There is no additional request envelope or CRC. Normal exchanges
+keep BSC enabled in I2C mode. The bus lock covers the request and its rising READY
+acceptance edge, and separately the exact header/body response read.
+
+READY detection stays rising-only for the connection. Response readiness uses
+100 microsecond level-poll intervals, subject to Linux scheduling. The existing
+`cleanup_ack` timing metric measures request acceptance, not a normal purge.
+
+Before DeviceInfo on open/reconnect, the connector sends the reserved frontend
+control frame `00 00 0d BSCRECOV 01 TOKEN32`, using existing HSM framing. The I2C
+frontend invokes `BSC_TARGET_IOC_RECOVER` and confirms the token with response
+command `80`. This control is outside the HSM core. The bus lock covers the whole
+recovery exchange. Any incomplete exchange closes the transport; reopening
+recovers before another command. An uncertain command is never replayed.
+
+Adapter errors, HSM frame validation and authenticated-session MACs supply their
+existing error checks. A raw unauthenticated protocol without integrity cannot
+detect all silent bit corruption. Recovery does not clear a physically stuck bus.
+Generic driver clients retain their normal byte protocols; abandoning a reply
+requires an application-specific recovery operation or a quiescent target restart.
+The HSM frontend, connector and recovery-capable driver must be updated together.
 
 Connector workers enter a FIFO admission queue for each wire phase. Character
 handles for the same physical adapter share the queue even through device-node
@@ -49,42 +67,34 @@ queue preserves bounded admission without asynchronous descriptor closure or
 process-wide signal handlers. See the Linux [flock](https://man7.org/linux/man-pages/man2/flock.2.html)
 and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
 
-READY stays asserted after reading; a new request clears previous transmit state. The
-acknowledgment includes a short assertion when READY was already inactive,
-so the controller waits for an edge rather than trusting an old level. It arms
-rising-only detection before writing, then falling-only detection followed by
-a level check for the response. Linux both-edge reporting can misclassify the
-short inactive interval by sampling the pin after the response is already ready.
-
-Only actual response bytes are queued. A new request invalidates the previous
-result and replaces the single pending request; an older computation may finish
-but cannot publish its stale result. This restores synchronization without
-undoing side effects or making replay of uncertain commands safe.
-
-A physical Pi 3B+ test queued A1 B2 C3 without a driver or guard: after reading
-two bytes, FIFO level and TXBUSY were both zero, but the next read returned C3.
-The flags remained identical after that final byte. Queuing and reading another
-complete response without a reset succeeded. This is why the driver avoids
-inferring completion and clears transmit state at the next request instead.
-
-All bus clients must cooperate in the advisory lock. Target activation, close
-and unload still require quiescent bus traffic. Linux IRQ latency and electrical
-margins remain hardware qualification concerns.
 
 ## Validation
 
-The actual C driver functions pass FIFO/serializer model checks for staged reads,
-abandoned last bytes, superseded worker results, receive-tail completion and
-transmit-refill latency. The target repository passes 27 Rust unit tests and
-Clippy with warnings denied. Both Pis build the kernel module against their
-running kernel.
+The coordinated driver, HSM frontend and connector pass the finite raw-byte
+recovery checks in the [validation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json): 100 normal echoes with one
+startup recovery, 50 exchanges with every fifth response deliberately incomplete,
+30 concurrent echoes per target, reconnects, and exact 8192-byte requests/replies
+on both targets. The unchanged `controller-long` works with the committed C echo
+fixture, including an 8192-byte reply. Receive-only test records arrive unchanged.
+Neither path reports overruns or underruns.
 
-The connector's Linux `experimental-i2c` build passes 67 unit tests, including
-FIFO admission, deadline cancellation and external advisory-lock exclusion.
-The Mac connector build without default features passes 65 tests. Both pass
-Clippy with warnings denied. The connector and raw stress tool disable
-implicit adapter retries under each wire-phase lock. Other bus clients must preserve this adapter-wide policy;
-retrying a partially consumed reply also loses framing.
+Four-channel scope records cover SCL, SDA and both READY signals. Threshold
+decoding matches the complete 3133-byte echo request and reply in both a steady
+capture and a READY2 pulse-control capture. All ten pulse-control echoes pass;
+this short run does not establish a fix for the intermittent fault. A native
+20 ns excerpt measures SCL at approximately 391 kHz. C3 observes READY2 via the
+breadboard; Pi2 READY is on controller GPIO22/pin 15. Concurrent authenticated
+PQC remains unqualified. Full display application qualification is not repeated
+by the receive-only byte check.
+
+The actual C driver functions pass FIFO/serializer model checks for raw byte
+preservation, staged reads, abandoned last bytes, active-input recovery refusal,
+superseded worker results, receive-tail completion and transmit-refill latency.
+Both Pis build the C module against their running kernel. The ARM64 Linux build
+passes 16 controller I2C tests and 6 frontend tests. The connector and raw stress
+tool disable implicit adapter retries under each wire-phase lock; other clients
+must preserve this adapter-wide policy. Retrying a partly consumed reply also
+loses application framing.
 
 The hardware topology is Ubuntu4 (Pi 5/RP1) controlling raspberrypi-1 (`0x24`,
 serial 24000001, READY GPIO23) and raspberrypi-2 (`0x25`, serial 25000002,
@@ -199,13 +209,13 @@ cleanup acknowledgement. Its first cleanup rise overlaps the following
 The target logs record the partial echo and complete device-info request;
 this recovery overlap remains distinct from the original arbitration loss.
 
-Diagnostic wiring currently connects Pi2 GPIO17 (pin 11) directly to controller
-GPIO24 (pin 18), with C3 disconnected. The documented normal bench mapping is GPIO22;
-no production configuration was changed. Any subsequent two-target diagnostic must use
-GPIO24 explicitly or restore the physical GPIO22 connection first. Diagnostic
-jobs are stopped. The next measurement should trace receive completion and
-BSC reconfiguration against wire timing to distinguish driver transitions from
-hardware loss of alignment.
+The historical isolation captures above used controller GPIO24/pin 18 with C3
+disconnected. The active bench mapping is Pi2 GPIO17/pin 11 to controller
+GPIO22/pin 15, with C3 observing READY2 through the breadboard. Pi1 READY uses
+controller GPIO23/pin 16. Diagnostic jobs are stopped. Further root-cause work
+must distinguish unexpected SDA drive from receive/ACK misalignment while
+capturing READY2 with SDA/SCL; the existing finite controls do not separate those
+mechanisms.
 
 See the target [SDA output isolation](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/sda-output-isolation.json),
 [correlated failure capture](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-failure-capture.json)
