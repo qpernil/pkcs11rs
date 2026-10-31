@@ -7,7 +7,6 @@ import random
 import select
 import struct
 import time
-import zlib
 
 
 def main():
@@ -53,18 +52,12 @@ def main():
         if time.monotonic() >= deadline:
             raise TimeoutError(stage)
 
-    def wire(request, recovery=False, token=0):
-        header = b"BSC\x04" + bytes([2 if recovery else 1, 0])
-        frame = header + len(request).to_bytes(2, "big") + token.to_bytes(4, "big") + request
-        return frame + zlib.crc32(frame).to_bytes(4, "big")
-
     def write_request(request, deadline, recovery=False, token=0):
         fcntl.flock(bus, fcntl.LOCK_EX)
         fcntl.ioctl(bus, 0x0701, 0)  # Never replay a partial transfer after arbitration loss.
         while select.select([ready], [], [], 0)[0]:
             os.read(ready, 48)
-        encoded = wire(request, recovery, token)
-        if os.write(bus, encoded) != len(encoded):
+        if os.write(bus, request) != len(request):
             raise RuntimeError("short request write")
         while True:
             check_deadline(deadline, "request cleanup acknowledgement")
@@ -81,13 +74,15 @@ def main():
     def recover(deadline):
         token = time.monotonic_ns() & 0xffffffff
         try:
-            write_request(b"", deadline, recovery=True, token=token)
+            request = b"\x00\x00\x0dBSCRECOV\x01" + token.to_bytes(4, "big")
+            write_request(request, deadline, recovery=True, token=token)
             while not asserted():
                 check_deadline(deadline, "recovery response")
                 time.sleep(0.0001)
-            expected = b"\x80\x00\x08BSC\x04" + token.to_bytes(4, "big")
-            if read(len(expected)) != expected:
-                raise RuntimeError("target did not confirm wire protocol 4 recovery")
+            expected = b"\x80\x00\x0dBSCRECOV\x01" + token.to_bytes(4, "big")
+            header = read(3)
+            if header != expected[:3] or read(len(expected) - 3) != expected[3:]:
+                raise RuntimeError("target frontend did not confirm explicit recovery")
         finally:
             fcntl.flock(bus, fcntl.LOCK_UN)
 
