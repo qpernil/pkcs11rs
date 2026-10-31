@@ -69,8 +69,10 @@ their respective device protocols; they are not dependencies of the provider.
 The upstream [RustCrypto/signatures](https://github.com/RustCrypto/signatures)
 repository supplies the ML-DSA implementation used by software-key-core and
 pkcs11rs validation, including row-allocated matrices that limit stack usage.
-The Git dependency follows the upstream default branch without a revision pin;
-Cargo.lock records the resolved commit. Expanded-key import validation belongs to
+The dependency manifest pins commit
+`a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e` until a crates.io release includes
+the stack fix and passes the shared core's 512 KiB stack tests in debug and
+release builds. Expanded-key import validation belongs to
 [software-key-core](https://github.com/qpernil/software-key-core/blob/main/docs/ml-dsa-key-validation.md)
 and uses the dependency's existing public API. This is a cryptographic
 dependency rather than a deployed service.
