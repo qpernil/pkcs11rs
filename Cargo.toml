@@ -63,7 +63,7 @@ platform-credential = { path = "crates/platform-credential" }
 yubihsm-auth-client = { path = "crates/yubihsm-auth-client" }
 zeroize = "1.9.0"
 const-oid = "0.10.2"
-der = { version = "0.8.1", features = ["alloc", "derive", "std"] }
+der = { version = "0.8.3", features = ["alloc", "derive", "std"] }
 p256 = { version = "0.14.0", optional = true, default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "std"] }
 rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
