@@ -80,7 +80,9 @@ x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
-ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", features = ["zeroize"] }
+# Temporary pin for the matrix stack fix; switch to a crates.io release
+# once it includes the fix and passes the 512 KiB stack tests.
+ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", rev = "a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e", features = ["zeroize"] }
 num-bigint-dig = "0.8.6"
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 signature = "3.0.0"
@@ -96,5 +98,3 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 
 [patch.crates-io]
 hidapi = { path = "vendor/hidapi" }
-# certval requires x509-ocsp 0.3, which is not yet published on crates.io.
-x509-ocsp = { git = "https://github.com/RustCrypto/formats.git", rev = "2c0b0f99cf2bbc0738edc4e439e97dcc204099f5" }
