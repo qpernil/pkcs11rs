@@ -144,15 +144,40 @@ echoes and 674 GPIO cycles. Electrical checks verify both wiring states. The
 failing request waits 11 microseconds for the bus lock. The idle peer's BSC
 transaction and byte counters remain zero during the two physical controls.
 
-These finite results do not separate wire coupling, controller pad/input,
-and ground/probe effects, qualify authenticated PQC concurrency, or prove that
-every earlier failure has this cause. C3 probe retention was requested but not
-independently verified; no new time-aligned waveform is claimed. A short
-READY/ground pair routed away from SDA/SCL, then a spare controller input if
-needed, can distinguish routing from pad effects. See the target
-[READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
-for complete counts and limits. No firmware or lock-policy change was made;
-diagnostic jobs are stopped and the original READY connection is restored.
+Follow-up controls retain the same GPIO17 high/low pulse workload:
+
+| READY path / controller input | Successful echoes before failure | Failure |
+|---|---:|---|
+| Breadboard, GPIO22, C3 tip disconnected | 85 | Request-write `EAGAIN`, lost arbitration |
+| Direct jumper, GPIO22, C3 tip disconnected | 13 | Response-payload `EAGAIN`, lost arbitration |
+| Direct jumper, GPIO24, C3 tip disconnected | 43 | Request-write `EREMOTEIO` |
+| Direct jumper, GPIO24, repeated for scope | 11 | Full-length 3,136-byte reply differs at byte 915 |
+
+A 100-echo baseline without pulses passes after bus recovery and again with
+GPIO24 connected. The idle peer's transaction/byte counters remain zero.
+GPIO22 specifically, READY breadboard contacts and C3's tip are therefore not
+required for this finite reproduction. Other scope/ground paths, wire loading,
+shared controller effects and target output/ground coupling remain unresolved.
+The I2C diagnostic sources and loaded target module match the earlier controls;
+other dependency/binary changes limit direct comparisons across the lab reboot.
+
+Lost arbitration can leave SDA low. The affected target service was restarted
+with the same profile, binary and state path; low/release recovery clocks and a
+STOP restored bus idle, followed by the passing baseline. No uncertain HSM
+mutation was replayed. The latest scope-assisted run confirmed Stop, but the
+export contains a subsequent device-info exchange rather than the corrupt
+reply. No new time-aligned failure waveform is claimed.
+
+Diagnostic wiring currently connects Pi2 GPIO17 (pin 11) directly to controller
+GPIO24 (pin 18), with C3 disconnected. The documented normal bench mapping is GPIO22;
+no production configuration was changed. Any subsequent two-target diagnostic must use
+GPIO24 explicitly or restore the physical GPIO22 connection first. Diagnostic
+jobs are stopped. The next measurement should correlate the actual failure
+with SDA/SCL while controlling READY loading and ground return.
+
+See the target [READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
+for counts, source revisions and limits. Concurrent authenticated PQC remains
+unqualified; no firmware or lock-policy change was made for these controls.
 
 ## PQC provider qualification
 
