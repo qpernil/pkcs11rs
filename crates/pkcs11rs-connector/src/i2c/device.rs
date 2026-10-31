@@ -2,6 +2,7 @@ use super::{
     I2cYubiHsmSpec, ReadyGpioSpec,
     fair_queue::{FairQueue, Turn},
     timing::{ExchangeTiming, Phase},
+    wire,
 };
 use crate::registry::TransportError;
 use gpiocdev_uapi::v2 as gpio;
@@ -26,6 +27,7 @@ const MAX_FRAME_DATA_LENGTH: usize = MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH;
 const BUS_LOCK_RETRY_DELAY: Duration = Duration::from_millis(2);
 const DEVICE_INFO_REQUEST: [u8; 3] = [0x06, 0x00, 0x00];
 const DEVICE_INFO_RESPONSE: u8 = 0x86;
+const READY_POLL_INTERVAL: Duration = Duration::from_micros(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct I2cDeviceIdentity {
@@ -79,8 +81,33 @@ impl YubiHsmI2cDevice {
             endpoint,
             timeout,
         };
+        device.recover()?;
         let identity = device.identity()?;
         Ok((device, identity))
+    }
+
+    fn recover(&mut self) -> Result<(), TransportError> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TOKENS: AtomicU32 = AtomicU32::new(1);
+        let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + self.timeout;
+        let _bus_lock = BusLock::acquire(&self.bus, deadline)?;
+        disable_adapter_retries(&self.bus)?;
+        self.ready.discard_events()?;
+        write_transaction(&mut self.bus, &wire::encode(&[], true, token))
+            .map_err(|error| device_error("write I2C recovery", error))?;
+        if !self.ready.wait_for_ack(deadline)? || !self.ready.wait_for_level(true, deadline)? {
+            return Err(TransportError::device("I2C recovery handshake timed out"));
+        }
+        let mut reply = [0_u8; 11];
+        read_transaction(&mut self.bus, &mut reply)
+            .map_err(|error| device_error("read I2C recovery response", error))?;
+        if reply != wire::recovery_reply(token) {
+            return Err(TransportError::device(
+                "I2C target does not confirm wire protocol 4 recovery",
+            ));
+        }
+        Ok(())
     }
 
     fn identity(&mut self) -> Result<I2cDeviceIdentity, TransportError> {
@@ -107,25 +134,22 @@ impl YubiHsmI2cDevice {
         let bus_lock = BusLock::acquire(&self.bus, deadline)?;
         timing.enter(Phase::RequestSetup);
         disable_adapter_retries(&self.bus)?;
-        self.ready.listen_for(gpio::LineFlags::EDGE_RISING)?;
         self.ready.discard_events()?;
         timing.enter(Phase::RequestWrite);
-        write_transaction(&mut self.bus, request).map_err(|error| {
+        write_transaction(&mut self.bus, &wire::encode(request, false, 0)).map_err(|error| {
             if matches!(error.raw_os_error(), Some(libc::EREMOTEIO | libc::ENXIO)) {
                 TransportError::endpoint_unavailable(format!("write I2C request: {error}"))
             } else {
                 device_error("write I2C request", error)
             }
         })?;
-        // Arm a single edge: Linux's both-edge threaded handler infers the
-        // direction from a later pin reading and can mislabel a fast pulse.
+        // Rising detection remains fixed throughout this connection.
         timing.enter(Phase::CleanupAck);
         if !self.ready.wait_for_ack(deadline)? {
             return Err(TransportError::device(
-                "I2C target did not acknowledge request cleanup",
+                "I2C target did not acknowledge request acceptance",
             ));
         }
-        self.ready.listen_for(gpio::LineFlags::EDGE_FALLING)?;
         drop(bus_lock);
         timing.enter(Phase::ResponseReady);
         if !self.ready.wait_for_level(true, deadline)? {
@@ -157,8 +181,8 @@ impl YubiHsmI2cDevice {
             read_transaction(&mut self.bus, &mut response[start..])
                 .map_err(|error| device_error("read I2C response payload", error))?;
         }
-        // READY remains asserted. The next request clears any unread data;
-        // the controller's exact-length read is the successful completion.
+        // READY remains asserted. A complete read permits the next normal request.
+        // Any transport failure closes this connection; reopening recovers first.
         timing.complete(response.len());
         Ok(response)
     }
@@ -265,9 +289,10 @@ fn validate_request(request: &[u8]) -> Result<(), TransportError> {
             request.len()
         )));
     }
-    if request.len() > MAX_FRAME_LENGTH {
+    if request.len() > wire::MAX_REQUEST {
         return Err(TransportError::too_large(format!(
-            "YubiHSM request exceeds {MAX_FRAME_LENGTH} bytes"
+            "YubiHSM request exceeds {} bytes",
+            wire::MAX_REQUEST
         )));
     }
     Ok(())
@@ -299,17 +324,6 @@ impl ReadyLine {
         let lines = gpio::get_line(&chip, request)
             .map_err(|error| device_error("request READY GPIO line", error))?;
         Ok(Self { lines })
-    }
-
-    fn listen_for(&self, edge: gpio::LineFlags) -> Result<(), TransportError> {
-        gpio::set_line_config(
-            &self.lines,
-            gpio::LineConfig {
-                flags: gpio::LineFlags::INPUT | gpio::LineFlags::BIAS_PULL_UP | edge,
-                ..Default::default()
-            },
-        )
-        .map_err(|error| device_error("configure READY edge", error))
     }
 
     fn read_edge(&self) -> Result<u32, TransportError> {
@@ -372,13 +386,8 @@ impl ReadyLine {
             if remaining.is_zero() {
                 return Ok(false);
             }
-            match gpio::wait_event(&self.lines, remaining) {
-                Ok(false) => return Ok(false),
-                Err(gpio::Error::Os(gpio::Errno(libc::EINTR))) => continue,
-                Err(error) => return Err(device_error("wait for READY GPIO edge", error)),
-                Ok(true) => {}
-            }
-            self.read_edge()?;
+            // Avoid changing GPIO edge configuration during a connection.
+            thread::sleep(remaining.min(READY_POLL_INTERVAL));
         }
     }
 }
@@ -469,15 +478,16 @@ mod tests {
         );
 
         let mut maximum = vec![0x01];
-        maximum.extend_from_slice(&((MAX_FRAME_LENGTH - FRAME_HEADER_LENGTH) as u16).to_be_bytes());
-        maximum.resize(MAX_FRAME_LENGTH, 0);
+        maximum
+            .extend_from_slice(&((wire::MAX_REQUEST - FRAME_HEADER_LENGTH) as u16).to_be_bytes());
+        maximum.resize(wire::MAX_REQUEST, 0);
         assert!(validate_request(&maximum).is_ok());
 
         let mut oversized = vec![0x01];
         oversized.extend_from_slice(
-            &((MAX_FRAME_LENGTH + 1 - FRAME_HEADER_LENGTH) as u16).to_be_bytes(),
+            &((wire::MAX_REQUEST + 1 - FRAME_HEADER_LENGTH) as u16).to_be_bytes(),
         );
-        oversized.resize(MAX_FRAME_LENGTH + 1, 0);
+        oversized.resize(wire::MAX_REQUEST + 1, 0);
         assert_eq!(
             validate_request(&oversized).unwrap_err().kind(),
             crate::registry::TransportErrorKind::CommandTooLarge
