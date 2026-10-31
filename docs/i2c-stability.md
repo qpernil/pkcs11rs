@@ -23,32 +23,30 @@ provide lab evidence for a particular setup, not general electrical qualificatio
 
 ## Exchange contract
 
-Use target character-device ABI 3 with READY and wire protocol 4 on both ends.
-[The transport contract](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/response-transport.md)
-defines the versioned request envelope and explicit recovery exchange.
+Use target character-device ABI 3 with READY and the explicit recovery capability.
+[The exchange contract](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/response-transport.md)
+keeps ordinary application requests and responses unchanged, including the
+8192-byte limits. There is no additional request envelope or CRC. Normal exchanges
+keep BSC enabled in I2C mode. The bus lock covers the request and its rising READY
+acceptance edge, and separately the exact header/body response read.
 
-Normal requests follow a fully consumed response and leave target BSC enabled in
-I2C mode. They carry a 16-byte version/length/token/CRC envelope, leaving 8176
-application-request bytes within Linux's 8192-byte write limit; responses retain
-the 8192-byte limit. The shared bus lock covers the write and physical rising
-READY acknowledgment, and separately the complete header/body response read.
-READY detection stays rising-only for the lifetime of the connection. Response
-readiness is checked by bounded 100 microsecond level polling without changing
-GPIO edge configuration. The existing `cleanup_ack` timing metric measures the
-request acknowledgment; it does not imply a normal peripheral purge.
+READY detection stays rising-only for the connection. Response readiness uses
+100 microsecond level-poll intervals, subject to Linux scheduling. The existing
+`cleanup_ack` timing metric measures request acceptance, not a normal purge.
 
-Opening or reconnecting performs explicit driver-level recovery before DeviceInfo.
-The controller consumes and verifies the recovery version/token response while
-holding the bus lock. Any incomplete or uncertain exchange closes the transport;
-a later connection recovers before another command. The failed command is never
-replayed. Only explicit recovery purges old target transmit state. Corrupt, partial
-or legacy request frames are rejected before reaching the HSM worker. A failed
-recovery leaves the endpoint unavailable; it does not clear a physically stuck bus.
+Before DeviceInfo on open/reconnect, the connector sends the reserved frontend
+control frame `00 00 0d BSCRECOV 01 TOKEN32`, using existing HSM framing. The I2C
+frontend invokes `BSC_TARGET_IOC_RECOVER` and confirms the token with response
+command `80`. This control is outside the HSM core. The bus lock covers the whole
+recovery exchange. Any incomplete exchange closes the transport; reopening
+recovers before another command. An uncertain command is never replayed.
 
-FIFO flags cannot prove that an old serializer byte was consumed, so other
-controllers must implement the same completion/recovery contract. Module/service
-lifecycle changes require quiescent traffic. Old and new wire implementations
-must be upgraded together. Shared-bus qualification remains required.
+Adapter errors, HSM frame validation and authenticated-session MACs supply their
+existing error checks. A raw unauthenticated protocol without integrity cannot
+detect all silent bit corruption. Recovery does not clear a physically stuck bus.
+Generic driver clients retain their normal byte protocols; abandoning a reply
+requires an application-specific recovery operation or a quiescent target restart.
+The HSM frontend, connector and recovery-capable driver must be updated together.
 
 Connector workers enter a FIFO admission queue for each wire phase. Character
 handles for the same physical adapter share the queue even through device-node
@@ -72,18 +70,11 @@ and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
 
 ## Validation
 
-The [explicit-recovery validation](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json)
-passes normal and intentionally abandoned reads, both-target connector traffic,
-8176-byte application requests and reconnects. Each open performs one recovery;
-successful normal exchanges add none. The 67 connector tests on the Mac, 17
-Linux I2C tests, and the target C model pass.
-
-The original manual READY2 pulse trigger remains reproducible: 78 Pi1 echoes
-pass before request-write arbitration loss leaves SDA low. Pi2 has no I2C traffic
-in that control. Removing routine BSC resets and GPIO edge reconfiguration does
-not eliminate this failure. Bus clear and explicit reconnect recovery restore
-idle-high lines, and four subsequent echoes per target pass. This is a separate
-qualification limit from the implemented normal/recovery contract.
+The target C model verifies raw byte delivery, normal exchanges without resets,
+and explicit abandoned-response recovery. Updated hardware qualification is
+recorded in the [driver validation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json).
+The READY2-triggered fault remains unqualified and must be checked with READY2,
+SDA and SCL captured together.
 
 The actual C driver functions pass FIFO/serializer model checks for staged reads,
 abandoned last bytes, superseded worker results, receive-tail completion and
