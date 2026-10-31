@@ -70,24 +70,31 @@ and [close](https://man7.org/linux/man-pages/man2/close.2.html) semantics.
 
 ## Validation
 
-The target C model verifies raw byte delivery, normal exchanges without resets,
-and explicit abandoned-response recovery. Updated hardware qualification is
-recorded in the [driver validation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json).
-The READY2-triggered fault remains unqualified and must be checked with READY2,
-SDA and SCL captured together.
+The coordinated driver, HSM frontend and connector pass the finite raw-byte
+recovery checks in the [validation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/explicit-recovery-validation.json): 100 normal echoes with one
+startup recovery, 50 exchanges with every fifth response deliberately incomplete,
+30 concurrent echoes per target, reconnects, and exact 8192-byte requests/replies
+on both targets. The unchanged `controller-long` works with the committed C echo
+fixture, including an 8192-byte reply. Receive-only test records arrive unchanged.
+Neither path reports overruns or underruns.
 
-The actual C driver functions pass FIFO/serializer model checks for staged reads,
-abandoned last bytes, superseded worker results, receive-tail completion and
-transmit-refill latency. The target repository passes 27 Rust unit tests and
-Clippy with warnings denied. Both Pis build the kernel module against their
-running kernel.
+Four-channel scope records cover SCL, SDA and both READY signals. Threshold
+decoding matches the complete 3133-byte echo request and reply in both a steady
+capture and a READY2 pulse-control capture. All ten pulse-control echoes pass;
+this short run does not establish a fix for the intermittent fault. A native
+20 ns excerpt measures SCL at approximately 391 kHz. C3 observes READY2 via the
+breadboard; Pi2 READY is on controller GPIO22/pin 15. Concurrent authenticated
+PQC remains unqualified. Full display application qualification is not repeated
+by the receive-only byte check.
 
-The connector's Linux `experimental-i2c` build passes 67 unit tests, including
-FIFO admission, deadline cancellation and external advisory-lock exclusion.
-The Mac connector build without default features passes 65 tests. Both pass
-Clippy with warnings denied. The connector and raw stress tool disable
-implicit adapter retries under each wire-phase lock. Other bus clients must preserve this adapter-wide policy;
-retrying a partially consumed reply also loses framing.
+The actual C driver functions pass FIFO/serializer model checks for raw byte
+preservation, staged reads, abandoned last bytes, active-input recovery refusal,
+superseded worker results, receive-tail completion and transmit-refill latency.
+Both Pis build the C module against their running kernel. The ARM64 Linux build
+passes 16 controller I2C tests and 6 frontend tests. The connector and raw stress
+tool disable implicit adapter retries under each wire-phase lock; other clients
+must preserve this adapter-wide policy. Retrying a partly consumed reply also
+loses application framing.
 
 The hardware topology is Ubuntu4 (Pi 5/RP1) controlling raspberrypi-1 (`0x24`,
 serial 24000001, READY GPIO23) and raspberrypi-2 (`0x25`, serial 25000002,
@@ -202,13 +209,13 @@ cleanup acknowledgement. Its first cleanup rise overlaps the following
 The target logs record the partial echo and complete device-info request;
 this recovery overlap remains distinct from the original arbitration loss.
 
-Diagnostic wiring currently connects Pi2 GPIO17 (pin 11) directly to controller
-GPIO24 (pin 18), with C3 disconnected. The documented normal bench mapping is GPIO22;
-no production configuration was changed. Any subsequent two-target diagnostic must use
-GPIO24 explicitly or restore the physical GPIO22 connection first. Diagnostic
-jobs are stopped. The next measurement should trace receive completion and
-BSC reconfiguration against wire timing to distinguish driver transitions from
-hardware loss of alignment.
+The historical isolation captures above used controller GPIO24/pin 18 with C3
+disconnected. The active bench mapping is Pi2 GPIO17/pin 11 to controller
+GPIO22/pin 15, with C3 observing READY2 through the breadboard. Pi1 READY uses
+controller GPIO23/pin 16. Diagnostic jobs are stopped. Further root-cause work
+must distinguish unexpected SDA drive from receive/ACK misalignment while
+capturing READY2 with SDA/SCL; the existing finite controls do not separate those
+mechanisms.
 
 See the target [SDA output isolation](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/sda-output-isolation.json),
 [correlated failure capture](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-failure-capture.json)
