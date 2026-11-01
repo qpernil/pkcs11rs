@@ -69,6 +69,9 @@ jobs:
       - name: Test connector benchmark cleanup ownership guards
         run: python -m unittest discover -s tools -p 'test_connector_slow_operations.py'
 
+      - name: Test I2C recovery probe without lab access
+        run: python -m unittest discover -s tools -p 'test_i2c_recovery_probe.py'
+
       - name: Run full pkcs11test suite on disposable software tokens
         run: >-
           python integration/run_pkcs11test.py
