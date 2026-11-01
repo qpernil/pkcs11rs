@@ -25,6 +25,15 @@ provide lab evidence for a particular setup, not general electrical qualificatio
 
 ## Exchange contract
 
+The [2026-11-01 bench closeout](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/bench-validation-2026-11-01.md)
+records receive-only isolation, finite GPIO comparisons, reboot defaults and an
+in-place recovery after a natural transport failure. GPIO tuning is not deployed:
+the two Pi3 banks use their observed 8 mA/unlimited-slew boot settings and the Pi5
+I2C pads use 12 mA/slow slew, with Schmitt hysteresis enabled. Those are measured
+defaults on this bench, not universal Raspberry Pi defaults or a qualified fix.
+The [build-host deployment files](../deployment/) describe the
+source-built connector, persistent I2C endpoints and disabled embedded HSM.
+
 Use target character-device ABI 3 with READY and the explicit recovery capability.
 [The exchange contract](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/response-transport.md)
 keeps ordinary application requests and responses unchanged, including the
@@ -224,6 +233,36 @@ See the target [SDA output isolation](https://github.com/qpernil/raspberry-pi-i2
 and [READY isolation record](https://github.com/qpernil/raspberry-pi-i2c-target/blob/main/docs/ready-signal-isolation.json)
 for counts, source revisions and limits. Concurrent authenticated PQC remains
 unqualified; no firmware or lock-policy change was made for these controls.
+
+## Fresh-command recovery probe
+
+Run on the controller against the existing service, without stopping it:
+
+```sh
+python3 tools/i2c-recovery-probe.py \
+  --serials 24000001 25000002 --count 2000 \
+  --systemd-service pkcs11rs-connector.service \
+  --output /var/tmp/i2c-recovery-evidence
+```
+
+Only non-mutating Echo commands are sent. After the first failure, the probe
+sends distinct nonce-bearing commands to the affected target and its peers,
+then tries new commands after bounded delays if needed. It never replays the
+failed command, restarts a service, changes GPIO configuration or clears the bus.
+The optional service check requires unchanged PID, invocation and restart count.
+Exit status is 0 for successful fresh commands, 1 for failed availability or a
+changed service identity, and 2 when the finite run observes no failure. JSON
+results are replaced atomically; the output directory must be new.
+
+A valid HSM error reply is distinguished from an HTTP/transport error. Kernel
+logs and target recovery-counter deltas are still needed to identify a bus fault
+and prove an explicit recovery ioctl occurred. The recorded natural failure
+rejected immediate fresh commands on both targets; a distinct Pi2 command passed
+about 1.05 seconds later without restarting either target or the connector.
+This establishes one in-place Echo recovery, not guaranteed immediate recovery,
+authenticated-session recovery or PQC recovery. A stuck physical bus can still
+require separate intervention. See the linked bench record for exact counts and
+the excluded interrupted run.
 
 ## PQC provider qualification
 
