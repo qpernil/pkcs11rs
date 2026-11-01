@@ -80,15 +80,21 @@ Requests and responses use the same 8,192-byte total frame limit as the USB and
 HTTP transports. The target frontend refuses to start if its kernel driver
 reports a smaller maximum transfer.
 
-READY is active-low. Before writing, the connector arms rising-only detection and drains old GPIO events.
-The target acknowledges cleanup with a physical rising edge, using a short
-assertion first if READY was already inactive. Only the following assertion
-announces the new response. The connector captures the cleanup edge during the write, then arms falling-only
-detection and checks the response level. Single-edge detection avoids Linux
-classifying a fast pulse from a later pin reading. READY stays asserted after the exact
-response read; the next request clears leftover data. There is no polling
-marker, guard byte or post-read drain wait. One endpoint still has only one
-controller exchange at a time, including when an HTTP waiter is cancelled.
+READY is active-low. Rising-only detection remains configured for the connection;
+old events are drained before writing. The target acknowledges request acceptance
+with a physical rising edge, using a short assertion first if READY was already
+inactive. Only the following assertion announces the new response. Response
+readiness uses level checks at 100 microsecond intervals, subject to scheduling.
+Normal exchanges keep BSC enabled in I2C mode and do not purge the transmit FIFO.
+READY stays asserted after the exact response read. There is no polling marker,
+guard byte or post-read drain wait. One endpoint still has only one controller
+exchange at a time, including when an HTTP waiter is cancelled.
+
+Open/reconnect performs the reserved, token-confirmed frontend recovery exchange
+before DeviceInfo. An incomplete exchange closes the transport; a subsequent new
+command reopens and explicitly recovers it. Recovery clears stale transport state,
+not HSM objects, and cannot guarantee release of a physically stuck bus. See the
+[recovery contract and qualification limits](i2c-stability.md#exchange-contract).
 
 A new request supersedes any pending result. The target retains one pending
 request and discards an older worker's result; this cannot undo its side effects.
@@ -96,8 +102,10 @@ A transport failure is returned without automatically replaying the command.
 
 `python3 tools/i2c-stress.py 0x24 --ready /dev/gpiochip0:23 --count 1000`
 runs randomized, byte-exact echo tests. Add `--payload-gap-ms 5` for delayed
-header/body reads or `--abandon-every 10` to verify next-request recovery from
-an unread final byte. Stop the connector before claiming its READY inputs.
+header/body reads or `--abandon-every 10` to verify explicit recovery before the
+next request after an unread final byte. Stop the connector before claiming its
+READY inputs. To test fresh-command availability through the running connector,
+use the [recovery probe](i2c-stability.md#fresh-command-recovery-probe).
 
 The process needs read/write access to the configured `/dev/i2c-*` and
 `/dev/gpiochip*` devices but need not run as root. The generic controller-side
