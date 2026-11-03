@@ -488,6 +488,9 @@ fn sign_init(
         }
 
         let mechanism = unsafe { _as_ref(mechanism) }?;
+        if crate::oath::is_mechanism(mechanism.mechanism) {
+            return crate::oath::sign_init(ctx, session_handle, mechanism, key);
+        }
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_SIGN as CK_FLAGS)?;
         let gmac = aes_gmac_parameters(mechanism)?;
         let aes_mac_length = match &gmac {
@@ -676,6 +679,7 @@ fn sign_init(
             requires_login: object.private,
             context_specific_extended: false,
             context_specific_rp_id,
+            oath_time: None,
             fido_authorization: None,
             mechanism: mechanism.mechanism,
             mac_length,
@@ -752,6 +756,16 @@ fn sign(
                 return Err(error);
             }
         };
+        if matches!(operation.key, KeyMaterial::OathCredential(_)) {
+            return crate::oath::sign(
+                ctx,
+                session_handle,
+                &operation,
+                data,
+                signature,
+                signature_len,
+            );
+        }
         if matches!(
             &operation.key,
             KeyMaterial::FidoResidentPrivate { .. } | KeyMaterial::PreviewSignDerived { .. }
@@ -1160,7 +1174,7 @@ ffi_entry_point! {
                 .sign_operation
                 .as_mut()
                 .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
+            if crate::oath::is_mechanism(operation.mechanism) || operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
                 session.sign_operation = None;
                 return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }
@@ -1182,7 +1196,7 @@ ffi_entry_point! {
     ) -> CK_RV {
         let allowed = with_session_context_mut(session_handle, |ctx| {
             let session = ctx.get_session_context_mut(session_handle)?;
-            if session.sign_operation.as_ref().is_some_and(|op| op.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE) {
+            if session.sign_operation.as_ref().is_some_and(|op| crate::oath::is_mechanism(op.mechanism) || op.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE) {
                 session.sign_operation = None;
                 return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
             }

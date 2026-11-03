@@ -40,6 +40,10 @@ pub(crate) trait Connector {
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit(self, command)
     }
+    /// OATH uses SEND REMAINING rather than ISO GET RESPONSE.
+    fn send_oath_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        crate::iso7816::transmit_oath(self, command)
+    }
     fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit_short(self, command)
     }
@@ -1114,6 +1118,38 @@ impl Connector for PcscAppletConnector {
         self.base.apdu_capabilities()
     }
 
+    fn send_oath_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        self.state.with_operation(|| {
+            self.ensure_selected_locked()?;
+            if self.active_protocol().is_none() || !self.enabled() {
+                let result = crate::iso7816::transmit_oath(self.base.as_ref(), command);
+                if result.is_err() {
+                    self.state
+                        .secure_channel()?
+                        .clear_selection("OATH transport failed");
+                }
+                return result;
+            }
+            let mut state = self.state.secure_channel()?;
+            let result = state
+                .selected_applet_mut()?
+                .session
+                .as_mut()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?
+                .transmit_oath(self.base.as_ref(), command);
+            if result.is_err() {
+                state.clear_selection("secure OATH transport failed");
+                self.set_enabled(false);
+                self.applet
+                    .authentication
+                    .lock()
+                    .map_err(|_| CKR_MUTEX_BAD)?
+                    .credential
+                    .take();
+            }
+            result
+        })
+    }
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.state.with_operation(|| self.send_apdu_locked(command))
     }

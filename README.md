@@ -89,6 +89,10 @@ software mechanism list for session keys.
 - **OpenPGP** signing, RSA deciphering, ECDH, certificates, key generation and
   import, PIN administration, and OpenPGP PIN KDFs. See
   [YubiKey OpenPGP](docs/openpgp.md).
+- **OATH** credential discovery, standard SHA1 HOTP, uniform extended
+  SHA1/SHA256/SHA512 HOTP, TOTP generation, import/deletion,
+  access-password authentication, and touch policies. See
+  [YubiKey OATH](docs/oath.md).
 - **YubiHSM Auth** credential discovery and administration, with symmetric and
   asymmetric credentials that can open local or remote YubiHSM sessions. See
   [YubiHSM Auth](docs/yubihsm-auth.md#yubihsm-auth-administration).

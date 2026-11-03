@@ -15,10 +15,10 @@ the linked references contain configuration and qualification details.
 
 | Component | Useful when | Purpose and next step |
 | --- | --- | --- |
-| Physical YubiKey or FIDO authenticator | You need the physical token's key protection, user interaction, or actual firmware behavior. | Use supported applets through pkcs11rs or native clients. See [CCID applets](ccid.md) and [FIDO2](fido2.md). |
+| Physical YubiKey or FIDO authenticator | You need the physical token's key protection, user interaction, or actual firmware behavior. | Use supported applets through pkcs11rs or native clients. See [CCID applets](ccid.md), [OATH](oath.md), and [FIDO2](fido2.md). |
 | Physical YubiHSM | You need keys protected by a physical HSM or want to qualify actual device behavior. | Access it directly over USB or through a connector. See [YubiHSM support](yubihsm-auth.md). |
 | Named software slots | Your application needs PKCS #11 keys and operations without device protocols. | General-purpose software tokens with session objects and optional encrypted persistence. See [software slots](software.md). |
-| Embedded virtual YubiKey | You want to exercise pkcs11rs's YubiKey applet workflows without a USB device. | An in-process reader emulates the applets and their state. See [embedded readers](configuration.md#embedded-virtual-yubikey-readers). |
+| Embedded virtual YubiKey | You want to exercise pkcs11rs's YubiKey applet workflows without a USB device. | An in-process reader emulates the supported applets and their state; OATH is not implemented in the virtual core. See [embedded readers](configuration.md#embedded-virtual-yubikey-readers). |
 | Virtual YubiKey USB worker | You want an OS-visible YubiKey-compatible device for external clients or USB integration tests. | Runs the virtual core behind CCID and FIDO HID on a Linux USB device controller. See [virtual-yubikey](https://github.com/qpernil/virtual-yubikey). |
 | Connector-embedded virtual YubiHSM | You want to test YubiHSM workflows without an HSM or Raspberry Pi, including through existing connector clients. | The connector hosts the virtual core and persistent state. See [embedded HSM setup](connector.md#embedded-virtual-yubihsms). |
 | Virtual YubiHSM USB worker | Your client needs USB, or you want to test discovery, framing, and disconnect/reconnect. | Runs the same virtual core as a host-visible USB HSM, accessed directly or through a connector. See [virtual-yubihsm](https://github.com/qpernil/virtual-yubihsm). |

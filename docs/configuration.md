@@ -91,13 +91,14 @@ a public key or CA certificate.
     }
   },
   "ccid": {
-    "applications": ["piv", "openpgp", "hsmauth", "issuer-sd", "fido2"],
+    "applications": ["piv", "openpgp", "oath", "hsmauth", "issuer-sd", "fido2"],
     "secure_channel": "scp11b",
     "recreate_sessions": true,
     "aids": {
       "piv": "a000000308000010000100",
       "openpgp": "d27600012401",
-      "hsmauth": "a0000005272101",
+      "oath": "a0000005272101",
+      "hsmauth": "a000000527210701",
       "issuer_sd": "a000000151000000",
       "fido2": "a0000006472f0001"
     }
@@ -259,7 +260,8 @@ Management applet and keeps each embedded reader in a discovery namespace
 distinct from external USB, NFC, and PC/SC readers.
 
 `applets` is a nonempty allowlist using the same names as
-`ccid.applications`: `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`.
+`ccid.applications`, except OATH: `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`.
+`oath` is supported for physical readers; the embedded core has no OATH applet.
 Management is always installed and must not be listed. An installed applet is
 published only when it is also present in the global `ccid.applications`
 allowlist.
@@ -333,6 +335,7 @@ native application prompt provider.
 | `ccid.recreate_sessions` | `PKCS11RS_CCID_RECREATE_SESSIONS` |
 | `ccid.aids.piv` | `PKCS11RS_PIV_AID` |
 | `ccid.aids.openpgp` | `PKCS11RS_OPENPGP_AID` |
+| `ccid.aids.oath` | `PKCS11RS_OATH_AID` |
 | `ccid.aids.hsmauth` | `PKCS11RS_HSMAUTH_AID` |
 | `ccid.aids.issuer_sd` | `PKCS11RS_ISSUER_SD_AID` |
 | `ccid.aids.fido2` | `PKCS11RS_FIDO2_AID` |

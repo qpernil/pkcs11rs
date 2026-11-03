@@ -76,6 +76,10 @@ The header declares the pkcs11rs vendor range and the identifiers used by:
 
 - [public-key projection](public-key-projection-proposal.md), through
   `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`;
+- [OATH](oath.md), through `CKM_PKCS11RS_TOTP`, `CKK_PKCS11RS_TOTP`,
+  `CKM_PKCS11RS_HOTP`, `CKK_PKCS11RS_HOTP`, and the OATH hash and touch-policy
+  attributes; the extended HOTP view accepts all three hashes with an explicit
+  hash attribute on import. SHA1 HOTP also retains its standard object view;
 - [FIDO2 one-shot assertions](fido2.md), through
   `CKM_PKCS11RS_FIDO_ASSERTION` and `CKA_PKCS11RS_FIDO_RP_ID`;
 - RFC 7512 object identification and YubiHSM client-authentication selection,

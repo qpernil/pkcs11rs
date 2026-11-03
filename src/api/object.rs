@@ -1922,6 +1922,12 @@ pub(crate) fn destroy_object(
         {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
+        if let KeyMaterial::OathCredential(credential) = &stored_object.material {
+            ctx.slot.oath_delete(&credential.name)?;
+            ctx.remove_object_handle(object);
+            ctx.refresh_slot_token_objects(slot_id)?;
+            return Ok(());
+        }
         if stored_object.is_yubihsm_public_projection() {
             if stored_object.token {
                 ctx.get_slot(slot_id)?

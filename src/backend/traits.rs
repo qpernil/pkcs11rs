@@ -301,6 +301,16 @@ pub(crate) trait Slot {
     ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn oath_calculate(
+        &mut self,
+        _credential: &crate::oath::Credential,
+        _time: Option<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn oath_delete(&mut self, _name: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn fido_get_assertion(
         &mut self,
         _authorization: &crate::ctap::CredentialAuthorization,

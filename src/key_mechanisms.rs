@@ -20,6 +20,13 @@ pub(crate) fn allowed<S: Slot + ?Sized>(slot: &S, key: &TokenObject) -> Vec<CK_M
 /// Key type, class and usage attributes determine the common operation set.
 /// Slots may narrow this for native objects without affecting software objects.
 pub(crate) fn operations(key: &TokenObject, m: CK_MECHANISM_TYPE) -> CK_FLAGS {
+    if let KeyMaterial::OathCredential(credential) = &key.material {
+        return if credential.mechanism() == m && key.sign {
+            CKF_SIGN as _
+        } else {
+            0
+        };
+    }
     let private = key.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let public = key.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let secret = key.class == CKO_SECRET_KEY as CK_OBJECT_CLASS;

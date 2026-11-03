@@ -740,6 +740,16 @@ impl Scp03Session {
         self.unprotect_response(response)
     }
 
+    pub(crate) fn transmit_oath(
+        &mut self,
+        connector: &dyn Connector,
+        command: &CommandApdu,
+    ) -> Result<ResponseApdu, Error> {
+        let protected = self.protect_command(command)?;
+        let response = crate::iso7816::transmit_oath(connector, &protected)?;
+        self.unprotect_response(response)
+    }
+
     pub(crate) fn transmit_short(
         &mut self,
         connector: &dyn Connector,
@@ -933,7 +943,8 @@ pub(crate) fn transmit<C: Connector + ?Sized>(
     connector: &C,
     command: &CommandApdu,
 ) -> Result<ResponseApdu, Error> {
-    ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)
+    let encoded = Zeroizing::new(command.encode()?);
+    ResponseApdu::parse(&connector.send(&encoded, DEFAULT_TIMEOUT)?)
 }
 
 pub(crate) fn validate_security_level(security_level: u8) -> Result<(), Error> {

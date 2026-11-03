@@ -155,6 +155,7 @@ struct JsonNfcConfiguration {
 struct JsonCcidAidConfiguration {
     piv: Option<String>,
     openpgp: Option<String>,
+    oath: Option<String>,
     hsmauth: Option<String>,
     issuer_sd: Option<String>,
     fido2: Option<String>,
@@ -304,6 +305,7 @@ pub(crate) struct EmbeddedReaderConfiguration {
 pub(crate) struct CcidAidConfiguration {
     piv: Vec<u8>,
     openpgp: Vec<u8>,
+    oath: Vec<u8>,
     hsmauth: Vec<u8>,
     issuer_sd: Vec<u8>,
     fido2: Vec<u8>,
@@ -314,6 +316,7 @@ impl CcidAidConfiguration {
         match application {
             CcidApplication::Piv => &self.piv,
             CcidApplication::OpenPgp => &self.openpgp,
+            CcidApplication::Oath => &self.oath,
             CcidApplication::HsmAuth => &self.hsmauth,
             CcidApplication::IssuerSecurityDomain => &self.issuer_sd,
             CcidApplication::Fido2 => &self.fido2,
@@ -538,6 +541,12 @@ impl ModuleConfiguration {
             .collect();
 
         let ccid_aids = CcidAidConfiguration {
+            oath: resolve_aid(
+                explicit.ccid.aids.oath,
+                "PKCS11RS_OATH_AID",
+                &crate::oath::AID,
+                &mut environment,
+            )?,
             piv: resolve_aid(
                 explicit.ccid.aids.piv,
                 "PKCS11RS_PIV_AID",
@@ -674,6 +683,9 @@ fn resolve_embedded_readers(
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
             let applets = parse_applications(reader.applets)?;
+            if applets.contains(&CcidApplication::Oath) {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
             Ok(EmbeddedReaderConfiguration {
                 id: id.to_owned(),
                 name: name.to_owned(),
