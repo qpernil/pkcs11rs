@@ -513,6 +513,14 @@ mod virtual_card {
     }
 
     #[test]
+    fn scp11a_and_c_protect_oath_vectors_passwords_and_continuation() {
+        for variant in [Scp11Variant::A, Scp11Variant::C] {
+            let (connector, keys) = fixture(variant);
+            crate::oath::virtual_tests::qualify_scp11(connector, &keys);
+        }
+    }
+
+    #[test]
     fn scp11a_and_c_write_independent_usb_application_configuration() {
         for variant in [Scp11Variant::A, Scp11Variant::C] {
             let (connector, keys) = fixture(variant);

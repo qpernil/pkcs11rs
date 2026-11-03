@@ -683,9 +683,6 @@ fn resolve_embedded_readers(
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
             let applets = parse_applications(reader.applets)?;
-            if applets.contains(&CcidApplication::Oath) {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
             Ok(EmbeddedReaderConfiguration {
                 id: id.to_owned(),
                 name: name.to_owned(),
@@ -1393,7 +1390,7 @@ mod tests {
                     "storage": {"tokens": "/tmp/pkcs11rs-embedded-test"},
                     "embedded": {"readers": [
                         {"id": "phone", "name": "Embedded CCID 0", "serial": 1,
-                         "persistent": true, "applets": ["piv", "fido2"]},
+                         "persistent": true, "applets": ["piv", "fido2", "oath"]},
                         {"id": "test-2", "name": "Embedded CCID 1", "serial": 2,
                          "applets": ["openpgp", "hsmauth", "issuer-sd"]}
                     ]}
@@ -1405,7 +1402,11 @@ mod tests {
         assert_eq!(configuration.embedded_readers.len(), 2);
         assert_eq!(
             configuration.embedded_readers[0].applets,
-            [CcidApplication::Piv, CcidApplication::Fido2]
+            [
+                CcidApplication::Piv,
+                CcidApplication::Fido2,
+                CcidApplication::Oath
+            ]
         );
         assert!(configuration.embedded_readers[0].persistent);
 

@@ -1078,6 +1078,7 @@ impl ModuleContext {
                     issuer_security_domain: false,
                     management: true,
                     hsmauth: false,
+                    oath: false,
                     openpgp: false,
                     piv: false,
                     fido2: false,
@@ -1087,8 +1088,7 @@ impl ModuleContext {
                     match applet {
                         CcidApplication::Piv => applets.piv = true,
                         CcidApplication::OpenPgp => applets.openpgp = true,
-                        // The embedded core has no OATH application yet.
-                        CcidApplication::Oath => return Err(Error::from(CKR_ARGUMENTS_BAD)),
+                        CcidApplication::Oath => applets.oath = true,
                         CcidApplication::HsmAuth => applets.hsmauth = true,
                         CcidApplication::IssuerSecurityDomain => {
                             applets.issuer_security_domain = true
@@ -4106,7 +4106,7 @@ mod discovery_tests {
                 name: "Embedded CCID test reader".to_owned(),
                 serial: 1,
                 persistent: false,
-                applets: vec![CcidApplication::Fido2],
+                applets: vec![CcidApplication::Fido2, CcidApplication::Oath],
             });
         let context = ModuleContext::new_configured(configuration, false).unwrap();
         context.init().unwrap();
@@ -4116,9 +4116,10 @@ mod discovery_tests {
             .values()
             .map(|slot| slot.lock().unwrap().slot.kind())
             .collect::<Vec<_>>();
-        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds.len(), 3);
         assert!(kinds.contains(&crate::SlotKind::Fido2));
         assert!(kinds.contains(&crate::SlotKind::Software));
+        assert!(kinds.contains(&crate::SlotKind::Ccid(CcidApplication::Oath)));
     }
 
     #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]

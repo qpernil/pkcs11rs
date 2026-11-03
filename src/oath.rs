@@ -762,3 +762,6 @@ pub(crate) fn import_template(
     credential.touch = Some(touch);
     Ok((credential, secret.ok_or(CKR_TEMPLATE_INCOMPLETE)?, counter))
 }
+
+#[cfg(all(test, feature = "embedded-virtual-yubikey"))]
+pub(crate) mod virtual_tests;
