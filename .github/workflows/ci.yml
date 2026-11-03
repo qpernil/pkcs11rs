@@ -10,8 +10,6 @@ concurrency:
 
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
-  # Match shared-core integration and the upstream ML-DSA lockfile.
-  VIRTUAL_YUBIKEY_REVISION: 4815dbe07f749f7df6e60e16131ce805bf1d343b
 
 jobs:
   pkcs11test:
@@ -36,8 +34,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
@@ -112,8 +108,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Cache Cargo dependencies and compilation
@@ -150,8 +144,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
@@ -298,8 +290,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
@@ -338,8 +328,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git virtual-yubikey
-          git -C virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git raspberry-pi-i2c-target
 
@@ -373,8 +361,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
           git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
 
@@ -520,8 +506,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Cache Cargo dependencies and compilation
@@ -558,8 +542,6 @@ jobs:
           git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
           git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
           git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
-          git -C ../virtual-yubikey fetch --depth 1 origin "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
-          git -C ../virtual-yubikey checkout --detach "${{ env.VIRTUAL_YUBIKEY_REVISION }}"
           git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
 
       - name: Cache Cargo dependencies and compilation
