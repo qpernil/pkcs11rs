@@ -341,6 +341,24 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
   automatically at launch. The two bundle identifiers use independent
   platform credentials and YubiHSM Authentication Key IDs.
 
+Temporary embedded-device qualification uses an isolated persistent virtual
+YubiKey, all six applets, the six public OATH fixtures and a matching SCP11b
+public-key pin. Native hardware, NFC, remote YubiHSM discovery and the platform
+slot are disabled only in that test profile. Swift and Objective-C runs on iOS
+27.0 Simulator discover six applet slots, authenticate over pinned SCP11b, list
+seven OATH rows and complete FIDO previewSign/ECDSA verification. The Swift app
+also passes those checks on a physical iPhone with iOS 27.2. Replacing the embedded
+card key while retaining the pin fails login with `CKR_DEVICE_ERROR` and exposes
+no authenticated OATH inventory. Normal sources and installed test builds are
+restored after qualification; no embedded device or public-key pin is retained
+in the normal app configuration.
+
+This profile does not provide PIV administrator authorization: a fresh PIV applet
+therefore reports `CKR_USER_NOT_LOGGED_IN` for PQC key generation after USER login.
+That result does not qualify PIV key generation or the full PQC functional suite.
+The Objective-C physical-device run remains unqualified; simulator checks do
+not establish physical-device coverage.
+
 Build the XCFramework before opening either Xcode project. Both projects use
 automatic device signing. Select your own development team and configure a
 unique bundle identifier for each app in Xcode. Command-line device builds

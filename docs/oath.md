@@ -190,7 +190,48 @@ inventory over SCP03 and SCP11a/b/c, and touch cancellation. Exported PKCS #11
 checks cover imports, pre-login/logout visibility, shared SHA1 views, secret
 read rejection, repeated length queries and short-buffer handling, deletion,
 ordinary SCP03/SCP11b login, deselection and persistent-device restart. These
-software checks are distinct from the physical qualification below.
+software checks are distinct from the USB and physical qualification below.
+
+The gadget-host virtual USB gadget (5.8 profile, serial `12345678`) passes macOS
+host-tool qualification with YubiKey Manager 5.9.2. The `ykman` CLI checks OATH
+disable/re-enable with credential preservation, add/list/delete, all three HOTP
+hashes, rename with counter continuity, and password installation/change/removal
+with incorrect-password rejection. Yubico's Python SDK checks the TOTP/HOTP
+vectors and fragmented LIST/CALCULATE ALL over plain USB CCID, SCP03 and SCP11b;
+password installation, incorrect-password rejection, protected login, change and
+removal; and application
+ID, password, credential and HOTP-counter persistence across worker restart.
+A touch-required calculation times out after 15 seconds without losing the CCID
+connection. Temporary qualification credentials and password protection are
+removed afterward.
+These external-client checks qualify the virtual USB applet independently of the
+PKCS #11 mapping. Native PKCS #11 USB checks additionally generate codes for all
+six samples, including all six RFC 6238 timestamps per hash, repeated length
+queries and short-buffer retries without extra HOTP consumption. `C_SetPIN`
+installation and removal, incorrect-password rejection and protected login
+preserve the six samples. A physical joystick-center touch completes `C_Sign`
+with the expected RFC 6238 code; the display's slow presence-wait blink and its
+completion on touch are visually confirmed. USB SCP11a/c remains outside this
+qualification.
+
+The deployed gadget-host gadget retains the same six
+[public-fixture OATH samples](../examples/ios/PKCS11RSPhoneSmoke/README.md#persistent-oath-samples)
+as the physical test keys. Worker restart preserves the set, and native pkcs11rs
+verifies six credential identities and seven OTP object views across module
+reinitialization. Provisioning performs no HOTP calculation, leaving their
+initial counters at zero.
+
+Native USB SCP11b qualification against gadget-host uses a public-key pin obtained
+through authenticated SSH from the worker's persisted public certificate. Login,
+seven OTP object views and RFC TOTP codes for all three hashes pass; a different
+valid P-256 pin fails with `CKR_DEVICE_ERROR`.
+
+Temporary embedded iOS profiles qualify OATH discovery, SCP11b login and all seven
+sample object views in both smoke apps on iOS 27.0 Simulator and in the Swift app
+on a physical iPhone running iOS 27.2. A mismatched embedded card key fails login
+and exposes no authenticated OATH objects. These are inventory/authentication
+checks, not iOS OTP-vector tests. The temporary embedded configuration and pin
+are absent from the normal app builds.
 
 Physical USB CCID qualification on a YubiKey 5C Nano, firmware 5.7.4, covers:
 

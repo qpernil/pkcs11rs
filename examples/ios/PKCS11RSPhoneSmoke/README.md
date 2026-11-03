@@ -75,6 +75,9 @@ samples use public RFC 6238 test secrets, six-digit HOTP and eight-digit TOTP,
 and a 30-second TOTP period. HOTP counters start at zero; provisioning and
 enumeration do not calculate HOTP codes. The helper verifies the objects after
 module finalization and reinitialization, and leaves them on the device.
+The gadget-host virtual USB YubiKey (serial `12345678`) retains the same six sample
+credentials. Worker restart and native pkcs11rs module reinitialization verify
+persistence and all seven OTP object views without calculating HOTP codes.
 
 From the repository root, with an unprotected dedicated OATH test application:
 
