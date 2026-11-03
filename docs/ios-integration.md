@@ -314,7 +314,7 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
   [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) exercise
   the same direct C ABI, initialization profile, slot order, authentication
   sequence, and functional coverage. Both configure host token storage without
-  embedded readers or software slots; inventory USB CCID, NFC, platform, and
+  embedded virtual YubiKeys or software slots; inventory USB CCID, NFC, platform, and
   remote YubiHSM slots; report ML-DSA, ML-KEM, and MLKEM768-X25519 mechanism
   flags including `CKF_HW`; and exercise hardware FIDO2 previewSign when its
   mechanisms are advertised. The physical smoke-test YubiKey uses explicit

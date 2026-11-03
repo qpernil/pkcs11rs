@@ -68,10 +68,10 @@ a public key or CA certificate.
     ]
   },
   "embedded": {
-    "readers": [
+    "yubikeys": [
       {
         "id": "local-test",
-        "name": "pkcs11rs embedded CCID reader",
+        "name": "pkcs11rs embedded virtual YubiKey",
         "serial": 1,
         "persistent": true,
         "applets": ["piv", "fido2"]
@@ -244,22 +244,27 @@ blocks until the NFC request completes; applications must make that call away
 from their main UI thread. Later UI triggers are summarized in
 [When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears).
 
-## Embedded virtual YubiKey readers
+## Embedded virtual YubiKeys
 
-`embedded.readers` is available when pkcs11rs is compiled with the
+The canonical setting is `embedded.yubikeys`. `embedded.readers` remains a
+compatibility alias; supplying both keys is rejected. Existing ID-scoped
+`embedded-reader-id-<encoded-id>` storage directories are preserved, so changing
+the setting name does not change a device's stored credentials or identity.
+
+`embedded.yubikeys` is available when pkcs11rs is compiled with the
 `embedded-virtual-yubikey` feature. Omitting it or using an empty array creates
-no embedded readers. Supplying readers to a build without the feature makes
-initialization fail with `CKR_ARGUMENTS_BAD` rather than silently ignoring the
+no embedded virtual YubiKeys. Supplying devices to a build without the feature
+makes initialization fail with `CKR_ARGUMENTS_BAD` rather than silently ignoring the
 configuration.
 
-Each entry describes one in-process CCID reader. `id` is a stable configuration
-identity containing only ASCII letters, digits, `-`, or `_`; `name` is the
-current reader name exposed in slot descriptions; and `serial` is the nonzero
-Management serial reported by the virtual device. IDs, names, and serials must
+Each entry describes one complete virtual YubiKey exposed through an in-process
+CCID connector. `id` is a stable configuration identity containing only ASCII
+letters, digits, `-`, or `_`; `name` is the current reader name exposed in slot
+descriptions; and `serial` is the nonzero Management serial reported by the virtual device. IDs, names, and serials must
 be unique within the list. Reader names are routing identities, not durable
 card identities; pkcs11rs learns the serial and firmware through the implicit
-Management applet and keeps each embedded reader in a discovery namespace
-distinct from external USB, NFC, and PC/SC readers.
+Management applet and keeps each embedded virtual YubiKey in a discovery
+namespace distinct from external USB, NFC, and PC/SC readers.
 
 `applets` is a nonempty allowlist using the same names as
 `ccid.applications`: `piv`, `openpgp`, `oath`, `hsmauth`, `issuer-sd`, and `fido2`.
@@ -267,10 +272,10 @@ Management is always installed and must not be listed. An installed applet is
 published only when it is also present in the global `ccid.applications`
 allowlist.
 
-`persistent` defaults to `false`. Ephemeral readers start from factory state on
-each module initialization, which is suitable for isolated tests. A persistent
-reader is currently supported on Unix-family targets and requires
-`storage.tokens`; its applet state is stored below that root in
+`persistent` defaults to `false`. Ephemeral devices start from factory state on
+each module initialization, which is suitable for isolated tests. Persistent
+virtual YubiKeys are currently supported on Unix-family targets and require
+`storage.tokens`; each device's applet state is stored below that root in
 an ID-scoped directory using an exclusive lock, batched writes, and atomic file
 replacement. Durable state includes PIV keys and data, FIDO credentials and PIN
 state and attestation identity, OpenPGP keys, certificates, PIN verifiers and

@@ -10,8 +10,8 @@ separate from the two-slot Yubico OTP application. Discovery uses AID
 overrides the AID. A device serial allowlist can further restrict discovery.
 
 OATH is included in default physical CCID discovery. The shared virtual YubiKey
-core implements the same native protocol for USB and embedded readers. Enable
-it with `"applets": ["oath"]` in an [embedded reader](configuration.md#embedded-virtual-yubikey-readers).
+core implements the same native protocol for USB and embedded virtual YubiKeys. Enable
+it with `"applets": ["oath"]` in an [embedded virtual YubiKey](configuration.md#embedded-virtual-yubikeys).
 The PKCS #11 OATH backend and physical-reader behavior are shared; embedded
 configuration selects the virtual transport and applet only.
 
@@ -159,14 +159,14 @@ exposed. SCP integration uses the common CCID login and credential selection
 path; OATH response fragments are collected with SEND REMAINING before
 verifying the logical response MAC and decrypting, matching Yubico's client.
 
-## Virtual readers
+## Embedded virtual YubiKeys
 
 The virtual application starts without credentials or an access password. It
 supports 64 credentials, HOTP/TOTP with all three hashes, native PUT overwrite,
 rename/delete/reset, password authentication and change, touch policy, and
 SEND REMAINING continuation over plain CCID and SCP03/SCP11a/b/c. The provider
 retains its ordinary USER-login requirement and duplicate-import protection.
-Persistent readers use `oath-<serial>.cbor`, shared with the USB worker, for
+Persistent virtual YubiKeys use `oath-<serial>.cbor`, shared with the USB worker, for
 credentials, the application ID/access key and moving factors. OATH mutations
 are flushed before responding. Authorization, plaintext passwords and session
 state are not persisted by pkcs11rs; the virtual card stores its native access
@@ -189,7 +189,7 @@ counters, password authentication/change/removal, protected multi-response
 inventory over SCP03 and SCP11a/b/c, and touch cancellation. Exported PKCS #11
 checks cover imports, pre-login/logout visibility, shared SHA1 views, secret
 read rejection, repeated length queries and short-buffer handling, deletion,
-ordinary SCP03/SCP11b login, deselection and persistent-reader restart. These
+ordinary SCP03/SCP11b login, deselection and persistent-device restart. These
 software checks are distinct from the physical qualification below.
 
 Physical USB CCID qualification on a YubiKey 5C Nano, firmware 5.7.4, covers:

@@ -576,7 +576,7 @@ cryptographic guidance. pkcs11rs has an isolated request encoder,
 structural registration parser, canonical
 [previewSign persistence model](preview-sign.md), protocol vectors, and an
 ignored capability-gated registration test. It also exposes an experimental
-vendor PKCS #11 flow and a configurable embedded CCID reader whose opt-in FIDO2
+vendor PKCS #11 flow and a configurable embedded virtual YubiKey whose opt-in FIDO2
 applet uses the same discovery and slot path as an external reader.
 Registration and derived metadata use the
 [content-addressed CBOR storage boundary](storage.md).

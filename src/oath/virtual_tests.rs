@@ -381,7 +381,7 @@ fn embedded_oath_pkcs11_import_visibility_vectors_shared_views_and_deletion() {
 
 #[cfg(unix)]
 #[test]
-fn embedded_oath_persistent_reader_password_and_hotp_survive_restart() {
+fn embedded_oath_persistent_yubikey_password_and_hotp_survive_restart() {
     let mut nonce = [0; 8];
     getrandom::fill(&mut nonce).unwrap();
     let root = std::env::temp_dir().join(format!("pkcs11-oath-{:x}", u64::from_ne_bytes(nonce)));

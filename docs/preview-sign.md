@@ -197,7 +197,7 @@ and signs digests that are verified against the production-derived public key.
 It also rejects modified tags, contexts, and malformed ephemeral points. No
 private-seed operation is compiled into a normal hardware build. The
 `embedded-virtual-yubikey` feature includes that private side specifically so a
-configured embedded CCID reader with the FIDO2 applet can provide a
+configured embedded virtual YubiKey with the FIDO2 applet can provide a
 self-contained integration target.
 
 ## PKCS #11 mapping
@@ -383,7 +383,7 @@ encoding and the randomly generated material.
 
 The iOS smoke application's PreviewSign signing and ordinary ECDSA verification
 also passed in the user's physical-device run on 2026-10-05. Its profile
-instantiates no embedded virtual reader and supplies the explicit prototype
+instantiates no embedded virtual YubiKey and supplies the explicit prototype
 FIDO2 PIN `123456`. Persistence across iOS app relaunch still requires separate
 qualification.
 

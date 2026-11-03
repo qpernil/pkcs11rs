@@ -94,12 +94,13 @@ struct JsonSoftwareSlotConfiguration {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonEmbeddedConfiguration {
-    readers: Option<Vec<JsonEmbeddedReaderConfiguration>>,
+    #[serde(alias = "readers")]
+    yubikeys: Option<Vec<JsonEmbeddedVirtualYubiKeyConfiguration>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JsonEmbeddedReaderConfiguration {
+struct JsonEmbeddedVirtualYubiKeyConfiguration {
     id: String,
     name: String,
     serial: u32,
@@ -277,7 +278,7 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) fido2_storage: Option<OsString>,
     pub(crate) software_slots: Vec<String>,
     #[cfg_attr(not(feature = "embedded-virtual-yubikey"), allow(dead_code))]
-    pub(crate) embedded_readers: Vec<EmbeddedReaderConfiguration>,
+    pub(crate) embedded_yubikeys: Vec<EmbeddedVirtualYubiKeyConfiguration>,
     pub(crate) platform_enabled: bool,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     pub(crate) yubihsm_urls: Vec<String>,
@@ -294,7 +295,7 @@ pub(crate) struct ModuleConfiguration {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EmbeddedReaderConfiguration {
+pub(crate) struct EmbeddedVirtualYubiKeyConfiguration {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) serial: u32,
@@ -491,11 +492,11 @@ impl ModuleConfiguration {
             })
             .collect();
         let software_slots = software_slots.into_iter().map(|slot| slot.name).collect();
-        let embedded_readers = resolve_embedded_readers(explicit.embedded.readers)?;
-        if !embedded_readers.is_empty() && !cfg!(feature = "embedded-virtual-yubikey") {
+        let embedded_yubikeys = resolve_embedded_yubikeys(explicit.embedded.yubikeys)?;
+        if !embedded_yubikeys.is_empty() && !cfg!(feature = "embedded-virtual-yubikey") {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        if embedded_readers.iter().any(|reader| reader.persistent) && token_storage.is_none() {
+        if embedded_yubikeys.iter().any(|yubikey| yubikey.persistent) && token_storage.is_none() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
 
@@ -612,7 +613,7 @@ impl ModuleConfiguration {
             token_storage,
             fido2_storage,
             software_slots,
-            embedded_readers,
+            embedded_yubikeys,
             platform_enabled,
             software_discovery_pins,
             yubihsm_urls,
@@ -656,18 +657,18 @@ impl ModuleConfiguration {
     }
 }
 
-fn resolve_embedded_readers(
-    explicit: Option<Vec<JsonEmbeddedReaderConfiguration>>,
-) -> Result<Vec<EmbeddedReaderConfiguration>, Error> {
-    let readers = explicit.unwrap_or_default();
+fn resolve_embedded_yubikeys(
+    explicit: Option<Vec<JsonEmbeddedVirtualYubiKeyConfiguration>>,
+) -> Result<Vec<EmbeddedVirtualYubiKeyConfiguration>, Error> {
+    let yubikeys = explicit.unwrap_or_default();
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
     let mut serials = HashSet::new();
-    readers
+    yubikeys
         .into_iter()
-        .map(|reader| {
-            let id = reader.id.trim();
-            let name = reader.name.trim();
+        .map(|yubikey| {
+            let id = yubikey.id.trim();
+            let name = yubikey.name.trim();
             if id.is_empty()
                 || id.len() > 64
                 || !id
@@ -675,19 +676,19 @@ fn resolve_embedded_readers(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
                 || name.is_empty()
                 || name.len() > 128
-                || reader.serial == 0
+                || yubikey.serial == 0
                 || !ids.insert(id.to_owned())
                 || !names.insert(name.to_owned())
-                || !serials.insert(reader.serial)
+                || !serials.insert(yubikey.serial)
             {
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
-            let applets = parse_applications(reader.applets)?;
-            Ok(EmbeddedReaderConfiguration {
+            let applets = parse_applications(yubikey.applets)?;
+            Ok(EmbeddedVirtualYubiKeyConfiguration {
                 id: id.to_owned(),
                 name: name.to_owned(),
-                serial: reader.serial,
-                persistent: reader.persistent,
+                serial: yubikey.serial,
+                persistent: yubikey.persistent,
                 applets,
             })
         })
@@ -1380,15 +1381,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn embedded_yubikeys_accept_the_legacy_alias_and_reject_ambiguous_configuration() {
+        let canonical = json(
+            r#"{"version":1,"embedded":{"yubikeys":[{"id":"local-test","name":"Virtual YubiKey","serial":1,"applets":["oath"]}]}}"#,
+        );
+        let legacy = json(
+            r#"{"version":1,"embedded":{"readers":[{"id":"local-test","name":"Virtual YubiKey","serial":1,"applets":["oath"]}]}}"#,
+        );
+        assert_eq!(
+            resolve_embedded_yubikeys(canonical.embedded.yubikeys).unwrap(),
+            resolve_embedded_yubikeys(legacy.embedded.yubikeys).unwrap(),
+        );
+        for conflicting in [
+            r#"{"version":1,"embedded":{"yubikeys":[],"readers":[]}}"#,
+            r#"{"version":1,"embedded":{"readers":[],"yubikeys":[]}}"#,
+        ] {
+            assert!(serde_json::from_str::<JsonConfiguration>(conflicting).is_err());
+        }
+    }
+
     #[cfg(feature = "embedded-virtual-yubikey")]
     #[test]
-    fn embedded_readers_are_explicit_and_validate_identity_and_persistence() {
+    fn embedded_yubikeys_are_explicit_and_validate_identity_and_persistence() {
         let configuration = resolve(
             Some(json(
                 r#"{
                     "version": 1,
                     "storage": {"tokens": "/tmp/pkcs11rs-embedded-test"},
-                    "embedded": {"readers": [
+                    "embedded": {"yubikeys": [
                         {"id": "phone", "name": "Embedded CCID 0", "serial": 1,
                          "persistent": true, "applets": ["piv", "fido2", "oath"]},
                         {"id": "test-2", "name": "Embedded CCID 1", "serial": 2,
@@ -1399,22 +1420,22 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(configuration.embedded_readers.len(), 2);
+        assert_eq!(configuration.embedded_yubikeys.len(), 2);
         assert_eq!(
-            configuration.embedded_readers[0].applets,
+            configuration.embedded_yubikeys[0].applets,
             [
                 CcidApplication::Piv,
                 CcidApplication::Fido2,
                 CcidApplication::Oath
             ]
         );
-        assert!(configuration.embedded_readers[0].persistent);
+        assert!(configuration.embedded_yubikeys[0].persistent);
 
         for encoded in [
-            r#"{"version":1,"embedded":{"readers":[{"id":"bad/id","name":"reader","serial":1,"applets":["piv"]}]}}"#,
-            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":0,"applets":["piv"]}]}}"#,
-            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"persistent":true,"applets":["piv"]}]}}"#,
-            r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"applets":[]}]}}"#,
+            r#"{"version":1,"embedded":{"yubikeys":[{"id":"bad/id","name":"reader","serial":1,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"yubikeys":[{"id":"one","name":"reader","serial":0,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"yubikeys":[{"id":"one","name":"reader","serial":1,"persistent":true,"applets":["piv"]}]}}"#,
+            r#"{"version":1,"embedded":{"yubikeys":[{"id":"one","name":"reader","serial":1,"applets":[]}]}}"#,
         ] {
             assert!(resolve(Some(json(encoded)), &[]).is_err());
         }
@@ -1422,11 +1443,11 @@ mod tests {
 
     #[cfg(not(feature = "embedded-virtual-yubikey"))]
     #[test]
-    fn embedded_reader_configuration_requires_compile_time_support() {
+    fn embedded_yubikey_configuration_requires_compile_time_support() {
         assert!(
             resolve(
                 Some(json(
-                    r#"{"version":1,"embedded":{"readers":[{"id":"one","name":"reader","serial":1,"applets":["piv"]}]}}"#,
+                    r#"{"version":1,"embedded":{"yubikeys":[{"id":"one","name":"reader","serial":1,"applets":["piv"]}]}}"#,
                 )),
                 &[],
             )

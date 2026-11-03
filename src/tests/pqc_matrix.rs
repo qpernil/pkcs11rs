@@ -627,7 +627,7 @@ fn run_matrix(backend: Backend) {
     let mut config = serde_json::json!({"version": 1, "hardware": {"discovery": false}, "platform": {"enabled": false}, "yubihsm": {"urls": []}, "ccid": {"applications": ["piv"]}});
     #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
     if matches!(backend, Backend::Piv) {
-        config["embedded"] = serde_json::json!({"readers": [{"id": "pqc-matrix", "name": "PQC matrix PIV", "serial": 77, "applets": ["piv"]}]});
+        config["embedded"] = serde_json::json!({"yubikeys": [{"id": "pqc-matrix", "name": "PQC matrix PIV", "serial": 77, "applets": ["piv"]}]});
     }
     if matches!(backend, Backend::DeployedYubiHsm) {
         let serial = std::env::var("PKCS11RS_PQC_SERIAL").expect("set PKCS11RS_PQC_SERIAL");
