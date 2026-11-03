@@ -54,8 +54,7 @@ a public key or CA certificate.
     "serials": ["1238075073", "2545354682", "37070618"]
   },
   "storage": {
-    "tokens": "/var/lib/pkcs11rs",
-    "fido2_compatibility": "/var/lib/pkcs11rs-fido2"
+    "tokens": "/var/lib/pkcs11rs"
   },
   "software": {
     "slots": [
@@ -244,10 +243,9 @@ from their main UI thread. Later UI triggers are summarized in
 
 ## Embedded virtual YubiKeys
 
-The canonical setting is `embedded.yubikeys`. `embedded.readers` remains a
-compatibility alias; supplying both keys is rejected. Existing ID-scoped
-`embedded-reader-id-<encoded-id>` storage directories are preserved, so changing
-the setting name does not change a device's stored credentials or identity.
+`embedded.yubikeys` is the only setting for embedded virtual YubiKeys.
+ID-scoped `embedded-reader-id-<encoded-id>` storage directories hold their
+persistent device state independently of the configuration field name.
 
 `embedded.yubikeys` is available when pkcs11rs is compiled with the
 `embedded-virtual-yubikey` feature. Omitting it or using an empty array creates
@@ -324,8 +322,7 @@ native application prompt provider.
 | `discovery.refresh_interval_ms` | `PKCS11RS_DISCOVERY_REFRESH_INTERVAL_MS` |
 | `slots.serials` | `PKCS11RS_SLOTS_SERIALS` |
 | `storage.tokens` | `PKCS11RS_TOKEN_STORAGE` |
-| `storage.fido2_compatibility` | `PKCS11RS_FIDO2_STORAGE` |
-| `software.slots` | `PKCS11RS_SOFTWARE_SLOTS` and each slot's `PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>` |
+| `software.slots` | `PKCS11RS_SOFTWARE_SLOTS` for slot names only |
 | `platform.enabled` | `PKCS11RS_PLATFORM_ENABLED` |
 | `yubihsm.urls` | `PKCS11RS_YUBIHSM_URLS` |
 | `yubihsm.recreate_sessions` | `PKCS11RS_YUBIHSM_RECREATE_SESSIONS` |
@@ -364,8 +361,8 @@ native application prompt provider.
 
 `software.slots` is intentionally structured rather than reproducing the
 environment variable's dynamic names. Each entry carries its own optional
-`discovery_pin`. An omitted pin still falls back to that slot's legacy dynamic
-environment variable.
+`discovery_pin`. Discovery credentials are supplied only through this structured
+field; an omitted pin leaves pre-login public discovery disabled.
 
 An explicitly configured `discovery_pin` is retained in zeroizing storage for
 the software-token store's lifetime, independently of user login/logout. It is

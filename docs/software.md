@@ -69,9 +69,8 @@ SO login unlocks only public objects. USER login unlocks public and private
 objects. `C_SetPIN` preserves login: SO rewraps only the public key, while USER
 rewraps both keys. It never rewrites object records.
 
-Pre-login discovery is configured per slot with
-`PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>`, where `<HEXNAME>` is the uppercase hex
-encoding of the slot name's UTF-8 bytes. Discovery is read-only and unwraps
+Pre-login discovery is configured through each `software.slots` entry's
+`discovery_pin` in the JSON initialization configuration. Discovery is read-only and unwraps
 only the public key. Without it, logout returns to profile objects only; with
 it, logout restores the encrypted public-object view. The credential must be
 configured when `C_InitToken` creates the token. Changing or adding it later

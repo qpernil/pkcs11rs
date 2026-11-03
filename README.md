@@ -897,9 +897,7 @@ export PKCS11RS_TOKEN_STORAGE="$HOME/.local/share/pkcs11rs"
 The configured root is created during `C_Initialize`. Objects are separated by
 physical token identity and applet, stored below a versioned directory, and
 restored automatically on the next module initialization. FIDO registration
-and derived signing-key records use the same provider. The older
-`PKCS11RS_FIDO2_STORAGE` setting remains supported as a FIDO-only compatibility
-option when `PKCS11RS_TOKEN_STORAGE` is unset.
+and derived signing-key records use the same provider.
 
 `CKA_TOKEN=CK_FALSE` remains session-only; `CKA_TOKEN=CK_TRUE` selects the slot
 provider. Tokens without a stable identity continue to return
@@ -1574,8 +1572,7 @@ storage use `UnavailableStorageProvider`, so unsupported token persistence
 fails explicitly instead of silently becoming session-local. When
 `PKCS11RS_TOKEN_STORAGE` is configured, slots with a stable Yubico physical
 serial install separate durable local providers for each applet and
-automatically restore their saved backed objects. `PKCS11RS_FIDO2_STORAGE`
-configures durable storage for FIDO2 slots only. Applications can also restore
+automatically restore their saved backed objects. Applications can also restore
 exported previewSign registration or derived-key wrappers manually through
 `C_CreateObject`. The registration attribute also accepts the versioned
 browser/server WebAuthn JSON export; pkcs11rs normalizes it internally and uses

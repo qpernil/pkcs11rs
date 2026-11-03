@@ -582,8 +582,7 @@ Registration and derived metadata use the
 [content-addressed CBOR storage boundary](storage.md).
 Applications can export and strictly re-import both wrappers with
 `C_CreateObject`. Setting `PKCS11RS_TOKEN_STORAGE` installs an applet- and
-serial-scoped local provider on validated YubiKey slots;
-`PKCS11RS_FIDO2_STORAGE` is supported as a FIDO-only compatibility setting.
+serial-scoped local provider on validated YubiKey slots.
 Backed token objects are restored automatically after module finalization.
 The two-key previewSign lifecycle passes on a physical YubiKey 5C NFC with
 firmware 5.8.0 through the serial-selected production HID slot, using both

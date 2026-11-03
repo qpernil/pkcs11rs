@@ -46,7 +46,6 @@ use std::{
 use zeroize::Zeroizing;
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
-const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
 
 #[derive(Clone, Debug)]
 pub(crate) struct TokenStorageConfig {
@@ -97,34 +96,6 @@ impl TokenStorageConfig {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct FidoStorageConfig {
-    root: PathBuf,
-}
-
-impl FidoStorageConfig {
-    fn open(root: PathBuf) -> Result<Self, Error> {
-        validate_storage_root(&root)?;
-        Ok(Self { root })
-    }
-
-    fn token_root(&self, key: &PhysicalDeviceKey) -> PathBuf {
-        self.root
-            .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
-            .join(physical_device_directory(key))
-    }
-
-    fn provider(&self, key: &PhysicalDeviceKey) -> Result<LocalStorageProvider, Error> {
-        LocalStorageProvider::open(self.token_root(key))
-            .map_err(crate::backed_object::storage_error)
-    }
-
-    #[cfg(test)]
-    fn root(&self) -> &std::path::Path {
-        &self.root
-    }
-}
-
 fn validate_storage_root(root: &std::path::Path) -> Result<(), Error> {
     std::fs::create_dir_all(root)?;
     if !std::fs::metadata(root)?.is_dir() {
@@ -156,12 +127,6 @@ pub(crate) fn configured_token_storage(
     configured_storage_root(value, TokenStorageConfig::open)
 }
 
-pub(crate) fn configured_fido_storage(
-    value: Option<std::ffi::OsString>,
-) -> Result<Option<FidoStorageConfig>, Error> {
-    configured_storage_root(value, FidoStorageConfig::open)
-}
-
 fn physical_device_directory(key: &PhysicalDeviceKey) -> String {
     match key {
         PhysicalDeviceKey::YubicoSerial(serial) => {
@@ -183,16 +148,13 @@ fn encode_path_component(value: &[u8]) -> String {
 fn token_storage_for_slot(
     slot: &dyn Slot,
     token_storage: Option<&TokenStorageConfig>,
-    fido_storage: Option<&FidoStorageConfig>,
 ) -> Result<Box<dyn StorageProvider>, Error> {
     let Some(namespace) = slot.shared_storage_namespace() else {
         return Ok(Box::new(UnavailableStorageProvider));
     };
-    let configured =
-        token_storage.is_some() || (slot.accepts_legacy_fido_storage() && fido_storage.is_some());
-    if !configured {
+    let Some(config) = token_storage else {
         return Ok(Box::new(UnavailableStorageProvider));
-    }
+    };
     let Some(key) = slot.physical_device_key() else {
         log!(
             1,
@@ -201,11 +163,7 @@ fn token_storage_for_slot(
         );
         return Ok(Box::new(UnavailableStorageProvider));
     };
-    let provider = if let Some(config) = token_storage {
-        config.provider(&key, namespace)?
-    } else {
-        fido_storage.ok_or(CKR_GENERAL_ERROR)?.provider(&key)?
-    };
+    let provider = config.provider(&key, namespace)?;
     log!(
         2,
         "Token persistence for {} uses {:?}",
@@ -275,7 +233,6 @@ pub(crate) struct ModuleContext {
     nfc_mount: Mutex<Option<NfcMountRegistration>>,
     pub(crate) secure_channels: Arc<SecureChannelConfiguration>,
     pub(crate) token_storage: Option<TokenStorageConfig>,
-    pub(crate) fido_storage: Option<FidoStorageConfig>,
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
@@ -624,7 +581,6 @@ impl SlotContextRegistry {
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
         token_storage: Option<&TokenStorageConfig>,
-        fido_storage: Option<&FidoStorageConfig>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
         // Each discovered application or authenticator is a separate PKCS
         // token with its own logical state.
@@ -644,10 +600,9 @@ impl SlotContextRegistry {
         let mut contexts = Vec::with_capacity(slots.len());
         let mut storage_error = None;
         for (slot_id, slot, token_objects) in slots {
-            let configured_storage = token_storage.is_some()
-                || (slot.accepts_legacy_fido_storage() && fido_storage.is_some());
-            let context = token_storage_for_slot(slot.as_ref(), token_storage, fido_storage)
-                .and_then(|token_storage| {
+            let configured_storage = token_storage.is_some();
+            let context =
+                token_storage_for_slot(slot.as_ref(), token_storage).and_then(|token_storage| {
                     SlotContext::new_with_storage(
                         slot_id,
                         slot,
@@ -824,7 +779,6 @@ impl std::fmt::Debug for ModuleContext {
                 &self.yubihsm_public_discovery_config,
             )
             .field("token_storage", &self.token_storage)
-            .field("fido_storage", &self.fido_storage)
             .field("slot_contexts", &slot_ids)
             .finish()
     }
@@ -970,7 +924,6 @@ impl ModuleContext {
             context.pinentry.clone(),
             context.trust_store.clone(),
             None,
-            None,
         )?;
         registry.discovered = true;
         Ok(context)
@@ -1048,11 +1001,6 @@ impl ModuleContext {
             configuration.software_discovery_pins
         } else {
             HashMap::new()
-        };
-        let fido_storage = if token_storage.is_none() {
-            configured_fido_storage(configuration.fido2_storage)?
-        } else {
-            None
         };
         let yubihsm_http_tls = configured_yubihsm_http_tls(
             configuration.yubihsm_tls_client_certificate_bundle,
@@ -1155,7 +1103,6 @@ impl ModuleContext {
             nfc_mount: Mutex::new(None),
             secure_channels,
             token_storage,
-            fido_storage,
             handles: handles.clone(),
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
@@ -1295,7 +1242,6 @@ impl ModuleContext {
                 self.pinentry.clone(),
                 self.trust_store.clone(),
                 self.token_storage.as_ref(),
-                self.fido_storage.as_ref(),
             )
             .map(|_| ())
     }
@@ -2556,7 +2502,6 @@ impl ModuleContext {
             self.pinentry.clone(),
             self.trust_store.clone(),
             self.token_storage.as_ref(),
-            self.fido_storage.as_ref(),
         )?;
         tracing::debug!(
             target: "pkcs11rs::discovery",
@@ -2943,7 +2888,6 @@ impl ModuleContext {
                     self.pinentry.clone(),
                     self.trust_store.clone(),
                     self.token_storage.as_ref(),
-                    None,
                 )?;
             }
         }
@@ -2958,7 +2902,6 @@ impl ModuleContext {
                 self.handles.clone(),
                 self.pinentry.clone(),
                 self.trust_store.clone(),
-                None,
                 None,
             )?;
         }
@@ -3149,7 +3092,6 @@ impl ModuleContext {
                 self.pinentry.clone(),
                 self.trust_store.clone(),
                 self.token_storage.as_ref(),
-                self.fido_storage.as_ref(),
             ) {
                 Ok(_) => tracing::debug!(
                     target: "pkcs11rs::discovery",
@@ -4244,7 +4186,6 @@ mod discovery_tests {
         configuration.pinentry = None;
         configuration.hardware_discovery = false;
         configuration.token_storage = None;
-        configuration.fido2_storage = None;
         configuration.software_slots.clear();
         configuration.software_discovery_pins.clear();
         configuration.yubihsm_urls = vec![url];
@@ -4719,7 +4660,6 @@ mod discovery_tests {
             nfc_mount: Mutex::new(None),
             secure_channels: Arc::new(configuration.secure_channels),
             token_storage: None,
-            fido_storage: None,
             handles: Arc::new(HandleCounters::new()),
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
             trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
@@ -4862,31 +4802,9 @@ mod discovery_tests {
                 .join("embedded-reader-id-6c6f63616c2d74657374"),
         );
 
-        assert!(configured_fido_storage(None).unwrap().is_none());
-        assert!(configured_fido_storage(Some(std::ffi::OsString::new())).is_err());
-        assert!(configured_fido_storage(Some("relative/path".into())).is_err());
-
         let directory = TestDirectory::new();
         let file = directory.0.join("not-a-directory");
         std::fs::write(&file, []).unwrap();
-        assert!(configured_fido_storage(Some(file.into_os_string())).is_err());
-        let config = configured_fido_storage(Some(directory.0.clone().into_os_string()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(config.root(), directory.0);
-        assert_eq!(
-            config.token_root(&key("12345678")),
-            directory
-                .0
-                .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
-                .join("yubico-serial-3132333435363738")
-        );
-        assert_eq!(
-            config.token_root(&key("87654321")),
-            directory
-                .0
-                .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
-                .join("yubico-serial-3837363534333231")
-        );
+        assert!(configured_token_storage(Some(file.into_os_string())).is_err());
     }
 }

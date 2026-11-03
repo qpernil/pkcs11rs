@@ -43,9 +43,7 @@ supply another implementation. Discovery selects a local provider when
 `PKCS11RS_TOKEN_STORAGE` contains an absolute path and the slot has a stable
 physical Yubico serial. The provider path includes both the physical identity
 and the applet kind, so PIV, OpenPGP, YubiHSM Auth, issuer security-domain, and
-FIDO objects cannot collide. The older `PKCS11RS_FIDO2_STORAGE` setting remains
-a FIDO-only compatibility path when the generic setting is absent. Slots
-without stable identity retain the unavailable provider rather than sharing an
+FIDO objects cannot collide. Slots without stable identity retain the unavailable provider rather than sharing an
 ambiguously addressed store.
 
 For YubiKey HSM Auth, FIDO2, and issuer security-domain slots, installing token
@@ -161,8 +159,7 @@ $PKCS11RS_TOKEN_STORAGE/
 ```
 
 `<applet>` is one of `fido2`, `piv`, `openpgp`, `yubihsm-auth`, or
-`issuer-security-domain`. The FIDO-only `PKCS11RS_FIDO2_STORAGE` setting uses
-the `$PKCS11RS_FIDO2_STORAGE/fido2-v1/yubico-serial-.../objects` layout.
+`issuer-security-domain`.
 Hex encoding makes the physical identity a safe, reversible path component on
 every supported platform. The version directory permits a future binding
 scheme to coexist without silently reinterpreting an existing store.
