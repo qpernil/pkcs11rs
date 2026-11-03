@@ -892,9 +892,6 @@ impl Slot for Fido2Slot {
     fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
         self.endpoint.ccid_login_connector()
     }
-    fn accepts_legacy_fido_storage(&self) -> bool {
-        true
-    }
 
     fn shared_storage_namespace(&self) -> Option<&'static str> {
         Some("fido2")

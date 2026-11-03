@@ -4327,8 +4327,9 @@ fn corrupt_fido_storage_does_not_suppress_sibling_pcsc_applets() {
         std::process::id()
     ));
     let objects = root
-        .join("fido2-v1")
+        .join("tokens-v1")
         .join("yubico-serial-434f4e43555252454e5430")
+        .join("fido2")
         .join("objects");
     std::fs::create_dir_all(&objects).unwrap();
     std::fs::write(
@@ -4341,7 +4342,7 @@ fn corrupt_fido_storage_does_not_suppress_sibling_pcsc_applets() {
     assert_eq!(
         super::initialize_with_configuration(serde_json::json!({
             "version": 1,
-            "storage": {"fido2_compatibility": environment.root.to_string_lossy()}
+            "storage": {"tokens": environment.root.to_string_lossy()}
         })),
         CKR_OK as CK_RV
     );

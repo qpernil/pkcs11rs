@@ -136,9 +136,6 @@ pub(crate) trait Slot {
     fn shared_storage_namespace(&self) -> Option<&'static str> {
         None
     }
-    fn accepts_legacy_fido_storage(&self) -> bool {
-        false
-    }
     fn supports_yubihsm_management(&self) -> bool {
         false
     }

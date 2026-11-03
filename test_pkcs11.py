@@ -6,6 +6,7 @@ from __future__ import annotations
 import concurrent.futures
 import ctypes
 import hashlib
+import json
 import os
 import pathlib
 import platform
@@ -1019,7 +1020,7 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
             b'{"version":1,"hardware":{"discovery":false},'
             b'"software":{"slots":[]},"platform":{"enabled":false},'
             b'"yubihsm":{"urls":[]},"ccid":{"applications":["hsmauth"]},'
-            b'"embedded":{"readers":[{"id":"abi-hsmauth","name":"HSM Auth ABI Reader","serial":42,'
+            b'"embedded":{"yubikeys":[{"id":"abi-hsmauth","name":"HSM Auth ABI Reader","serial":42,'
             b'"applets":["hsmauth"]}]}}'
         )
         init_args = CK_C_INITIALIZE_ARGS()
@@ -1042,7 +1043,7 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
     def test_resident_fido_assertion_requires_per_operation_login(self) -> None:
         configuration = ctypes.create_string_buffer(
             b'{"version":1,"hardware":{"discovery":false},'
-            b'"embedded":{"readers":[{"id":"abi-fido",'
+            b'"embedded":{"yubikeys":[{"id":"abi-fido",'
             b'"name":"Embedded FIDO ABI Reader","serial":1,'
             b'"applets":["fido2"]}]}}'
         )
@@ -4400,17 +4401,17 @@ class Pkcs11AbiTests(unittest.TestCase):
     def test_named_software_slot_restores_public_but_not_private_token_state(
         self,
     ) -> None:
-        previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
-        previous_storage = os.environ.get("PKCS11RS_TOKEN_STORAGE")
-        discovery_env = (
-            "PKCS11RS_SOFTWARE_DISCOVERY_"
-            + b"persistent public".hex().upper()
-        )
-        previous_discovery = os.environ.get(discovery_env)
         with tempfile.TemporaryDirectory() as directory:
-            os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "persistent public"
-            os.environ["PKCS11RS_TOKEN_STORAGE"] = directory
-            os.environ[discovery_env] = "persistent public discovery password"
+            configuration = ctypes.create_string_buffer(json.dumps({
+                "version": 1,
+                "storage": {"tokens": directory},
+                "software": {"slots": [{
+                    "name": "persistent public",
+                    "discovery_pin": "persistent public discovery password",
+                }]},
+            }).encode())
+            init_args = CK_C_INITIALIZE_ARGS()
+            init_args.pReserved = ctypes.cast(configuration, ctypes.c_void_p)
             try:
                 def named_slot() -> int:
                     count = CK_ULONG()
@@ -4468,7 +4469,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     )
                     return list(handles[: found.value])
 
-                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_OK)
                 slot_id = named_slot()
                 session = self.open_slot_session(
                     slot_id,
@@ -4557,7 +4558,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
                 self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
 
-                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_OK)
                 restored_session = self.open_slot_session(named_slot())
                 restored = find_label(restored_session, b"restored public")
                 self.assertEqual(len(restored), 1)
@@ -4638,18 +4639,6 @@ class Pkcs11AbiTests(unittest.TestCase):
                 )
             finally:
                 self.lib.C_Finalize(None)
-                if previous_slots is None:
-                    os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
-                else:
-                    os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous_slots
-                if previous_storage is None:
-                    os.environ.pop("PKCS11RS_TOKEN_STORAGE", None)
-                else:
-                    os.environ["PKCS11RS_TOKEN_STORAGE"] = previous_storage
-                if previous_discovery is None:
-                    os.environ.pop(discovery_env, None)
-                else:
-                    os.environ[discovery_env] = previous_discovery
 
     def test_named_software_private_token_lifecycle_is_login_gated_and_persistent(
         self,

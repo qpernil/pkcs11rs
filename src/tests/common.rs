@@ -9842,9 +9842,6 @@ impl crate::Slot for ConcurrentSlot {
     fn shared_storage_namespace(&self) -> Option<&'static str> {
         (self.kind == crate::SlotKind::Fido2).then_some("fido2")
     }
-    fn accepts_legacy_fido_storage(&self) -> bool {
-        self.kind == crate::SlotKind::Fido2
-    }
     fn refresh_objects_after_discovery(&self) -> bool {
         self.kind == crate::SlotKind::YubiHsm
     }
@@ -10125,9 +10122,6 @@ impl crate::Slot for TestSlot {
             crate::SlotKind::Host => Some("platform"),
             crate::SlotKind::Synthetic => Some("synthetic"),
         }
-    }
-    fn accepts_legacy_fido_storage(&self) -> bool {
-        self.kind == crate::SlotKind::Fido2
     }
     fn supports_yubihsm_management(&self) -> bool {
         self.kind == crate::SlotKind::YubiHsm

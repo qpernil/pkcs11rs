@@ -581,8 +581,7 @@ applet on a newly discovered reader can append a slot later.
 When `PKCS11RS_TOKEN_STORAGE` is configured, a stable physical Yubico serial
 selects a versioned local token provider separately for each applet. Stored
 canonical backed objects are decoded and reconciled during slot construction.
-`PKCS11RS_FIDO2_STORAGE` remains a FIDO-only compatibility setting. An endpoint
-without a stable identity retains an unavailable provider, so durable objects
+An endpoint without a stable identity retains an unavailable provider, so durable objects
 cannot accidentally cross tokens or applets.
 
 The validated Yubico physical serial also associates the HID endpoint with the

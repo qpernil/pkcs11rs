@@ -75,7 +75,6 @@ struct JsonSlotsConfiguration {
 #[serde(deny_unknown_fields)]
 struct JsonStorageConfiguration {
     tokens: Option<String>,
-    fido2_compatibility: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -94,7 +93,6 @@ struct JsonSoftwareSlotConfiguration {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonEmbeddedConfiguration {
-    #[serde(alias = "readers")]
     yubikeys: Option<Vec<JsonEmbeddedVirtualYubiKeyConfiguration>>,
 }
 
@@ -275,7 +273,6 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) discovery_refresh_interval: Duration,
     pub(crate) slot_serials: Option<HashSet<String>>,
     pub(crate) token_storage: Option<OsString>,
-    pub(crate) fido2_storage: Option<OsString>,
     pub(crate) software_slots: Vec<String>,
     #[cfg_attr(not(feature = "embedded-virtual-yubikey"), allow(dead_code))]
     pub(crate) embedded_yubikeys: Vec<EmbeddedVirtualYubiKeyConfiguration>,
@@ -468,11 +465,6 @@ impl ModuleConfiguration {
             "PKCS11RS_TOKEN_STORAGE",
             &mut environment,
         )?;
-        let fido2_storage = resolve_os(
-            explicit.storage.fido2_compatibility,
-            "PKCS11RS_FIDO2_STORAGE",
-            &mut environment,
-        )?;
         let yubihsm_recreate_sessions = explicit
             .yubihsm
             .recreate_sessions
@@ -611,7 +603,6 @@ impl ModuleConfiguration {
             discovery_refresh_interval,
             slot_serials,
             token_storage,
-            fido2_storage,
             software_slots,
             embedded_yubikeys,
             platform_enabled,
@@ -727,14 +718,7 @@ fn resolve_software_slots(
         {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        let variable = format!(
-            "PKCS11RS_SOFTWARE_DISCOVERY_{}",
-            encode_path_component(slot.name.as_bytes()).to_ascii_uppercase()
-        );
-        let discovery_pin = match slot.discovery_pin {
-            Some(pin) => Some(pin),
-            None => environment_text(&variable, environment)?,
-        };
+        let discovery_pin = slot.discovery_pin;
         if let Some(pin) = discovery_pin.as_deref() {
             crate::software_storage::validate_software_pin(pin.as_bytes())?;
         }
@@ -1022,16 +1006,6 @@ fn environment_text(
     environment(name)?
         .map(|value| value.into_string().map_err(|_| CKR_ARGUMENTS_BAD.into()))
         .transpose()
-}
-
-fn encode_path_component(value: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value {
-        encoded.push(DIGITS[(byte >> 4) as usize] as char);
-        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 #[cfg(test)]
@@ -1382,23 +1356,32 @@ mod tests {
     }
 
     #[test]
-    fn embedded_yubikeys_accept_the_legacy_alias_and_reject_ambiguous_configuration() {
-        let canonical = json(
-            r#"{"version":1,"embedded":{"yubikeys":[{"id":"local-test","name":"Virtual YubiKey","serial":1,"applets":["oath"]}]}}"#,
-        );
-        let legacy = json(
-            r#"{"version":1,"embedded":{"readers":[{"id":"local-test","name":"Virtual YubiKey","serial":1,"applets":["oath"]}]}}"#,
-        );
-        assert_eq!(
-            resolve_embedded_yubikeys(canonical.embedded.yubikeys).unwrap(),
-            resolve_embedded_yubikeys(legacy.embedded.yubikeys).unwrap(),
-        );
-        for conflicting in [
-            r#"{"version":1,"embedded":{"yubikeys":[],"readers":[]}}"#,
-            r#"{"version":1,"embedded":{"readers":[],"yubikeys":[]}}"#,
+    fn removed_setting_names_are_rejected() {
+        for encoded in [
+            r#"{"version":1,"embedded":{"readers":[]}}"#,
+            r#"{"version":1,"storage":{"fido2_compatibility":"/tmp/obsolete"}}"#,
         ] {
-            assert!(serde_json::from_str::<JsonConfiguration>(conflicting).is_err());
+            assert!(serde_json::from_str::<JsonConfiguration>(encoded).is_err());
         }
+    }
+
+    #[test]
+    fn obsolete_environment_settings_are_not_read() {
+        let configuration = resolve(
+            None,
+            &[
+                ("PKCS11RS_FIDO2_STORAGE", "/tmp/obsolete"),
+                ("PKCS11RS_SOFTWARE_SLOTS", "build signing"),
+                (
+                    "PKCS11RS_SOFTWARE_DISCOVERY_6275696C64207369676E696E67",
+                    "obsolete discovery password",
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(configuration.token_storage.is_none());
+        assert_eq!(configuration.software_slots, ["build signing"]);
+        assert!(configuration.software_discovery_pins.is_empty());
     }
 
     #[cfg(feature = "embedded-virtual-yubikey")]
