@@ -241,6 +241,16 @@ blocks until the NFC request completes; applications must make that call away
 from their main UI thread. Later UI triggers are summarized in
 [When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears).
 
+## Rust test isolation
+
+Rust unit-test builds default local hardware discovery to off. The usual
+precedence applies: explicit JSON `hardware.discovery`, then
+`PKCS11RS_HARDWARE_DISCOVERY`, then the default. Setting the environment switch
+to `1` enables discovery for deliberate hardware testing; leave it unset for
+ordinary tests. Ignored live-hardware tests explicitly opt in when their
+documented device-selection gates are satisfied. Normal module and application
+builds retain the default-on behavior.
+
 ## Embedded virtual YubiKeys
 
 `embedded.yubikeys` is the only setting for embedded virtual YubiKeys.
