@@ -260,8 +260,7 @@ Management applet and keeps each embedded reader in a discovery namespace
 distinct from external USB, NFC, and PC/SC readers.
 
 `applets` is a nonempty allowlist using the same names as
-`ccid.applications`, except OATH: `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`.
-`oath` is supported for physical readers; the embedded core has no OATH applet.
+`ccid.applications`: `piv`, `openpgp`, `oath`, `hsmauth`, `issuer-sd`, and `fido2`.
 Management is always installed and must not be listed. An installed applet is
 published only when it is also present in the global `ccid.applications`
 allowlist.
@@ -273,18 +272,19 @@ reader is currently supported on Unix-family targets and requires
 an ID-scoped directory using an exclusive lock, batched writes, and atomic file
 replacement. Durable state includes PIV keys and data, FIDO credentials and PIN
 state and attestation identity, OpenPGP keys, certificates, PIN verifiers and
-retry policy, YubiHSM Auth credentials, and Issuer Security Domain keys and policy.
+retry policy, OATH credentials, application ID/access key and moving factors,
+YubiHSM Auth credentials, and Issuer Security Domain keys and policy.
 Selecting `fido2` installs both FIDO2 and U2F in the embedded device. Its USB
 Management settings can disable or enable either protocol independently without
 deleting credentials. There is no virtual NFC transport. Management changes
 force durability before returning.
 
-All forms use `virtual-yubikey-core::storage`: six independent
+All forms use `virtual-yubikey-core::storage`: seven independent
 `fido-<serial>.cbor`, `piv-<serial>.cbor`, `openpgp-<serial>.cbor`,
-`hsmauth-<serial>.cbor`, `security-domain-<serial>.cbor`, and
-`management-<serial>.cbor` records protected by
+`hsmauth-<serial>.cbor`, `security-domain-<serial>.cbor`,
+`management-<serial>.cbor`, and `oath-<serial>.cbor` records protected by
 `yubikey-<serial>.lock`. One writer batches dirty applets for up to 500 ms and
-flushes on shutdown; FIDO mutations and Management settings force durability
+flushes on shutdown; FIDO mutations, OATH mutations and Management settings force durability
 before returning.
 These filenames and applet encodings are identical to the USB worker's storage.
 Only the host-selected directory differs. Whole-device `state.cbor` files are

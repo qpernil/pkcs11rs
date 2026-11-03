@@ -1466,7 +1466,7 @@ The `embedded-virtual-yubikey` Cargo feature links `virtual-yubikey-core` into
 the module as configurable in-process CCID readers. An embedded reader follows
 the normal CCID discovery path: pkcs11rs reads its Management identity, probes
 the configured application AIDs, and constructs the same PIV, FIDO2, OpenPGP,
-YubiHSM Auth, and Issuer Security Domain slots used for external readers.
+OATH, YubiHSM Auth, and Issuer Security Domain slots used for external readers.
 Management is always installed because it provides the device identity; every
 PKCS #11 applet is opt-in. Multiple readers may be configured for multi-device
 tests, while ordinary applications normally need only one.
@@ -1513,7 +1513,7 @@ the feature was compiled; `embedded.readers` is the runtime opt-in:
 embedded-reader list. The ID is the stable internal identity; the reader name
 is the current CCID route and may be treated like a PC/SC name rather than a
 device identity. Supported applet names are `piv`, `fido2`, `openpgp`,
-`hsmauth`, and `issuer-sd`. The ordinary `ccid.applications` allowlist still
+`oath`, `hsmauth`, and `issuer-sd`. The ordinary `ccid.applications` allowlist still
 controls which installed applets pkcs11rs publishes as slots, and
 `slots.serials` applies to the Management-reported serial.
 
@@ -1537,12 +1537,14 @@ because CI runs the virtual-device persistence tests in that workspace.
 The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,
 `storage.tokens` is required on Unix-family targets and the complete durable
-PIV, FIDO2, OpenPGP, YubiHSM Auth, and Issuer Security Domain state uses the
-same six per-applet CBOR records as the USB worker, including Management USB
+PIV, FIDO2, OpenPGP, OATH, YubiHSM Auth, and Issuer Security Domain state uses the
+same seven per-applet CBOR records as the USB worker, including Management USB
 settings, in an ID-scoped directory.
 `virtual-yubikey-core::storage` owns the exclusive device lock, record validation,
-and one writer that batches dirty applets for up to 500 ms. FIDO mutations are
-flushed before returning. OpenPGP keys, certificates, PIN verifiers, retry state,
+and one writer that batches dirty applets for up to 500 ms. FIDO mutations,
+OATH mutations and Management settings are flushed before returning. OATH
+credentials, application ID/access key and HOTP counters survive restart; see
+[OATH](docs/oath.md). OpenPGP keys, certificates, PIN verifiers, retry state,
 and metadata survive restart. Applet selection, login state, presence grants,
 and secure-channel sessions are never persisted. See
 [embedded configuration](docs/configuration.md#embedded-virtual-yubikey-readers)

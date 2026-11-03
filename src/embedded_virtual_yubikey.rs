@@ -182,8 +182,9 @@ impl EmbeddedVirtualYubiKeyConnector {
         #[cfg(not(unix))]
         state.take_persistent_change();
         #[cfg(unix)]
-        let force_fido = persistent_changes.contains(&PersistentApplet::Fido)
-            || persistent_changes.contains(&PersistentApplet::Management);
+        let force_flush = persistent_changes.contains(&PersistentApplet::Fido)
+            || persistent_changes.contains(&PersistentApplet::Management)
+            || persistent_changes.contains(&PersistentApplet::Oath);
         #[cfg(unix)]
         let receipt = self
             .persistent
@@ -195,7 +196,7 @@ impl EmbeddedVirtualYubiKeyConnector {
         #[cfg(unix)]
         if let Some(receipt) = receipt {
             receipt.wait()?;
-            if force_fido && let Some(persistent) = &self.persistent {
+            if force_flush && let Some(persistent) = &self.persistent {
                 persistent.handle.flush()?;
             }
         }
