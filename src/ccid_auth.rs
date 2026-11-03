@@ -203,8 +203,16 @@ pub(crate) fn resolve(
                 }
             };
             Ok(Some((protocol, credential)))
-        })?
-        .ok_or_else(|| CKR_KEY_HANDLE_INVALID.into())
+        })
+        .map_err(|error| error.login_failure(crate::error::LoginStage::CredentialLookup))?
+        .ok_or_else(|| {
+            tracing::warn!(
+                target: "pkcs11rs::auth",
+                stage = ?crate::error::LoginStage::CredentialLookup,
+                "No matching authorized SCP source credential; target applet PIN verification was not attempted"
+            );
+            CKR_FUNCTION_FAILED.into()
+        })
 }
 
 /// Leaf first; a missing terminal issuer is verified by the card's fixed CA key.

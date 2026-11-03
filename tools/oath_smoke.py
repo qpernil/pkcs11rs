@@ -36,7 +36,7 @@ class Module:
             "C_GetSlotList": [C.c_ubyte, C.POINTER(U), C.POINTER(U)],
             "C_GetMechanismList": [U,C.POINTER(U),C.POINTER(U)],
             "C_OpenSession": [U,U,P,P,C.POINTER(U)], "C_CloseSession": [U],
-            "C_Login": [U,U,P,U], "C_Logout": [U],
+            "C_Login": [U,U,P,U], "C_LoginUser": [U,U,P,U,P,U], "C_Logout": [U],
             "C_CreateObject": [U,C.POINTER(Attribute),U,C.POINTER(U)],
             "C_DestroyObject": [U,U],
             "C_FindObjectsInit": [U,C.POINTER(Attribute),U],
@@ -67,6 +67,13 @@ class Module:
     def call(self,name,*args,expected=0):
         rv=getattr(self.lib,name)(*args)
         if rv != expected: raise RuntimeError(f"{name}: 0x{rv:x}, expected 0x{expected:x}")
+    def login_empty(self, user=False):
+        password=C.create_string_buffer(b"")
+        if user:
+            username=C.create_string_buffer(b"")
+            self.call("C_LoginUser",self.session,1,password,0,username,0)
+        else:
+            self.call("C_Login",self.session,1,password,0)
     def find(self,kind=None,hash_=None):
         key_type=U(kind or 0)
         hash_type=U(hash_ or 0)
@@ -131,12 +138,14 @@ def main():
     args=parser.parse_args()
     if args.serial in {"10462967","12345678"}:parser.error("Select a dedicated physical test YubiKey; preserved key and virtual gadget are excluded")
     module=Module(args.module,args.serial)
-    baseline=module.names();prefix=f"pkcs11rs-test-{uuid.uuid4().hex[:12]}:".encode()
+    baseline=None;prefix=f"pkcs11rs-test-{uuid.uuid4().hex[:12]}:".encode()
     try:
-        # No password is installed or changed by this test. Empty USER login is
-        # useful to exercise login/logout on an unprotected test application.
-        empty_password=C.create_string_buffer(b"")
-        module.call("C_Login",module.session,1,empty_password,0)
+        # Private OTP objects require logical USER login even when the physical
+        # application has no password. No password is installed or changed.
+        assert not module.names(), "Private OATH credentials visible before login"
+        module.login_empty()
+        baseline=module.names()
+        assert all(module.attr(key,2)==b"\x01" for key in baseline.values())
         for algorithm,mechanism,secret in [("sha1",0x220,b"12345678901234567890"),("sha256",0x250,b"12345678901234567890123456789012"),("sha512",0x270,b"1234567890"*6+b"1234")]:
             key=module.create(prefix+algorithm.encode(),secret,hash_=mechanism)
             for time in [59,1111111109,1111111111,1234567890,2000000000,20000000000]:
@@ -201,13 +210,30 @@ def main():
         module.call("C_DestroyObject",module.session,standard_key)
         assert prefix+b"hotp" not in module.names()
         assert not any(module.attr(key,0x102)==prefix+b"hotp" for key in module.find(0xd0530003))
+        auth_key=module.create(prefix+b"login",secret,totp=False)
+        module.call("C_Logout",module.session)
+        assert not module.names(), "Private OATH credentials visible after logout"
+        try:module.create(prefix+b"denied",secret,totp=False)
+        except RuntimeError as error:assert "0x101" in str(error)
+        else:raise AssertionError("Import succeeded without USER login")
+        mechanism=Mechanism(0x291,None,0)
+        rv=module.lib.C_SignInit(module.session,C.byref(mechanism),auth_key)
+        assert rv in (0x60,0x101), f"Logged-out SignInit returned 0x{rv:x}"
+        module.login_empty(user=True)
+        auth_key=module.names()[prefix+b"login"]
+        assert module.attr(auth_key,2)==b"\x01"
+        assert module.generate(auth_key,totp=False)=="755224", "Denied signing consumed an HOTP counter"
+        print("PASS: private-object visibility, import/sign rejection without login, empty C_LoginUser, and fresh authentication after logout")
         print("PASS: 18 RFC 6238 cases, 10 RFC 4226 counters, 39 extended HOTP cases, shared SHA1 counter, hash-filtered discovery, alias deletion, mechanism separation, import validation, buffer retries, secret protection, period 60, response continuation, duplicate protection")
     finally:
         try:
-            for name,key in module.names().items():
-                if name not in baseline and (name.startswith(prefix) or name.startswith(b"60/"+prefix)):module.call("C_DestroyObject",module.session,key)
-            assert module.names()==baseline,"OATH inventory did not return to its baseline"
-            print("PASS: dedicated test credentials removed; original OATH inventory preserved")
+            if baseline is not None:
+                rv=module.lib.C_Login(module.session,1,C.create_string_buffer(b""),0)
+                if rv not in (0,0x100):raise RuntimeError(f"Cleanup login failed: 0x{rv:x}")
+                for name,key in module.names().items():
+                    if name not in baseline and (name.startswith(prefix) or name.startswith(b"60/"+prefix)):module.call("C_DestroyObject",module.session,key)
+                assert set(module.names())==set(baseline),"OATH inventory did not return to its baseline"
+                print("PASS: dedicated test credentials removed; original OATH inventory preserved")
         finally:module.close()
 
 if __name__=="__main__":main()

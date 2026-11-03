@@ -1379,14 +1379,16 @@ impl Connector for PcscAppletConnector {
         if application_aid != self.application_aid {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        self.state.with_operation(|| {
-            self.set_enabled(true);
-            if let Err(error) = self.ensure_selected_locked() {
-                self.set_enabled(false);
-                return Err(error);
-            }
-            Ok(())
-        })
+        self.state
+            .with_operation(|| {
+                self.set_enabled(true);
+                if let Err(error) = self.ensure_selected_locked() {
+                    self.set_enabled(false);
+                    return Err(error);
+                }
+                Ok(())
+            })
+            .map_err(|error| error.login_failure(crate::error::LoginStage::SecureChannel))
     }
 
     fn clear_secure_channel(&self) {

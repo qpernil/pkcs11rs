@@ -48,6 +48,8 @@ private let ckaYubicoHsmAuthRetries =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5902)
 private let ckaYubicoHsmAuthTouchRequired =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5903)
+private let ckaPkcs11rsOathHash =
+    CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5053_0007)
 private struct ObjectInventory {
     var lines: [String]
 }
@@ -141,6 +143,13 @@ private func keyTypeName(_ keyType: CK_KEY_TYPE) -> String {
         return String(cString: name)
     }
     return String(format: "Unknown key type 0x%08llX", UInt64(keyType))
+}
+
+private func mechanismName(_ mechanism: CK_MECHANISM_TYPE) -> String {
+    if let name = PKCS11RS_GetMechanismName(mechanism) {
+        return String(cString: name)
+    }
+    return String(format: "Unknown mechanism 0x%08llX", UInt64(mechanism))
 }
 
 private func returnValueDescription(_ value: CK_RV) -> String {
@@ -357,6 +366,22 @@ private func objectDescription(
             parts.append(
                 "touch=\(hsmAuthTouchRequired != CK_BBOOL(CK_FALSE))"
             )
+        }
+    }
+    if objectClass == CK_OBJECT_CLASS(CKO_OTP_KEY) {
+        if let value = attributeValue(
+            session: session, object: object, type: ckaPkcs11rsOathHash
+        ).value, value.count == MemoryLayout<CK_MECHANISM_TYPE>.size {
+            let hash = value.withUnsafeBytes { $0.loadUnaligned(as: CK_MECHANISM_TYPE.self) }
+            parts.append("hash=\(mechanismName(hash))")
+        }
+        if let value = attributeValue(
+            session: session, object: object, type: CK_ATTRIBUTE_TYPE(CKA_ALLOWED_MECHANISMS)
+        ).value, value.count.isMultiple(of: MemoryLayout<CK_MECHANISM_TYPE>.size) {
+            let mechanisms = stride(from: 0, to: value.count, by: MemoryLayout<CK_MECHANISM_TYPE>.size).map { offset in
+                value.withUnsafeBytes { mechanismName($0.loadUnaligned(fromByteOffset: offset, as: CK_MECHANISM_TYPE.self)) }
+            }
+            parts.append("mechanisms=\(mechanisms.joined(separator: "|"))")
         }
     }
     return parts.joined(separator: ", ")
@@ -1870,7 +1895,11 @@ private func yubiHsmLogin(
     )
 }
 
-private func loginSourceSlot(_ slot: CK_SLOT_ID) -> SourceLogin {
+private func loginSourceSlot(
+    _ slot: CK_SLOT_ID,
+    explicitEmptyPIN: Bool = false,
+    factoryUserPIN: Bool = false
+) -> SourceLogin {
     var session = CK_SESSION_HANDLE()
     let openResult = C_OpenSession(
         slot,
@@ -1883,12 +1912,22 @@ private func loginSourceSlot(_ slot: CK_SLOT_ID) -> SourceLogin {
         return SourceLogin(authorization: nil, result: openResult)
     }
 
-    let loginResult = C_Login(
-        session,
-        CK_USER_TYPE(CKU_USER),
-        nil,
-        0
-    )
+    let loginResult: CK_RV
+    if factoryUserPIN {
+        // Dedicated test devices only. One USER attempt; no SO login or retry.
+        var pin = Array("123456".utf8)
+        defer {
+            _ = pin.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) }
+        }
+        loginResult = pin.withUnsafeMutableBufferPointer {
+            C_Login(session, CK_USER_TYPE(CKU_USER), $0.baseAddress, CK_ULONG($0.count))
+        }
+    } else {
+        var emptyPIN = CK_UTF8CHAR(0)
+        loginResult = explicitEmptyPIN
+            ? C_Login(session, CK_USER_TYPE(CKU_USER), &emptyPIN, 0)
+            : C_Login(session, CK_USER_TYPE(CKU_USER), nil, 0)
+    }
     guard loginResult == CKR_OK || loginResult == CKR_USER_ALREADY_LOGGED_IN else {
         _ = C_CloseSession(session)
         return SourceLogin(authorization: nil, result: loginResult)
@@ -2168,10 +2207,21 @@ private final class ModuleInspector {
                 }
             }
             var authenticatedSession: CK_SESSION_HANDLE?
-            if isHostTokenLabel(inventory.tokenLabel) || inventory.tokenLabel.hasPrefix("Issuer SD #") {
-                let source = loginSourceSlot(inventory.slot)
+            let isOath = inventory.tokenLabel.hasPrefix("OATH #")
+            let usesFactoryUserPIN = isPivTokenLabel(inventory.tokenLabel)
+                || inventory.tokenLabel.hasPrefix("OpenPGP #")
+            if isHostTokenLabel(inventory.tokenLabel) || inventory.tokenLabel.hasPrefix("Issuer SD #") || isOath || usesFactoryUserPIN {
+                let source = loginSourceSlot(
+                    inventory.slot, explicitEmptyPIN: isOath, factoryUserPIN: usesFactoryUserPIN
+                )
                 lines.append("")
                 lines.append(loginResultLine(CK_USER_TYPE(CKU_USER), result: source.result))
+                if isOath && source.result == CK_RV(CKR_PIN_INCORRECT) {
+                    lines.append("  OATH requires its application access password; the empty test password was rejected.")
+                }
+                if usesFactoryUserPIN && source.result == CK_RV(CKR_PIN_INCORRECT) {
+                    lines.append("  Factory USER PIN rejected; no retry.")
+                }
                 if let authorization = source.authorization {
                     authorizedSessions.append(authorization)
                     authenticatedSession = authorization.session

@@ -140,6 +140,18 @@ client URI uses the same source-authorization and recreation rules as an
 explicit username. Public discovery can run before login, but
 PIN management requiring SCP returns `CKR_USER_NOT_LOGGED_IN` before login.
 
+Login failures are classified by phase. Missing or unusable SCP credentials
+return `CKR_FUNCTION_FAILED`, with diagnostics identifying credential lookup,
+certificate validation, or secure-channel establishment. Invalid caller
+arguments or selectors remain `CKR_ARGUMENTS_BAD`.
+Transport/protocol and channel-integrity failures return `CKR_DEVICE_ERROR`;
+device removal retains its removal error. Actual applet PIN rejection or
+blocking retains `CKR_PIN_INCORRECT` or `CKR_PIN_LOCKED`. Prerequisite failures
+do not submit the target applet PIN. Diagnostics identify the phase and
+original return code; card protocol failures also log the APDU header and
+status word without logging command payloads or PIN values. `CKR_GENERAL_ERROR`
+is reserved for unrecoverable failures rather than ordinary provisioning gaps.
+
 For SCP03, select a token AES key named `<name>.enc`; the same source must
 contain its unique `<name>.mac` companion. `<name>.dek` is optional for
 transport and required for static-DEK administration. For SCP11a/c, select

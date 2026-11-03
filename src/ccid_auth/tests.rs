@@ -458,7 +458,7 @@ fn configured_client_uri_requires_authorization_and_explicit_username_overrides_
         })
     };
     // Factory transport keys exist, but failure of the configured lookup cannot fall back to them.
-    assert_eq!(ordinary_login(), CKR_KEY_HANDLE_INVALID as CK_RV);
+    assert_eq!(ordinary_login(), CKR_FUNCTION_FAILED as CK_RV);
     let selector = b"pkcs11:object=client.enc;type=secret-key";
     assert_eq!(login(&owner, selector, b"123456"), CKR_OK as CK_RV);
     assert_eq!(connector.send_apdu(&version()).unwrap().data, [5, 8, 0]);
@@ -554,6 +554,46 @@ fn administer(
 }
 
 #[test]
+fn scp_setup_failures_do_not_consume_target_pin_attempts() {
+    for missing_card_credential in [true, false] {
+        let base = base();
+        crate::select_application(base.as_ref(), &piv::PIV_AID).unwrap();
+        let retries = PivClient.pin_retries(base.as_ref()).unwrap();
+        let source = Source::new();
+        let leaf = crate::certificate_builder::p256_scp11_oce_certificate(
+            scalar(5).verifying_key(),
+            &scalar(4),
+            "CN=OCE",
+            "CN=CA",
+            20,
+        );
+        source.ec(&leaf);
+        let protocol = (!missing_card_credential).then_some(SecureChannelProtocol::Scp11b);
+        let (owner, _) = target(
+            base.clone(),
+            &source,
+            SecureChannelConfiguration::for_test(),
+            protocol,
+        );
+        // The virtual card has only SCP11b, with its own untrusted test CA.
+        // Both failures must precede even an intentionally incorrect PIV PIN.
+        let selector = if missing_card_credential {
+            b"pkcs11:".as_slice()
+        } else {
+            b"".as_slice()
+        };
+        assert_eq!(
+            login(&owner, selector, b"000000"),
+            CKR_FUNCTION_FAILED as CK_RV
+        );
+        assert_eq!(diagnostic(&owner, false), "none");
+        assert_eq!(diagnostic(&owner, true), "none");
+        crate::select_application(base.as_ref(), &piv::PIV_AID).unwrap();
+        assert_eq!(PivClient.pin_retries(base.as_ref()).unwrap(), retries);
+    }
+}
+
+#[test]
 fn ccid_scp11_login_reports_missing_card_credential_on_factory_card() {
     for configured in [None, Some(SecureChannelProtocol::Scp11c)] {
         let base = base();
@@ -594,10 +634,7 @@ fn ccid_scp11_login_reports_missing_card_credential_on_factory_card() {
             configured,
             CcidApplication::IssuerSecurityDomain,
         );
-        assert_eq!(
-            login(&owner, b"pkcs11:", b""),
-            CKR_KEY_HANDLE_INVALID as CK_RV
-        );
+        assert_eq!(login(&owner, b"pkcs11:", b""), CKR_FUNCTION_FAILED as CK_RV);
         assert_eq!(diagnostic(&owner, false), "none");
         assert_eq!(diagnostic(&owner, true), "none");
         let mut info = unsafe { std::mem::zeroed() };
@@ -894,7 +931,7 @@ fn ccid_dynamic_scp11_rejects_mismatched_certificate_key() {
     );
     assert_eq!(
         login(&owner, b"pkcs11:object=client;type=private", b"123456"),
-        CKR_PUBLIC_KEY_INVALID as CK_RV
+        CKR_FUNCTION_FAILED as CK_RV
     );
     assert!(
         connector

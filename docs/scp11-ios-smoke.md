@@ -180,9 +180,12 @@ identity; use another factory card or deliberately reset and reprovision its
 Issuer SD. Changing the app's protocol does not change card provisioning.
 
 An SCP11a login against a factory SCP11b-only card returns
-`CKR_KEY_HANDLE_INVALID` when the requested `0x11/01` card certificate is absent.
+`CKR_FUNCTION_FAILED` when the requested `0x11/01` card certificate is absent.
 The log identifies the SCP11 variant, KID, and KVN. There is no automatic
 fallback to SCP11b. A missing source credential also returns
-`CKR_KEY_HANDLE_INVALID`; inspect the host inventory and login first to distinguish
-the source lookup from a missing card certificate. An unreadable CA file or a
-malformed/untrusted certificate chain remains a separate validation failure.
+`CKR_FUNCTION_FAILED`; inspect the `CredentialLookup` diagnostic and host
+inventory to distinguish the source lookup from a missing card certificate.
+Certificate trust failures have a `CardCertificate` diagnostic. Bad SCP11
+receipts and malformed card responses return `CKR_DEVICE_ERROR`. Actual applet
+PIN rejection remains `CKR_PIN_INCORRECT`, and a blocked PIN remains
+`CKR_PIN_LOCKED`. Setup failures occur before the target applet PIN is submitted.

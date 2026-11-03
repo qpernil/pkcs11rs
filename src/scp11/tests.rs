@@ -228,7 +228,7 @@ fn authenticates_scp11b_against_fixed_p256_vector() {
     };
     assert!(matches!(
         keys.establish_with_ephemeral(&connector, private_key(1)),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
+        Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as crate::CK_RV
     ));
 }
 
@@ -365,7 +365,7 @@ fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
         };
         assert!(
             matches!(keys.establish_with_ephemeral(&bad, private_key(1)),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV)
+        Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as CK_RV)
         );
         assert_eq!(observer.count_provider_objects(), 1);
     }

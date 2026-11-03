@@ -81,11 +81,6 @@ pub(crate) struct Info {
     salt: Vec<u8>,
     challenge: Option<Vec<u8>>,
 }
-impl Info {
-    pub(crate) fn protected(&self) -> bool {
-        self.challenge.is_some()
-    }
-}
 
 pub(crate) fn tlv(tag: u8, value: &[u8], output: &mut Vec<u8>) -> Result<(), Error> {
     if value.len() > 255 {
@@ -367,7 +362,7 @@ pub(crate) fn attribute(c: &Credential, t: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>>
         _ => None,
     }
 }
-pub(crate) fn object(slot: CK_SLOT_ID, c: Credential, private: bool) -> TokenObject {
+pub(crate) fn object(slot: CK_SLOT_ID, c: Credential) -> TokenObject {
     let name = String::from_utf8_lossy(&c.name).into_owned();
     TokenObject {
         slot_id: Some(slot),
@@ -388,7 +383,7 @@ pub(crate) fn object(slot: CK_SLOT_ID, c: Credential, private: bool) -> TokenObj
         label: name,
         id: c.name.clone(),
         token: true,
-        private,
+        private: true,
         sign: true,
         verify: false,
         encrypt: false,
