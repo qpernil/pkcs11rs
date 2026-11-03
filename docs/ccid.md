@@ -9,6 +9,7 @@ default:
 | --- | --- | --- |
 | PIV | `A0 00 00 03 08 00 00 10 00 01 00` | `PKCS11RS_PIV_AID` |
 | OpenPGP | `D2 76 00 01 24 01` | `PKCS11RS_OPENPGP_AID` |
+| [OATH](oath.md) | `A0 00 00 05 27 21 01` | `PKCS11RS_OATH_AID` |
 | YubiHSM Auth | `A0 00 00 05 27 21 07 01` | `PKCS11RS_HSMAUTH_AID` |
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 | FIDO2 | `A0 00 00 06 47 2F 00 01` | `PKCS11RS_FIDO2_AID` |
@@ -116,7 +117,7 @@ role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs
 
 ## Login-selected secure channels
 
-PIV, OpenPGP, FIDO2 over CCID, and the Issuer Security Domain support two
+PIV, OpenPGP, OATH, FIDO2 over CCID, and the Issuer Security Domain support two
 credential paths. `C_Login`, or `C_LoginUser` with an empty username, uses
 the configured SCP protocol and credentials. Set `ccid.client_uri` (or
 `PKCS11RS_CCID_CLIENT_URI`) to select a provider credential for these calls.
@@ -202,7 +203,7 @@ slot, a later `C_GetSlotList` retries the applet probe. If the reader already
 has slots, they remain registered and report the failed connection as token
 absence. PC/SC
 ownership applies to the reader, not one selected applet: an exclusive client
-using OpenPGP can therefore also make PIV, YubiHSM Auth, Issuer SD, and FIDO
+using OpenPGP can therefore also make PIV, OATH, YubiHSM Auth, Issuer SD, and FIDO
 over CCID unavailable through that reader. A separate native FIDO HID
 interface does not depend on PC/SC ownership.
 
@@ -238,7 +239,7 @@ and can connect after it is released.
 
 ## Allowlist
 
-Without configuration, all five applets above are probed. Set
+Without configuration, all six applets above are probed. Set
 `PKCS11RS_CCID_APPLICATIONS` to a comma-separated allowlist when only specific
 applets should be exposed:
 
@@ -246,7 +247,7 @@ applets should be exposed:
 PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-Accepted names are `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`. Names are
+Accepted names are `piv`, `openpgp`, `oath`, `hsmauth`, `issuer-sd`, and `fido2`. Names are
 case-insensitive and duplicates are ignored.
 
 This allowlist controls probing, including HSM Auth credential-provider
@@ -276,9 +277,9 @@ OpenPGP, or YubiHSM Auth.
 
 ## FIDO2 smart-card binding
 
-Pre-release YubiKey firmware may expose FIDO2 through the USB CCID smart-card
-interface. Production YubiKeys normally expose FIDO2 over the separate USB
-FIDO HID interface, which pkcs11rs discovers independently. FIDO over NFC uses
+YubiKey firmware 5.8 exposes FIDO2 through the USB CCID smart-card
+interface. Earlier firmware uses the separate USB FIDO HID interface,
+which pkcs11rs discovers independently. FIDO over NFC uses
 the smart-card binding. Applet selection, `authenticatorGetInfo`, legacy
 PIN-token login, and read-only credential enumeration have also been validated
 with an earlier YubiKey over NFC on macOS.

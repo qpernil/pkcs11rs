@@ -173,6 +173,7 @@ pub(crate) fn verify_init(
             requires_login: object.private,
             context_specific_extended: false,
             context_specific_rp_id: None,
+            oath_time: None,
             fido_authorization: None,
             mechanism: mechanism.mechanism,
             mac_length,

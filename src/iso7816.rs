@@ -124,9 +124,27 @@ fn transmit_command<C: Connector + ?Sized>(
     Err(CKR_DEVICE_ERROR.into())
 }
 
+/// OATH response chaining uses INS A5. Under SCP this collects the protected
+/// response before MAC verification/decryption, matching Yubico's protocol.
+pub(crate) fn transmit_oath<C: Connector + ?Sized>(
+    connector: &C,
+    command: &CommandApdu,
+) -> Result<ResponseApdu, Error> {
+    let response = scp03::transmit(connector, command)?;
+    collect_response_chain_with_instruction(connector, response, 0xa5)
+}
+
 pub(crate) fn collect_response_chain<C: Connector + ?Sized>(
     connector: &C,
+    response: ResponseApdu,
+) -> Result<ResponseApdu, Error> {
+    collect_response_chain_with_instruction(connector, response, GET_RESPONSE)
+}
+
+fn collect_response_chain_with_instruction<C: Connector + ?Sized>(
+    connector: &C,
     mut response: ResponseApdu,
+    instruction: u8,
 ) -> Result<ResponseApdu, Error> {
     let mut data = Vec::new();
     let mut segments = 0usize;
@@ -140,7 +158,7 @@ pub(crate) fn collect_response_chain<C: Connector + ?Sized>(
         let available = (response.status & 0xff) as u32;
         let get_response = CommandApdu {
             cla: 0,
-            ins: GET_RESPONSE,
+            ins: instruction,
             p1: 0,
             p2: 0,
             data: Vec::new(),

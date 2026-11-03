@@ -147,6 +147,7 @@ pub mod storage;
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 
+mod oath;
 mod openpgp;
 use openpgp::{
     Algorithm as OpenPgpAlgorithm, Client as OpenPgpClient, KeyRef as OpenPgpKeyRef,
@@ -317,6 +318,22 @@ pub const CKM_PKCS11RS_PROJECT_PUBLIC_KEY: CK_MECHANISM_TYPE =
 /// Return one exact CTAP GetAssertion response for a resident FIDO credential.
 pub const CKM_PKCS11RS_FIDO_ASSERTION: CK_MECHANISM_TYPE =
     CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0005;
+/// Generate a TOTP using the standard OTP parameter and result structures.
+pub const CKM_PKCS11RS_TOTP: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0007;
+/// Generate SHA1/SHA256/SHA512 HOTP using the standard OTP parameter/result structures.
+pub const CKM_PKCS11RS_HOTP: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0008;
+/// TOTP credentials held by the OATH application.
+pub const CKK_PKCS11RS_TOTP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0002;
+/// Uniform SHA1/SHA256/SHA512 HOTP view; SHA1 also retains its standard view.
+pub const CKK_PKCS11RS_HOTP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0003;
+/// OATH hash algorithm: CKM_SHA_1, CKM_SHA256, or CKM_SHA512.
+pub const CKA_PKCS11RS_OATH_HASH: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0007;
+/// Require physical touch for OATH calculations (creation only).
+pub const CKA_PKCS11RS_OATH_TOUCH_REQUIRED: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0008;
 /// Atomically prefix an ECDH secret and apply a mandatory ANSI X9.63 KDF.
 pub const CKM_PKCS11RS_PREFIXED_ECDH_DERIVE: CK_MECHANISM_TYPE =
     CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0006;

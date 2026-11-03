@@ -604,6 +604,7 @@ fn ccid_application_discovery_defaults_to_supported_applets() {
         vec![
             crate::CcidApplication::Piv,
             crate::CcidApplication::OpenPgp,
+            crate::CcidApplication::Oath,
             crate::CcidApplication::HsmAuth,
             crate::CcidApplication::IssuerSecurityDomain,
             crate::CcidApplication::Fido2,

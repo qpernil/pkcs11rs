@@ -1087,6 +1087,8 @@ impl ModuleContext {
                     match applet {
                         CcidApplication::Piv => applets.piv = true,
                         CcidApplication::OpenPgp => applets.openpgp = true,
+                        // The embedded core has no OATH application yet.
+                        CcidApplication::Oath => return Err(Error::from(CKR_ARGUMENTS_BAD)),
                         CcidApplication::HsmAuth => applets.hsmauth = true,
                         CcidApplication::IssuerSecurityDomain => {
                             applets.issuer_security_domain = true
@@ -2470,6 +2472,11 @@ impl ModuleContext {
                 CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new_with_device(
                     application_connector,
                     application_aid.clone(),
+                    reader_state.device.clone(),
+                )),
+                CcidApplication::Oath => Box::new(crate::backend::OathSlot::new(
+                    application_connector,
+                    application_aid,
                     reader_state.device.clone(),
                 )),
                 CcidApplication::HsmAuth => {

@@ -162,7 +162,9 @@ arbitrary software private and secret session keys. Device and applet slots use
 the composition scope described below and reject unrelated software private or
 secret session-key imports. Native token-key imports remain available when the
 backend supports them. HSM Auth and Issuer Security Domain are management-only
-slots and expose no software cryptographic mechanisms.
+slots and expose no software cryptographic mechanisms. The [OATH](oath.md)
+slot likewise exposes only native OTP mechanisms and persistent OTP credentials;
+it does not inherit the software composition mechanisms.
 
 Generic operation routing uses advertised mechanisms, object material, and
 backend capabilities. Software-token persistence uses
@@ -290,6 +292,7 @@ keys. YubiHSM applies its actual per-object capability bitmap; PIV and OpenPGP
 reuse their native signing restrictions. Software session keys keep the common
 software capabilities regardless of the surrounding slot's native restrictions.
 Native HSM Auth credential types expose no ordinary cryptographic mechanisms.
+OATH OTP keys expose their native HOTP or TOTP signing mechanism only.
 
 `C_GetAttributeValue`, `C_FindObjects` attribute matching, and authentication's
 mechanism selection use the same sorted list. Queries do no device I/O beyond

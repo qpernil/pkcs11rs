@@ -339,6 +339,7 @@ pub(crate) enum KeyMaterial {
         registration: crate::preview_sign::PreviewSignRegistration,
         derived: crate::preview_sign::PreviewSignDerivedKeyRecord,
     },
+    OathCredential(crate::oath::Credential),
     HsmAuthCredential {
         algorithm: HsmAuthAlgorithm,
         retries: u8,
@@ -380,6 +381,7 @@ impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => fmt.write_str("None"),
+            Self::OathCredential(credential) => credential.fmt(fmt),
             Self::Profile { profile_id } => fmt
                 .debug_struct("Profile")
                 .field("profile_id", profile_id)
@@ -577,6 +579,7 @@ pub(crate) struct SignatureOperation {
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
     pub(crate) context_specific_rp_id: Option<String>,
+    pub(crate) oath_time: Option<u64>,
     pub(crate) fido_authorization: Option<crate::ctap::CredentialAuthorization>,
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) mac_length: Option<usize>,
@@ -869,6 +872,14 @@ fn is_hybrid_kem_key_type(key_type: CK_KEY_TYPE) -> bool {
 }
 
 const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
+    CKA_OTP_FORMAT as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_LENGTH as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_TIME_INTERVAL as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_USER_FRIENDLY_MODE as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_CHALLENGE_REQUIREMENT as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_TIME_REQUIREMENT as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_COUNTER_REQUIREMENT as CK_ATTRIBUTE_TYPE,
+    CKA_OTP_PIN_REQUIREMENT as CK_ATTRIBUTE_TYPE,
     CKA_CLASS as CK_ATTRIBUTE_TYPE,
     CKA_TOKEN as CK_ATTRIBUTE_TYPE,
     CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
@@ -1237,6 +1248,9 @@ impl TokenObject {
     }
 
     pub(crate) fn supports_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if matches!(self.material, KeyMaterial::OathCredential(_)) {
+            return crate::oath::supports_attribute(attribute_type);
+        }
         if is_common_storage_attribute(attribute_type) {
             return true;
         }
@@ -1349,6 +1363,11 @@ impl TokenObject {
     }
 
     pub(crate) fn attribute_is_sensitive(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if matches!(self.material, KeyMaterial::OathCredential(_))
+            && attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+        {
+            return true;
+        }
         if !self.supports_attribute(attribute_type) {
             return false;
         }
@@ -1403,6 +1422,8 @@ impl TokenObject {
             .filter(|attribute_type| self.supports_attribute(*attribute_type))
             .collect::<Vec<_>>();
         for attribute_type in [
+            crate::CKA_PKCS11RS_OATH_HASH,
+            crate::CKA_PKCS11RS_OATH_TOUCH_REQUIRED,
             CKA_PKCS11RS_PIV_OBJECT_TAG,
             CKA_YUBICO_HSMAUTH_RETRIES,
             CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
@@ -1530,6 +1551,7 @@ impl TokenObject {
 
     pub(crate) fn has_sensitive_attributes(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_OTP_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
@@ -1571,6 +1593,11 @@ impl TokenObject {
     }
 
     pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+        if let KeyMaterial::OathCredential(credential) = &self.material
+            && let Some(value) = crate::oath::attribute(credential, attribute_type)
+        {
+            return Some(value);
+        }
         if !self.supports_attribute(attribute_type) {
             return None;
         }
@@ -2105,6 +2132,7 @@ impl TokenObject {
 
     pub(crate) fn is_key_object(&self) -> bool {
         self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_OTP_KEY as CK_OBJECT_CLASS
             || self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
@@ -2176,6 +2204,7 @@ impl TokenObject {
         matches!(
             &self.material,
             KeyMaterial::Profile { .. }
+                | KeyMaterial::OathCredential(_)
                 | KeyMaterial::PlatformPrivate(_)
                 | KeyMaterial::PivPrivate { .. }
                 | KeyMaterial::PivCertificate { .. }

@@ -9894,6 +9894,7 @@ impl crate::Slot for ConcurrentSlot {
             crate::SlotKind::Host => "Secure Enclave",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
+            crate::SlotKind::Ccid(crate::CcidApplication::Oath) => "OATH",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",
             crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) => "YubiHSM Auth",
             crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain) => "Issuer SD",
@@ -10115,6 +10116,7 @@ impl crate::Slot for TestSlot {
                 Some("fido2")
             }
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => Some("piv"),
+            crate::SlotKind::Ccid(crate::CcidApplication::Oath) => Some("oath"),
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => Some("openpgp"),
             crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) => Some("yubihsm-auth"),
             crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain) => {

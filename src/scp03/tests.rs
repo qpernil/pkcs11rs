@@ -1487,3 +1487,42 @@ fn rejects_unsupported_response_security_and_s16() {
     assert!(validate_implementation(0x01).is_err());
     assert!(validate_implementation(0x40).is_err());
 }
+
+#[test]
+fn oath_collects_protected_fragments_before_authenticating_the_response() {
+    let command = CommandApdu {
+        cla: 0,
+        ins: 0xa1,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+        le: Some(256),
+        extended: false,
+    };
+    let plaintext = vec![0x72; 500];
+    for level in [0x11, 0x33] {
+        let encoded =
+            protected_test_response(&mut test_session(level), &command, &plaintext, 0x9000);
+        let first = [&encoded[..200], &[0x61, 0x00]].concat();
+        let rest = encoded[200..].to_vec();
+        let connector = ScriptedConnector::new(vec![first.clone(), rest.clone()]);
+        let response = test_session(level)
+            .transmit_oath(&connector, &command)
+            .unwrap();
+        assert_eq!(response.data, plaintext);
+        assert_eq!(response.status, 0x9000);
+        let commands = connector.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(CommandApdu::decode(&commands[1]).unwrap().ins, 0xa5);
+        drop(commands);
+        let mut tampered = first;
+        tampered[0] ^= 1;
+        let connector = ScriptedConnector::new(vec![tampered, rest]);
+        assert!(
+            test_session(level)
+                .transmit_oath(&connector, &command)
+                .is_err()
+        );
+        assert_eq!(connector.commands.borrow().len(), 2);
+    }
+}

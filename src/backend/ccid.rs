@@ -5,6 +5,7 @@ use crate::*;
 pub(crate) enum CcidApplication {
     Piv,
     OpenPgp,
+    Oath,
     HsmAuth,
     IssuerSecurityDomain,
     Fido2,
@@ -57,6 +58,7 @@ pub(crate) fn default_ccid_applications() -> Vec<CcidApplication> {
     vec![
         CcidApplication::Piv,
         CcidApplication::OpenPgp,
+        CcidApplication::Oath,
         CcidApplication::HsmAuth,
         CcidApplication::IssuerSecurityDomain,
         CcidApplication::Fido2,
@@ -67,6 +69,7 @@ pub(crate) fn parse_ccid_application(value: &str) -> Result<CcidApplication, Err
     match value.to_ascii_lowercase().as_str() {
         "piv" => Ok(CcidApplication::Piv),
         "openpgp" => Ok(CcidApplication::OpenPgp),
+        "oath" => Ok(CcidApplication::Oath),
         "hsmauth" => Ok(CcidApplication::HsmAuth),
         "issuer-sd" => Ok(CcidApplication::IssuerSecurityDomain),
         "fido2" => Ok(CcidApplication::Fido2),
@@ -78,6 +81,7 @@ pub(crate) fn ccid_application_label(application: CcidApplication) -> &'static s
     match application {
         CcidApplication::Piv => "PIV",
         CcidApplication::OpenPgp => "OpenPGP",
+        CcidApplication::Oath => "OATH",
         CcidApplication::HsmAuth => "YubiHSM Auth",
         CcidApplication::IssuerSecurityDomain => "Issuer SD",
         CcidApplication::Fido2 => "FIDO2",
