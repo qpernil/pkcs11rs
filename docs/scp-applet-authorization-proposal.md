@@ -30,7 +30,7 @@ are host policies and do not prevent another client using plaintext where the
 device permits it. See [CCID login](ccid.md#login-selected-secure-channels) and
 [SCP11 configuration](scp11.md).
 
-The USB virtual YubiKey and embedded virtual readers use the same
+The USB virtual YubiKey and embedded virtual YubiKeys use the same
 `virtual-yubikey-core`. Its common APDU router unwraps SCP before dispatching to
 an applet. The channel implementation has an OCE-authenticated indication used
 for Issuer SD administration, but it does not expose a general principal to

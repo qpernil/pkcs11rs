@@ -25,7 +25,7 @@ SCP03 or SCP11 configuration is documented in [`scp03.md`](scp03.md) and
 
 ## Virtual devices
 
-Configured embedded readers with the `openpgp` applet use the same
+Configured embedded virtual YubiKeys with the `openpgp` applet use the same
 `virtual-yubikey-core` implementation as the USB gadget. The core supports
 persistent RSA/ECC/Ed25519/X25519 keys, certificates, PIN/recovery policy,
 signing, decipher, and applet reset. Every form uses the shared per-applet

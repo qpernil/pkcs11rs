@@ -32,7 +32,7 @@ impl TestFidoStorage {
             "hardware": {"discovery": false},
             "yubihsm": {"urls": []},
             "storage": {"tokens": self.root.to_string_lossy()},
-            "embedded": {"readers": [{
+            "embedded": {"yubikeys": [{
                 "id": "preview-sign",
                 "name": "Embedded CCID previewSign reader",
                 "serial": 1,
@@ -56,7 +56,7 @@ fn initialize_embedded() -> CK_RV {
         "version": 1,
         "hardware": {"discovery": false},
         "yubihsm": {"urls": []},
-        "embedded": {"readers": [{
+        "embedded": {"yubikeys": [{
             "id": "preview-sign",
             "name": "Embedded CCID previewSign reader",
             "serial": 1,
@@ -163,7 +163,7 @@ fn every_embedded_ccid_applet_starts_with_public_ro_and_rw_sessions() {
             "hardware": {"discovery": false},
             "yubihsm": {"urls": []},
             "storage": {"tokens": storage.root.to_string_lossy()},
-            "embedded": {"readers": [{
+            "embedded": {"yubikeys": [{
                 "id": "login-state",
                 "name": "Embedded CCID login-state reader",
                 "serial": 41,
@@ -248,7 +248,7 @@ fn embedded_piv_pqc_enforces_token_wide_role_transitions() {
             "hardware": {"discovery": false},
             "yubihsm": {"urls": []},
             "storage": {"tokens": storage.root.to_string_lossy()},
-            "embedded": {"readers": [{
+            "embedded": {"yubikeys": [{
                 "id": "piv-pqc",
                 "name": "pkcs11rs embedded CCID reader",
                 "serial": 1,

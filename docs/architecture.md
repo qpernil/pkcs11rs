@@ -26,16 +26,16 @@ they expose different token behavior:
 | | Named software slots | Embedded virtual YubiKey |
 | --- | --- | --- |
 | Purpose | General-purpose software PKCS #11 tokens. | Emulate YubiKey applets, protocols, and device state. |
-| Slot model | Each configured token name creates one independent software slot. | A configurable virtual CCID reader follows normal applet discovery and exposes the configured, supported applet slots. |
+| Slot model | Each configured token name creates one independent software slot. | Each embedded virtual YubiKey follows normal CCID discovery and exposes its configured, supported applet slots. |
 | Cryptographic behavior | Full software mechanism set and general-purpose software private/secret keys. | YubiKey applet capabilities and policy, with the same scoped software composition used by device/applet slots. |
-| Enablement | Explicit `software.slots` configuration or `PKCS11RS_SOFTWARE_SLOTS`; no named slots by default. | The `embedded-virtual-yubikey` build feature plus explicit `embedded.readers` configuration; no embedded readers by default. |
+| Enablement | Explicit `software.slots` configuration or `PKCS11RS_SOFTWARE_SLOTS`; no named slots by default. | The `embedded-virtual-yubikey` build feature plus explicit `embedded.yubikeys` configuration; no embedded virtual YubiKeys by default. |
 | Persistence | Session objects; encrypted token objects when token storage is configured. | Persistent logical-device and applet state. |
 
 Neither path needs a USB gadget worker or supervisor, and neither gives
 private keys physical YubiKey protection. `software-key-core` is the shared
 cryptographic library beneath these backends, not an additional token or slot.
 See [named software slots](software.md) and
-[embedded reader configuration](configuration.md#embedded-virtual-yubikey-readers).
+[embedded virtual YubiKey configuration](configuration.md#embedded-virtual-yubikeys).
 
 ### Projects and ownership
 
@@ -43,7 +43,7 @@ See [named software slots](software.md) and
 | --- | --- |
 | [pkcs11rs](https://github.com/qpernil/pkcs11rs) | PKCS #11 provider, platform credentials, tooling, iOS examples, and the separate connector executable. Local devices and HTTP(S) YubiHSM endpoints become slots; named software tokens use the shared software provider. |
 | [software-key-core](https://github.com/qpernil/software-key-core) | Protocol-neutral software keys, cryptographic constructions, X.509 adapters, and optional durable-state helpers. Shared by pkcs11rs, its platform-credential package, and the virtual YubiKey and YubiHSM cores. Protocol authorization and object policy remain with each consumer. |
-| [virtual-yubikey](https://github.com/qpernil/virtual-yubikey) | YubiKey-compatible USB worker and transport-neutral `virtual-yubikey-core`. Implements Management, FIDO, PIV, OpenPGP, OATH, HSM Auth, Issuer Security Domain, secure messaging, and applet state. The core also provides pkcs11rs's optional embedded readers. |
+| [virtual-yubikey](https://github.com/qpernil/virtual-yubikey) | YubiKey-compatible USB worker and transport-neutral `virtual-yubikey-core`. Implements Management, FIDO, PIV, OpenPGP, OATH, HSM Auth, Issuer Security Domain, secure messaging, and applet state. The core also provides pkcs11rs's optional embedded virtual YubiKeys. |
 | [virtual-yubihsm](https://github.com/qpernil/virtual-yubihsm) | YubiHSM protocol core, USB worker, and experimental I2C frontend. Its shared persistent runtime also backs virtual HSMs embedded in the connector; the core is used directly by tests. |
 | [usb-gadget-supervisor](https://github.com/qpernil/usb-gadget-supervisor) | Privileged ConfigFS, FunctionFS, UDC, process, and typed-resource lifecycle. Its `usb-gadget-worker` crate supplies the shared USB personality and control contract. Workers own protocol payloads, device state, and UI. |
 

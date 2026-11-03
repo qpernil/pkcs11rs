@@ -45,7 +45,7 @@ and its [printable PDF](https://github.com/qpernil/virtual-yubikey/blob/main/out
 
 The two optional in-process backends have distinct roles:
 [named software slots](docs/software.md) expose general-purpose software
-PKCS #11 tokens; [embedded virtual YubiKey readers](#embedded-virtual-yubikey-readers)
+PKCS #11 tokens; [embedded virtual YubiKeys](#embedded-virtual-yubikeys)
 emulate YubiKey applets and protocol state. Both use host-held keys. See the
 [backend comparison](docs/architecture.md#optional-software-slots-and-embedded-virtual-yubikeys).
 
@@ -512,7 +512,7 @@ refreshes request a new authenticator signature and verify it through the
 projected public key and ordinary `CKM_ECDSA` without recreating the
 credential. The physical smoke-test YubiKey uses prototype FIDO2 PIN `123456`
 for user login and fresh signing authorization. The smoke profiles configure
-no embedded readers.
+no embedded virtual YubiKeys.
 
 The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
@@ -1460,18 +1460,18 @@ concurrent operation on their shared I2C bus remains unqualified. See
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
-## Embedded virtual YubiKey readers
+## Embedded virtual YubiKeys
 
 The `embedded-virtual-yubikey` Cargo feature links `virtual-yubikey-core` into
-the module as configurable in-process CCID readers. An embedded reader follows
-the normal CCID discovery path: pkcs11rs reads its Management identity, probes
-the configured application AIDs, and constructs the same PIV, FIDO2, OpenPGP,
+the module as configurable virtual YubiKeys with in-process CCID connectors.
+Each device follows the normal CCID discovery path: pkcs11rs reads its Management
+identity, probes the configured application AIDs, and constructs the same PIV, FIDO2, OpenPGP,
 OATH, YubiHSM Auth, and Issuer Security Domain slots used for external readers.
 Management is always installed because it provides the device identity; every
-PKCS #11 applet is opt-in. Multiple readers may be configured for multi-device
-tests, while ordinary applications normally need only one.
+PKCS #11 applet is opt-in. Multiple virtual YubiKeys may be configured for
+multi-device tests, while ordinary applications normally need only one.
 
-The embedded reader shares applet and cryptographic behavior with the USB
+Embedded virtual YubiKeys share applet and cryptographic behavior with the USB
 worker. Joystick sampling, blink indication, blocking touch deadlines, and HID
 cancellation belong to the USB worker and are not provided by the in-process
 CCID transport.
@@ -1492,16 +1492,16 @@ pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 ```
 
 Building the feature without `--no-default-features` retains ordinary hardware
-discovery and makes embedded readers additive. No reader exists merely because
-the feature was compiled; `embedded.readers` is the runtime opt-in:
+discovery and makes embedded virtual YubiKeys additive. No device exists merely
+because the feature was compiled; `embedded.yubikeys` is the runtime opt-in:
 
 ```json
 {
   "version": 1,
   "storage": {"tokens": "/var/lib/pkcs11rs"},
-  "embedded": {"readers": [{
+  "embedded": {"yubikeys": [{
     "id": "local-test",
-    "name": "pkcs11rs embedded CCID reader",
+    "name": "pkcs11rs embedded virtual YubiKey",
     "serial": 1,
     "persistent": true,
     "applets": ["piv", "fido2"]
@@ -1510,7 +1510,7 @@ the feature was compiled; `embedded.readers` is the runtime opt-in:
 ```
 
 `id`, current reader `name`, and `serial` must each be unique within the
-embedded-reader list. The ID is the stable internal identity; the reader name
+embedded YubiKey list. The ID is the stable internal identity; the reader name
 is the current CCID route and may be treated like a PC/SC name rather than a
 device identity. Supported applet names are `piv`, `fido2`, `openpgp`,
 `oath`, `hsmauth`, and `issuer-sd`. The ordinary `ccid.applications` allowlist still
@@ -1534,7 +1534,7 @@ repositories are maintained together so their applet contracts, manifests and
 standalone lockfiles remain compatible; CI also runs the virtual-device
 persistence tests in that workspace.
 
-The initial FIDO and PIV PIN is `123456`. Readers are ephemeral by default, so
+The initial FIDO and PIV PIN is `123456`. Devices are ephemeral by default, so
 each `C_Initialize` receives factory applet state. With `persistent: true`,
 `storage.tokens` is required on Unix-family targets and the complete durable
 PIV, FIDO2, OpenPGP, OATH, YubiHSM Auth, and Issuer Security Domain state uses the
@@ -1547,7 +1547,7 @@ credentials, application ID/access key and HOTP counters survive restart; see
 [OATH](docs/oath.md). OpenPGP keys, certificates, PIN verifiers, retry state,
 and metadata survive restart. Applet selection, login state, presence grants,
 and secure-channel sessions are never persisted. See
-[embedded configuration](docs/configuration.md#embedded-virtual-yubikey-readers)
+[embedded configuration](docs/configuration.md#embedded-virtual-yubikeys)
 and [shared device storage](https://github.com/qpernil/virtual-yubikey/blob/main/docs/storage.md).
 Whole-device `state.cbor` files are not imported; explicitly clear previous
 virtual-device state when replacing that layout, and preserve state on ordinary

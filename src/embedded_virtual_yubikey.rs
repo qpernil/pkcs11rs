@@ -35,7 +35,7 @@ struct PersistentEmbeddedState {
     _persistence: DevicePersistence,
 }
 
-/// An embedded virtual YubiKey CCID reader visible through a pkcs11rs build
+/// A CCID adapter for an embedded virtual YubiKey, available in a pkcs11rs build
 /// compiled with the `embedded-virtual-yubikey` feature.
 pub(crate) struct EmbeddedVirtualYubiKeyConnector {
     name: String,

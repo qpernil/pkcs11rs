@@ -185,7 +185,7 @@ APDU partial SELECT does not satisfy this requirement.
 
 Both smoke apps configure storage for host token records, CryptoTokenKit NFC
 discovery, the Secure Enclave host slot, and the YubiHSM connector. They
-configure no embedded reader or software slot. PreviewSign runs on an attached
+configure no embedded virtual YubiKey or software slot. PreviewSign runs on an attached
 FIDO2 authenticator that advertises the required generation, derivation, and
 signing mechanisms. An authenticator without that support is reported as
 skipped before any PIN is submitted.

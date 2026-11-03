@@ -12,7 +12,7 @@ both signed apps remain installed and provisioned at the same time.
 Both apps configure CryptoTokenKit NFC discovery, the local or overridden
 YubiHSM connector, prototype YubiHSM public discovery, the Secure Enclave host
 slot, host token storage, and `ccid.secure_channel = "scp11b"`. Neither app
-configures an embedded reader or software slot. Physical FIDO2 devices are selected for PreviewSign by their
+configures an embedded virtual YubiKey or software slot. Physical FIDO2 devices are selected for PreviewSign by their
 advertised generation, derivation, and signing mechanisms.
 
 The inventory opens a public session for every present slot and reports its
