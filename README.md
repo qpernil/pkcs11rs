@@ -1135,6 +1135,13 @@ These default-workspace commands test the PKCS #11 provider, platform
 credential provider, connector, and `pkcs11rs-tool`. Add `--workspace` to also
 run the internal local-hardware crate's package tests directly.
 
+Rust unit-test initialization defaults local hardware discovery to off.
+An explicit JSON `hardware.discovery` setting takes precedence over
+`PKCS11RS_HARDWARE_DISCOVERY`; either can enable discovery for deliberate
+hardware testing. Ignored live-hardware tests opt in explicitly through their
+initialization configuration or dedicated hardware configuration helper.
+Production module builds retain their ordinary default-on discovery.
+
 To test the production shared library with the operating system's native
 dynamic loader, without Python, build it and run the explicit loader smoke
 test:

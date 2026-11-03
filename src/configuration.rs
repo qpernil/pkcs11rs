@@ -451,7 +451,7 @@ impl ModuleConfiguration {
                 "PKCS11RS_HARDWARE_DISCOVERY",
                 &mut environment,
             )?)
-            .unwrap_or(true);
+            .unwrap_or(!cfg!(test));
         let platform_enabled = explicit
             .platform
             .enabled
@@ -1012,6 +1012,29 @@ fn environment_text(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn native_discovery_defaults_off_in_tests_and_honors_overrides() {
+        const ENV: &str = "PKCS11RS_HARDWARE_DISCOVERY";
+        assert!(!resolve(None, &[]).unwrap().hardware_discovery);
+        for enabled in [false, true] {
+            let value = if enabled { "1" } else { "0" };
+            assert_eq!(
+                resolve(None, &[(ENV, value)]).unwrap().hardware_discovery,
+                enabled
+            );
+            let explicit = serde_json::from_value(serde_json::json!({
+                "version": 1, "hardware": {"discovery": !enabled}
+            }))
+            .unwrap();
+            assert_eq!(
+                resolve(Some(explicit), &[(ENV, value)])
+                    .unwrap()
+                    .hardware_discovery,
+                !enabled
+            );
+        }
+    }
 
     #[test]
     fn configured_ccid_client_uri_validates_protocol_and_json_precedence() {
