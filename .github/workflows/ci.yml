@@ -24,11 +24,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Check out pinned pkcs11test fork
+      - name: Check out pkcs11test fork
         uses: actions/checkout@v7
         with:
           repository: qpernil/pkcs11test
-          ref: bab8443b01c712e81460af18b3ce479624e64358
           path: target/pkcs11test-source
 
       - name: Check out first-party dependencies
