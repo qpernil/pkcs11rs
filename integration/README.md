@@ -67,9 +67,10 @@ python3 integration/run_pkcs11test.py --filter 'Init.*' --jobs 1
 ```
 
 The dedicated Linux CI job runs the full suite on every push and pull request.
-It builds `qpernil/pkcs11test` at the pinned commit
-`bab8443b01c712e81460af18b3ce479624e64358`, including its vendored Google Test,
-and checks the fork's fixture contracts before running the compatibility suite.
+It builds the default branch of `qpernil/pkcs11test`, including its vendored
+Google Test, and checks the fork's fixture contracts before running the
+compatibility suite. The checkout log records the exact revision used by each
+run.
 The `pkcs11test-results-linux` artifact contains the JSON report, uploaded even
 when the suite fails. Failures, crashes, timeouts, harness errors, and incomplete
 runs fail the job; unsupported/skipped cases remain separately visible and do
@@ -94,7 +95,7 @@ The upstream executable accepts PINs as command arguments, so ephemeral test
 PINs are visible to local process inspection while it runs; persisted reports
 redact them.
 
-The verified macOS run uses [qpernil/pkcs11test](https://github.com/qpernil/pkcs11test)
+The recorded macOS qualification baseline uses [qpernil/pkcs11test](https://github.com/qpernil/pkcs11test)
 at `bab8443b01c712e81460af18b3ce479624e64358`: **547 cases, 452 passed,
 95 unsupported/skipped, zero failures, crashes, or timeouts**. The fork preserves
 Google upstream and YubicoLabs history and builds with Google Test 1.10.0. This inventory
