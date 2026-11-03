@@ -31,7 +31,14 @@ impl CertificateTrust {
     ) -> Result<Vec<u8>, Error> {
         self.0
             .validate_p256_public_point(certificates)
-            .map_err(Into::into)
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "pkcs11rs::certificate_chain",
+                    reason = ?error,
+                    "Certificate chain validation failed"
+                );
+                error.into()
+            })
     }
 
     pub(crate) fn fingerprint(&self) -> [u8; 32] {

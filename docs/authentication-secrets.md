@@ -9,9 +9,11 @@ lifetime is distinct from retaining the login secret to authenticate again.
 ## Backend behavior
 
 - OATH retains neither the access password nor its derived access key. USER
-  login performs mutual challenge-response authentication and retains only
-  connection-bound authorization. Deselection, reconnect, logout, and session
-  cleanup require fresh authentication. See [OATH](oath.md).
+  login requires the application password, or an explicitly empty password
+  when none is configured. It performs mutual challenge-response authentication
+  when password protection is enabled and retains only connection-bound
+  authorization. Deselection, reconnect, logout, and session cleanup require
+  fresh authentication. See [OATH](oath.md).
 - OpenPGP retains neither clear nor derived PINs. An operation requiring fresh
   verification obtains its PIN through `CKU_CONTEXT_SPECIFIC` login. See
   [OpenPGP authentication](openpgp.md).

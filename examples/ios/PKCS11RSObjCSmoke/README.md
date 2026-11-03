@@ -28,6 +28,26 @@ reports the authenticated objects. Successful sessions remain open so an
 earlier authorized YubiHSM can supply a credential to a later one. Retained
 sessions close in reverse dependency order.
 
+These are dedicated test-device apps. Each Refresh attempts PIV and OpenPGP
+USER login once with factory PIN `123456`, then lists authenticated objects on
+success. The configured secure channel is established inside the module before
+applet PIN verification. A rejected PIN is reported without retrying during
+that Refresh. PIN buffers are erased after the call. This inventory login
+submits no SO/admin PIN and changes no PINs or credentials.
+
+OATH uses this same slot and object inventory. Credential rows include the
+standard or extended OTP key type, hash, and allowed signing mechanism using
+the module's canonical names. SHA1 HOTP appears in both standard and extended
+views sharing one device credential and counter. OTP keys are private and
+appear only after USER login. Refresh attempts USER login
+with an explicitly empty test PIN, reports secure-channel
+diagnostics, and enumerates authenticated objects. It does not generate OATH
+codes or advance HOTP counters. The empty password succeeds for passwordless
+OATH. If rejected, the app reports that the actual application password is
+required, without retrying or changing the password.
+The Swift app's [persistent OATH sample guide](../PKCS11RSPhoneSmoke/README.md#persistent-oath-samples)
+documents the six sample credentials and provisioning helper used by both apps.
+
 Every login performed during Refresh has the same terse report format in both
 apps: the PKCS #11 entry point, user type, selector when applicable, named
 return value, and selected credential when available. Login secrets are
@@ -43,7 +63,8 @@ Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
 Issuer SD slot to exercise the configured secure channel without a PIN
 (SCP11b by default). It reports the
 login result and both diagnostics. This smoke check is independent of
-post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
+post-quantum mechanisms. PIV and OpenPGP use the factory USER-PIN login
+described above and report the same diagnostics and authenticated inventory.
 
 After logins, the inventory queries `PKCS11RS_GetSecureChannel` and
 `PKCS11RS_GetAuthenticatedCredential`. It prints the returned channel mode and credential URI, or the literal `none`

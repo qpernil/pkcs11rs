@@ -110,7 +110,9 @@ the ECB-based construction batches CMAC chaining into one zero-IV CBC call.
 The former is preferred; the latter constructs CMAC/counter KDF through source
 session encryption without exporting the long-term key. Explicit permission to
 encrypt is sufficient for this alternative; it does not enable `C_DeriveKey`.
-Missing keys return `CKR_KEY_HANDLE_INVALID`. A broad selector can match more
+Missing SCP source keys cause login to return `CKR_FUNCTION_FAILED` with a
+`CredentialLookup` diagnostic. Internal key-handle errors are not exposed as
+login errors. A broad selector can match more
 than one credential; the first candidate in the global protection order is
 selected. The target PIN is never sent to an ordinary source. No failure causes
 password-based protocol fallback or a retry with another source.

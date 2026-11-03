@@ -9,6 +9,7 @@ pub(crate) struct OathSlot {
     info: RefCell<Option<(u64, Info)>>,
     authenticated: Cell<Option<u64>>,
     metadata: RefCell<HashMap<Vec<u8>, Credential>>,
+    inventory: RefCell<HashMap<String, TokenObject>>,
 }
 impl std::fmt::Debug for OathSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -32,6 +33,7 @@ impl OathSlot {
             info: RefCell::new(None),
             authenticated: Cell::new(None),
             metadata: RefCell::new(HashMap::new()),
+            inventory: RefCell::new(HashMap::new()),
         }
     }
     fn info(&self) -> Result<Info, Error> {
@@ -42,19 +44,21 @@ impl OathSlot {
             return Ok(info.clone());
         }
         self.metadata.borrow_mut().clear();
+        self.inventory.borrow_mut().clear();
         let info = oath::select(self.connector.as_ref(), &self.aid)?;
         *self.info.borrow_mut() = Some((epoch, info.clone()));
         Ok(info)
     }
     fn reselect(&self) -> Result<Info, Error> {
         self.authenticated.set(None);
+        self.inventory.borrow_mut().clear();
         self.connector.clear_secure_channel_for_login();
         let info = oath::select(self.connector.as_ref(), &self.aid)?;
         *self.info.borrow_mut() = Some((self.connector.connection_epoch(), info.clone()));
         Ok(info)
     }
     fn require_access(&self) -> Result<(), Error> {
-        if self.info()?.protected() && !self.login_is_active() {
+        if !self.login_is_active() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         Ok(())
@@ -134,11 +138,11 @@ impl Slot for OathSlot {
         true
     }
     fn backend_token_objects(&self, slot: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let info = self.info()?;
-        if info.protected() && !self.login_is_active() {
+        self.inventory.borrow_mut().clear();
+        if !self.login_is_active() {
             return Ok(Vec::new());
         }
-        Ok(oath::list(self.connector.as_ref())?
+        let objects: Vec<_> = oath::list(self.connector.as_ref())?
             .into_iter()
             .flat_map(|mut c| {
                 if let Some(known) = self.metadata.borrow().get(&c.name)
@@ -151,15 +155,30 @@ impl Slot for OathSlot {
                 if !c.totp && c.hash == 1 {
                     let mut extended = c.clone();
                     extended.extended = true;
-                    vec![
-                        oath::object(slot, c, info.protected()),
-                        oath::object(slot, extended, info.protected()),
-                    ]
+                    vec![oath::object(slot, c), oath::object(slot, extended)]
                 } else {
-                    vec![oath::object(slot, c, info.protected())]
+                    vec![oath::object(slot, c)]
                 }
             })
-            .collect())
+            .collect();
+        *self.inventory.borrow_mut() = objects
+            .iter()
+            .map(|object| (object.unique_id.clone(), object.clone()))
+            .collect();
+        Ok(objects)
+    }
+    fn backend_token_object(
+        &self,
+        _slot: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<TokenObject>, Error> {
+        if !self.login_is_active() {
+            return Ok(None);
+        }
+        Ok(self.inventory.borrow().get(unique_id).cloned())
+    }
+    fn invalidate_token_objects(&self) {
+        self.inventory.borrow_mut().clear();
     }
     fn login(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         if pin.is_some_and(|p| p.len() > 255) {
@@ -190,6 +209,7 @@ impl Slot for OathSlot {
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(None);
+        self.inventory.borrow_mut().clear();
         self.connector.clear_secure_channel();
         self.info.borrow_mut().take();
         Ok(())
@@ -219,6 +239,7 @@ impl Slot for OathSlot {
     }
     fn clear_lost_login(&mut self) {
         self.authenticated.set(None);
+        self.inventory.borrow_mut().clear();
         self.info.borrow_mut().take();
         self.connector.reconcile_lost_applet_login();
     }
@@ -233,10 +254,9 @@ impl Slot for OathSlot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
         let app = self.info()?;
-        info.flags &= !((CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED) as CK_FLAGS);
-        if app.protected() {
-            info.flags |= (CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED) as CK_FLAGS;
-        }
+        // The empty password is an initialized USER credential too. Private
+        // OTP objects require login independently of on-card access protection.
+        info.flags &= !(CKF_RNG as CK_FLAGS);
         info.ulMinPinLen = 0;
         info.ulMaxPinLen = 255;
         info.firmwareVersion.major = app.version[0];
@@ -272,6 +292,9 @@ impl Slot for OathSlot {
         self.require_access()?;
         oath::delete(self.connector.as_ref(), name)?;
         self.metadata.borrow_mut().remove(name);
+        self.inventory.borrow_mut().retain(|_, object| {
+            !matches!(&object.material, KeyMaterial::OathCredential(c) if c.name == name)
+        });
         Ok(())
     }
     fn set_pin(&mut self, old: &[u8], new: &[u8]) -> Result<(), Error> {
@@ -298,12 +321,11 @@ impl Slot for OathSlot {
         if let Some(a) = template
             .iter()
             .find(|a| a.type_ == CKA_PRIVATE as CK_ATTRIBUTE_TYPE)
-            && crate::object::read_bool_template_attribute(a).map_err(Error::from)?
-                != self.info()?.protected()
+            && !crate::object::read_bool_template_attribute(a).map_err(Error::from)?
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        if self.info()?.protected() && !logged {
+        if !logged {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         self.require_access()?;
@@ -318,7 +340,7 @@ impl Slot for OathSlot {
             .borrow_mut()
             .insert(credential.name.clone(), credential.clone());
         ctx.refresh_slot_token_objects(self, ctx.slot_id)?;
-        let object = oath::object(ctx.slot_id, credential, self.info()?.protected());
+        let object = oath::object(ctx.slot_id, credential);
         // Resolve the native inventory handle rather than creating a shadow copy.
         ctx.token_object_handles
             .iter()

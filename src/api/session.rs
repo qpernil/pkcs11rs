@@ -502,7 +502,8 @@ ffi_entry_point! {
             "C_Login called with {:?}",
             (session_handle, user_type, pin, pin_len)
         );
-        map(login(session_handle, user_type, pin, pin_len))
+        map(login(session_handle, user_type, pin, pin_len)
+            .map_err(|error| error.login_failure(crate::error::LoginStage::Authentication)))
     }
 }
 
@@ -579,7 +580,7 @@ ffi_entry_point! {
             pin_len,
             username,
             username_len,
-        ))
+        ).map_err(|error| error.login_failure(crate::error::LoginStage::Authentication)))
     }
 }
 

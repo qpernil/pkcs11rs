@@ -1,5 +1,7 @@
 # YubiKey OATH
 
+Hostnames and device/account identifiers below are illustrative; replace them with your own configured values.
+
 The OATH slot exposes credentials in the YubiKey's OATH application through
 native CCID on desktop and the shared smart-card transport on iOS. It is
 separate from the two-slot Yubico OTP application. Discovery uses AID
@@ -94,19 +96,35 @@ touch during the output call. A device touch timeout returns
 
 ## Authentication and administration
 
-If an access password is installed, `C_GetTokenInfo` reports
-`CKF_LOGIN_REQUIRED`, and credentials are not enumerated until USER login.
-`C_Login(CKU_USER)` performs the OATH password derivation and mutual
-challenge-response authentication. Neither the password nor its derived access
-key is retained. Authentication is bound to the current card connection and
-selected-applet authorization. Logout, deselection, connection loss, and closing
-the last session invalidate it; fresh authentication is required afterward.
-See [authentication secret retention](authentication-secrets.md).
+OATH credentials always have `CKA_PRIVATE=true`, `CKA_SENSITIVE=true`, and
+`CKA_EXTRACTABLE=false`. USER login is required for credential discovery,
+code generation, import, and deletion. Before login, the slot and mechanisms
+remain discoverable, but searches return no OTP key objects. This is the
+PKCS #11 provider's access policy even when the native device protocol permits
+unauthenticated access. Unlike PIV and OpenPGP keys, OTP credentials have no
+public-key or certificate counterpart to expose before login.
 
-Without an access password, credentials are public objects whose secret values
-remain unreadable; calculations and provisioning do not require an artificial
-password. Explicit empty-password USER login is also supported. A null PIN
-pointer requests the configured pinentry path.
+Authenticated discovery refreshes the device credential list. Subsequent
+object resolution and attribute reads reuse that inventory rather than issuing
+LIST for each attribute. Find initialization, successful login, import, deletion,
+and explicit inventory refresh obtain a fresh list. Logout, applet reselection,
+and loss of connection-bound authorization invalidate access to cached objects.
+The inventory contains credential metadata, never secret key values or OTPs.
+
+`C_GetTokenInfo` always reports `CKF_LOGIN_REQUIRED` and
+`CKF_USER_PIN_INITIALIZED`. Without an application access password, the USER
+credential is an explicitly empty password. When a password is installed,
+`C_Login(CKU_USER)` requires that password and performs the OATH password
+derivation and mutual challenge-response authentication. A null PIN pointer
+requests the configured pinentry path; an explicit nonnull pointer with zero
+length supplies the empty password. `C_LoginUser` with an empty username uses
+the same authentication policy and default secure-channel selection.
+
+Neither the password nor its derived access key is retained. Authentication is
+bound to the current card connection and selected-applet authorization. Logout,
+deselection, connection loss, and closing the last session invalidate it;
+fresh authentication is required afterward. See
+[authentication secret retention](authentication-secrets.md).
 
 `C_CreateObject` requires an RW session, `CKO_OTP_KEY`, the appropriate key type,
 `CKA_TOKEN=true`, `CKA_VALUE`, and a nonempty `CKA_LABEL` or `CKA_ID`. If both
@@ -124,10 +142,11 @@ into the name. HOTP accepts an initial `CKA_OTP_COUNTER` as an eight-byte
 big-endian integer whose value fits the device's 32-bit initialization field.
 
 Imports reject an existing name rather than invoking PUT's overwrite behavior.
-An explicit `CKA_PRIVATE` must agree with application password protection;
-unsupported policy templates are rejected. A protected application requires
-USER login for import and deletion. `C_DestroyObject` deletes only its selected
-credential. Imported secret buffers use zeroizing storage.
+An explicit `CKA_PRIVATE=false` is rejected with `CKR_TEMPLATE_INCONSISTENT`;
+unsupported policy templates are rejected. Import and deletion require USER
+login regardless of whether an application access password is configured.
+`C_DestroyObject` deletes only its selected credential. Imported secret buffers
+use zeroizing storage.
 
 `C_SetPIN` verifies the old access password and installs or removes the new
 password; an empty new password removes protection. It requires an RW session,
@@ -167,10 +186,24 @@ Use the platform's shared-library filename on Linux or Windows. `--touch` adds
 an interactive touch-required calculation. Scripted protocol tests cover
 mutual-authentication success and failure, forged responses, applet/connection
 login invalidation, malformed responses, response continuation, and absence of
-automatic calculation replay. Password-protected physical operation, physical
-password changes, SCP-protected OATH, and iOS/NFC remain outside the verified
-physical test scope.
+automatic calculation replay. Exported-API tests cover private-object visibility
+before login and after logout, empty-password `C_Login` and `C_LoginUser`,
+token-wide authorization across sessions, last-session cleanup, and prevention
+of code generation after logout. Manual iOS smoke-app runs with a physical
+YubiKey 5C NFC 5.7.4 (serial `YUBIKEY_B_SERIAL`) exercise discovery, login, and
+authenticated inventory over USB and NFC with the SCP11b smoke configuration.
+These inventory runs do not generate OTPs or advance HOTP counters.
+Password-protected physical operation and physical password changes remain
+outside the verified scope, as does full OTP-vector qualification over
+SCP-protected OATH or iOS/NFC.
 
 References: [YKOATH protocol](https://developers.yubico.com/OATH/YKOATH_Protocol.html),
 [Yubico OATH client](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/oath.html),
 [PKCS #11 OTP mechanisms](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/pkcs11-spec-v3.2.html).
+
+The [iOS smoke apps](../examples/ios/PKCS11RSPhoneSmoke/README.md#persistent-oath-samples)
+display the same OATH views in their ordinary object inventory. Their sample
+provisioning helper keeps six public-fixture credentials on a dedicated test
+key, verifies persistence across module reinitialization, and performs no HOTP
+calculation. This persistent sample set is separate from the temporary hardware
+qualification credentials removed by `oath_smoke.py`.

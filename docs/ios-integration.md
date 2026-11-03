@@ -323,7 +323,20 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
   Failures after successful advertisement remain visible so the
   report qualifies implementation as well as discovery. Both examples cover
   YubiHSM Auth matching and login, object inventory, debug Unified Logging,
-  platform-credential lifecycle, and long-lived application behavior. The
+  platform-credential lifecycle, and long-lived application behavior. The test
+  apps attempt one factory USER-PIN (`123456`) login per Refresh for PIV and
+  OpenPGP, report configured secure-channel diagnostics, and add an authenticated
+  listing on success. PIN buffers are erased and rejected PINs are not retried
+  during that Refresh. These inventory logins provide no SO/admin authorization.
+  OATH credentials appear in the same inventory with standard or extended key
+  types, hash names, and allowed signing mechanisms. OATH credential objects
+  appear only in the authenticated inventory. The apps attempt an explicit
+  empty-PIN USER login for the passwordless test application, report
+  secure-channel diagnostics on success, and report when an application access
+  password is required. Inventory reads do not generate OATH codes or advance
+  HOTP counters. The shared
+  [persistent OATH sample set](../examples/ios/PKCS11RSPhoneSmoke/README.md#persistent-oath-samples)
+  covers HOTP and TOTP with SHA1, SHA256, and SHA512. The
   first explicit refresh starts slot discovery, so NFC UI is not presented
   automatically at launch. The two bundle identifiers use independent
   platform credentials and YubiHSM Authentication Key IDs.

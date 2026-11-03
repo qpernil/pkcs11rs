@@ -171,6 +171,12 @@ static NSString *PKCS11RSKeyType(CK_KEY_TYPE value) {
                         : [NSString stringWithUTF8String:name];
 }
 
+static NSString *PKCS11RSMechanism(CK_MECHANISM_TYPE value) {
+    const char *name = PKCS11RS_GetMechanismName(value);
+    return name == NULL ? [NSString stringWithFormat:@"mechanism 0x%lx", (unsigned long)value]
+                        : [NSString stringWithUTF8String:name];
+}
+
 static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     if (attribute.ulValueLen == CK_UNAVAILABLE_INFORMATION ||
         attribute.ulValueLen > storage.length) {
@@ -581,6 +587,26 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
                                                     touchRequired != CK_FALSE ? @"true" : @"false"]];
     }
 
+    if (objectClass == CKO_OTP_KEY) {
+        NSData *hashData = nil;
+        if ([self attributeValueInSession:session key:object type:CKA_PKCS11RS_OATH_HASH value:&hashData] == CKR_OK &&
+            hashData.length == sizeof(CK_MECHANISM_TYPE)) {
+            CK_MECHANISM_TYPE hash = 0;
+            [hashData getBytes:&hash length:sizeof(hash)];
+            [parts addObject:[NSString stringWithFormat:@"hash=%@", PKCS11RSMechanism(hash)]];
+        }
+        NSData *mechanismData = nil;
+        if ([self attributeValueInSession:session key:object type:CKA_ALLOWED_MECHANISMS value:&mechanismData] == CKR_OK &&
+            mechanismData.length % sizeof(CK_MECHANISM_TYPE) == 0) {
+            NSMutableArray<NSString *> *mechanisms = [[NSMutableArray alloc] init];
+            for (NSUInteger offset = 0; offset < mechanismData.length; offset += sizeof(CK_MECHANISM_TYPE)) {
+                CK_MECHANISM_TYPE mechanism = 0;
+                [mechanismData getBytes:&mechanism range:NSMakeRange(offset, sizeof(mechanism))];
+                [mechanisms addObject:PKCS11RSMechanism(mechanism)];
+            }
+            [parts addObject:[NSString stringWithFormat:@"mechanisms=%@", [mechanisms componentsJoinedByString:@"|"]]];
+        }
+    }
     return [parts componentsJoinedByString:@", "];
 }
 
@@ -1665,16 +1691,24 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
     return inventory;
 }
 
-- (PKCS11RSAuthorizedSession *)loginSourceSlot:(CK_SLOT_ID)slot result:(CK_RV *)result {
+- (PKCS11RSAuthorizedSession *)loginSourceSlot:(CK_SLOT_ID)slot
+                                     emptyPIN:(BOOL)explicitEmptyPIN
+                                  factoryPIN:(BOOL)factoryUserPIN
+                                       result:(CK_RV *)result {
     CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
     *result = C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &session);
     if (*result != CKR_OK) {
         return nil;
     }
-    *result = C_Login(session,
-                      CKU_USER,
-                      NULL_PTR,
-                      0);
+    if (factoryUserPIN) {
+        // Dedicated test devices only. One USER attempt; no SO login or retry.
+        NSMutableData *pin = [[@"123456" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        *result = C_Login(session, CKU_USER, pin.mutableBytes, (CK_ULONG)pin.length);
+        [pin resetBytesInRange:NSMakeRange(0, pin.length)];
+    } else {
+        CK_UTF8CHAR emptyPIN = 0;
+        *result = C_Login(session, CKU_USER, explicitEmptyPIN ? &emptyPIN : NULL_PTR, 0);
+    }
     if (*result != CKR_OK && *result != CKR_USER_ALREADY_LOGGED_IN) {
         C_CloseSession(session);
         return nil;
@@ -2158,12 +2192,22 @@ static NSString *PKCS11RSHsmAuthAlgorithmName(CK_KEY_TYPE keyType) {
             }
         }
         CK_SESSION_HANDLE authenticatedSession = CK_INVALID_HANDLE;
+        BOOL isOath = [inventory.tokenLabel hasPrefix:@"OATH #"];
+        BOOL usesFactoryUserPIN = PKCS11RSIsPivTokenLabel(inventory.tokenLabel) ||
+            [inventory.tokenLabel hasPrefix:@"OpenPGP #"];
         if (PKCS11RSIsHostTokenLabel(inventory.tokenLabel) ||
-            [inventory.tokenLabel hasPrefix:@"Issuer SD #"]) {
+            [inventory.tokenLabel hasPrefix:@"Issuer SD #"] || isOath || usesFactoryUserPIN) {
             CK_RV sourceResult = CKR_OK;
             PKCS11RSAuthorizedSession *authorization =
-                [self loginSourceSlot:inventory.slot result:&sourceResult];
+                [self loginSourceSlot:inventory.slot emptyPIN:isOath
+                          factoryPIN:usesFactoryUserPIN result:&sourceResult];
             [report appendFormat:@"\n%@\n", PKCS11RSLoginResult(CKU_USER, sourceResult)];
+            if (isOath && sourceResult == CKR_PIN_INCORRECT) {
+                [report appendString:@"  OATH requires its application access password; the empty test password was rejected.\n"];
+            }
+            if (usesFactoryUserPIN && sourceResult == CKR_PIN_INCORRECT) {
+                [report appendString:@"  Factory USER PIN rejected; no retry.\n"];
+            }
             if (authorization != nil) {
                 [authorizedSessions addObject:authorization];
                 authenticatedSession = authorization.session;

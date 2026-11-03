@@ -1,7 +1,6 @@
 use crate::{
-    CKK_AES, CKM_AES_CMAC, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_KEY_HANDLE_INVALID,
-    CKR_PIN_INCORRECT, CKR_SIGNATURE_INVALID, CKR_USER_PIN_NOT_INITIALIZED, Connector,
-    TokenObjectTemplate,
+    CKK_AES, CKM_AES_CMAC, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_FUNCTION_FAILED,
+    CKR_SIGNATURE_INVALID, CKR_USER_PIN_NOT_INITIALIZED, Connector, TokenObjectTemplate,
     error::Error,
     key_scope::{BoundKey, KeyHandle, Pkcs11KeyScope, generic_template, readable_template},
     scp_key_provider::protect_p256,
@@ -240,14 +239,15 @@ impl Scp11KeySet {
                 variant = ?self.variant,
                 kid = format_args!("0x{:02x}", self.variant.key_id()),
                 kvn = format_args!("0x{:02x}", self.key_version),
-                "Selected SCP11 card credential has no certificate bundle"
+                "Selected SCP11 card credential has no certificate bundle; target applet PIN verification was not attempted"
             );
-            return Err(CKR_KEY_HANDLE_INVALID.into());
+            return Err(CKR_FUNCTION_FAILED.into());
         }
         let card_public_key = card_public_key_from_certificates(
             &certificates,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
-        )?;
+        )
+        .map_err(|error| error.login_failure(crate::error::LoginStage::CardCertificate))?;
         let point = card_public_key.clone();
         self.establish_with_card_key(connector, &card_public_key)
             .map(|session| (session, Some(point)))
@@ -353,7 +353,12 @@ impl Scp11KeySet {
             .verify_cmac(&receipt_key, &receipt_input, authentication.receipt)
             .map_err(|error| match error {
                 Error::Generic(rv) if rv == CKR_SIGNATURE_INVALID as crate::CK_RV => {
-                    CKR_PIN_INCORRECT.into()
+                    tracing::warn!(
+                        target: "pkcs11rs::scp11",
+                        variant = ?self.variant,
+                        "SCP11 receipt verification failed; target applet PIN verification was not attempted"
+                    );
+                    CKR_DEVICE_ERROR.into()
                 }
                 error => error,
             })?;

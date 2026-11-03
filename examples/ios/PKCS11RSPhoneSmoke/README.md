@@ -38,6 +38,59 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+These are dedicated test-device apps. Each Refresh submits the factory USER
+PIN `123456` once to each PIV and OpenPGP slot. Successful login establishes
+the configured secure channel and adds an authenticated object listing after
+the public listing. A rejected PIN is reported without retrying during that
+Refresh. The transient PIN buffer is erased after the call. No SO/admin PIN
+is submitted by this inventory login, and it changes no PINs or credentials.
+
+OATH slots use the same public and authenticated object enumeration. Private
+OTP credentials appear only after USER login; their pre-login inventory contains
+no OTP key objects. Credential rows display `CKO_OTP_KEY`, the standard or
+extended key type, the hash, and the allowed signing mechanism by its
+module-provided name. A SHA1 HOTP
+credential has both standard and extended rows with the same ID; both refer
+to one device credential and counter. Refresh calls
+`C_Login(CKU_USER)` with an explicitly empty PIN, exercising the configured
+secure channel, printing authentication diagnostics, and enumerating objects
+in the authenticated session. It does not calculate codes or advance HOTP
+counters. This empty test password succeeds only when OATH has no application
+access password. If it is rejected, the apps report that the actual application
+password is required and do not retry or change the password.
+
+## Persistent OATH samples
+
+The [provisioning helper](../../../tools/oath_provision_smoke.py) installs the
+following persistent sample set on an explicitly selected test YubiKey:
+
+| Hash | HOTP credential | TOTP credential |
+| --- | --- | --- |
+| SHA1 | `pkcs11rs-smoke:HOTP-SHA1` | `pkcs11rs-smoke:TOTP-SHA1` |
+| SHA256 | `pkcs11rs-smoke:HOTP-SHA256` | `pkcs11rs-smoke:TOTP-SHA256` |
+| SHA512 | `pkcs11rs-smoke:HOTP-SHA512` | `pkcs11rs-smoke:TOTP-SHA512` |
+
+These six device credentials produce seven PKCS #11 credential rows. The
+samples use public RFC 6238 test secrets, six-digit HOTP and eight-digit TOTP,
+and a 30-second TOTP period. HOTP counters start at zero; provisioning and
+enumeration do not calculate HOTP codes. The helper verifies the objects after
+module finalization and reinitialization, and leaves them on the device.
+
+From the repository root, with an unprotected dedicated OATH test application:
+
+```sh
+cargo build --lib
+python3 tools/oath_provision_smoke.py --module target/debug/libpkcs11rs.dylib --serial SERIAL
+```
+
+Re-running preserves existing sample names with matching public type and hash;
+it does not verify their unreadable secrets or replace them. Other credentials
+and the application password setting are preserved. After building the updated
+XCFramework and apps, connect the sample YubiKey to the iPhone and tap
+**Refresh** in either smoke app to inspect the OATH slot alongside other slots.
+
+## Application behavior
+
 The app uses UIKit's scene lifecycle, with a single `UIWindowScene` and a
 `UIWindow` attached to that scene. This is required when building with the
 iOS 27 SDK. PKCS #11 inspection runs on its background queue.
@@ -73,7 +126,8 @@ point, user type, selector when applicable, and named return value.
 Refresh explicitly calls `C_Login(session, CKU_USER, NULL, 0)` for each
 Issuer SD slot to exercise the configured channel without a PIN. It reports the
 login result and both diagnostics. This smoke check is independent of
-post-quantum mechanisms; PIV and OpenPGP retain their existing login flows.
+post-quantum mechanisms. PIV and OpenPGP use the factory USER-PIN login
+described above and report the same diagnostics and authenticated inventory.
 
 After logins, the inventory queries `PKCS11RS_GetSecureChannel` and
 `PKCS11RS_GetAuthenticatedCredential`. It prints the returned channel mode and credential URI, or the literal `none`
@@ -211,9 +265,10 @@ retired slot references `0x82`, `0x83`, and `0x84`; YubiHSM object IDs
 providers.
 PQC operations run after the authentication already available to the app.
 YubiHSMs use the authenticated wildcard-login session described below. The
-Secure Enclave uses its no-secret USER login. Physical PIV slots receive public
-inventory and mechanism reports; this profile does not automatically provision
-or submit factory credentials to them.
+Secure Enclave uses its no-secret USER login. PIV and OpenPGP use their factory
+USER PIN for inventory login; this does not provide SO/admin authorization for
+native key generation or provisioning. Physical PIV slots expose no native PQC
+mechanisms and therefore receive inventory and mechanism reports only.
 Other slots use an authenticated retained session when one exists and otherwise
 an ordinary read/write session. A provider that advertises a mechanism but rejects
 key generation or use because authentication, authorization, templates, or the
