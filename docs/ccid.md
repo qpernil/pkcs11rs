@@ -104,6 +104,8 @@ card access before the NFC slot session is released and its UI dismissed.
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 
+## Applet state and operation granularity
+
 One card-wide state records either no selected applet or the selected AID with
 its live SCP03/SCP11 session and a selected-applet guard. The guard prevents
 ordinary discovery from selecting another applet while a slot role is active;
@@ -114,6 +116,29 @@ transport reconnection clears the card-wide connector state. Validated SCP11
 public-key material is separately cached for the same connected card and is
 also discarded on reconnection. PIV's precise separation between the logical
 role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs-11-role-and-piv-authentication).
+
+The local device-operation guard spans one device-backed PKCS #11 call and all
+of its APDUs, including command chaining and response continuation. Separate
+calls such as `C_SignInit` and `C_Sign` have separate local guards. Ending a
+guard does not close the desktop PC/SC connection or retained iOS smart-card
+session, clear the selected AID, or discard an established secure channel.
+
+There is no fixed command count per SELECT. Repeated calls on the same selected
+applet reuse its state until an explicit re-selection, another applet selection,
+or connection loss. After login and any required SCP establishment:
+
+| Operation | Logical commands, before transport fragmentation |
+| --- | --- |
+| Cached information or buffered length/result query | Can require none |
+| OATH code calculation | One CALCULATE command |
+| PIV signature | One GENERAL AUTHENTICATE command, when no fresh PIN verification is needed |
+| Live inventory or credential administration | Depends on the applet and requested data |
+
+Chaining, GET RESPONSE, OATH SEND REMAINING, authentication and metadata reads
+can add wire APDUs. These are command-shape examples, not measured averages.
+An established SCP channel is reused across calls; a missing channel is
+established only when the login and recreation policy permits it. Recreating
+SCP does not replay an applet PIN or restore lost applet authorization.
 
 ## Login-selected secure channels
 
@@ -128,7 +153,8 @@ source slot separately with its own login policy. No target PIN is forwarded
 to the source or retained for later applet verification. The Issuer SD accepts
 an empty PIN because its authorization comes from the authenticated channel.
 
-Dynamic selection requires SCP even when `ccid.secure_channel` is omitted.
+Selecting a provider-backed SCP credential implicitly enables SCP, even when
+no protocol is explicitly configured.
 Configured protocol selection takes precedence; a conflicting URI protocol
 is rejected. Without a configured protocol, `type=secret-key` selects SCP03
 and a private-key selector selects SCP11a. SCP11c must be selected with
@@ -229,9 +255,25 @@ gpgconf --kill scdaemon
 
 `disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. Shared mode
 does not permit coexistence with pkcs11rs's exclusive connection. The exclusive
-boundary is intentional: smart-card applet selection, PIN verification, and
-secure-channel state are card-global and cannot be reconstructed safely after
-arbitrary traffic from another process.
+boundary preserves card-global applet selection, PIN verification and
+secure-channel state between calls. Releasing ownership between calls would
+allow another application to invalidate that state. Restoring authorization
+can require a fresh PIN; the module does not cache ordinary login secrets to
+replay them. Channel recreation alone cannot restore applet authorization.
+
+A PC/SC transaction also provides enforced exclusion while it is held: another
+PC/SC application cannot bypass it simply by omitting its own transaction.
+That is distinct from preserving state between transactions. This module uses
+the retained exclusive connection instead of per-call transactions. See the
+[PC/SC API](https://pcsclite.apdu.fr/api/group__API.html) and
+[Microsoft's transaction contract](https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardbegintransaction).
+
+The boundary relies on the operating system's smart-card resource manager. It
+does not cover privileged direct USB access, activity through other interfaces,
+or physical removal and reset. The module's HID/CCID gate coordinates its own
+operations, not other processes' HID traffic. Transport or secure-channel
+integrity failures invalidate the channel and return the failed operation
+without automatic replay.
 
 Native FIDO HID discovery does not use PC/SC and may remain available while
 the CCID interface is owned by another process.
@@ -247,7 +289,10 @@ cargo run --features native-hardware --bin pcsc-exclusive-test
 
 If more readers are installed, pass one exact PC/SC reader name after `--`. The
 check verifies that a peer is rejected while the exclusive connection is alive
-and can connect after it is released.
+and can connect after it is released. It uses two independent PC/SC contexts in
+one process; the peer requests no transaction. This check passes on macOS with
+the Ubuntu3 virtual USB reader. The probe does not exercise a separate peer
+process, raw USB interference, or HID/CCID concurrency.
 
 ## Allowlist
 

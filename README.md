@@ -100,9 +100,10 @@ software mechanism list for session keys.
   chains, plus explicit SCP03 and SCP11 administration. See
   [CCID applets](docs/ccid.md), [SCP03](docs/scp03.md), and
   [SCP11](docs/scp11.md).
-- Exclusive PC/SC ownership and sensitive CryptoTokenKit sessions preserve one
-  selected applet, secure channel, and logical login state per physical card,
-  while different readers remain concurrent. See [CCID applets](docs/ccid.md).
+- Exclusive PC/SC ownership and sensitive CryptoTokenKit sessions preserve the
+  selected applet and live secure channel per physical card. Each slot owns its
+  logical login role, and different readers remain concurrent. See
+  [CCID applets](docs/ccid.md).
 
 ### FIDO2 as PKCS #11
 

@@ -197,8 +197,8 @@ hashes, rename with counter continuity, and password installation/change/removal
 with incorrect-password rejection. Yubico's Python SDK checks the TOTP/HOTP
 vectors and fragmented LIST/CALCULATE ALL over plain USB CCID, SCP03 and SCP11b;
 password installation, incorrect-password rejection, protected login, change and
-removal; and application
-ID, password, credential and HOTP-counter persistence across worker restart.
+removal; and application ID, password, credential and HOTP-counter persistence
+across worker restart.
 A touch-required calculation times out after 15 seconds without losing the CCID
 connection. Temporary qualification credentials and password protection are
 removed afterward.
@@ -216,8 +216,9 @@ The deployed Ubuntu3 gadget retains the same six
 [public-fixture OATH samples](../examples/ios/PKCS11RSPhoneSmoke/README.md#persistent-oath-samples)
 as the physical test keys. Worker restart preserves the set, and native pkcs11rs
 verifies six credential identities and seven OTP object views across module
-reinitialization. Provisioning performs no HOTP calculation, leaving their
-initial counters at zero.
+reinitialization. Provisioning creates HOTP credentials at counter zero without
+calculating a code. Subsequent code generation advances their counters;
+enumeration and worker restart neither advance nor reset them.
 
 Native USB SCP11b qualification against Ubuntu3 uses a public-key pin obtained
 through authenticated SSH from the worker's persisted public certificate. Login,
@@ -230,6 +231,15 @@ on an iPhone 16 Pro running iOS 27.2. A mismatched embedded card key fails login
 and exposes no authenticated OATH objects. These are inventory/authentication
 checks, not iOS OTP-vector tests. The temporary embedded configuration and pin
 are absent from the normal app builds.
+
+Linux deployment checks cover native release-library initialization,
+`C_GetInfo`, an empty `C_GetSlotList`, and finalization on Ubuntu3 and Ubuntu4,
+plus the embedded-feature release library on Ubuntu3. These ABI checks use
+temporary storage, explicitly disable device discovery, and configure no
+embedded devices. They qualify library loading and configuration, not additional
+Linux OTP vectors or physical-device behavior. Worker build and USB qualification
+are described in
+[virtual-yubikey's verification limits](https://github.com/qpernil/virtual-yubikey/blob/main/docs/oath.md#verification-and-limits).
 
 Physical USB CCID qualification on a YubiKey 5C Nano, firmware 5.7.4, covers:
 
