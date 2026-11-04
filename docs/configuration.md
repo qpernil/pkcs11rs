@@ -398,8 +398,9 @@ CK_RV rv = C_Initialize(&args);
 
 The application owns `config` and only needs to keep it alive until
 `C_Initialize` returns. Passing a null argument to `C_Initialize`, rather than
-a `CK_C_INITIALIZE_ARGS` structure, continues to use environment variables and
-defaults exactly as before.
+a `CK_C_INITIALIZE_ARGS` structure, uses environment variables and built-in
+defaults. Rust unit-test builds use the hardware-discovery default described in
+[Rust test isolation](#rust-test-isolation).
 
 When `hardware.discovery` is true, desktop builds enumerate CCID readers with
 PC/SC and iOS builds use CryptoTokenKit. If it is false, native local hardware

@@ -72,8 +72,9 @@ following persistent sample set on an explicitly selected test YubiKey:
 
 These six device credentials produce seven PKCS #11 credential rows. The
 samples use public RFC 6238 test secrets, six-digit HOTP and eight-digit TOTP,
-and a 30-second TOTP period. HOTP counters start at zero; provisioning and
-enumeration do not calculate HOTP codes. The helper verifies the objects after
+and a 30-second TOTP period. Provisioning starts HOTP counters at zero without
+calculating a code. Code generation advances them; enumeration and restart
+neither advance nor reset them. The helper verifies the objects after
 module finalization and reinitialization, and leaves them on the device.
 The gadget-host virtual USB YubiKey (serial `12345678`) retains the same six sample
 credentials. Worker restart and native pkcs11rs module reinitialization verify
@@ -168,9 +169,12 @@ APDU and retains that session while the card and connector remain valid.
 Applet selection, PIV or OpenPGP authentication, and configured SCP03 or SCP11
 state can therefore remain live across separate PKCS #11 calls. Reusing the
 selected applet sends no extra SELECT. Selecting a different applet through
-another pkcs11rs slot replaces the card-wide applet state and makes the old
-slot's still-open sessions public. A different `TKSmartCard` object cannot
-begin a competing session until pkcs11rs releases its retained session.
+another pkcs11rs slot replaces the selected applet and its live SCP state and
+can invalidate applet authorization. Logical PKCS #11 roles remain slot-owned;
+PIV's role is distinct from the card's authentication state. See
+[operation and login-state boundaries](../../../docs/ccid.md#applet-state-and-operation-granularity).
+A different `TKSmartCard` object cannot begin a competing session until
+pkcs11rs releases its retained session.
 
 After the NFC UI has closed, tap **Refresh** to repeat the ordinary PKCS #11
 inventory. If the NFC key was removed, Refresh asks for the bound serial again.
@@ -339,8 +343,8 @@ uses PC/SC and an iOS build uses CryptoTokenKit. Both feed the same Rust reader
 loop and configured CCID slot discovery.
 
 A configured application becomes a slot only when its AID can be selected. The
-result uses the existing PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, or
-FIDO2-over-CCID slot implementation; no applet logic is implemented in Swift.
+result uses the existing PIV, OpenPGP, OATH, YubiHSM Auth, Issuer Security Domain,
+or FIDO2-over-CCID slot implementation; no applet logic is implemented in Swift.
 YubiKey FIDO2 normally uses its separate FIDO interface and therefore does not
 become a CCID slot unless the configured FIDO2 AID is actually selectable.
 
