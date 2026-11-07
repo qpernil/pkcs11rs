@@ -2280,11 +2280,7 @@ pub(crate) fn derive_key(
                 .1
                 .yubihsm_command(&command)?;
             let handle = parse_native_session_handle(&response)?;
-            derived_object.always_sensitive = object.always_sensitive && derived_object.sensitive;
-            derived_object.never_extractable =
-                object.never_extractable && !derived_object.extractable;
-            derived_object.local = false;
-            derived_object.key_gen_mechanism = Some(mechanism.mechanism);
+            derived_object.set_derived_history(&object, mechanism.mechanism);
             *key_handle = publish_native_session_secret(
                 ctx,
                 session_handle,
@@ -2370,10 +2366,7 @@ pub(crate) fn derive_key(
             }
         }
         derived_object.material = KeyMaterial::SoftwareSecret(derived);
-        derived_object.always_sensitive = object.always_sensitive && derived_object.sensitive;
-        derived_object.never_extractable = object.never_extractable && !derived_object.extractable;
-        derived_object.local = false;
-        derived_object.key_gen_mechanism = Some(mechanism.mechanism);
+        derived_object.set_derived_history(&object, mechanism.mechanism);
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, derived_object)?;
         Ok(())
     })
@@ -2512,10 +2505,7 @@ fn derive_hkdf_key(
             return Err(CKR_DEVICE_ERROR.into());
         }
         object.material = KeyMaterial::SoftwareSecret(value);
-        object.always_sensitive = base.always_sensitive && object.sensitive;
-        object.never_extractable = base.never_extractable && !object.extractable;
-        object.local = false;
-        object.key_gen_mechanism = Some(mechanism.mechanism);
+        object.set_derived_history(&base, mechanism.mechanism);
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
         Ok(())
     })

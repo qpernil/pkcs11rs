@@ -123,31 +123,12 @@ pub(super) fn derive(
         };
         let (mut object, length) =
             derived_secret_object(template, default_length, available.min(1024))?;
-        if matches!(operation, SecretDerivation::Sha256) {
-            object.always_sensitive = base.always_sensitive && object.sensitive;
-            object.never_extractable = base.never_extractable && !object.extractable;
-        } else {
-            let sensitive = base.sensitive || other.as_ref().is_some_and(|key| key.sensitive);
-            let nonextractable =
-                !base.extractable || other.as_ref().is_some_and(|key| !key.extractable);
-            if sensitive
-                && optional_bool_template_attribute(template, CKA_SENSITIVE as CK_ATTRIBUTE_TYPE)?
-                    == Some(false)
-                || nonextractable
-                    && optional_bool_template_attribute(
-                        template,
-                        CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-                    )? == Some(true)
-            {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            object.sensitive |= sensitive;
-            object.extractable &= !nonextractable;
-            object.always_sensitive =
-                base.always_sensitive && other.as_ref().is_none_or(|key| key.always_sensitive);
-            object.never_extractable =
-                base.never_extractable && other.as_ref().is_none_or(|key| key.never_extractable);
-        }
+        operation.apply_policy(
+            &base,
+            &mut object,
+            optional_bool_template_attribute(template, CKA_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
+            optional_bool_template_attribute(template, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
+        )?;
         validate_new_object_access(&object, flags, logged_in)?;
         if super::native_session_objects_enabled(ctx, session)?
             && let Some(base_handle) = super::native_session_object_handle(&base)

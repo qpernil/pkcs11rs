@@ -2375,6 +2375,14 @@ impl TokenObject {
         }
     }
 
+    /// History for one-way derivation; reversible composition has stricter rules.
+    pub(crate) fn set_derived_history(&mut self, base: &Self, mechanism: CK_MECHANISM_TYPE) {
+        self.always_sensitive = base.always_sensitive && self.sensitive;
+        self.never_extractable = base.never_extractable && !self.extractable;
+        self.local = false;
+        self.key_gen_mechanism = Some(mechanism);
+    }
+
     pub(crate) fn set_copy_attribute_value(
         &mut self,
         attribute: &CK_ATTRIBUTE,

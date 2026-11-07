@@ -137,10 +137,7 @@ pub(crate) fn derive_counter_key_with(
         }
     }
     object.material = KeyMaterial::SoftwareSecret(derived);
-    object.always_sensitive = base.always_sensitive && object.sensitive;
-    object.never_extractable = base.never_extractable && !object.extractable;
-    object.local = false;
-    object.key_gen_mechanism = Some(CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE);
+    object.set_derived_history(base, CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE);
     Ok(object)
 }
 

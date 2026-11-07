@@ -24,6 +24,37 @@ impl SecretDerivation<'_> {
         }
         Ok(())
     }
+    pub(crate) fn apply_policy(
+        self,
+        base: &TokenObject,
+        object: &mut TokenObject,
+        requested_sensitive: Option<bool>,
+        requested_extractable: Option<bool>,
+    ) -> Result<(), Error> {
+        let other = if let Self::AppendKey(other) = self {
+            Some(other)
+        } else {
+            None
+        };
+        if matches!(self, Self::Sha256) {
+            object.set_derived_history(base, self.mechanism());
+        } else {
+            let sensitive = base.sensitive || other.is_some_and(|key| key.sensitive);
+            let nonextractable = !base.extractable || other.is_some_and(|key| !key.extractable);
+            if sensitive && requested_sensitive == Some(false)
+                || nonextractable && requested_extractable == Some(true)
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            object.sensitive |= sensitive;
+            object.extractable &= !nonextractable;
+            object.always_sensitive =
+                base.always_sensitive && other.is_none_or(|key| key.always_sensitive);
+            object.never_extractable =
+                base.never_extractable && other.is_none_or(|key| key.never_extractable);
+        }
+        Ok(())
+    }
     pub(crate) fn available(self, base: &TokenObject) -> Result<usize, Error> {
         let base_length = secret_length(base, self.mechanism())?;
         let other_value = if let Self::AppendKey(other) = self {
@@ -85,8 +116,8 @@ pub(crate) fn secret(object: &TokenObject, mechanism: CK_MECHANISM_TYPE) -> Resu
     Ok(value)
 }
 
-/// Output type/length and nested policies are validated by the calling object
-/// service before this function. No result is published until execution succeeds.
+/// The calling object service validates output type/length, inherited policy,
+/// and nested policies. No result is published until execution succeeds.
 pub(crate) fn execute_secret_derivation(
     base: &TokenObject,
     operation: SecretDerivation<'_>,
@@ -106,17 +137,6 @@ pub(crate) fn execute_secret_derivation(
     let other_value = other
         .map(|key| secret(key, operation.mechanism()))
         .transpose()?;
-    if matches!(operation, SecretDerivation::Sha256) {
-        object.always_sensitive = base.always_sensitive && object.sensitive;
-        object.never_extractable = base.never_extractable && !object.extractable;
-    } else {
-        object.sensitive |= base.sensitive || other.is_some_and(|key| key.sensitive);
-        object.extractable &= base.extractable && other.is_none_or(|key| key.extractable);
-        object.always_sensitive =
-            base.always_sensitive && other.is_none_or(|key| key.always_sensitive);
-        object.never_extractable =
-            base.never_extractable && other.is_none_or(|key| key.never_extractable);
-    }
     let mut value = Zeroizing::new(Vec::with_capacity(length));
     match operation {
         SecretDerivation::AppendKey(_) => value.extend(

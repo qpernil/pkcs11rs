@@ -163,10 +163,7 @@ pub(super) fn derive(
             let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
             let handle = super::parse_native_session_handle(&response)?;
             let mut object = object;
-            object.always_sensitive = base.always_sensitive && object.sensitive;
-            object.never_extractable = base.never_extractable && !object.extractable;
-            object.local = false;
-            object.key_gen_mechanism = Some(CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE);
+            object.set_derived_history(&base, CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE);
             *output =
                 super::publish_native_session_secret(ctx, session, slot, object, handle, length)?;
             return Ok(());

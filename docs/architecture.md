@@ -470,6 +470,11 @@ key and mechanism metadata without cloning the operation or hashing its input.
 FIDO assertions retain their one-shot authorization and completed-result retry
 semantics; an assertion may be needed to determine its output size.
 
+Common secret composition calculates sensitivity, extractability, and history
+inheritance once before choosing native or software execution. Both paths use
+the same effective policy and reject explicit weakening for reversible
+composition; SHA-256 derivation follows its separate one-way derivation rules.
+
 Encryption and decryption cannot be active together in one session. Attempting
 to initialize the conflicting direction returns `CKR_OPERATION_ACTIVE` and
 preserves the active operation. Cancellation, completion, and ordinary errors
