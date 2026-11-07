@@ -417,7 +417,9 @@ cargo build --locked
 ```
 
 The root workspace's default members are the provider, the connector, and the
-certificate-bundle authoring utility. Typical output paths are:
+certificate-bundle authoring utility. Ordinary provider builds produce only the
+shared PKCS #11 module; the iOS build task explicitly requests a static library.
+Typical output paths are:
 
 ```text
 target/debug/libpkcs11rs.so       Linux

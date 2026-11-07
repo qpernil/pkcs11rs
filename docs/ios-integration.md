@@ -31,6 +31,8 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 cargo xtask ios --release
 ```
 
+The task explicitly builds static libraries for both iOS targets; ordinary
+desktop builds produce only the shared PKCS #11 module.
 The output is `target/ios/PKCS11RS.xcframework`. Set
 `IPHONEOS_DEPLOYMENT_TARGET` before the command to override the default iOS 18.0
 deployment target, or pass `--output PATH` to choose a different output path.
