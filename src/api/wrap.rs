@@ -606,11 +606,9 @@ fn wrap_key(
             if !target.extractable || target.never_extractable {
                 return Err(CKR_KEY_UNEXTRACTABLE.into());
             }
-            let (target_value, private_target) = match &target.material {
-                KeyMaterial::SoftwareSecret(value) => (Zeroizing::new(value.to_vec()), false),
-                KeyMaterial::SoftwarePrivate(material) => {
-                    (crate::software_storage::material_to_pkcs8(material)?, true)
-                }
+            let private_target = match &target.material {
+                KeyMaterial::SoftwareSecret(_) => false,
+                KeyMaterial::SoftwarePrivate(_) => true,
                 _ => return Err(CKR_KEY_NOT_WRAPPABLE.into()),
             };
             if private_target
@@ -667,6 +665,17 @@ fn wrap_key(
                     SoftwareWrappingKey::Rsa(public_key)
                 }
             };
+            // Borrow secret bytes; serialize private material only after authorization
+            // and wrapping-key validation. Keep any serialized private key zeroizing.
+            let encoded_private;
+            let target_value = match &target.material {
+                KeyMaterial::SoftwareSecret(value) => value.as_slice(),
+                KeyMaterial::SoftwarePrivate(material) => {
+                    encoded_private = crate::software_storage::material_to_pkcs8(material)?;
+                    encoded_private.as_slice()
+                }
+                _ => return Err(CKR_KEY_NOT_WRAPPABLE.into()),
+            };
             let required = software_wrapped_key_length(
                 &parsed_mechanism,
                 &wrapping_material,
@@ -682,16 +691,16 @@ fn wrap_key(
             }
             let response = match (&parsed_mechanism, &wrapping_material) {
                 (SoftwareWrapMechanism::Aes(aes), SoftwareWrappingKey::Aes(key)) => {
-                    transform_software_wrapped_key(aes, key, &target_value, true)
+                    transform_software_wrapped_key(aes, key, target_value, true)
                         .map_err(software_wrap_error)?
                 }
                 (
                     SoftwareWrapMechanism::RsaPkcs | SoftwareWrapMechanism::RsaOaep(_),
                     SoftwareWrappingKey::Rsa(key),
-                ) => software_rsa_wrap(&parsed_mechanism, key, &target_value)
+                ) => software_rsa_wrap(&parsed_mechanism, key, target_value)
                     .map_err(software_wrap_error)?,
                 (SoftwareWrapMechanism::RsaAes(parameters), SoftwareWrappingKey::Rsa(key)) => {
-                    software_rsa_aes_wrap(parameters, key, &target_value)
+                    software_rsa_aes_wrap(parameters, key, target_value)
                         .map_err(software_wrap_error)?
                 }
                 _ => return Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into()),

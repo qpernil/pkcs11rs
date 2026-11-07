@@ -444,7 +444,7 @@ fn otp_signing_and_import_require_user_authorization_even_without_a_device_passw
     let mut output = [0u8; 128];
     let mut length = output.len() as CK_ULONG;
     assert!(
-        matches!(sign(&mut ctx, 1, &operation, &[], output.as_mut_ptr(), &mut length), Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as CK_RV)
+        matches!(sign(&mut ctx, &operation, &[], output.as_mut_ptr(), &mut length), Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as CK_RV)
     );
     c.done();
 }

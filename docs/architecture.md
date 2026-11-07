@@ -452,9 +452,32 @@ on a private key. Generic software private-key support remains confined to
 named software slots. The one exception is scoped P-256 ephemeral generation
 for the YubiHSM-auth client construction on an ECDH-capable slot.
 
-Digest output-length queries and short-buffer calls use the algorithm's fixed
-digest size without copying accumulated input or computing a hash. They leave
-the operation available for a later output call or further multipart input.
+Digest operations retain a streaming hash state rather than the complete input.
+`C_DigestKey` feeds secret bytes directly from zeroizing key storage into that
+state without an additional plaintext key buffer. Digest output-length queries
+and short-buffer calls inspect the algorithm's fixed digest size without
+updating or finalizing the hash. They leave the operation available for a later
+output call or further multipart input.
+
+Signing and verification updates share input validation and terminate their
+operation on any update error. An update, including an empty one, selects
+multipart mode; completion uses `C_SignFinal` or `C_VerifyFinal`. Single-part
+completion after an update returns `CKR_OPERATION_ACTIVE` and terminates the
+operation. Null and misaligned output-length pointers are terminal argument
+errors for signing, digests, and ciphers; cleanup affects only the selected
+operation. Fixed-size signature length queries and short-buffer calls inspect
+key and mechanism metadata without cloning the operation or hashing its input.
+FIDO assertions retain their one-shot authorization and completed-result retry
+semantics; an assertion may be needed to determine its output size.
+
+Encryption and decryption cannot be active together in one session. Attempting
+to initialize the conflicting direction returns `CKR_OPERATION_ACTIVE` and
+preserves the active operation. Cancellation, completion, and ordinary errors
+affect only their selected direction. Cipher output-length queries inspect
+metadata and buffered lengths without cloning keys or input or issuing a device
+command. Execution consumes the operation; a short output buffer retains the
+completed result for retries, avoiding repeated device commands or randomized
+encryption.
 
 YubiHSM `C_WrapKey` output-length queries return a conservative upper bound of
 65,535 bytes without issuing a wrap/export command. This is the wire format's

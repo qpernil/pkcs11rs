@@ -1,5 +1,84 @@
 use crate::*;
 
+/// Validate a caller-owned output length before execution. Any invalid pointer
+/// is a terminal argument error, regardless of whether it is null or misaligned.
+pub(super) fn output_length<'a>(
+    session_handle: CK_SESSION_HANDLE,
+    length: CK_ULONG_PTR,
+    operation: CK_FLAGS,
+) -> Result<&'a mut CK_ULONG, Error> {
+    match unsafe { as_mut(length) } {
+        Ok(length) => Ok(length),
+        Err(error) => {
+            let _ = with_session_context_mut(session_handle, |ctx| {
+                ctx.get_session_context_mut(session_handle)?
+                    .cancel_operations(operation);
+                Ok(())
+            });
+            Err(error)
+        }
+    }
+}
+
+/// An update error terminates its operation, including malformed input and
+/// allocation failures. Signing and verification share the same input handling.
+pub(super) fn signature_update(
+    session_handle: CK_SESSION_HANDLE,
+    part: *const u8,
+    part_len: CK_ULONG,
+    signing: bool,
+) -> Result<(), Error> {
+    with_session_context_mut(session_handle, |ctx| {
+        let session = ctx.get_session_context_mut(session_handle)?;
+        let state = if signing {
+            &mut session.sign_operation
+        } else {
+            &mut session.verify_operation
+        };
+        let result = (|| {
+            let operation = state.as_mut().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
+            if operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
+                || (signing
+                    && (crate::oath::is_mechanism(operation.mechanism)
+                        || operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION))
+            {
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            if let Some(hash) = &mut operation.prehash_state {
+                hash.update(part);
+            } else {
+                operation
+                    .buffer
+                    .try_reserve(part.len())
+                    .map_err(|_| CKR_HOST_MEMORY)?;
+                operation.buffer.extend_from_slice(part);
+            }
+            operation.multipart = true;
+            Ok(())
+        })();
+        if result.is_err() {
+            *state = None;
+        }
+        result
+    })
+}
+
+fn parse_mgf(mgf: CK_RSA_PKCS_MGF_TYPE) -> Result<u8, Error> {
+    Ok(match mgf {
+        x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
+        x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
+        x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
+        x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+        x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+        x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+        x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+        x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+        x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    })
+}
+
 /// Decode both raw and composite RSA-PSS mechanisms. Composite mechanisms fix
 /// the message hash, but the caller still supplies the MGF and salt length.
 pub(super) fn parse_rsa_pss_parameters(
@@ -17,18 +96,7 @@ pub(super) fn parse_rsa_pss_parameters(
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let mgf = match parameters.mgf {
-        x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
-        x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
-        x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
-        x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
-        x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
-        x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
-        x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
-        x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
-        x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
-        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
-    };
+    let mgf = parse_mgf(parameters.mgf)?;
     let salt_length =
         u16::try_from(parameters.sLen).map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     let parsed = (mgf, salt_length, parameters.hashAlg);
@@ -53,18 +121,7 @@ pub(crate) fn parse_rsa_oaep_parameters(
     }
     let digest = digest_for_hash_mechanism(parameters.hashAlg)
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
-    let mgf = match parameters.mgf {
-        x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
-        x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
-        x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
-        x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
-        x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
-        x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
-        x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
-        x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
-        x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
-        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
-    };
+    let mgf = parse_mgf(parameters.mgf)?;
     let label = unsafe {
         from_raw_parts(
             parameters.pSourceData as *const u8,

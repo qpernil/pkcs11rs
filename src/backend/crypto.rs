@@ -123,38 +123,15 @@ pub(crate) fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<Message
 
 pub(crate) fn piv_is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
     mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-        || mechanism == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || HASHED_RSA_PSS_MECHANISMS.contains(&mechanism)
 }
 
 pub(crate) fn piv_is_hashed_rsa_pkcs(mechanism: CK_MECHANISM_TYPE) -> bool {
-    piv_hash_mechanism(mechanism).is_some()
-        && !piv_is_pss_mechanism(mechanism)
-        && mechanism != CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
-        && mechanism != CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
-        && mechanism != CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
-        && mechanism != CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
-        && mechanism != CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
-        && mechanism < CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
+    HASHED_RSA_PKCS_MECHANISMS.contains(&mechanism)
 }
 
 pub(crate) fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
-    mechanism == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
-        || mechanism == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
+    HASHED_ECDSA_MECHANISMS.contains(&mechanism)
 }
 
 pub(crate) fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8>> {

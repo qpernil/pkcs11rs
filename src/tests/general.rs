@@ -3162,10 +3162,6 @@ pub fn session_cancel_clears_only_flagged_operations() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, private_key),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(
         crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, private_key),
         CKR_OK as CK_RV
     );
@@ -3188,16 +3184,23 @@ pub fn session_cancel_clears_only_flagged_operations() {
         })
     };
 
-    assert_eq!(operation_state(), (true, true, true, true, true, true));
+    assert_eq!(operation_state(), (true, true, true, false, true, true));
     assert_eq!(
         crate::api::C_SessionCancel(TEST_SESSION_HANDLE, 0),
         CKR_OK as CK_RV
     );
-    assert_eq!(operation_state(), (true, true, true, true, true, true));
+    assert_eq!(operation_state(), (true, true, true, false, true, true));
 
     let first_flags = (CKF_FIND_OBJECTS | CKF_ENCRYPT | CKF_SIGN) as CK_FLAGS;
     assert_eq!(
         crate::api::C_SessionCancel(TEST_SESSION_HANDLE, first_flags),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(operation_state(), (false, true, false, false, false, true));
+    // Decryption can start after encryption is cancelled. Cancelling the
+    // encryption flag again must preserve the active decryption operation.
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, private_key),
         CKR_OK as CK_RV
     );
     assert_eq!(operation_state(), (false, true, false, true, false, true));

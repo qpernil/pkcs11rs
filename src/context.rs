@@ -856,11 +856,6 @@ impl SessionContext {
         }
     }
 
-    pub(crate) fn clear_crypt_operations(&mut self) {
-        self.encrypt_operation = None;
-        self.decrypt_operation = None;
-    }
-
     pub(crate) fn cancel_operations(&mut self, flags: CK_FLAGS) {
         if flags & CKF_FIND_OBJECTS as CK_FLAGS != 0 {
             self.find_operation = None;

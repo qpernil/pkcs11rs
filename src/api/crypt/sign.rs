@@ -509,25 +509,9 @@ fn sign_init(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                     || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                    || x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
+                    || piv_is_hashed_rsa_pkcs(x)
                     || x == CKM_ECDSA as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
+                    || piv_is_hashed_ecdsa(x)
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA as CK_MECHANISM_TYPE
                     || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
@@ -672,6 +656,7 @@ fn sign_init(
             _ => None,
         };
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
+            multipart: false,
             prehash_state: super::signature_hash::context(mechanism.mechanism),
             key: object.material.clone(),
             public_key: object.public_key.clone(),
@@ -716,8 +701,172 @@ ffi_entry_point! {
             data_len,
             signature,
             signature_len,
+            false,
         ))
     }
+}
+
+fn signature_output_length(operation: &SignatureOperation) -> Result<usize, Error> {
+    Ok(match &operation.key {
+        KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
+        KeyMaterial::SoftwareSecret(_) => operation
+            .mac_length
+            .or_else(|| hmac_key_type_and_length(operation.mechanism).map(|(_, length)| length))
+            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+        KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
+            piv::Algorithm::Rsa1024
+            | piv::Algorithm::Rsa2048
+            | piv::Algorithm::Rsa3072
+            | piv::Algorithm::Rsa4096 => match &operation.public_key {
+                Some(PublicKeyMaterial::Rsa(key)) => key.size(),
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
+            piv::Algorithm::EccP256 => 64,
+            piv::Algorithm::EccP384 => 96,
+            piv::Algorithm::Ed25519 => 64,
+            piv::Algorithm::MlDsa44 => MlDsaParameterSet::MlDsa44.signature_length(),
+            piv::Algorithm::MlDsa65 => MlDsaParameterSet::MlDsa65.signature_length(),
+            piv::Algorithm::MlDsa87 => MlDsaParameterSet::MlDsa87.signature_length(),
+            piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+            piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            piv::Algorithm::HybridMlKem768P256
+            | piv::Algorithm::HybridMlKem768X25519
+            | piv::Algorithm::HybridMlKem1024P384 => {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+        },
+        KeyMaterial::OpenPgpPrivate { algorithm, .. } => match algorithm {
+            OpenPgpAlgorithm::Rsa { .. } => match &operation.public_key {
+                Some(PublicKeyMaterial::Rsa(key)) => key.size(),
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
+            OpenPgpAlgorithm::Ecdsa(_) => {
+                openpgp_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)? * 2
+            }
+            OpenPgpAlgorithm::Ed25519 => 64,
+            OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        },
+        KeyMaterial::YubiHsm { algorithm, .. } if yubihsm_ml_dsa(*algorithm).is_some() => {
+            yubihsm_ml_dsa(*algorithm)
+                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                .signature_length()
+        }
+        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => match *algorithm {
+            YUBIHSM_ALGO_RSA_2048 => 256,
+            YUBIHSM_ALGO_RSA_3072 => 384,
+            YUBIHSM_ALGO_RSA_4096 => 512,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        },
+        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
+            yubihsm_ec_coordinate_length(*algorithm)? * 2
+        }
+        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_edwards(*algorithm) => {
+            match *algorithm {
+                YUBIHSM_ALGO_ED25519 => 64,
+                YUBIHSM_ALGO_ED448 => 114,
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            }
+        }
+        KeyMaterial::YubiHsm { .. } if operation.mac_length.is_some() => {
+            operation.mac_length.ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+        }
+        KeyMaterial::YubiHsm { algorithm, .. } => match *algorithm {
+            YUBIHSM_ALGO_HMAC_SHA1 => 20,
+            YUBIHSM_ALGO_HMAC_SHA256 => 32,
+            YUBIHSM_ALGO_HMAC_SHA384 => 48,
+            YUBIHSM_ALGO_HMAC_SHA512 => 64,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        },
+        KeyMaterial::PreviewSignDerived { .. } => 64,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    })
+}
+
+fn sign_fido(
+    ctx: &mut SlotContext,
+    operation: &mut SignatureOperation,
+    data: &[u8],
+    signature: *mut u8,
+    signature_len: &mut CK_ULONG,
+) -> Result<(), Error> {
+    let rp_id = operation
+        .context_specific_rp_id
+        .as_deref()
+        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    if data.len() != 32 || (!operation.buffer.is_empty() && operation.buffer != data) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    if operation.result.is_none() {
+        let authorization = operation
+            .fido_authorization
+            .take()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let client_data_hash: &[u8; 32] = data.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
+        let slot = ctx._get_slot_mut(operation.slot_id)?;
+        let response = match &operation.key {
+            KeyMaterial::FidoResidentPrivate { credential_id } => {
+                slot.fido_get_assertion(&authorization, rp_id, credential_id, client_data_hash)?
+            }
+            KeyMaterial::PreviewSignDerived {
+                registration,
+                derived,
+                ..
+            } => slot.fido_preview_sign(
+                &authorization,
+                registration,
+                data,
+                derived
+                    .additional_args_cbor()
+                    .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+            )?,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && response.len() != 64 {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        operation.buffer = data.to_vec();
+        operation.result = Some(response);
+    }
+    let response = operation
+        .result
+        .as_ref()
+        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+    let capacity = *signature_len;
+    *signature_len = response.len() as CK_ULONG;
+    if signature.is_null() {
+        return Ok(());
+    }
+    if capacity < *signature_len {
+        return Err(CKR_BUFFER_TOO_SMALL.into());
+    }
+    unsafe { ptr::copy_nonoverlapping(response.as_ptr(), signature, response.len()) };
+    Ok(())
+}
+
+fn validate_signature_input_length(
+    operation: &SignatureOperation,
+    input_len: usize,
+    required: usize,
+) -> Result<(), Error> {
+    let (mechanism, input_len) =
+        super::signature_hash::input_length(operation.mechanism, input_len)?;
+    if let Some(hash) = operation.ml_dsa.as_ref().and_then(|p| p.prehash)
+        && input_len != hash.digest_length()
+    {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE && input_len > required.saturating_sub(11) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    if mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+        let (_, _, hash) = operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        if input_len != digest_for_hash_mechanism(hash)?.size() {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+    }
+    Ok(())
 }
 
 fn sign(
@@ -726,24 +875,26 @@ fn sign(
     data_len: CK_ULONG,
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: CK_ULONG_PTR,
+    finalizing: bool,
 ) -> Result<(), Error> {
-    if signature_len.is_null() {
-        let _ = with_session_context_mut(session_handle, |ctx| {
-            if let Ok(session) = ctx.get_session_context_mut(session_handle) {
-                session.sign_operation = None;
-            }
-            Ok(())
-        });
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let signature_len = unsafe { as_mut(signature_len) }?;
+    let signature_len = super::shared::output_length(session_handle, signature_len, CKF_SIGN as _)?;
     with_session_context_mut(session_handle, |ctx| {
-        let mut operation = ctx
+        let operation = ctx
             .get_session_context(session_handle)?
             .sign_operation
             .as_ref()
-            .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if finalizing
+            && (crate::oath::is_mechanism(operation.mechanism)
+                || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE)
+        {
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        if operation.multipart && !finalizing {
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
             ctx.get_session_context_mut(session_handle)?.sign_operation = None;
@@ -756,219 +907,45 @@ fn sign(
                 return Err(error);
             }
         };
-        if matches!(operation.key, KeyMaterial::OathCredential(_)) {
-            return crate::oath::sign(
-                ctx,
-                session_handle,
-                &operation,
-                data,
-                signature,
-                signature_len,
-            );
-        }
         if matches!(
-            &operation.key,
-            KeyMaterial::FidoResidentPrivate { .. } | KeyMaterial::PreviewSignDerived { .. }
+            operation.key,
+            KeyMaterial::OathCredential(_)
+                | KeyMaterial::FidoResidentPrivate { .. }
+                | KeyMaterial::PreviewSignDerived { .. }
         ) {
-            let rp_id = operation
-                .context_specific_rp_id
-                .as_deref()
-                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-            if data.len() != 32 || (!operation.buffer.is_empty() && operation.buffer != data) {
-                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                return Err(CKR_DATA_LEN_RANGE.into());
-            }
-            let response = if let Some(response) = operation.result {
-                response
+            let mut operation = ctx
+                .get_session_context_mut(session_handle)?
+                .sign_operation
+                .take()
+                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            let result = if matches!(operation.key, KeyMaterial::OathCredential(_)) {
+                crate::oath::sign(ctx, &operation, data, signature, signature_len)
             } else {
-                let authorization = ctx
-                    .get_session_context_mut(session_handle)?
-                    .sign_operation
-                    .as_mut()
-                    .and_then(|operation| operation.fido_authorization.take())
-                    .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-                let client_data_hash: &[u8; 32] = data
-                    .try_into()
-                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-                let result = match ctx._get_slot_mut(operation.slot_id) {
-                    Ok(slot) => match &operation.key {
-                        KeyMaterial::FidoResidentPrivate { credential_id } => slot
-                            .fido_get_assertion(
-                                &authorization,
-                                rp_id,
-                                credential_id,
-                                client_data_hash,
-                            ),
-                        KeyMaterial::PreviewSignDerived {
-                            registration,
-                            derived,
-                            ..
-                        } => slot.fido_preview_sign(
-                            &authorization,
-                            registration,
-                            data,
-                            derived
-                                .additional_args_cbor()
-                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
-                        ),
-                        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                    },
-                    Err(error) => Err(error),
-                };
-                let response = match result {
-                    Ok(response) => response,
-                    Err(error) => {
-                        ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                        return Err(error);
-                    }
-                };
-                if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. })
-                    && response.len() != 64
-                {
-                    ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                    return Err(CKR_DEVICE_ERROR.into());
-                }
-                let active = ctx
-                    .get_session_context_mut(session_handle)?
-                    .sign_operation
-                    .as_mut()
-                    .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-                active.buffer = data.to_vec();
-                active.result = Some(response.clone());
-                response
+                sign_fido(ctx, &mut operation, data, signature, signature_len)
             };
-            if signature.is_null() {
-                *signature_len = response.len() as CK_ULONG;
-                return Ok(());
+            if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_BUFFER_TOO_SMALL as CK_RV)
+                || (result.is_ok() && signature.is_null())
+            {
+                ctx.get_session_context_mut(session_handle)?.sign_operation = Some(operation);
             }
-            if *signature_len < response.len() as CK_ULONG {
-                *signature_len = response.len() as CK_ULONG;
-                return Err(CKR_BUFFER_TOO_SMALL.into());
-            }
-            unsafe {
-                ptr::copy_nonoverlapping(response.as_ptr(), signature, response.len());
-            }
-            *signature_len = response.len() as CK_ULONG;
-            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-            return Ok(());
+            return result;
         }
-        let mut buffered_data = operation.buffer;
-        let mut digest = if let Some(mut state) = operation.prehash_state {
-            state.update(data);
-            Some(state.finalize())
-        } else {
-            buffered_data.extend_from_slice(data);
-            None
-        };
-        if let Some(digest) = &mut digest {
-            super::signature_hash::normalize(&mut operation.mechanism, digest)?;
-        }
-        let data = digest.as_deref().unwrap_or(&buffered_data);
-        let required = match &operation.key {
-            KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
-            KeyMaterial::SoftwareSecret(_) => operation
-                .mac_length
-                .or_else(|| hmac_key_type_and_length(operation.mechanism).map(|(_, length)| length))
-                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
-            KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
-                piv::Algorithm::Rsa1024
-                | piv::Algorithm::Rsa2048
-                | piv::Algorithm::Rsa3072
-                | piv::Algorithm::Rsa4096 => match &operation.public_key {
-                    Some(PublicKeyMaterial::Rsa(key)) => key.size(),
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                },
-                piv::Algorithm::EccP256 => 64,
-                piv::Algorithm::EccP384 => 96,
-                piv::Algorithm::Ed25519 => 64,
-                piv::Algorithm::MlDsa44 => MlDsaParameterSet::MlDsa44.signature_length(),
-                piv::Algorithm::MlDsa65 => MlDsaParameterSet::MlDsa65.signature_length(),
-                piv::Algorithm::MlDsa87 => MlDsaParameterSet::MlDsa87.signature_length(),
-                piv::Algorithm::MlKem512 | piv::Algorithm::MlKem768 | piv::Algorithm::MlKem1024 => {
-                    return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-                }
-                piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                piv::Algorithm::HybridMlKem768P256
-                | piv::Algorithm::HybridMlKem768X25519
-                | piv::Algorithm::HybridMlKem1024P384 => {
-                    return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-                }
-            },
-            KeyMaterial::OpenPgpPrivate { algorithm, .. } => match algorithm {
-                OpenPgpAlgorithm::Rsa { .. } => match &operation.public_key {
-                    Some(PublicKeyMaterial::Rsa(key)) => key.size(),
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                },
-                OpenPgpAlgorithm::Ecdsa(_) => {
-                    openpgp_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)? * 2
-                }
-                OpenPgpAlgorithm::Ed25519 => 64,
-                OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-            },
-            KeyMaterial::YubiHsm { algorithm, .. } if yubihsm_ml_dsa(*algorithm).is_some() => {
-                yubihsm_ml_dsa(*algorithm)
-                    .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-                    .signature_length()
-            }
-            KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
-                match *algorithm {
-                    YUBIHSM_ALGO_RSA_2048 => 256,
-                    YUBIHSM_ALGO_RSA_3072 => 384,
-                    YUBIHSM_ALGO_RSA_4096 => 512,
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                }
-            }
-            KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
-                yubihsm_ec_coordinate_length(*algorithm)? * 2
-            }
-            KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_edwards(*algorithm) => {
-                match *algorithm {
-                    YUBIHSM_ALGO_ED25519 => 64,
-                    YUBIHSM_ALGO_ED448 => 114,
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                }
-            }
-            KeyMaterial::YubiHsm { .. } if operation.mac_length.is_some() => {
-                operation.mac_length.ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-            }
-            KeyMaterial::YubiHsm { algorithm, .. } => match *algorithm {
-                YUBIHSM_ALGO_HMAC_SHA1 => 20,
-                YUBIHSM_ALGO_HMAC_SHA256 => 32,
-                YUBIHSM_ALGO_HMAC_SHA384 => 48,
-                YUBIHSM_ALGO_HMAC_SHA512 => 64,
-                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-            },
-            KeyMaterial::PreviewSignDerived { .. } => 64,
-            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        };
-        if let Some(hash) = operation.ml_dsa.as_ref().and_then(|p| p.prehash)
-            && data.len() != hash.digest_length()
-        {
-            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && data.len() != 32 {
-            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-            && data.len() > required.saturating_sub(11)
-        {
-            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
-            let Some((_mgf, _salt, hash)) = operation.pss else {
+        let required = signature_output_length(operation).and_then(|required| {
+            let input_len = operation
+                .buffer
+                .len()
+                .checked_add(data.len())
+                .ok_or(CKR_HOST_MEMORY)?;
+            validate_signature_input_length(operation, input_len, required)?;
+            Ok(required)
+        });
+        let required = match required {
+            Ok(required) => required,
+            Err(error) => {
                 ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                return Err(CKR_MECHANISM_PARAM_INVALID.into());
-            };
-            let expected = digest_for_hash_mechanism(hash)?.size();
-            if data.len() != expected {
-                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
-                return Err(CKR_DATA_LEN_RANGE.into());
+                return Err(error);
             }
-        }
-
+        };
         if signature.is_null() {
             *signature_len = required as CK_ULONG;
             return Ok(());
@@ -977,6 +954,26 @@ fn sign(
             *signature_len = required as CK_ULONG;
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
+        let mut operation = ctx
+            .get_session_context_mut(session_handle)?
+            .sign_operation
+            .take()
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let mut buffered_data = operation.buffer;
+        let mut digest = if let Some(mut hash) = operation.prehash_state {
+            hash.update(data);
+            Some(hash.finalize())
+        } else {
+            buffered_data
+                .try_reserve(data.len())
+                .map_err(|_| CKR_HOST_MEMORY)?;
+            buffered_data.extend_from_slice(data);
+            None
+        };
+        if let Some(digest) = &mut digest {
+            super::signature_hash::normalize(&mut operation.mechanism, digest)?;
+        }
+        let data = digest.as_deref().unwrap_or(&buffered_data);
 
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
@@ -1143,11 +1140,9 @@ fn sign(
         let signature_bytes = match signature_result {
             Ok(signature) if signature.len() == required => signature,
             Ok(_) => {
-                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Err(error) => {
-                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(error);
             }
         };
@@ -1156,7 +1151,6 @@ fn sign(
             ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
         }
         *signature_len = required as CK_ULONG;
-        ctx.get_session_context_mut(session_handle)?.sign_operation = None;
         Ok(())
     })
 }
@@ -1167,24 +1161,7 @@ ffi_entry_point! {
         part: *mut ::std::os::raw::c_uchar,
         part_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        map(with_session_context_mut(session_handle, |ctx| {
-            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
-            let session = ctx.get_session_context_mut(session_handle)?;
-            let operation = session
-                .sign_operation
-                .as_mut()
-                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            if crate::oath::is_mechanism(operation.mechanism) || operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
-                session.sign_operation = None;
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-            }
-            if let Some(state) = &mut operation.prehash_state {
-                state.update(part);
-            } else {
-                operation.buffer.extend_from_slice(part);
-            }
-            Ok(())
-        }))
+        map(super::shared::signature_update(session_handle, part, part_len, true))
     }
 }
 
@@ -1194,21 +1171,13 @@ ffi_entry_point! {
         signature: *mut ::std::os::raw::c_uchar,
         signature_len: *mut ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        let allowed = with_session_context_mut(session_handle, |ctx| {
-            let session = ctx.get_session_context_mut(session_handle)?;
-            if session.sign_operation.as_ref().is_some_and(|op| crate::oath::is_mechanism(op.mechanism) || op.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE) {
-                session.sign_operation = None;
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-            }
-            Ok(())
-        });
-        if let Err(error) = allowed { return map(Err::<(), Error>(error)); }
         map(sign(
             session_handle,
             ptr::null(),
             0,
             signature,
             signature_len,
+            true,
         ))
     }
 }

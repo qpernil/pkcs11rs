@@ -543,6 +543,7 @@ pub(crate) fn sign_init(
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
     }
     ctx.get_session_context_mut(session)?.sign_operation = Some(SignatureOperation {
+        multipart: false,
         prehash_state: None,
         key: object.material,
         public_key: None,
@@ -568,14 +569,12 @@ fn result_size(digits: usize) -> usize {
 }
 pub(crate) fn sign(
     ctx: &mut SlotContext,
-    session: CK_SESSION_HANDLE,
     op: &SignatureOperation,
     input: &[u8],
     output: *mut u8,
     length: &mut CK_ULONG,
 ) -> Result<(), Error> {
     if !input.is_empty() {
-        ctx.get_session_context_mut(session)?.sign_operation = None;
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let KeyMaterial::OathCredential(c) = &op.key else {
@@ -593,7 +592,6 @@ pub(crate) fn sign(
         return Err(CKR_BUFFER_TOO_SMALL.into());
     }
     let result = ctx.slot.oath_calculate(c, op.oath_time);
-    ctx.get_session_context_mut(session)?.sign_operation = None;
     let result = result?;
     unsafe {
         let param = output

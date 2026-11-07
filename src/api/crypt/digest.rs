@@ -1,11 +1,22 @@
 use crate::*;
+use software_key_core::digest::HashContext;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct DigestOperation {
     mechanism: CK_MECHANISM_TYPE,
     algorithm: MessageDigest,
-    buffer: Vec<u8>,
+    state: HashContext,
     multipart: bool,
+}
+
+impl std::fmt::Debug for DigestOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DigestOperation")
+            .field("mechanism", &self.mechanism)
+            .field("algorithm", &self.algorithm)
+            .field("multipart", &self.multipart)
+            .finish_non_exhaustive()
+    }
 }
 
 fn software_digest(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
@@ -44,11 +55,12 @@ fn digest_init(
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(Error::from(CKR_MECHANISM_PARAM_INVALID as CK_RV));
         }
+        let algorithm = software_digest(mechanism.mechanism)?;
         ctx.get_session_context_mut(session_handle)?
             .digest_operation = Some(DigestOperation {
             mechanism: mechanism.mechanism,
-            algorithm: software_digest(mechanism.mechanism)?,
-            buffer: Vec::new(),
+            algorithm,
+            state: HashContext::new(algorithm),
             multipart: false,
         });
         Ok(())
@@ -59,9 +71,8 @@ fn copy_digest(
     session: &mut SessionContext,
     data: &[u8],
     digest: *mut u8,
-    digest_len: CK_ULONG_PTR,
+    digest_len: &mut CK_ULONG,
 ) -> Result<(), Error> {
-    let digest_len = unsafe { as_mut(digest_len) }?;
     let operation = session
         .digest_operation
         .as_ref()
@@ -76,13 +87,13 @@ fn copy_digest(
         return Err(Error::from(CKR_BUFFER_TOO_SMALL as CK_RV));
     }
     // Query and short-buffer calls only inspect the algorithm's fixed size.
-    // Move the accumulated input only when the caller can receive the digest.
+    // Finalize the hash only when the caller can receive the digest.
     let mut operation = session
         .digest_operation
         .take()
         .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-    operation.buffer.extend_from_slice(data);
-    let value = hash(operation.algorithm, &operation.buffer)?;
+    operation.state.update(data);
+    let value = operation.state.finalize();
     unsafe {
         ptr::copy_nonoverlapping(value.as_ptr(), digest, value.len());
     }
@@ -118,15 +129,7 @@ ffi_entry_point! {
             (session_handle, data, data_len, digest, digest_len)
         );
         map((|| {
-            if digest_len.is_null() {
-                let _ = with_session_context_mut(session_handle, |ctx| {
-                    if let Ok(session) = ctx.get_session_context_mut(session_handle) {
-                        session.digest_operation = None;
-                    }
-                    Ok(())
-                });
-                return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
-            }
+            let digest_len = super::shared::output_length(session_handle, digest_len, CKF_DIGEST as _)?;
             with_session_context_mut(session_handle, |ctx| {
                 let session = ctx.get_session_context_mut(session_handle)?;
                 let operation = session.digest_operation.as_ref().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
@@ -174,7 +177,7 @@ ffi_entry_point! {
             };
             let operation = ctx.get_session_context_mut(session_handle)?
                 .digest_operation.as_mut().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            operation.buffer.extend_from_slice(part);
+            operation.state.update(part);
             operation.multipart = true;
             Ok(())
         }))
@@ -213,12 +216,12 @@ ffi_entry_point! {
                 return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV));
             }
             let value = match &object.material {
-                KeyMaterial::Secret(value) | KeyMaterial::SoftwareSecret(value) => value.to_vec(),
+                KeyMaterial::Secret(value) | KeyMaterial::SoftwareSecret(value) => value.as_slice(),
                 _ => return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV)),
             };
             let operation = ctx.get_session_context_mut(session_handle)?
                 .digest_operation.as_mut().ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            operation.buffer.extend_from_slice(&value);
+            operation.state.update(value);
             operation.multipart = true;
             Ok(())
         }))
@@ -237,15 +240,7 @@ ffi_entry_point! {
             (session_handle, digest, digest_len)
         );
         map((|| {
-            if digest_len.is_null() {
-                let _ = with_session_context_mut(session_handle, |ctx| {
-                    if let Ok(session) = ctx.get_session_context_mut(session_handle) {
-                        session.digest_operation = None;
-                    }
-                    Ok(())
-                });
-                return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
-            }
+            let digest_len = super::shared::output_length(session_handle, digest_len, CKF_DIGEST as _)?;
             with_session_context_mut(session_handle, |ctx| {
                 copy_digest(
                     ctx.get_session_context_mut(session_handle)?,

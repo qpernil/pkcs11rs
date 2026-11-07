@@ -166,6 +166,7 @@ pub(crate) fn verify_init(
 
         ctx.get_session_context_mut(session_handle)?
             .verify_operation = Some(SignatureOperation {
+            multipart: false,
             prehash_state: super::signature_hash::context(mechanism.mechanism),
             key: asymmetric_key.unwrap_or_else(|| object.material.clone()),
             public_key: object.public_key.clone(),
@@ -218,12 +219,33 @@ pub(crate) fn verify(
     signature: *const ::std::os::raw::c_uchar,
     signature_len: CK_ULONG,
 ) -> Result<(), Error> {
+    verify_with_mode(
+        session_handle,
+        data,
+        data_len,
+        signature,
+        signature_len,
+        false,
+    )
+}
+
+fn verify_with_mode(
+    session_handle: CK_SESSION_HANDLE,
+    data: *const u8,
+    data_len: CK_ULONG,
+    signature: *const u8,
+    signature_len: CK_ULONG,
+    finalizing: bool,
+) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let mut operation = ctx
             .get_session_context_mut(session_handle)?
             .verify_operation
             .take()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.multipart && !finalizing {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
             return Err(CKR_USER_NOT_LOGGED_IN.into());
@@ -500,24 +522,7 @@ ffi_entry_point! {
         part: *mut ::std::os::raw::c_uchar,
         part_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        map(with_session_context_mut(session_handle, |ctx| {
-            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
-            let operation = ctx
-                .get_session_context_mut(session_handle)?
-                .verify_operation
-                .as_mut()
-                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            if operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
-                ctx.get_session_context_mut(session_handle)?.verify_operation = None;
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-            }
-            if let Some(state) = &mut operation.prehash_state {
-                state.update(part);
-            } else {
-                operation.buffer.extend_from_slice(part);
-            }
-            Ok(())
-        }))
+        map(super::shared::signature_update(session_handle, part, part_len, false))
     }
 }
 
@@ -536,12 +541,13 @@ ffi_entry_point! {
             Ok(())
         });
         if let Err(error) = allowed { return map(Err::<(), Error>(error)); }
-        map(verify(
+        map(verify_with_mode(
             session_handle,
             ptr::null(),
             0,
             signature,
             signature_len,
+            true,
         ))
     }
 }
