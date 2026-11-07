@@ -413,7 +413,8 @@ discovery does not run.
 subscriber. It writes to Apple Unified Logging on iOS and standard error on
 other platforms. If no level is configured, pkcs11rs installs no subscriber
 and its events flow to an ambient `tracing` subscriber when the Rust host has
-one.
+one. Object-search trace events report attribute types and lengths without
+including template values.
 
 The `pkcs11rs::scp` target reports successful SCP establishment at `info` and
 failed handshakes at `warn`, with the protocol and application AID. Success is

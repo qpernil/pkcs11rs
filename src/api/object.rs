@@ -2614,7 +2614,14 @@ pub(crate) fn find_objects_init(
             ctx.refresh_slot_token_objects(slot_id)?;
         }
         ctx.insert_session_objects(slot_id, session_handle)?;
-        log!(2, "C_FindObjectsInit template {:?}", templ);
+        for (attribute_type, value) in &templ {
+            log!(
+                2,
+                "C_FindObjectsInit attribute type={} length={}",
+                attribute_type,
+                value.len()
+            );
+        }
         let mut objects = Vec::new();
         for (handle, object) in ctx.resolved_objects()? {
             if !object.is_visible_to(logged_in) {

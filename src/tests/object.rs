@@ -3025,3 +3025,55 @@ pub fn set_attribute_value_reports_attribute_errors() {
         CKR_OK as CK_RV
     );
 }
+
+#[test]
+fn search_trace_omits_template_values() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    let mut secret = *b"synthetic search secret";
+    let mut template = [bytes_attribute(CKA_VALUE as _, &mut secret)];
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(
+            crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, template.as_mut_ptr(), 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+            CKR_OK as CK_RV
+        );
+    });
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("C_FindObjectsInit attribute type=17 length=23"),
+        "{logs}"
+    );
+    assert!(!logs.contains(std::str::from_utf8(&secret).unwrap()));
+    assert!(!logs.contains(&format!("{:?}", secret.to_vec())));
+    finalize_for_test();
+}
