@@ -543,6 +543,7 @@ pub(crate) fn sign_init(
         return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
     }
     ctx.get_session_context_mut(session)?.sign_operation = Some(SignatureOperation {
+        multipart: false,
         prehash_state: None,
         key: object.material,
         public_key: None,

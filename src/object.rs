@@ -572,6 +572,7 @@ pub(crate) struct FindOperation {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SignatureOperation {
+    pub(crate) multipart: bool,
     pub(crate) prehash_state: Option<crate::api::SignatureHashContext>,
     pub(crate) key: KeyMaterial,
     pub(crate) public_key: Option<PublicKeyMaterial>,

@@ -509,25 +509,9 @@ fn sign_init(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                     || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                    || x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
-                    || x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
+                    || piv_is_hashed_rsa_pkcs(x)
                     || x == CKM_ECDSA as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
-                    || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
+                    || piv_is_hashed_ecdsa(x)
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA as CK_MECHANISM_TYPE
                     || x == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE
@@ -672,6 +656,7 @@ fn sign_init(
             _ => None,
         };
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
+            multipart: false,
             prehash_state: super::signature_hash::context(mechanism.mechanism),
             key: object.material.clone(),
             public_key: object.public_key.clone(),
@@ -716,6 +701,7 @@ ffi_entry_point! {
             data_len,
             signature,
             signature_len,
+            false,
         ))
     }
 }
@@ -726,6 +712,7 @@ fn sign(
     data_len: CK_ULONG,
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: CK_ULONG_PTR,
+    finalizing: bool,
 ) -> Result<(), Error> {
     if signature_len.is_null() {
         let _ = with_session_context_mut(session_handle, |ctx| {
@@ -744,6 +731,10 @@ fn sign(
             .as_ref()
             .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.multipart && !finalizing {
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
             ctx.get_session_context_mut(session_handle)?.sign_operation = None;
@@ -1167,24 +1158,7 @@ ffi_entry_point! {
         part: *mut ::std::os::raw::c_uchar,
         part_len: ::std::os::raw::c_ulong,
     ) -> CK_RV {
-        map(with_session_context_mut(session_handle, |ctx| {
-            let part = unsafe { from_raw_parts(part, part_len as usize) }?;
-            let session = ctx.get_session_context_mut(session_handle)?;
-            let operation = session
-                .sign_operation
-                .as_mut()
-                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-            if crate::oath::is_mechanism(operation.mechanism) || operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION || operation.mechanism == CKM_HASH_ML_DSA as CK_MECHANISM_TYPE {
-                session.sign_operation = None;
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-            }
-            if let Some(state) = &mut operation.prehash_state {
-                state.update(part);
-            } else {
-                operation.buffer.extend_from_slice(part);
-            }
-            Ok(())
-        }))
+        map(super::shared::signature_update(session_handle, part, part_len, true))
     }
 }
 
@@ -1209,6 +1183,7 @@ ffi_entry_point! {
             0,
             signature,
             signature_len,
+            true,
         ))
     }
 }

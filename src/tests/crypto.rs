@@ -2045,3 +2045,410 @@ pub fn verify_operation_is_cleared_when_session_closes() {
         CKR_OK as CK_RV
     );
 }
+
+#[test]
+fn signature_update_errors_terminate_both_buffered_and_hashed_operations() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for kind in [CKM_RSA_PKCS, CKM_SHA256_RSA_PKCS] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: kind as _,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut data = *b"abc";
+        let mut signature = [0; 256];
+        let mut length = signature.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SignUpdate(TEST_SESSION_HANDLE, data.as_mut_ptr(), 3),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SignUpdate(TEST_SESSION_HANDLE, std::ptr::null_mut(), 1),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SignFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), &mut length),
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV
+        );
+        // An error releases the operation immediately so initialization can be retried.
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, std::ptr::null_mut(), 0),
+            CKR_OK as CK_RV
+        );
+
+        assert_eq!(
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyUpdate(TEST_SESSION_HANDLE, data.as_mut_ptr(), 3),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyUpdate(TEST_SESSION_HANDLE, std::ptr::null_mut(), 1),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), length),
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, std::ptr::null_mut(), 0),
+            CKR_OK as CK_RV
+        );
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn signatures_reject_single_part_completion_after_even_an_empty_update() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for kind in [CKM_RSA_PKCS, CKM_SHA256_RSA_PKCS] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: kind as _,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        for update_length in [0, 1] {
+            for query in [false, true] {
+                let mut data = *b"abc";
+                let mut signature = [0x5a; 256];
+                let mut length = signature.len() as CK_ULONG;
+                assert_eq!(
+                    crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(
+                    crate::api::C_SignUpdate(TEST_SESSION_HANDLE, data.as_mut_ptr(), update_length),
+                    CKR_OK as CK_RV
+                );
+                let output = if query {
+                    std::ptr::null_mut()
+                } else {
+                    signature.as_mut_ptr()
+                };
+                assert_eq!(
+                    crate::api::C_Sign(
+                        TEST_SESSION_HANDLE,
+                        data.as_mut_ptr(),
+                        3,
+                        output,
+                        &mut length
+                    ),
+                    CKR_OPERATION_ACTIVE as CK_RV
+                );
+                assert_eq!(signature, [0x5a; 256]);
+                assert_eq!(
+                    crate::api::C_SignFinal(
+                        TEST_SESSION_HANDLE,
+                        signature.as_mut_ptr(),
+                        &mut length
+                    ),
+                    CKR_OPERATION_NOT_INITIALIZED as CK_RV
+                );
+            }
+            let mut data = *b"abc";
+            let mut signature = [0; 256];
+            assert_eq!(
+                crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_VerifyUpdate(TEST_SESSION_HANDLE, data.as_mut_ptr(), update_length),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_Verify(
+                    TEST_SESSION_HANDLE,
+                    data.as_mut_ptr(),
+                    3,
+                    signature.as_mut_ptr(),
+                    256
+                ),
+                CKR_OPERATION_ACTIVE as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_VerifyFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), 256),
+                CKR_OPERATION_NOT_INITIALIZED as CK_RV
+            );
+        }
+    }
+    finalize_for_test();
+}
+
+fn create_crypto_secret(key_type: CK_KEY_TYPE, value: &mut [u8]) -> CK_OBJECT_HANDLE {
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = key_type;
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut template = [
+        scalar_attribute(CKA_CLASS as _, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as _, &mut key_type),
+        bytes_attribute(CKA_VALUE as _, value),
+        scalar_attribute(CKA_ENCRYPT as _, &mut enabled),
+        scalar_attribute(CKA_DECRYPT as _, &mut enabled),
+    ];
+    let mut key = 0;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            template.as_mut_ptr(),
+            template.len() as _,
+            &mut key
+        ),
+        CKR_OK as CK_RV
+    );
+    key
+}
+
+#[test]
+fn cipher_conflicts_and_other_direction_errors_preserve_the_active_operation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut value = test_hex("2b7e151628aed2a6abf7158809cf4f3c");
+    let key = create_crypto_secret(CKK_AES as _, &mut value);
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_ECB as _,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let plaintext = test_hex("6bc1bee22e409f96e93d7e117393172a");
+    let ciphertext = test_hex("3ad77bb40d7a3660a89ecaf32466ef97");
+    for encrypting in [true, false] {
+        let init = if encrypting {
+            crate::api::C_EncryptInit
+        } else {
+            crate::api::C_DecryptInit
+        };
+        let conflicting_init = if encrypting {
+            crate::api::C_DecryptInit
+        } else {
+            crate::api::C_EncryptInit
+        };
+        let complete = if encrypting {
+            crate::api::C_Encrypt
+        } else {
+            crate::api::C_Decrypt
+        };
+        let other_complete = if encrypting {
+            crate::api::C_Decrypt
+        } else {
+            crate::api::C_Encrypt
+        };
+
+        assert_eq!(
+            init(TEST_SESSION_HANDLE, &mut mechanism, key),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            conflicting_init(TEST_SESSION_HANDLE, &mut mechanism, key),
+            CKR_OPERATION_ACTIVE as CK_RV
+        );
+        assert_eq!(
+            conflicting_init(TEST_SESSION_HANDLE, std::ptr::null_mut(), key),
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV
+        );
+        assert_eq!(
+            other_complete(
+                TEST_SESSION_HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+        let mut input = if encrypting {
+            plaintext.clone()
+        } else {
+            ciphertext.clone()
+        };
+        let expected = if encrypting { &ciphertext } else { &plaintext };
+        let mut length = 0;
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                std::ptr::null_mut(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut output = [0x5a; 16];
+        length = 1;
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(output, [0x5a; 16]);
+        assert_eq!(length, 16);
+        // A cached result survives repeated sizing and short-buffer retries.
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                std::ptr::null_mut(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        length = 1;
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(output.as_slice(), expected);
+        assert_eq!(
+            complete(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as _,
+                output.as_mut_ptr(),
+                &mut length
+            ),
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV
+        );
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn streaming_digest_handles_large_messages_and_interleaved_secret_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256 as _,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+        CKR_OK as CK_RV
+    );
+    let mut chunk = [b'a'; 1000];
+    for _ in 0..1000 {
+        assert_eq!(
+            crate::api::C_DigestUpdate(TEST_SESSION_HANDLE, chunk.as_mut_ptr(), chunk.len() as _),
+            CKR_OK as CK_RV
+        );
+    }
+    let mut output = [0; 32];
+    let mut length = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut length),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        output.as_slice(),
+        test_hex("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+    );
+    let mut secret = [0x42; 127];
+    let key = create_crypto_secret(CKK_GENERIC_SECRET as _, &mut secret);
+    for (kind, hash) in [
+        (CKM_SHA_1, crate::MessageDigest::Sha1),
+        (CKM_SHA224, crate::MessageDigest::Sha224),
+        (CKM_SHA256, crate::MessageDigest::Sha256),
+        (CKM_SHA384, crate::MessageDigest::Sha384),
+        (CKM_SHA512, crate::MessageDigest::Sha512),
+        (CKM_SHA3_224, crate::MessageDigest::Sha3_224),
+        (CKM_SHA3_256, crate::MessageDigest::Sha3_256),
+        (CKM_SHA3_384, crate::MessageDigest::Sha3_384),
+        (CKM_SHA3_512, crate::MessageDigest::Sha3_512),
+    ] {
+        mechanism.mechanism = kind as _;
+        assert_eq!(
+            crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+            CKR_OK as CK_RV
+        );
+        let mut prefix = *b"prefix";
+        let mut suffix = *b"suffix";
+        assert_eq!(
+            crate::api::C_DigestUpdate(TEST_SESSION_HANDLE, prefix.as_mut_ptr(), prefix.len() as _),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_DigestKey(TEST_SESSION_HANDLE, key),
+            CKR_OK as CK_RV
+        );
+        let mut length = 0;
+        assert_eq!(
+            crate::api::C_DigestFinal(TEST_SESSION_HANDLE, std::ptr::null_mut(), &mut length),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(length as usize, hash.size());
+        let mut output = vec![0x5a; length as usize];
+        length = 1;
+        assert_eq!(
+            crate::api::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut length),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_DigestUpdate(TEST_SESSION_HANDLE, suffix.as_mut_ptr(), suffix.len() as _),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut length),
+            CKR_OK as CK_RV
+        );
+        let message = [prefix.as_slice(), secret.as_slice(), suffix.as_slice()].concat();
+        assert_eq!(output, hash.digest(&message));
+    }
+    finalize_for_test();
+}

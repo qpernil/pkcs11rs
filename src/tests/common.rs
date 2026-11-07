@@ -7035,7 +7035,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     );
     assert_eq!(
         crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
-        CKR_OK as CK_RV
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(
