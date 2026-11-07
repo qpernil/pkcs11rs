@@ -2172,7 +2172,7 @@ fn write_policy_template(
         return Ok(());
     }
     if attribute.ulValueLen < required {
-        attribute.ulValueLen = required;
+        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
     }
     let output = unsafe { _from_raw_parts_mut(attribute.pValue.cast::<CK_ATTRIBUTE>(), count) }
@@ -2182,11 +2182,8 @@ fn write_policy_template(
         slot.type_ = CK_ATTRIBUTE_TYPE::try_from(*type_).map_err(|_| CKR_DATA_INVALID)?;
         let write = match value {
             KeyAttributeValue::Template(nested) => write_policy_template(slot, nested),
-            _ => write_policy_value(slot, &key_attribute_native_value(value)?),
+            _ => write_attribute_value(slot, &key_attribute_native_value(value)?),
         };
-        if write == Err(CKR_BUFFER_TOO_SMALL as CK_RV) {
-            slot.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-        }
         if let Err(error) = write {
             rv = combine_attribute_rv(rv, error);
         }
@@ -2197,23 +2194,6 @@ fn write_policy_template(
     } else {
         Err(rv)
     }
-}
-
-fn write_policy_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
-    let required = value.len() as CK_ULONG;
-    if attribute.pValue.is_null() {
-        attribute.ulValueLen = required;
-        return Ok(());
-    }
-    if attribute.ulValueLen < required {
-        attribute.ulValueLen = required;
-        return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
-    }
-    let output = unsafe { _from_raw_parts_mut(attribute.pValue.cast::<u8>(), value.len()) }
-        .map_err(CK_RV::from)?;
-    output.copy_from_slice(value);
-    attribute.ulValueLen = required;
-    Ok(())
 }
 
 fn yubihsm_object_value(
@@ -2328,7 +2308,7 @@ fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(
         return Ok(());
     }
     if attribute.ulValueLen < required_len {
-        attribute.ulValueLen = required_len;
+        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
     }
 
@@ -2527,9 +2507,17 @@ fn set_attribute_value(
                 )
                 && ctx.get_slot(slot_id)?.stores_software_token_keys()
             {
-                let replacement = ctx
+                let replacement = match ctx
                     ._get_slot_mut(slot_id)?
-                    .store_software_private_object(slot_id, &updated_object)?;
+                    .store_software_private_object(slot_id, &updated_object)
+                {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        ctx.reconcile_login_state(slot_id);
+                        let _ = ctx.refresh_slot_token_objects(slot_id);
+                        return Err(error);
+                    }
+                };
                 ctx.refresh_slot_token_objects_with_rebindings(
                     slot_id,
                     &[(object, replacement.unique_id)],

@@ -262,6 +262,32 @@ pub trait StorageProvider {
     /// lossless backend-specific physical representation.
     fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError>;
 
+    /// Complete a create-before-delete replacement. On failure, remove the new
+    /// record only when the original still exists. Callers must reload their
+    /// object view after an error: deletion can fail after taking effect, and
+    /// rollback can itself fail.
+    fn finish_replacement(
+        &self,
+        previous: &ContentReference,
+        replacement: &ContentReference,
+    ) -> Result<(), StorageError> {
+        if previous == replacement {
+            return Ok(());
+        }
+        let error = match self.delete(previous) {
+            Ok(true) => return Ok(()),
+            Ok(false) => StorageError::Integrity,
+            Err(error) => error,
+        };
+        if matches!(self.get(previous), Ok(Some(_))) {
+            if let Err(rollback) = self.delete(replacement) {
+                tracing::warn!(target: "pkcs11rs::storage", error = %rollback,
+                    "Stored object replacement rollback failed; reload required");
+            }
+        }
+        Err(error)
+    }
+
     /// Delete an object, returning whether it was present.
     fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError>;
 }

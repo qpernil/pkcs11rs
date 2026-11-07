@@ -1651,20 +1651,23 @@ impl SlotState {
             put_backed_object(&self.get_session_context(creator)?.storage, &replacement)?
         };
         let shared = self.backed_reference_is_shared(handle, &previous_reference, previous);
-        if replacement_reference != previous_reference && !shared {
-            let deleted = if replacement.token {
+        if !shared {
+            let result = if replacement.token {
                 self.token_storage_provider(slot)
-                    .delete(&previous_reference)
-                    .map_err(crate::backed_object::storage_error)?
+                    .finish_replacement(&previous_reference, &replacement_reference)
             } else {
                 let creator = previous.creator_session.ok_or(CKR_DEVICE_ERROR)?;
                 self.get_session_context(creator)?
                     .storage
-                    .delete(&previous_reference)
-                    .map_err(crate::backed_object::storage_error)?
+                    .finish_replacement(&previous_reference, &replacement_reference)
             };
-            if !deleted {
-                return Err(CKR_DEVICE_ERROR.into());
+            if let Err(error) = result {
+                if replacement.token {
+                    // Reload after both successful and failed rollback. An uncertain
+                    // store must block stale handles and active key operations.
+                    let _ = self.refresh_slot_token_objects(slot, self.slot_id);
+                }
+                return Err(crate::backed_object::storage_error(error));
             }
         }
         if replacement.token {

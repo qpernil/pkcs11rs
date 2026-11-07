@@ -299,6 +299,10 @@ login/reload.
 An attribute update publishes its replacement before deleting the previous
 record. A crash between these steps can leave two records with the same object
 identity; loading rejects that ambiguity rather than selecting one arbitrarily.
+Reported deletion failures use the shared
+[replacement and recovery rules](storage.md#provider-boundary). The encrypted
+private-object cache is reloaded after failure; an unreadable or ambiguous
+private store releases its unlocked state and requires fresh authentication.
 
 ## Supported keys and operations
 

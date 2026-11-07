@@ -53,9 +53,13 @@ fallbacks emit warnings. Logs contain no attribute values or key material.
 Present attributes must still have the correct type. Positional formats retain
 explicit fields; a recognized historical format can supply only its documented
 missing defaults. Refresh rejects multiple records with the same object ID,
-including an interrupted replacement. Native-key companion deltas and policy
-templates retain their own omission semantics; these defaults do not replace
-native capabilities or remove template restrictions.
+including an interrupted replacement. Replacement failures trigger a reload;
+rollback removes the replacement only when the original still exists. If
+cleanup leaves ambiguous records or the store cannot be read, stale token
+handles and active key operations remain blocked until a successful refresh.
+Native-key companion deltas and policy templates retain their own omission
+semantics; these defaults do not replace native capabilities or remove template
+restrictions.
 
 The trait has no `Send` or `Sync` supertrait. A provider follows its owning
 context's concurrency model: the local provider is independently thread-safe,

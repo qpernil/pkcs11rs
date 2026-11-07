@@ -377,10 +377,15 @@ impl Slot for SoftwareSlot {
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let (stored, reference) = store.put_object(slot_id, master_key, object)?;
         if let Some(previous) = self.token_references.get(&stored.unique_id)
-            && *previous != reference
-            && let Err(error) = store.delete_object(previous)
+            && let Err(error) = store.finish_replacement(previous, &reference)
         {
-            let _ = store.delete_object(&reference);
+            match store.load_objects(slot_id, master_key) {
+                Ok((objects, references)) => {
+                    self.token_objects = objects;
+                    self.token_references = references;
+                }
+                Err(_) => self.clear_sensitive_state(),
+            }
             return Err(error);
         }
         self.token_references

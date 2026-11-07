@@ -2863,7 +2863,7 @@ pub fn get_attribute_value_reports_attribute_errors() {
     );
     assert_eq!(
         small_attr.ulValueLen,
-        b"Test RSA public key".len() as CK_ULONG
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
     );
 
     let mut unknown_attr = CK_ATTRIBUTE {
@@ -3075,5 +3075,71 @@ fn search_trace_omits_template_values() {
     );
     assert!(!logs.contains(std::str::from_utf8(&secret).unwrap()));
     assert!(!logs.contains(&format!("{:?}", secret.to_vec())));
+    finalize_for_test();
+}
+
+#[test]
+fn attribute_short_buffers_use_unavailable_lengths_and_process_other_attributes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let handle = with_test_slot_context(TEST_SLOT_ID, |context| {
+        let mut object = context
+            .memory_objects
+            .values()
+            .find(|o| o.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .unwrap()
+            .clone();
+        object.label = "buffer regression".into();
+        let mut policy = crate::key_metadata::KeyAttributes::new();
+        policy
+            .insert(
+                u64::from(CKA_ENCRYPT),
+                crate::key_metadata::KeyAttributeValue::Boolean(true),
+            )
+            .unwrap();
+        object.policy_templates.wrap = Some(policy);
+        context.insert_object(object).unwrap()
+    });
+    let mut byte = 0xa5u8;
+    let mut class = 99 as CK_OBJECT_CLASS;
+    let mut attrs = [
+        bytes_attribute(CKA_LABEL as _, std::slice::from_mut(&mut byte)),
+        scalar_attribute(CKA_CLASS as _, &mut class),
+    ];
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, attrs.as_mut_ptr(), 2),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(attrs[0].ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+    assert_eq!(byte, 0xa5);
+    assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    let mut nested = bytes_attribute(CKA_ENCRYPT as _, std::slice::from_mut(&mut byte));
+    let mut outer = scalar_attribute(CKA_WRAP_TEMPLATE as _, &mut nested);
+    outer.ulValueLen -= 1;
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut outer, 1),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(outer.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+    outer.ulValueLen = std::mem::size_of::<CK_ATTRIBUTE>() as _;
+    nested.ulValueLen = 0;
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut outer, 1),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(nested.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+    assert_eq!(byte, 0xa5);
+    nested.ulValueLen = 1;
+    outer = scalar_attribute(CKA_WRAP_TEMPLATE as _, &mut nested);
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut outer, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(byte, CK_TRUE as u8);
     finalize_for_test();
 }

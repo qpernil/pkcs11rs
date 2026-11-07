@@ -12293,3 +12293,111 @@ fn pkcs11_auth_prepares_an_existing_yubihsm_slot_without_copying_its_credential(
     crate::api::rust::close_session(source_session).unwrap();
     finalize_for_test();
 }
+
+#[test]
+fn failed_backed_replacement_reloads_or_blocks_stale_state() {
+    use crate::storage::{ContentReference, MemoryStorageProvider, StorageError, StorageProvider};
+    struct FailDelete {
+        inner: std::rc::Rc<MemoryStorageProvider>,
+        calls: std::cell::Cell<usize>,
+        mode: usize,
+    }
+    impl StorageProvider for FailDelete {
+        fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+            self.inner.list()
+        }
+        fn get(&self, r: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(r)
+        }
+        fn put(&self, v: &[u8]) -> Result<ContentReference, StorageError> {
+            self.inner.put(v)
+        }
+        fn delete(&self, r: &ContentReference) -> Result<bool, StorageError> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            if call == 0 || self.mode == 1 {
+                if self.mode == 2 {
+                    self.inner.delete(r)?;
+                }
+                if self.mode == 3 {
+                    return Ok(false);
+                }
+                return Err(StorageError::Provider("injected deletion failure".into()));
+            }
+            self.inner.delete(r)
+        }
+    }
+    let _guard = TEST_LOCK.lock().unwrap();
+    for mode in 0..4 {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+        let storage = std::rc::Rc::new(MemoryStorageProvider::new());
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            context
+                .set_token_storage_provider(Box::new(FailDelete {
+                    inner: storage.clone(),
+                    calls: std::cell::Cell::new(0),
+                    mode,
+                }))
+                .unwrap();
+            let mut object = context
+                .memory_objects
+                .values()
+                .find(|o| o.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+                .unwrap()
+                .clone();
+            object.token = true;
+            let handle = context
+                .store_backed_object(TEST_SESSION_HANDLE, object)
+                .unwrap();
+            let previous = context.resolve_object(handle).unwrap().unwrap();
+            let mut replacement = previous.clone();
+            replacement.label = "updated metadata".into();
+            assert!(
+                context
+                    .replace_backed_object(handle, &previous, replacement)
+                    .is_err()
+            );
+            if mode == 1 {
+                assert_eq!(storage.list().unwrap().len(), 2);
+                assert!(
+                    matches!(context.resolve_object(handle), Err(crate::Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as CK_RV)
+                );
+                // Explicit repair followed by refresh restores the existing handle.
+                for (reference, object) in storage.read_all().unwrap() {
+                    if crate::backed_object::decode_backed_object(
+                        storage.as_ref(),
+                        TEST_SLOT_ID,
+                        true,
+                        &object,
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .label
+                        == "updated metadata"
+                    {
+                        storage.delete(&reference).unwrap();
+                    }
+                }
+                context.refresh_slot_token_objects(TEST_SLOT_ID).unwrap();
+            } else {
+                assert_eq!(storage.list().unwrap().len(), 1);
+            }
+            let restored = context.resolve_object(handle).unwrap().unwrap();
+            assert_eq!(restored.unique_id, previous.unique_id);
+            assert_eq!(
+                restored.label,
+                if mode == 2 {
+                    "updated metadata"
+                } else {
+                    &previous.label
+                }
+            );
+        });
+    }
+    finalize_for_test();
+}

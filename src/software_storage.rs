@@ -656,6 +656,16 @@ impl SoftwareTokenStore {
         Ok((stored, reference))
     }
 
+    pub(crate) fn finish_replacement(
+        &self,
+        previous: &ContentReference,
+        replacement: &ContentReference,
+    ) -> Result<(), Error> {
+        self.records
+            .finish_replacement(previous, replacement)
+            .map_err(crate::backed_object::storage_error)
+    }
+
     pub(crate) fn delete_object(&self, reference: &ContentReference) -> Result<(), Error> {
         if !self
             .records
