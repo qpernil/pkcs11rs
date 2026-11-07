@@ -4708,6 +4708,140 @@ fn find_by_bytes_attribute(
     handles[..count as usize].to_vec()
 }
 
+#[test]
+fn yubihsm_invalid_stored_metadata_keeps_token_visible_and_blocks_object_access() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, peer, _) = crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
+    let mut object = crate::default_objects()
+        .unwrap()
+        .into_values()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    object.token = true;
+    object.unique_id = "stored-test-identity".into();
+    let valid = crate::backed_object::encode_backed_object(&object)
+        .unwrap()
+        .object;
+    let mut metadata = crate::key_metadata::BackedKeyMetadata::from_cbor(&valid).unwrap();
+    let mut attributes = metadata.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap().clone();
+    attributes
+        .insert(
+            u64::from(CKA_UNIQUE_ID),
+            crate::key_metadata::KeyAttributeValue::Text(String::new()),
+        )
+        .unwrap();
+    metadata
+        .insert_aspect(u64::from(CKO_PUBLIC_KEY), attributes)
+        .unwrap();
+    let obsolete = metadata.to_cbor().unwrap();
+    peer.set_stored_public_metadata(obsolete.clone());
+    crate::lock_context()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .insert_yubihsm_slot(SLOT_ID, slot)
+        .unwrap();
+
+    let mut slots = [0; 32];
+    let mut count = slots.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as _, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert!(slots[..count as usize].contains(&SLOT_ID));
+    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        crate::api::C_GetTokenInfo(SLOT_ID, &mut info),
+        CKR_OK as CK_RV
+    );
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            CKF_SERIAL_SESSION as _,
+            std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+
+    peer.set_stored_public_metadata(valid);
+    with_test_slot_context(SLOT_ID, |context| {
+        context.refresh_slot_token_objects(SLOT_ID).unwrap()
+    });
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    let handle = with_test_slot_context(SLOT_ID, |context| {
+        context
+            .resolved_objects()
+            .unwrap()
+            .into_iter()
+            .find(|(_, found)| found.unique_id == object.unique_id)
+            .unwrap()
+            .0
+    });
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as _,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, handle),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    // A later failure must also prevent use of handles from the previous good view.
+    peer.set_stored_public_metadata(obsolete);
+    with_test_slot_context(SLOT_ID, |context| {
+        assert!(
+            matches!(context.refresh_slot_token_objects(SLOT_ID), Err(crate::Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as CK_RV)
+        );
+        assert!(
+            matches!(context.resolve_object(handle), Err(crate::Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as CK_RV)
+        );
+    });
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    let mut found = [0; 4];
+    let mut found_count = 123;
+    assert_eq!(
+        crate::api::C_FindObjects(session, found.as_mut_ptr(), 4, &mut found_count),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    assert_eq!(found_count, 0);
+    let mut signature = [0; 256];
+    assert_eq!(
+        crate::api::C_VerifyFinal(session, signature.as_mut_ptr(), signature.len() as _),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetTokenInfo(SLOT_ID, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
 fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discovery: bool) {
     finalize_for_test();
     assert_eq!(

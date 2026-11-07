@@ -2678,6 +2678,8 @@ pub(crate) fn find_objects(
     let object_count = unsafe { as_mut(object_count) }?;
     let output = unsafe { _from_raw_parts_mut(object, max_object_count as usize) }?;
     with_session_context_mut(session_handle, |ctx| {
+        *object_count = 0;
+        ctx.require_token_objects()?;
         let operation = ctx
             .get_session_context_mut(session_handle)?
             .find_operation

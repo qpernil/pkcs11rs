@@ -303,6 +303,7 @@ pub(crate) struct SlotState {
     backed_token_objects: HashMap<String, TokenObject>,
     backed_object_references: HashMap<String, crate::storage::ContentReference>,
     backed_object_handles: HashMap<CK_OBJECT_HANDLE, crate::storage::ContentReference>,
+    token_objects_error: Option<CK_RV>,
 }
 
 impl std::ops::Deref for SlotContext {
@@ -1159,18 +1160,24 @@ impl ModuleContext {
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<SlotContext, Error> {
+        let mut object_error = None;
         let token_objects = if discover_objects && slot.is_present() {
             match slot.token_objects(slot_id) {
                 Ok(objects) => objects,
                 Err(error) => {
-                    log!(2, "YubiHSM public object discovery: {:?}", error);
+                    object_error = Some(error);
                     slot.profile_objects(slot_id)
                 }
             }
         } else {
             Vec::new()
         };
-        SlotContext::new(slot_id, slot, token_objects, handles, pinentry, trust_store)
+        let mut context =
+            SlotContext::new(slot_id, slot, token_objects, handles, pinentry, trust_store)?;
+        if let Some(error) = object_error {
+            let _ = context.state.finish_token_object_refresh(Err(error));
+        }
+        Ok(context)
     }
 
     #[cfg(test)]
@@ -1300,6 +1307,7 @@ impl SlotContext {
                 backed_token_objects: HashMap::new(),
                 backed_object_references: HashMap::new(),
                 backed_object_handles: HashMap::new(),
+                token_objects_error: None,
             },
         };
         let mut token_objects = token_objects;
@@ -1310,10 +1318,24 @@ impl SlotContext {
             token_objects.retain(|object| object.class != CKO_PROFILE as CK_OBJECT_CLASS);
             token_objects.extend(context.slot.profile_objects(slot_id));
         }
-        let stored = context.stored_token_objects()?;
+        let stored = match context.stored_token_objects() {
+            Ok(stored) => stored,
+            Err(error) if context.slot.supports_yubihsm_management() => {
+                // Device presence does not depend on auxiliary metadata validity.
+                // Retain the error so object APIs cannot expose a partial inventory.
+                let _ = context.state.finish_token_object_refresh(Err(error));
+                return Ok(context);
+            }
+            Err(error) => return Err(error),
+        };
         context.record_backed_objects(&stored);
         token_objects.extend(stored.into_iter().map(|(_, object)| object));
-        context.reconcile_slot_token_objects(slot_id, token_objects)?;
+        if let Err(error) = context.reconcile_slot_token_objects(slot_id, token_objects) {
+            if !context.slot.supports_yubihsm_management() {
+                return Err(error);
+            }
+            let _ = context.state.finish_token_object_refresh(Err(error));
+        }
         Ok(context)
     }
 
@@ -1655,13 +1677,9 @@ impl SlotState {
         self.backed_object_handles
             .insert(handle, replacement_reference);
         if replacement.token {
-            let mut objects = slot.token_objects(self.slot_id)?;
-            let stored = self.stored_token_objects(slot)?;
-            self.record_backed_objects(&stored);
-            objects.extend(stored.into_iter().map(|(_, object)| object));
-            self.reconcile_slot_token_objects_with_rebindings(
+            self.refresh_slot_token_objects_with_rebindings(
+                slot,
                 self.slot_id,
-                objects,
                 &[(handle, replacement.unique_id)],
             )?;
         } else {
@@ -1837,6 +1855,7 @@ impl SlotState {
         if let Some(object) = self.memory_objects.get(&handle) {
             return Ok(Some(object.clone()));
         }
+        self.require_token_objects()?;
         let Some(locator) = self.token_object_handles.get(&handle) else {
             return Ok(None);
         };
@@ -1855,6 +1874,7 @@ impl SlotState {
         &'a self,
         slot: &'a S,
     ) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
+        self.require_token_objects()?;
         let mut objects = self
             .memory_objects
             .iter()
@@ -2002,11 +2022,61 @@ impl SlotState {
         rebindings: &[(CK_OBJECT_HANDLE, String)],
     ) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
-        let mut objects = slot.token_objects(slot_id)?;
-        let stored = self.stored_token_objects(slot)?;
-        self.record_backed_objects(&stored);
-        objects.extend(stored.into_iter().map(|(_, object)| object));
-        self.reconcile_slot_token_objects_with_rebindings(slot_id, objects, rebindings)
+        let result = (|| {
+            let mut objects = slot.token_objects(slot_id)?;
+            let stored = self.stored_token_objects(slot)?;
+            objects.extend(stored.iter().map(|(_, object)| object.clone()));
+            self.reconcile_slot_token_objects_with_rebindings(slot_id, objects, rebindings)?;
+            self.record_backed_objects(&stored);
+            Ok(())
+        })();
+        self.finish_token_object_refresh(result)
+    }
+
+    pub(crate) fn require_token_objects(&self) -> Result<(), Error> {
+        match self.token_objects_error {
+            Some(rv) => Err(rv.into()),
+            None => Ok(()),
+        }
+    }
+
+    fn finish_token_object_refresh(&mut self, result: Result<(), Error>) -> Result<(), Error> {
+        match result {
+            Ok(()) => {
+                self.token_objects_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let original_rv = CK_RV::from(error);
+                // These describe stored data or discovery authorization, not caller
+                // input. Object/search APIs do not admit these internal return codes.
+                let rv = if original_rv == CKR_DATA_INVALID as CK_RV
+                    || original_rv == CKR_FUNCTION_REJECTED as CK_RV
+                {
+                    CKR_DEVICE_ERROR as CK_RV
+                } else {
+                    original_rv
+                };
+                if self.token_objects_error != Some(rv) {
+                    tracing::warn!(
+                        target: "pkcs11rs::storage",
+                        slot_id = self.slot_id,
+                        original_error = original_rv,
+                        returned_error = rv,
+                        "Token object loading failed; device remains visible, object access is blocked and active key operations are canceled"
+                    );
+                }
+                self.token_objects_error = Some(rv);
+                for session in self.sessions.values_mut() {
+                    session.find_operation = None;
+                    session.encrypt_operation = None;
+                    session.decrypt_operation = None;
+                    session.sign_operation = None;
+                    session.verify_operation = None;
+                }
+                Err(rv.into())
+            }
+        }
     }
 
     pub(crate) fn init_token<'a, S: Slot + ?Sized>(

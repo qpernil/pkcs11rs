@@ -386,6 +386,7 @@ pub(crate) struct YubiHsmObjectCache {
     pub(crate) discovery: YubiHsmDiscoveryCache,
     pub(crate) native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
     pub(crate) objects: Vec<TokenObject>,
+    object_error: Option<CK_RV>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2284,6 +2285,7 @@ impl YubiHsmSlot {
         };
         match discovery {
             Ok((objects, authkey_domains)) => {
+                state.object_error = None;
                 let mut retained = state
                     .objects
                     .drain(..)
@@ -2316,12 +2318,15 @@ impl YubiHsmSlot {
                 true
             }
             Err(error) => {
+                let rv = CK_RV::from(error);
+                state.object_error = Some(rv);
+                drop(state);
                 let _ = self.close_session_cell(&session, "failed public discovery");
-                log!(
-                    2,
-                    "YubiHSM public object discovery failed on {}: {:?}",
-                    self.connector.name(),
-                    error
+                tracing::warn!(
+                    target: "pkcs11rs::storage",
+                    serial = %self.serial,
+                    error = rv,
+                    "YubiHSM public object discovery failed"
                 );
                 false
             }
@@ -3084,8 +3089,26 @@ impl StorageProvider for YubiHsmSlot {
             let object = self
                 .storage_object_value(&info)
                 .map_err(yubihsm_storage_error)?;
-            BackedKeyMetadata::from_cbor(&object)
-                .map_err(|error| StorageError::Provider(error.to_string()))?;
+            let validation = if info
+                .label
+                .starts_with(YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX)
+            {
+                parse_yubihsm_pkcs11_metadata(&info, &object).map(|_| ())
+            } else {
+                BackedKeyMetadata::from_cbor(&object)
+                    .map(|_| ())
+                    .map_err(key_metadata_error)
+            };
+            validation.map_err(|error| {
+                tracing::warn!(
+                    target: "pkcs11rs::storage",
+                    serial = %self.serial,
+                    object_id = info.id,
+                    error = ?error,
+                    "Invalid YubiHSM metadata; repair the opaque metadata record"
+                );
+                StorageError::InvalidCbor
+            })?;
             let reference = ContentReference::for_object(&object);
             objects.insert(reference, object);
         }
@@ -4463,6 +4486,14 @@ impl Slot for YubiHsmSlot {
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         if !self.has_session_role(YubiHsmSessionRole::User) {
             self.public_discovery_available(slot_id);
+            if let Some(rv) = self
+                .object_cache
+                .try_borrow()
+                .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                .object_error
+            {
+                return Err(rv.into());
+            }
             return Ok(self.cached_objects());
         }
         let YubiHsmDiscoveredObjects {

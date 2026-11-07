@@ -334,10 +334,11 @@ suitable for this service-owned public view.
 The profile represents operational support rather than the current object
 inventory. It is advertised after the discovery credential authenticates and
 the public view can be enumerated, even when no certificates are provisioned.
-Malformed metadata, certificate values, public keys, and other object-local
-representations are logged and skipped without withdrawing the profile or
-discarding other valid public objects. Authentication, authorization, list,
-read, and transport failures still make discovery unavailable for that slot.
+Malformed certificate values and public keys are logged and skipped without
+discarding other valid public objects. Invalid pkcs11rs stored metadata instead
+blocks object access with an explicit error, while the HSM remains listed and
+its token information remains readable. Authentication, authorization, list,
+read, and transport failures can make public object discovery unavailable.
 
 After successful authentication, the module enumerates the credential-visible
 objects. `LIST OBJECTS` seeds one native cache entry per object type and ID with
@@ -445,9 +446,10 @@ contents identify the target object type, ID, and sequence, while its own
 sequence identifies the current companion incarnation. A link contributes
 attribute overrides only when its target sequence matches the target entry;
 this prevents reused object IDs from inheriting obsolete attributes.
-Domains must also match. Invalid metadata is hidden. Canonical metadata is
-authoritative whenever any pkcs11rs-namespaced companion exists; legacy
-metadata is considered only in its absence. Multiple valid companions within
+Domains must also match. Invalid legacy metadata is hidden; invalid canonical
+metadata fails object loading rather than silently losing attribute restrictions.
+Canonical metadata is authoritative whenever any pkcs11rs-namespaced companion
+exists; legacy metadata is considered only in its absence. Multiple valid companions within
 the selected namespace are ambiguous until an attribute update resolves the
 pkcs11rs namespace. `C_SetAttributeValue` first submits the new value under one
 canonical companion's existing ID and exact policy. A device that accepts

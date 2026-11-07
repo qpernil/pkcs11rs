@@ -262,6 +262,18 @@ pkcs11rs-owned records are canonical CBOR. Target-linked metadata uses the
 `yubihsm-shell` listings and prevent Yubico's PKCS #11 module from treating
 unfamiliar canonical CBOR as MDB1.
 
+Invalid pkcs11rs metadata does not remove a connected YubiHSM from
+`C_GetSlotList`, including token-present queries, or prevent `C_GetTokenInfo`.
+Object loading fails explicitly: `C_FindObjectsInit` reports `CKR_DEVICE_ERROR`
+for invalid metadata instead of returning a partial inventory. Failed refreshes
+also block access through previously issued token-object handles and cancel
+active searches and key operations; applications must initialize them again
+after recovery. Session cleanup and token information remain available.
+Diagnostics
+identify the slot and content reference, or the physical opaque-object ID.
+Repair is explicit and preserves native keys; after repair, a successful object
+refresh clears the error. Reinitialization also reloads the metadata.
+
 Provider mutation requires a secure session with the applicable YubiHSM
 capabilities. Metadata replacement first submits the new value under one
 existing canonical companion's ID and exact object policy. A device that

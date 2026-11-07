@@ -399,6 +399,31 @@ impl ProtocolPeer {
         self.metadata_objects.borrow().contains_key(&id)
     }
 
+    pub(crate) fn set_stored_public_metadata(&self, value: Vec<u8>) {
+        let mut objects = self.metadata_objects.borrow_mut();
+        let sequence = objects
+            .get(&0x7001)
+            .map_or(1, |(info, _)| info.sequence + 1);
+        objects.insert(
+            0x7001,
+            (
+                ObjectInfo {
+                    capabilities: [0; 8],
+                    id: 0x7001,
+                    length: value.len() as u16,
+                    domains: 0xffff,
+                    object_type: YUBIHSM_OPAQUE,
+                    algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                    sequence,
+                    origin: 2,
+                    label: "pkcs11rs stored test".to_owned(),
+                    delegated_capabilities: [0; 8],
+                },
+                value,
+            ),
+        );
+    }
+
     fn with_bad_card_cryptogram() -> Self {
         let peer = Self::new();
         peer.corrupt_card_cryptogram.set(true);
@@ -4712,16 +4737,8 @@ fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
     let mut slot =
         public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
 
-    assert!(
-        Slot::token_objects(&slot, 7)
-            .unwrap()
-            .iter()
-            .any(|object| matches!(
-                object.material,
-                KeyMaterial::Profile { profile_id }
-                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-            ))
-    );
+    assert!(matches!(Slot::token_objects(&slot, 7),
+        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as CK_RV));
     assert!(login_slot(&mut slot, b"0002password").is_ok());
     assert!(session_is_active(&slot));
     Slot::logout(&mut slot).unwrap();
