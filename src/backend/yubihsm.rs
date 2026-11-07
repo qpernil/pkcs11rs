@@ -2837,7 +2837,7 @@ impl YubiHsmSlot {
                     .insert(reference.clone(), linked_info.id);
             }
             replaced_metadata = Some((linked_info, linked_value, existed));
-            Some(reference)
+            Some(public_object.unique_id)
         } else {
             None
         };
@@ -2886,9 +2886,7 @@ impl YubiHsmSlot {
             .filter(|(id, _)| Some(*id) != replaced_id)
             .collect::<Vec<_>>();
         self.delete_metadata_objects(&obsolete)?;
-        Ok(detached
-            .as_ref()
-            .map(crate::backed_object::backed_object_unique_id))
+        Ok(detached)
     }
 
     fn write_backed_key_metadata(&self, object: &[u8]) -> Result<u16, Error> {
@@ -3117,7 +3115,7 @@ impl StorageProvider for YubiHsmSlot {
         }
         let reference = ContentReference::for_object(object);
         if record.backing().provider() == crate::backed_object::PUBLIC_KEY_PROVIDER {
-            match crate::backed_object::decode_backed_object(self, 0, true, &reference, object)
+            match crate::backed_object::decode_backed_object(self, 0, true, object)
                 .map_err(|error| StorageError::Provider(format!("{error:?}")))?
             {
                 Some(_) => {}

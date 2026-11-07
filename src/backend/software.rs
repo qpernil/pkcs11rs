@@ -376,8 +376,17 @@ impl Slot for SoftwareSlot {
             .as_ref()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let (stored, reference) = store.put_object(slot_id, master_key, object)?;
+        if let Some(previous) = self.token_references.get(&stored.unique_id)
+            && *previous != reference
+            && let Err(error) = store.delete_object(previous)
+        {
+            let _ = store.delete_object(&reference);
+            return Err(error);
+        }
         self.token_references
             .insert(stored.unique_id.clone(), reference);
+        self.token_objects
+            .retain(|object| object.unique_id != stored.unique_id);
         self.token_objects.push(stored.clone());
         Ok(stored)
     }

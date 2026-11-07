@@ -67,6 +67,8 @@ mod interfaces;
 mod key;
 #[path = "object.rs"]
 mod object;
+#[path = "persistence.rs"]
+mod persistence;
 #[path = "pqc_matrix.rs"]
 mod pqc_matrix;
 #[cfg(all(feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]

@@ -2,8 +2,8 @@ use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
     import_yubihsm_token_object_in_slot, persist_software_private_object_in_slot,
     piv_key_object_handles_in_slot, publish_software_secret_object, required_template_value,
-    validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
-    yubihsm_id, yubihsm_object_parameters,
+    validate_unique_template, yubihsm_hardware_import_object, yubihsm_id,
+    yubihsm_object_parameters,
 };
 use crate::software_key_ops::agreement::software_ecdh;
 use crate::*;

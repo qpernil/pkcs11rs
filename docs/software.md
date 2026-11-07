@@ -120,6 +120,16 @@ and are restored when that same name is configured again. Without a configured
 provider, a requested public token object fails with
 `CKR_TOKEN_WRITE_PROTECTED`.
 
+Stored public-key metadata uses the shared [identity fallback and conservative
+boolean defaults](storage.md). New attribute maps omit default
+flags. Legacy identity fallbacks emit warnings; applied defaults are logged at
+debug level. Malformed explicit values remain errors.
+
+Software token keys support label/ID updates and one-way tightening of
+sensitivity and extractability through `C_SetAttributeValue`. Updates preserve
+key history flags and the caller's object handle; rejected templates leave the
+stored object unchanged.
+
 Private key material and the unwrapped private master key are held only while
 the USER role is logged in. `C_Logout`, closing the last session,
 `C_CloseAllSessions`, module finalization, and failed login/loading release
@@ -132,6 +142,12 @@ secret keys must set both `CKA_TOKEN=CK_TRUE` and `CKA_PRIVATE=CK_TRUE`; they
 are stored only in the USER realm. Generation, import, copy, derivation,
 unwrapping, destruction, and restart restoration share the same publication
 and rollback boundary as asymmetric private keys.
+
+Persistent objects have stable `CKA_UNIQUE_ID` values independent of their
+content-addressed storage references. Creation and copying assign fresh
+identities; attribute updates and restart preserve them. Software asymmetric
+private keys support copying to session or encrypted token storage under the
+same access and policy checks as creation.
 
 ## Data and certificates
 
@@ -174,8 +190,10 @@ independently to every PKCS #8 key:
 Headers and record envelopes are strict canonical CBOR with explicit schema,
 version, KDF, AEAD, and parameter identifiers.
 
-Asymmetric private-record plaintext is DER-encoded PKCS #8
-`OneAsymmetricKey` version 0:
+Version-5 private-record plaintext is canonical CBOR `[unique_id, payload]`,
+where `unique_id` is text and `payload` is a byte string. The envelope version
+is included in the authenticated associated data. Asymmetric key payloads are
+DER-encoded PKCS #8 `OneAsymmetricKey` version 0:
 
 - the algorithm-specific private key is the normal PKCS #8 private-key value;
 - PKCS #9 `friendlyName` mirrors `CKA_LABEL` when it fits the standard
@@ -185,12 +203,23 @@ Asymmetric private-record plaintext is DER-encoded PKCS #8
   canonical versioned encoding of all authoritative PKCS #11 attributes,
   including the exact label and ID.
 
+Private-key attribute metadata is written as version 5 with explicit wrapping
+and unwrapping permissions. The recognized version-4 attribute layout omits
+those two permissions; readers default them to false and log a warning.
+Version-4 encrypted envelopes are authenticated with their original
+version-bound associated data and retain the historical `software-private-`
+identity derived from the ciphertext record's SHA3-256 digest. Version-1 private
+data payloads use that outer encrypted-record identity. The next explicit
+update writes version 5 and embeds the same identity. Reads never rewrite
+storage. Unknown versions, malformed records, empty explicit identities, and
+failed authenticated decryption remain errors; there is no automatic reset.
+
 The private attribute preserves labels outside PKCS #9's BMPString range.
 Conflicting, duplicate, unknown, noncanonical, or malformed attributes are
 rejected.
 
-Secret records instead use a distinct canonical CBOR schema containing the
-raw secret and its authoritative PKCS #11 attributes. Both record kinds are
+Secret payloads use a distinct canonical CBOR schema containing the
+raw secret and its authoritative PKCS #11 attributes. All private record kinds are
 encrypted and authenticated under the private master key before publication.
 
 ## Password-encrypted PKCS #8 export
@@ -266,6 +295,10 @@ Concurrent deletion or PIN changes are first-writer-wins at their atomic
 publication point; another process may retain already-unlocked key material
 until its own logout or teardown, and sees filesystem changes after its next
 login/reload.
+
+An attribute update publishes its replacement before deleting the previous
+record. A crash between these steps can leave two records with the same object
+identity; loading rejects that ambiguity rather than selecting one arbitrarily.
 
 ## Supported keys and operations
 

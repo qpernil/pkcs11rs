@@ -200,11 +200,12 @@ fn publish_data_object(
     slot_id: CK_SLOT_ID,
     mut object: TokenObject,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
-    let instance = match &mut object.material {
-        KeyMaterial::Data { instance, .. } | KeyMaterial::Certificate { instance, .. } => instance,
-        _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
-    };
-    getrandom::fill(instance).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    if !matches!(
+        object.material,
+        KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
+    ) {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
     if !object.token {
         object.set_creator(session, slot_id);
         return ctx.insert_object(object);
@@ -1255,7 +1256,6 @@ fn parse_data_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Err
     }
     let mut object = common.into_object().map_err(Error::from)?;
     object.material = KeyMaterial::Data {
-        instance: [0; 16],
         application,
         object_id,
         value,
@@ -1317,10 +1317,7 @@ fn parse_certificate_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObje
         }
     }
     let mut object = common.into_object().map_err(Error::from)?;
-    object.material = KeyMaterial::Certificate {
-        instance: [0; 16],
-        value,
-    };
+    object.material = KeyMaterial::Certificate { value };
     Ok(object)
 }
 
@@ -1373,25 +1370,6 @@ fn parse_create_object_template_with_policy(
         object.material = KeyMaterial::SoftwareSecret(value);
     }
     Ok(object)
-}
-
-pub(crate) fn validate_software_secret_length(
-    key_type: CK_KEY_TYPE,
-    length: usize,
-) -> Result<(), Error> {
-    let valid = if key_type == CKK_AES as CK_KEY_TYPE {
-        matches!(length, 16 | 24 | 32)
-    } else if key_type == CKK_DES3 as CK_KEY_TYPE {
-        length == 24
-    } else if key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE || is_hmac_key_type(key_type) {
-        (1..=1024).contains(&length)
-    } else {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-    };
-    if !valid {
-        return Err(CKR_KEY_SIZE_RANGE.into());
-    }
-    Ok(())
 }
 
 fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -1841,10 +1819,6 @@ pub(crate) fn copy_object(
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
         }
-        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwarePrivate(_))
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
         if copied_object.token
             && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_))
             && !copied_object.private
@@ -1859,6 +1833,12 @@ pub(crate) fn copy_object(
             KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
         ) {
             *new_object_handle = publish_data_object(ctx, session_handle, slot_id, copied_object)?;
+            return Ok(());
+        }
+        if copied_object.token {
+            *new_object_handle =
+                ctx.slot
+                    .store_token_key(&mut ctx.state, session_handle, copied_object)?;
             return Ok(());
         }
         if matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
@@ -2540,22 +2520,16 @@ fn set_attribute_value(
                 && stored_object.private
                 && matches!(
                     stored_object.material,
-                    KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
+                    KeyMaterial::Data { .. }
+                        | KeyMaterial::Certificate { .. }
+                        | KeyMaterial::SoftwareSecret(_)
+                        | KeyMaterial::SoftwarePrivate(_)
                 )
                 && ctx.get_slot(slot_id)?.stores_software_token_keys()
             {
                 let replacement = ctx
                     ._get_slot_mut(slot_id)?
                     .store_software_private_object(slot_id, &updated_object)?;
-                if let Err(error) = ctx
-                    ._get_slot_mut(slot_id)?
-                    .destroy_software_private_object(&stored_object.unique_id)
-                {
-                    let _ = ctx
-                        ._get_slot_mut(slot_id)?
-                        .destroy_software_private_object(&replacement.unique_id);
-                    return Err(error);
-                }
                 ctx.refresh_slot_token_objects_with_rebindings(
                     slot_id,
                     &[(object, replacement.unique_id)],

@@ -6,9 +6,8 @@ use super::{
     },
     key::yubihsm_ec_algorithm,
     object::{
-        persist_software_private_object, publish_software_secret_object,
-        validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
-        yubihsm_id,
+        persist_software_private_object, publish_software_secret_object, validate_unique_template,
+        yubihsm_hardware_import_object, yubihsm_id,
     },
 };
 use crate::*;

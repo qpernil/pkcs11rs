@@ -29,7 +29,7 @@ use crate::{
     PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector, SignatureOperation,
     Slot, SoftwareSlot, SwitchableFidoEndpoint, TokenObject, YubiHsmPublicDiscoveryConfig,
     YubiHsmSlot, YubiKeyClient,
-    backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
+    backed_object::{put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad,
 };
 #[cfg(feature = "native-hardware")]
@@ -1504,6 +1504,9 @@ impl SlotState {
         session_handle: CK_SESSION_HANDLE,
         mut object: TokenObject,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
+        if object.token {
+            object.unique_id = crate::object::new_object_id()?;
+        }
         let reference = if object.token {
             put_backed_object(self.token_storage_provider(slot), &object)?
         } else {
@@ -1511,7 +1514,6 @@ impl SlotState {
             put_backed_object(&session.storage, &object)?
         };
         if object.token {
-            object.unique_id = backed_object_unique_id(&reference);
             self.backed_object_references
                 .insert(object.unique_id.clone(), reference.clone());
             let unique_id = object.unique_id.clone();
@@ -1619,6 +1621,7 @@ impl SlotState {
         else {
             return Ok(false);
         };
+        replacement.unique_id = previous.unique_id.clone();
         let replacement_reference = if replacement.token {
             put_backed_object(self.token_storage_provider(slot), &replacement)?
         } else {
@@ -1644,7 +1647,6 @@ impl SlotState {
         }
         if replacement.token {
             self.backed_object_references.remove(&previous.unique_id);
-            replacement.unique_id = backed_object_unique_id(&replacement_reference);
             self.backed_object_references
                 .insert(replacement.unique_id.clone(), replacement_reference.clone());
         } else {

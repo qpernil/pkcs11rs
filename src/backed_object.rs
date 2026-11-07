@@ -53,6 +53,16 @@ fn insert(
 
 fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
     let mut attributes = KeyAttributes::new();
+    if object.token && object.unique_id.is_empty() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    if object.token {
+        insert(
+            &mut attributes,
+            CKA_UNIQUE_ID as _,
+            KeyAttributeValue::Text(object.unique_id.clone()),
+        )?;
+    }
     for (attribute, value) in [
         (
             CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
@@ -65,58 +75,6 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
         (
             CKA_ID as CK_ATTRIBUTE_TYPE,
             KeyAttributeValue::Bytes(object.id.clone()),
-        ),
-        (
-            CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.private),
-        ),
-        (
-            CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.encrypt),
-        ),
-        (
-            CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.decrypt),
-        ),
-        (
-            CKA_SIGN as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.sign),
-        ),
-        (
-            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.verify),
-        ),
-        (
-            CKA_DERIVE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.derive),
-        ),
-        (
-            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.encapsulate),
-        ),
-        (
-            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.decapsulate),
-        ),
-        (
-            CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.sensitive),
-        ),
-        (
-            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.extractable),
-        ),
-        (
-            CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.always_sensitive),
-        ),
-        (
-            CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.never_extractable),
-        ),
-        (
-            CKA_LOCAL as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.local),
         ),
     ] {
         insert(&mut attributes, attribute, value)?;
@@ -141,15 +99,19 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
             ),
         )?;
     }
-    if matches!(
-        object.class,
-        x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS || x == CKO_SECRET_KEY as CK_OBJECT_CLASS
-    ) {
-        insert(
-            &mut attributes,
-            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
-            KeyAttributeValue::Boolean(object.wrap_with_trusted),
-        )?;
+    for (attribute, value) in crate::object::KeyPolicyFlags::from_object(object).attributes() {
+        if crate::object::KeyPolicyFlags::stored_default(attribute, object.class) == Some(value) {
+            continue;
+        }
+        if attribute != CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
+            || matches!(object.class, x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS || x == CKO_SECRET_KEY as CK_OBJECT_CLASS)
+        {
+            insert(
+                &mut attributes,
+                attribute,
+                KeyAttributeValue::Boolean(value),
+            )?;
+        }
     }
     for (attribute, template) in [
         (
@@ -278,31 +240,39 @@ fn encode_record(object: &TokenObject, provider: &str, backing: Vec<u8>) -> Resu
 const DATA_OBJECT_SCHEMA: &str = "pkcs11rs.data-object";
 
 pub(crate) fn encode_data_object(object: &TokenObject) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let (instance, application, object_id, value) = match &object.material {
+    encode_data_object_format(object, None)
+}
+
+pub(crate) fn encode_data_object_format(
+    object: &TokenObject,
+    legacy_instance: Option<&[u8; 16]>,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let (application, object_id, value) = match &object.material {
         KeyMaterial::Data {
-            instance,
             application,
             object_id,
             value,
         } if object.class == CKO_DATA as CK_OBJECT_CLASS => (
-            instance,
             application.as_slice(),
             object_id.as_slice(),
             value.as_slice(),
         ),
-        KeyMaterial::Certificate { instance, value }
+        KeyMaterial::Certificate { value }
             if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS =>
         {
-            (instance, &[][..], &[][..], value.as_slice())
+            (&[][..], &[][..], value.as_slice())
         }
         _ => return Err(CKR_DATA_INVALID.into()),
     };
+    if object.unique_id.is_empty() {
+        return Err(CKR_DATA_INVALID.into());
+    }
     let mut encoded = Zeroizing::new(Vec::new());
     let mut encoder = Encoder::new(&mut *encoded);
     encoder
         .array(10)
         .and_then(|e| e.str(DATA_OBJECT_SCHEMA))
-        .and_then(|e| e.u64(1))
+        .and_then(|e| e.u64(if legacy_instance.is_some() { 1 } else { 2 }))
         .and_then(|e| e.u64(cryptoki_ulong_to_u64(object.class)))
         .and_then(|e| e.str(&object.label))
         .and_then(|e| e.bytes(&object.id))
@@ -310,21 +280,38 @@ pub(crate) fn encode_data_object(object: &TokenObject) -> Result<Zeroizing<Vec<u
         .and_then(|e| e.bytes(application))
         .and_then(|e| e.bytes(object_id))
         .and_then(|e| e.bytes(value))
-        .and_then(|e| e.bytes(instance))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    match legacy_instance {
+        Some(instance) => encoder.bytes(instance),
+        None => encoder.str(&object.unique_id),
+    }
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     Ok(encoded)
 }
 
 pub(crate) fn decode_data_object(
     slot_id: CK_SLOT_ID,
     token: bool,
-    unique_id: &str,
     encoded: &[u8],
+) -> Result<TokenObject, Error> {
+    decode_data_object_with_legacy_identity(slot_id, token, encoded, None)
+}
+
+pub(crate) fn decode_data_object_with_legacy_identity(
+    slot_id: CK_SLOT_ID,
+    token: bool,
+    encoded: &[u8],
+    legacy_identity: Option<&str>,
 ) -> Result<TokenObject, Error> {
     let decode = || -> Result<TokenObject, Box<dyn std::error::Error>> {
         let mut d = Decoder::new(encoded);
-        if d.array()? != Some(10) || d.str()? != DATA_OBJECT_SCHEMA || d.u64()? != 1 {
+        let fields = d.array()?;
+        if d.str()? != DATA_OBJECT_SCHEMA {
             return Err("invalid data record".into());
+        }
+        let version = d.u64()?;
+        if fields != Some(10) || !matches!(version, 1 | 2) {
+            return Err("invalid data version".into());
         }
         let class = d.u64()?;
         if class != u64::from(CKO_DATA) && class != u64::from(CKO_CERTIFICATE) {
@@ -342,7 +329,21 @@ pub(crate) fn decode_data_object(
         let application = d.bytes()?.to_vec();
         let object_id = d.bytes()?.to_vec();
         let value = Zeroizing::new(d.bytes()?.to_vec());
-        let instance: [u8; 16] = d.bytes()?.try_into()?;
+        let legacy_instance: Option<[u8; 16]> = if version == 1 {
+            Some(d.bytes()?.try_into()?)
+        } else {
+            None
+        };
+        let unique_id = if version == 1 {
+            legacy_identity.map(str::to_owned).unwrap_or_else(|| {
+                ContentReference::for_object(encoded).legacy_object_id("pkcs11rs stored ")
+            })
+        } else {
+            d.str()?.to_owned()
+        };
+        if unique_id.is_empty() {
+            return Err("empty object identity".into());
+        }
         if d.position() != encoded.len() {
             return Err("trailing data".into());
         }
@@ -354,10 +355,9 @@ pub(crate) fn decode_data_object(
             {
                 return Err("invalid certificate".into());
             }
-            KeyMaterial::Certificate { instance, value }
+            KeyMaterial::Certificate { value }
         } else {
             KeyMaterial::Data {
-                instance,
                 application,
                 object_id,
                 value,
@@ -365,13 +365,20 @@ pub(crate) fn decode_data_object(
         };
         object.slot_id = Some(slot_id);
         object.unique_id = unique_id.to_owned();
+        if encode_data_object_format(&object, legacy_instance.as_ref())
+            .map_err(|_| "invalid data record")?
+            .as_slice()
+            != encoded
+        {
+            return Err("noncanonical data record".into());
+        }
+        if version == 1 {
+            tracing::warn!(target: "pkcs11rs::storage", slot_id,
+                "Legacy data metadata uses its original content-derived identity until rewritten");
+        }
         Ok(object)
     };
-    let object = decode().map_err(|_| Error::from(CKR_DATA_INVALID))?;
-    if encode_data_object(&object)?.as_slice() != encoded {
-        return Err(CKR_DATA_INVALID.into());
-    }
-    Ok(object)
+    decode().map_err(|_| Error::from(CKR_DATA_INVALID))
 }
 
 pub(crate) fn encode_backed_object(object: &TokenObject) -> Result<EncodedBackedObject, Error> {
@@ -479,13 +486,6 @@ fn required_unsigned(
 ) -> Result<u64, Error> {
     match attributes.get(cryptoki_ulong_to_u64(attribute)) {
         Some(KeyAttributeValue::Unsigned(value)) => Ok(*value),
-        _ => Err(CKR_DATA_INVALID.into()),
-    }
-}
-
-fn required_bool(attributes: &KeyAttributes, attribute: CK_ATTRIBUTE_TYPE) -> Result<bool, Error> {
-    match attributes.get(cryptoki_ulong_to_u64(attribute)) {
-        Some(KeyAttributeValue::Boolean(value)) => Ok(*value),
         _ => Err(CKR_DATA_INVALID.into()),
     }
 }
@@ -747,8 +747,13 @@ fn materialize_object(
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     let allowed_mechanisms =
         optional_mechanisms(attributes, CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE)?;
-    let wrap_with_trusted =
-        optional_bool(attributes, CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE)?.unwrap_or(false);
+    let flag = |attribute| -> Result<bool, Error> {
+        Ok(optional_bool(attributes, attribute)?.unwrap_or(
+            crate::object::KeyPolicyFlags::stored_default(attribute, class)
+                .ok_or(CKR_DATA_INVALID)?,
+        ))
+    };
+    let wrap_with_trusted = flag(CKA_WRAP_WITH_TRUSTED as _)?;
     let policy_templates = crate::KeyPolicyTemplates {
         wrap: optional_template(attributes, CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE)?,
         unwrap: optional_template(attributes, CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE)?,
@@ -756,29 +761,43 @@ fn materialize_object(
     };
     let object = TokenObject {
         slot_id: token.then_some(slot_id),
-        unique_id: backed_object_unique_id(reference),
+        unique_id: if token {
+            match attributes.get(u64::from(CKA_UNIQUE_ID)) {
+                Some(KeyAttributeValue::Text(id)) if !id.is_empty() => id.clone(),
+                None => {
+                    // Preserve the pre-existing identity until the next write embeds it.
+                    let id = reference.legacy_object_id("pkcs11rs stored ");
+                    tracing::warn!(
+                        target: "pkcs11rs::storage", slot_id, reference = ?reference,
+                        "Stored metadata lacks CKA_UNIQUE_ID; using the legacy content-derived identity until the record is rewritten"
+                    );
+                    id
+                }
+                Some(_) => return Err(CKR_DATA_INVALID.into()),
+            }
+        } else {
+            String::new()
+        },
         class,
         key_type,
         label: required_text(attributes, CKA_LABEL as CK_ATTRIBUTE_TYPE)?,
         id: required_bytes(attributes, CKA_ID as CK_ATTRIBUTE_TYPE)?,
         token,
-        private: required_bool(attributes, CKA_PRIVATE as CK_ATTRIBUTE_TYPE)?,
-        encrypt: required_bool(attributes, CKA_ENCRYPT as CK_ATTRIBUTE_TYPE)?,
-        decrypt: required_bool(attributes, CKA_DECRYPT as CK_ATTRIBUTE_TYPE)?,
-        sign: required_bool(attributes, CKA_SIGN as CK_ATTRIBUTE_TYPE)?,
-        verify: required_bool(attributes, CKA_VERIFY as CK_ATTRIBUTE_TYPE)?,
-        derive: required_bool(attributes, CKA_DERIVE as CK_ATTRIBUTE_TYPE)?,
-        wrap: false,
-        unwrap: false,
-        encapsulate: optional_bool(attributes, CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE)?
-            .unwrap_or(false),
-        decapsulate: optional_bool(attributes, CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE)?
-            .unwrap_or(false),
-        sensitive: required_bool(attributes, CKA_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
-        extractable: required_bool(attributes, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
-        always_sensitive: required_bool(attributes, CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
-        never_extractable: required_bool(attributes, CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
-        local: required_bool(attributes, CKA_LOCAL as CK_ATTRIBUTE_TYPE)?,
+        private: flag(CKA_PRIVATE as _)?,
+        encrypt: flag(CKA_ENCRYPT as _)?,
+        decrypt: flag(CKA_DECRYPT as _)?,
+        sign: flag(CKA_SIGN as _)?,
+        verify: flag(CKA_VERIFY as _)?,
+        derive: flag(CKA_DERIVE as _)?,
+        wrap: flag(CKA_WRAP as _)?,
+        unwrap: flag(CKA_UNWRAP as _)?,
+        encapsulate: flag(CKA_ENCAPSULATE as _)?,
+        decapsulate: flag(CKA_DECAPSULATE as _)?,
+        sensitive: flag(CKA_SENSITIVE as _)?,
+        extractable: flag(CKA_EXTRACTABLE as _)?,
+        always_sensitive: flag(CKA_ALWAYS_SENSITIVE as _)?,
+        never_extractable: flag(CKA_NEVER_EXTRACTABLE as _)?,
+        local: flag(CKA_LOCAL as _)?,
         key_gen_mechanism,
         allowed_mechanisms,
         wrap_with_trusted,
@@ -794,6 +813,22 @@ fn materialize_object(
             return Err(CKR_DATA_INVALID.into());
         }
     }
+    let defaulted_attributes = crate::object::KeyPolicyFlags::STORED_DEFAULTS
+        .into_iter()
+        .filter_map(|(attribute, name, _)| {
+            attributes
+                .get(cryptoki_ulong_to_u64(attribute))
+                .is_none()
+                .then_some(name)
+        })
+        .collect::<Vec<_>>();
+    if !defaulted_attributes.is_empty() {
+        tracing::debug!(
+            target: "pkcs11rs::storage", slot_id, token, reference = ?reference,
+            attributes = ?defaulted_attributes,
+            "Missing stored flags use conservative defaults"
+        );
+    }
     Ok(object)
 }
 
@@ -801,13 +836,11 @@ pub(crate) fn decode_backed_object(
     provider: &dyn StorageProvider,
     slot_id: CK_SLOT_ID,
     token: bool,
-    reference: &ContentReference,
     encoded: &[u8],
 ) -> Result<Option<TokenObject>, Error> {
     let mut prefix = Decoder::new(encoded);
     if prefix.array().is_ok() && prefix.str().ok() == Some(DATA_OBJECT_SCHEMA) {
-        let object =
-            decode_data_object(slot_id, token, &backed_object_unique_id(reference), encoded)?;
+        let object = decode_data_object(slot_id, token, encoded)?;
         if object.private {
             return Err(CKR_DATA_INVALID.into());
         }
@@ -836,7 +869,7 @@ pub(crate) fn decode_backed_object(
             materialize_object(
                 slot_id,
                 token,
-                reference,
+                &ContentReference::for_object(encoded),
                 CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 attributes,
                 material,
@@ -861,7 +894,7 @@ pub(crate) fn decode_backed_object(
             materialize_object(
                 slot_id,
                 token,
-                reference,
+                &ContentReference::for_object(encoded),
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 attributes,
                 KeyMaterial::PreviewSignRegistration {
@@ -901,7 +934,7 @@ pub(crate) fn decode_backed_object(
             materialize_object(
                 slot_id,
                 token,
-                reference,
+                &ContentReference::for_object(encoded),
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 attributes,
                 KeyMaterial::PreviewSignDerived {
@@ -949,26 +982,27 @@ pub(crate) fn stored_objects(
         Err(error) => return Err(storage_error(error)),
     };
     let mut objects = Vec::new();
+    let mut identities = std::collections::BTreeSet::new();
     for reference in references {
         let encoded = provider
             .get(&reference)
             .map_err(storage_error)?
             .ok_or(CKR_DEVICE_ERROR)?;
-        if let Some(object) = decode_backed_object(provider, slot_id, token, &reference, &encoded)?
-        {
+        let decoded = decode_backed_object(provider, slot_id, token, &encoded).map_err(|error| {
+            tracing::warn!(
+                target: "pkcs11rs::storage", slot_id, reference = ?reference, error = ?error,
+                "Invalid stored object metadata; repair the record before accessing token objects"
+            );
+            error
+        })?;
+        if let Some(object) = decoded {
+            if token && !identities.insert(object.unique_id.clone()) {
+                return Err(CKR_DATA_INVALID.into());
+            }
             objects.push((reference, object));
         }
     }
     Ok(objects)
-}
-
-pub(crate) fn backed_object_unique_id(reference: &ContentReference) -> String {
-    let mut unique_id = String::from("pkcs11rs stored ");
-    for byte in reference.digest() {
-        use std::fmt::Write;
-        let _ = write!(unique_id, "{byte:02x}");
-    }
-    unique_id
 }
 
 #[cfg(test)]
@@ -996,6 +1030,56 @@ mod tests {
         fn delete(&self, _reference: &ContentReference) -> Result<bool, StorageError> {
             Err(StorageError::Unavailable)
         }
+    }
+
+    #[test]
+    fn data_records_preserve_legacy_identity_and_reject_malformed_versions() {
+        let mut object = TokenObjectTemplate {
+            class: Some(CKO_DATA as _),
+            key_type: Some(CKK_GENERIC_SECRET as _),
+            token: true,
+            ..TokenObjectTemplate::default()
+        }
+        .into_object()
+        .unwrap();
+        object.unique_id = crate::object::new_object_id().unwrap();
+        object.material = KeyMaterial::Data {
+            application: Vec::new(),
+            object_id: Vec::new(),
+            value: Zeroizing::new(b"payload".to_vec()),
+        };
+        let legacy = encode_data_object_format(&object, Some(&[0x42; 16])).unwrap();
+        let mut restored = decode_data_object(7, true, &legacy).unwrap();
+        let expected = ContentReference::for_object(&legacy).legacy_object_id("pkcs11rs stored ");
+        assert_eq!(restored.unique_id, expected);
+        restored.label = "updated legacy data".into();
+        let updated = encode_data_object(&restored).unwrap();
+        assert_eq!(
+            decode_data_object(7, true, &updated).unwrap().unique_id,
+            expected
+        );
+        let mut encoded = encode_data_object(&object).unwrap();
+        assert_eq!(
+            decode_data_object(7, true, &encoded).unwrap().unique_id,
+            object.unique_id
+        );
+        let mut decoder = Decoder::new(&encoded);
+        decoder.array().unwrap();
+        decoder.str().unwrap();
+        let offset = decoder.position();
+        assert_eq!(decoder.u64().unwrap(), 2);
+        encoded[offset] = 1;
+        assert!(decode_data_object(7, true, &encoded).is_err());
+
+        // An interrupted replacement must not silently select one record.
+        let provider = crate::storage::MemoryStorageProvider::default();
+        put_backed_object(&provider, &object).unwrap();
+        object.label = "replacement".into();
+        put_backed_object(&provider, &object).unwrap();
+        assert_eq!(
+            CK_RV::from(stored_objects(&provider, 7, true).unwrap_err()),
+            CKR_DATA_INVALID as CK_RV
+        );
     }
 
     #[test]
@@ -1028,6 +1112,26 @@ mod tests {
 
     #[test]
     fn backed_public_key_preserves_allowed_mechanisms() {
+        #[derive(Clone)]
+        struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = LogWriter(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _log_guard = tracing::subscriber::set_default(subscriber);
         let mut object = TokenObject {
             slot_id: Some(7),
             unique_id: "public-key".to_owned(),
@@ -1042,7 +1146,7 @@ mod tests {
             sign: false,
             verify: true,
             derive: false,
-            wrap: false,
+            wrap: true,
             unwrap: false,
             encapsulate: false,
             decapsulate: false,
@@ -1080,10 +1184,110 @@ mod tests {
             object: encoded,
         };
 
+        let written = BackedKeyMetadata::from_cbor(&provider.object).unwrap();
+        let written = written.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap();
+        assert!(written.get(u64::from(CKA_UNWRAP)).is_none());
+        assert_eq!(
+            written.get(u64::from(CKA_WRAP)),
+            Some(&KeyAttributeValue::Boolean(true))
+        );
+        assert_eq!(
+            written.get(u64::from(CKA_PRIVATE)),
+            Some(&KeyAttributeValue::Boolean(false))
+        );
         let restored = stored_objects(&provider, 7, true).unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);
         assert_eq!(restored[0].1.policy_templates, object.policy_templates);
+        assert!(restored[0].1.wrap);
+        // Missing legacy identity is stable; absent optional uses deny permission.
+        for attribute in [
+            CKA_UNIQUE_ID,
+            CKA_PRIVATE,
+            CKA_SENSITIVE,
+            CKA_ENCRYPT,
+            CKA_DECRYPT,
+            CKA_SIGN,
+            CKA_VERIFY,
+            CKA_DERIVE,
+            CKA_WRAP,
+            CKA_UNWRAP,
+            CKA_ENCAPSULATE,
+            CKA_DECAPSULATE,
+            CKA_EXTRACTABLE,
+        ] {
+            let mut metadata = BackedKeyMetadata::from_cbor(&provider.object).unwrap();
+            let mut attributes = metadata.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap().clone();
+            attributes.remove(u64::from(attribute));
+            metadata
+                .insert_aspect(u64::from(CKO_PUBLIC_KEY), attributes)
+                .unwrap();
+            let encoded = metadata.to_cbor().unwrap();
+            let obsolete = FixedProvider {
+                reference: ContentReference::for_object(&encoded),
+                object: encoded,
+            };
+            if attribute == CKA_UNIQUE_ID {
+                let mut restored = stored_objects(&obsolete, 7, true).unwrap().remove(0).1;
+                let expected = format!(
+                    "pkcs11rs stored {}",
+                    obsolete
+                        .reference
+                        .digest()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+                assert_eq!(restored.unique_id, expected);
+                restored.label = "updated label".to_owned();
+                let rewritten = encode_backed_object(&restored).unwrap().object;
+                let rewritten_provider = FixedProvider {
+                    reference: ContentReference::for_object(&rewritten),
+                    object: rewritten,
+                };
+                assert_ne!(obsolete.reference, rewritten_provider.reference);
+                assert_eq!(
+                    stored_objects(&rewritten_provider, 7, true).unwrap()[0]
+                        .1
+                        .unique_id,
+                    expected
+                );
+            } else {
+                let restored = stored_objects(&obsolete, 7, true).unwrap().remove(0).1;
+                let usage = match attribute {
+                    CKA_PRIVATE => restored.private,
+                    CKA_SENSITIVE => restored.sensitive,
+                    CKA_ENCRYPT => restored.encrypt,
+                    CKA_DECRYPT => restored.decrypt,
+                    CKA_SIGN => restored.sign,
+                    CKA_VERIFY => restored.verify,
+                    CKA_DERIVE => restored.derive,
+                    CKA_EXTRACTABLE => restored.extractable,
+                    CKA_WRAP => restored.wrap,
+                    CKA_UNWRAP => restored.unwrap,
+                    CKA_ENCAPSULATE => restored.encapsulate,
+                    CKA_DECAPSULATE => restored.decapsulate,
+                    _ => unreachable!(),
+                };
+                assert_eq!(usage, matches!(attribute, CKA_PRIVATE | CKA_SENSITIVE));
+                assert_eq!(restored.unique_id, object.unique_id);
+                assert_eq!(restored.policy_templates, object.policy_templates);
+                assert_eq!(restored.allowed_mechanisms, object.allowed_mechanisms);
+            }
+        }
+        let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("legacy content-derived identity"));
+        assert!(logs.contains("Missing stored flags use conservative defaults"));
+        for attribute in ["CKA_WRAP", "CKA_UNWRAP", "CKA_SIGN", "CKA_EXTRACTABLE"] {
+            assert!(logs.contains(attribute));
+        }
+        assert!(!logs.contains("restricted RSA key"));
+        let duplicates = crate::storage::MemoryStorageProvider::new();
+        put_backed_object(&duplicates, &object).unwrap();
+        object.label = "different content with duplicate identity".into();
+        put_backed_object(&duplicates, &object).unwrap();
+        assert!(matches!(stored_objects(&duplicates, 7, true),
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as CK_RV));
     }
 
     #[test]
@@ -1133,6 +1337,17 @@ mod tests {
             reference: ContentReference::for_object(&encoded),
             object: encoded,
         };
+        let written = BackedKeyMetadata::from_cbor(&provider.object).unwrap();
+        let written = written.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap();
+        assert!(written.get(u64::from(CKA_UNWRAP)).is_none());
+        assert_eq!(
+            written.get(u64::from(CKA_ENCAPSULATE)),
+            Some(&KeyAttributeValue::Boolean(true))
+        );
+        assert_eq!(
+            written.get(u64::from(CKA_PRIVATE)),
+            Some(&KeyAttributeValue::Boolean(false))
+        );
         let restored = stored_objects(&provider, 7, true).unwrap();
         assert_eq!(restored.len(), 1);
         assert!(restored[0].1.encapsulate);

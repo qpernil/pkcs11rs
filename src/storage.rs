@@ -75,6 +75,10 @@ pub struct ContentReference {
 }
 
 impl ContentReference {
+    /// Reproduce a reader's historical per-record identity without changing storage.
+    pub(crate) fn legacy_object_id(&self, prefix: &str) -> String {
+        format!("{prefix}{}", encode_lower_hex(&self.digest))
+    }
     /// Compute a SHA3-256 content reference for the exact object bytes.
     pub fn for_object(object: &[u8]) -> Self {
         let algorithm = ContentHashAlgorithm::Sha3_256;

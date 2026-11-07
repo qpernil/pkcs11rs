@@ -47,6 +47,8 @@ const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
 const DATA_RECORD_SCHEMA: &str = "pkcs11rs-software-private-data";
 const SECRET_RECORD_SCHEMA: &str = "pkcs11rs-software-secret-key";
 const FORMAT_VERSION: u64 = 4;
+const IDENTITY_RECORD_VERSION: u64 = 5;
+const PRIVATE_ATTRIBUTES_VERSION: u64 = 5;
 const HEADER_FORMAT_VERSION: u64 = 3;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 const KDF_ITERATIONS: u32 = 10_000;
@@ -333,26 +335,13 @@ type StoredPkcs8Attributes = SetOfVec<StoredPkcs8Attribute>;
 
 #[derive(Debug, Eq, PartialEq)]
 struct StoredAttributes {
+    flags: crate::object::KeyPolicyFlags,
     class: u64,
     key_type: u64,
     label: String,
     id: Vec<u8>,
-    private: bool,
-    encrypt: bool,
-    decrypt: bool,
-    sign: bool,
-    verify: bool,
-    derive: bool,
-    encapsulate: bool,
-    decapsulate: bool,
-    sensitive: bool,
-    extractable: bool,
-    always_sensitive: bool,
-    never_extractable: bool,
-    local: bool,
     key_gen_mechanism: Option<u64>,
     allowed_mechanisms: Option<Vec<u64>>,
-    wrap_with_trusted: bool,
     wrap_template: Option<Vec<u8>>,
     unwrap_template: Option<Vec<u8>>,
     derive_template: Option<Vec<u8>>,
@@ -627,9 +616,13 @@ impl SoftwareTokenStore {
             if encoded.len() > MAX_RECORD_LENGTH {
                 return Err(CKR_DATA_INVALID.into());
             }
-            let unique_id = record_unique_id(&reference);
-            let object = decode_record(&self.name, slot_id, &unique_id, master_key, &encoded)?;
-            references.insert(unique_id, reference);
+            let object = decode_record(&self.name, slot_id, master_key, &encoded)?;
+            if references
+                .insert(object.unique_id.clone(), reference)
+                .is_some()
+            {
+                return Err(CKR_DATA_INVALID.into());
+            }
             objects.push(object);
         }
         objects.sort_by(|left, right| left.unique_id.cmp(&right.unique_id));
@@ -642,13 +635,16 @@ impl SoftwareTokenStore {
         master_key: &[u8; MASTER_KEY_LENGTH],
         object: &TokenObject,
     ) -> Result<(TokenObject, ContentReference), Error> {
-        let encoded = encode_record(&self.name, master_key, object)?;
+        let mut object = object.clone();
+        if object.unique_id.is_empty() {
+            object.unique_id = crate::object::new_object_id()?;
+        }
+        let encoded = encode_record(&self.name, master_key, &object)?;
         let reference = self
             .records
             .put(&encoded)
             .map_err(crate::backed_object::storage_error)?;
-        let unique_id = record_unique_id(&reference);
-        let stored = decode_record(&self.name, slot_id, &unique_id, master_key, &encoded)?;
+        let stored = decode_record(&self.name, slot_id, master_key, &encoded)?;
         Ok((stored, reference))
     }
 
@@ -878,14 +874,16 @@ fn header_aad(name: &str, role: PinRole, generation: u64) -> Vec<u8> {
 }
 
 fn record_aad(name: &str, schema: &str) -> Vec<u8> {
+    record_aad_version(name, schema, IDENTITY_RECORD_VERSION)
+}
+
+fn record_aad_version(name: &str, schema: &str, version: u64) -> Vec<u8> {
     let mut aad = Vec::with_capacity(schema.len() + name.len() + 9);
     aad.extend_from_slice(schema.as_bytes());
     aad.push(0);
     aad.extend_from_slice(name.as_bytes());
-    if schema == SECRET_RECORD_SCHEMA {
-        aad.push(0);
-        aad.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
-    }
+    aad.push(0);
+    aad.extend_from_slice(&version.to_be_bytes());
     aad
 }
 
@@ -1055,21 +1053,24 @@ fn encode_record(
         ),
         _ => return Err(CKR_DATA_INVALID.into()),
     };
+    if object.unique_id.is_empty() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let mut identified = Zeroizing::new(Vec::new());
+    Encoder::new(&mut *identified)
+        .array(2)
+        .and_then(|e| e.str(&object.unique_id))
+        .and_then(|e| e.bytes(&plaintext))
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     let mut nonce = [0u8; NONCE_LENGTH];
     getrandom::fill(&mut nonce).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let ciphertext = encrypt(
-        master_key,
-        &nonce,
-        &record_aad(name, schema),
-        plaintext.as_ref(),
-    )?;
+    let ciphertext = encrypt(master_key, &nonce, &record_aad(name, schema), &identified)?;
     encode_record_envelope(schema, &nonce, &ciphertext)
 }
 
 fn decode_record(
     name: &str,
     slot_id: crate::CK_SLOT_ID,
-    unique_id: &str,
     master_key: &[u8; MASTER_KEY_LENGTH],
     encoded: &[u8],
 ) -> Result<TokenObject, Error> {
@@ -1081,8 +1082,11 @@ fn decode_record(
     if !matches!(
         schema,
         RECORD_SCHEMA | SECRET_RECORD_SCHEMA | DATA_RECORD_SCHEMA
-    ) || outer.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
-    {
+    ) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let version = outer.u64().map_err(|_| CKR_DATA_INVALID)?;
+    if !matches!(version, FORMAT_VERSION | IDENTITY_RECORD_VERSION) {
         return Err(CKR_DATA_INVALID.into());
     }
     let nonce: [u8; NONCE_LENGTH] = outer
@@ -1094,29 +1098,62 @@ fn decode_record(
     if ciphertext.len() < TAG_LENGTH || outer.position() != encoded.len() {
         return Err(CKR_DATA_INVALID.into());
     }
-    if encode_record_envelope(schema, &nonce, ciphertext)? != encoded {
+    if encode_record_envelope_version(schema, version, &nonce, ciphertext)? != encoded {
         return Err(CKR_DATA_INVALID.into());
     }
-    let plaintext = decrypt(master_key, &nonce, &record_aad(name, schema), ciphertext)
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let plaintext = decrypt(
+        master_key,
+        &nonce,
+        &record_aad_version(name, schema, version),
+        ciphertext,
+    )
+    .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let legacy_id = (version == FORMAT_VERSION)
+        .then(|| ContentReference::for_object(encoded).legacy_object_id("software-private-"));
+    let (unique_id, plaintext) = if let Some(id) = legacy_id.as_deref() {
+        tracing::warn!(target: "pkcs11rs::storage", slot_id,
+            "Legacy encrypted object uses its original ciphertext-derived identity until rewritten");
+        (id, plaintext.as_slice())
+    } else {
+        let mut decoder = Decoder::new(&plaintext);
+        if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(2) {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let id = decoder.str().map_err(|_| CKR_DATA_INVALID)?;
+        let payload = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?;
+        let mut canonical = Zeroizing::new(Vec::new());
+        Encoder::new(&mut *canonical)
+            .array(2)
+            .and_then(|e| e.str(id))
+            .and_then(|e| e.bytes(payload))
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        if id.is_empty() || canonical.as_slice() != plaintext.as_slice() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        (id, payload)
+    };
     if schema == DATA_RECORD_SCHEMA {
-        let object =
-            crate::backed_object::decode_data_object(slot_id, true, unique_id, plaintext.as_ref())?;
-        if !object.private {
+        let object = crate::backed_object::decode_data_object_with_legacy_identity(
+            slot_id,
+            true,
+            plaintext,
+            legacy_id.as_deref(),
+        )?;
+        if !object.private || object.unique_id != unique_id {
             return Err(CKR_DATA_INVALID.into());
         }
         return Ok(object);
     }
     if schema == SECRET_RECORD_SCHEMA {
-        if !stored_secret_key_info(plaintext.as_ref()) {
+        if !stored_secret_key_info(plaintext) {
             return Err(CKR_DATA_INVALID.into());
         }
-        return decode_stored_secret_key_info(slot_id, unique_id, plaintext.as_ref());
+        return decode_stored_secret_key_info(slot_id, unique_id, plaintext);
     }
-    if stored_secret_key_info(plaintext.as_ref()) {
+    if stored_secret_key_info(plaintext) {
         return Err(CKR_DATA_INVALID.into());
     }
-    let (attributes, material) = decode_stored_private_key_info(plaintext.as_ref())?;
+    let (attributes, material) = decode_stored_private_key_info(plaintext)?;
     let class: crate::CK_OBJECT_CLASS = stored_u64_to_cryptoki_ulong(attributes.class)?;
     let key_type: crate::CK_KEY_TYPE = stored_u64_to_cryptoki_ulong(attributes.key_type)?;
     let key_gen_mechanism: Option<crate::CK_MECHANISM_TYPE> = attributes
@@ -1150,24 +1187,24 @@ fn decode_record(
         label: attributes.label,
         id: attributes.id,
         token: true,
-        private: attributes.private,
-        encrypt: attributes.encrypt,
-        decrypt: attributes.decrypt,
-        sign: attributes.sign,
-        verify: attributes.verify,
-        derive: attributes.derive,
-        wrap: false,
-        unwrap: false,
-        encapsulate: attributes.encapsulate,
-        decapsulate: attributes.decapsulate,
-        sensitive: attributes.sensitive,
-        extractable: attributes.extractable,
-        always_sensitive: attributes.always_sensitive,
-        never_extractable: attributes.never_extractable,
-        local: attributes.local,
+        private: attributes.flags.private,
+        encrypt: attributes.flags.encrypt,
+        decrypt: attributes.flags.decrypt,
+        sign: attributes.flags.sign,
+        verify: attributes.flags.verify,
+        derive: attributes.flags.derive,
+        wrap: attributes.flags.wrap,
+        unwrap: attributes.flags.unwrap,
+        encapsulate: attributes.flags.encapsulate,
+        decapsulate: attributes.flags.decapsulate,
+        sensitive: attributes.flags.sensitive,
+        extractable: attributes.flags.extractable,
+        always_sensitive: attributes.flags.always_sensitive,
+        never_extractable: attributes.flags.never_extractable,
+        local: attributes.flags.local,
         key_gen_mechanism,
         allowed_mechanisms,
-        wrap_with_trusted: attributes.wrap_with_trusted,
+        wrap_with_trusted: attributes.flags.wrap_with_trusted,
         policy_templates,
         creator_session: None,
         public_key: Some(public_key),
@@ -1334,19 +1371,7 @@ fn decode_stored_secret_key_info(
 }
 
 fn validate_stored_secret_key(key_type: crate::CK_KEY_TYPE, length: usize) -> Result<(), Error> {
-    let valid = if key_type == crate::CKK_AES as crate::CK_KEY_TYPE {
-        matches!(length, 16 | 24 | 32)
-    } else if key_type == crate::CKK_GENERIC_SECRET as crate::CK_KEY_TYPE
-        || crate::is_hmac_key_type(key_type)
-    {
-        (1..=1024).contains(&length)
-    } else {
-        false
-    };
-    if !valid {
-        return Err(CKR_DATA_INVALID.into());
-    }
-    Ok(())
+    crate::validate_software_secret_length(key_type, length).map_err(|_| CKR_DATA_INVALID.into())
 }
 
 fn encode_record_envelope(
@@ -1354,11 +1379,20 @@ fn encode_record_envelope(
     nonce: &[u8; NONCE_LENGTH],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    encode_record_envelope_version(schema, IDENTITY_RECORD_VERSION, nonce, ciphertext)
+}
+
+fn encode_record_envelope_version(
+    schema: &str,
+    version: u64,
+    nonce: &[u8; NONCE_LENGTH],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, Error> {
     let mut encoded = Vec::new();
     Encoder::new(&mut encoded)
         .array(4)
         .and_then(|encoder| encoder.str(schema))
-        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+        .and_then(|encoder| encoder.u64(version))
         .and_then(|encoder| encoder.bytes(nonce))
         .and_then(|encoder| encoder.bytes(ciphertext))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
@@ -1521,26 +1555,13 @@ fn decode_optional_bytes(decoder: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, E
 
 fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
     Ok(StoredAttributes {
+        flags: crate::object::KeyPolicyFlags::from_object(object),
         class: cryptoki_ulong_to_u64(object.class),
         key_type: cryptoki_ulong_to_u64(object.key_type),
         label: object.label.clone(),
         id: object.id.clone(),
-        private: object.private,
-        encrypt: object.encrypt,
-        decrypt: object.decrypt,
-        sign: object.sign,
-        verify: object.verify,
-        derive: object.derive,
-        encapsulate: object.encapsulate,
-        decapsulate: object.decapsulate,
-        sensitive: object.sensitive,
-        extractable: object.extractable,
-        always_sensitive: object.always_sensitive,
-        never_extractable: object.never_extractable,
-        local: object.local,
         key_gen_mechanism: object.key_gen_mechanism.map(cryptoki_ulong_to_u64),
         allowed_mechanisms: stored_allowed_mechanisms(object.allowed_mechanisms.as_deref()),
-        wrap_with_trusted: object.wrap_with_trusted,
         wrap_template: encode_policy_template(object.policy_templates.wrap.as_ref())?,
         unwrap_template: encode_policy_template(object.policy_templates.unwrap.as_ref())?,
         derive_template: encode_policy_template(object.policy_templates.derive.as_ref())?,
@@ -1548,31 +1569,38 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
 }
 
 fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<Vec<u8>>, Error> {
+    encode_stored_attributes_version(attributes, PRIVATE_ATTRIBUTES_VERSION)
+}
+
+fn encode_stored_attributes_version(
+    attributes: &StoredAttributes,
+    version: u64,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut encoded = Zeroizing::new(Vec::new());
     let mut encoder = Encoder::new(&mut *encoded);
     let encoder = encoder
-        .array(25)
+        .array(if version == FORMAT_VERSION { 25 } else { 27 })
         .and_then(|encoder| encoder.str(RECORD_SCHEMA))
-        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+        .and_then(|encoder| encoder.u64(version))
         .and_then(|encoder| encoder.u64(attributes.class))
         .and_then(|encoder| encoder.u64(attributes.key_type))
         .and_then(|encoder| encoder.str(&attributes.label))
         .and_then(|encoder| encoder.bytes(&attributes.id))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     for flag in [
-        attributes.private,
-        attributes.encrypt,
-        attributes.decrypt,
-        attributes.sign,
-        attributes.verify,
-        attributes.derive,
-        attributes.encapsulate,
-        attributes.decapsulate,
-        attributes.sensitive,
-        attributes.extractable,
-        attributes.always_sensitive,
-        attributes.never_extractable,
-        attributes.local,
+        attributes.flags.private,
+        attributes.flags.encrypt,
+        attributes.flags.decrypt,
+        attributes.flags.sign,
+        attributes.flags.verify,
+        attributes.flags.derive,
+        attributes.flags.encapsulate,
+        attributes.flags.decapsulate,
+        attributes.flags.sensitive,
+        attributes.flags.extractable,
+        attributes.flags.always_sensitive,
+        attributes.flags.never_extractable,
+        attributes.flags.local,
     ] {
         encoder.bool(flag).map_err(|_| CKR_DEVICE_ERROR)?;
     }
@@ -1586,65 +1614,103 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
     }
     encode_allowed_mechanisms(encoder, attributes.allowed_mechanisms.as_deref())?;
     encoder
-        .bool(attributes.wrap_with_trusted)
+        .bool(attributes.flags.wrap_with_trusted)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     encode_optional_bytes(encoder, attributes.wrap_template.as_deref())?;
     encode_optional_bytes(encoder, attributes.unwrap_template.as_deref())?;
     encode_optional_bytes(encoder, attributes.derive_template.as_deref())?;
+    if version != FORMAT_VERSION {
+        encoder
+            .bool(attributes.flags.wrap)
+            .and_then(|e| e.bool(attributes.flags.unwrap))
+            .map_err(|_| CKR_DEVICE_ERROR)?;
+    }
     Ok(encoded)
 }
 
 fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
     let mut decoder = Decoder::new(encoded);
     let count = decoder.array().map_err(|_| CKR_DATA_INVALID)?;
-    if !matches!(count, Some(23 | 25))
-        || decoder.str().map_err(|_| CKR_DATA_INVALID)? != RECORD_SCHEMA
-        || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
-    {
+    if decoder.str().map_err(|_| CKR_DATA_INVALID)? != RECORD_SCHEMA {
         return Err(CKR_DATA_INVALID.into());
     }
-    let attributes = StoredAttributes {
-        class: decoder.u64().map_err(|_| CKR_DATA_INVALID)?,
-        key_type: decoder.u64().map_err(|_| CKR_DATA_INVALID)?,
-        label: decoder.str().map_err(|_| CKR_DATA_INVALID)?.to_owned(),
-        id: decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec(),
-        private: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        encrypt: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        decrypt: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        sign: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        verify: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        derive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        encapsulate: if count == Some(25) {
-            decoder.bool().map_err(|_| CKR_DATA_INVALID)?
-        } else {
-            false
-        },
-        decapsulate: if count == Some(25) {
-            decoder.bool().map_err(|_| CKR_DATA_INVALID)?
-        } else {
-            false
-        },
-        sensitive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        extractable: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        always_sensitive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        never_extractable: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        local: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        key_gen_mechanism: if decoder.datatype().map_err(|_| CKR_DATA_INVALID)?
-            == minicbor::data::Type::Null
-        {
+    let version = decoder.u64().map_err(|_| CKR_DATA_INVALID)?;
+    if !matches!(
+        (version, count),
+        (FORMAT_VERSION, Some(25)) | (PRIVATE_ATTRIBUTES_VERSION, Some(27))
+    ) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let class = decoder.u64().map_err(|_| CKR_DATA_INVALID)?;
+    let key_type = decoder.u64().map_err(|_| CKR_DATA_INVALID)?;
+    let label = decoder.str().map_err(|_| CKR_DATA_INVALID)?.to_owned();
+    let id = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec();
+    let private = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let encrypt = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let decrypt = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let sign = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let verify = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let derive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let encapsulate = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let decapsulate = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let sensitive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let extractable = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let always_sensitive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let never_extractable = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let local = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let key_gen_mechanism =
+        if decoder.datatype().map_err(|_| CKR_DATA_INVALID)? == minicbor::data::Type::Null {
             decoder.null().map_err(|_| CKR_DATA_INVALID)?;
             None
         } else {
             Some(decoder.u64().map_err(|_| CKR_DATA_INVALID)?)
+        };
+    let allowed_mechanisms = decode_allowed_mechanisms(&mut decoder)?;
+    let wrap_with_trusted = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let wrap_template = decode_optional_bytes(&mut decoder)?;
+    let unwrap_template = decode_optional_bytes(&mut decoder)?;
+    let derive_template = decode_optional_bytes(&mut decoder)?;
+    let (wrap, unwrap) = if version == FORMAT_VERSION {
+        tracing::warn!(target: "pkcs11rs::storage", attributes = ?["CKA_WRAP", "CKA_UNWRAP"],
+            "Missing legacy private-key permissions defaulted to false");
+        (false, false)
+    } else {
+        (
+            decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
+            decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
+        )
+    };
+    let attributes = StoredAttributes {
+        flags: crate::object::KeyPolicyFlags {
+            private,
+            encrypt,
+            decrypt,
+            sign,
+            verify,
+            derive,
+            wrap,
+            unwrap,
+            encapsulate,
+            decapsulate,
+            sensitive,
+            extractable,
+            always_sensitive,
+            never_extractable,
+            local,
+            wrap_with_trusted,
         },
-        allowed_mechanisms: decode_allowed_mechanisms(&mut decoder)?,
-        wrap_with_trusted: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
-        wrap_template: decode_optional_bytes(&mut decoder)?,
-        unwrap_template: decode_optional_bytes(&mut decoder)?,
-        derive_template: decode_optional_bytes(&mut decoder)?,
+        class,
+        key_type,
+        label,
+        id,
+        key_gen_mechanism,
+        allowed_mechanisms,
+        wrap_template,
+        unwrap_template,
+        derive_template,
     };
     if decoder.position() != encoded.len()
-        || count == Some(25) && encode_stored_attributes(&attributes)?.as_slice() != encoded
+        || encode_stored_attributes_version(&attributes, version)?.as_slice() != encoded
     {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -1836,15 +1902,6 @@ fn decode_stored_private_key_info(
     }
     let material = material_from_pkcs8(encoded)?;
     Ok((attributes, material))
-}
-
-fn record_unique_id(reference: &ContentReference) -> String {
-    let mut id = String::from("software-private-");
-    for byte in reference.digest() {
-        use std::fmt::Write as _;
-        let _ = write!(id, "{byte:02x}");
-    }
-    id
 }
 
 pub(crate) fn material_to_pkcs8(
@@ -2168,7 +2225,7 @@ mod tests {
     fn object(material: SoftwarePrivateKeyMaterial) -> TokenObject {
         TokenObject {
             slot_id: Some(7),
-            unique_id: String::new(),
+            unique_id: crate::object::new_object_id().unwrap(),
             class: crate::CKO_PRIVATE_KEY as crate::CK_OBJECT_CLASS,
             key_type: material.key_type(),
             label: String::from("caller supplied label"),
@@ -2203,7 +2260,7 @@ mod tests {
     fn secret_object() -> TokenObject {
         TokenObject {
             slot_id: Some(7),
-            unique_id: String::new(),
+            unique_id: crate::object::new_object_id().unwrap(),
             class: crate::CKO_SECRET_KEY as crate::CK_OBJECT_CLASS,
             key_type: crate::CKK_AES as crate::CK_KEY_TYPE,
             label: String::from("persistent AES key"),
@@ -2249,17 +2306,22 @@ mod tests {
         let mut decoder = Decoder::new(encoded);
         assert_eq!(decoder.array().unwrap(), Some(4));
         assert_eq!(decoder.str().unwrap(), RECORD_SCHEMA);
-        assert_eq!(decoder.u64().unwrap(), FORMAT_VERSION);
+        let version = decoder.u64().unwrap();
+        assert_eq!(version, IDENTITY_RECORD_VERSION);
         let nonce: [u8; NONCE_LENGTH] = decoder.bytes().unwrap().try_into().unwrap();
         let ciphertext = decoder.bytes().unwrap();
         assert_eq!(decoder.position(), encoded.len());
-        decrypt(
+        let plaintext = decrypt(
             master_key,
             &nonce,
             &record_aad(&store.name, RECORD_SCHEMA),
             ciphertext,
         )
-        .unwrap()
+        .unwrap();
+        let mut decoder = Decoder::new(&plaintext);
+        assert_eq!(decoder.array().unwrap(), Some(2));
+        assert!(!decoder.str().unwrap().is_empty());
+        Zeroizing::new(decoder.bytes().unwrap().to_vec())
     }
 
     #[test]
@@ -2460,14 +2522,129 @@ mod tests {
             Some(crate::CKM_ML_KEM_KEY_PAIR_GEN as crate::CK_MECHANISM_TYPE);
         original.allowed_mechanisms = Some(vec![crate::CKM_ML_KEM as crate::CK_MECHANISM_TYPE]);
         let encoded = encode_record("ml-kem storage", &master_key, &original).unwrap();
-        let decoded =
-            decode_record("ml-kem storage", 7, "ml-kem-private", &master_key, &encoded).unwrap();
+        let decoded = decode_record("ml-kem storage", 7, &master_key, &encoded).unwrap();
         assert!(decoded.decapsulate);
         assert_eq!(decoded.allowed_mechanisms, original.allowed_mechanisms);
         assert!(matches!(
             decoded.material,
             KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::MlKem(_))
         ));
+    }
+
+    #[test]
+    fn encrypted_records_preserve_identity_and_reject_version_tampering() {
+        let key = [0x51; MASTER_KEY_LENGTH];
+        let object = secret_object();
+        let mut encoded = encode_record("identity", &key, &object).unwrap();
+        let restored = decode_record("identity", 7, &key, &encoded).unwrap();
+        assert_eq!(restored.unique_id, object.unique_id);
+        let mut decoder = Decoder::new(&encoded);
+        decoder.array().unwrap();
+        decoder.str().unwrap();
+        let offset = decoder.position();
+        assert_eq!(decoder.u64().unwrap(), IDENTITY_RECORD_VERSION);
+        encoded[offset] = 4;
+        assert!(decode_record("identity", 7, &key, &encoded).is_err());
+    }
+
+    #[test]
+    fn legacy_encrypted_records_authenticate_and_preserve_identity_on_rewrite() {
+        let key = [0x63; MASTER_KEY_LENGTH];
+        let nonce = [0x27; NONCE_LENGTH];
+        let secret = secret_object();
+        let private = object(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &scalar(32))
+                .unwrap(),
+        ));
+        let mut pkcs8 =
+            StoredPrivateKeyInfo::from_der(&encode_stored_private_key_info(&private).unwrap())
+                .unwrap();
+        let legacy_attributes =
+            encode_stored_attributes_version(&stored_attributes(&private).unwrap(), FORMAT_VERSION)
+                .unwrap();
+        let legacy_attribute = one_value_attribute(
+            pkcs11rs_attributes_oid().unwrap(),
+            Any::encode_from(&OctetString::new(legacy_attributes.to_vec()).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let attributes = pkcs8
+            .attributes
+            .take()
+            .unwrap()
+            .iter()
+            .map(|attribute| {
+                if attribute.oid == legacy_attribute.oid {
+                    legacy_attribute.clone()
+                } else {
+                    attribute.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        pkcs8.attributes = Some(SetOfVec::try_from(attributes).unwrap());
+        let mut data = crate::TokenObjectTemplate {
+            class: Some(crate::CKO_DATA as _),
+            key_type: Some(crate::CKK_GENERIC_SECRET as _),
+            token: true,
+            private: true,
+            ..Default::default()
+        }
+        .into_object()
+        .unwrap();
+        data.unique_id = "fixture".into();
+        data.material = KeyMaterial::Data {
+            application: vec![],
+            object_id: vec![],
+            value: Zeroizing::new(b"private payload".to_vec()),
+        };
+        let legacy_data =
+            crate::backed_object::encode_data_object_format(&data, Some(&[0x41; 16])).unwrap();
+        for (schema, payload) in [
+            (
+                SECRET_RECORD_SCHEMA,
+                encode_stored_secret_key_info(&secret).unwrap(),
+            ),
+            (RECORD_SCHEMA, Zeroizing::new(pkcs8.to_der().unwrap())),
+            (DATA_RECORD_SCHEMA, legacy_data),
+        ] {
+            let ciphertext = encrypt(
+                &key,
+                &nonce,
+                &record_aad_version("legacy", schema, FORMAT_VERSION),
+                &payload,
+            )
+            .unwrap();
+            let encoded =
+                encode_record_envelope_version(schema, FORMAT_VERSION, &nonce, &ciphertext)
+                    .unwrap();
+            let mut restored = decode_record("legacy", 7, &key, &encoded).unwrap();
+            let identity =
+                ContentReference::for_object(&encoded).legacy_object_id("software-private-");
+            assert_eq!(restored.unique_id, identity);
+            assert!(restored.private);
+            if schema == RECORD_SCHEMA {
+                assert!(!restored.wrap && !restored.unwrap);
+            }
+            restored.label = "updated legacy record".into();
+            let updated = encode_record("legacy", &key, &restored).unwrap();
+            assert_eq!(
+                decode_record("legacy", 7, &key, &updated)
+                    .unwrap()
+                    .unique_id,
+                identity
+            );
+            assert!(decode_record("wrong token", 7, &key, &encoded).is_err());
+            let mut damaged = encoded.clone();
+            *damaged.last_mut().unwrap() ^= 1;
+            assert!(decode_record("legacy", 7, &key, &damaged).is_err());
+            let changed_version = encode_record_envelope_version(
+                schema,
+                IDENTITY_RECORD_VERSION,
+                &nonce,
+                &ciphertext,
+            )
+            .unwrap();
+            assert!(decode_record("legacy", 7, &key, &changed_version).is_err());
+        }
     }
 
     #[test]
@@ -2493,16 +2670,9 @@ mod tests {
                 .windows(original.label.len())
                 .any(|window| window == original.label.as_bytes())
         );
-        let decoded = decode_record(
-            "secret storage",
-            9,
-            "software-private-test",
-            &master_key,
-            &encoded,
-        )
-        .unwrap();
+        let decoded = decode_record("secret storage", 9, &master_key, &encoded).unwrap();
         assert_eq!(decoded.slot_id, Some(9));
-        assert_eq!(decoded.unique_id, "software-private-test");
+        assert_eq!(decoded.unique_id, original.unique_id);
         assert_eq!(decoded.class, original.class);
         assert_eq!(decoded.key_type, original.key_type);
         assert_eq!(decoded.label, original.label);
@@ -2523,16 +2693,44 @@ mod tests {
 
         let mut tampered = encoded;
         *tampered.last_mut().unwrap() ^= 1;
-        assert!(
-            decode_record(
-                "secret storage",
-                9,
-                "software-private-test",
-                &master_key,
-                &tampered,
-            )
-            .is_err()
+        assert!(decode_record("secret storage", 9, &master_key, &tampered,).is_err());
+    }
+
+    #[test]
+    fn private_metadata_defaults_legacy_permissions_and_rejects_malformed_records() {
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized_for_kind(KeyKind::Ec(EcCurve::P256), &scalar(32))
+                .unwrap(),
         );
+        let mut original = object(material);
+        original.wrap = true;
+        original.unwrap = true;
+        let attributes = stored_attributes(&original).unwrap();
+        let encoded = encode_stored_attributes(&attributes).unwrap();
+        let mut decoder = Decoder::new(&encoded);
+        assert_eq!(decoder.array().unwrap(), Some(27));
+        assert_eq!(decoder.str().unwrap(), RECORD_SCHEMA);
+        assert_eq!(decoder.u64().unwrap(), PRIVATE_ATTRIBUTES_VERSION);
+        assert_eq!(decode_stored_attributes(&encoded).unwrap(), attributes);
+        let master = [0x35; MASTER_KEY_LENGTH];
+        let encoded = encode_record("permissions", &master, &original).unwrap();
+        let restored = decode_record("permissions", 7, &master, &encoded).unwrap();
+        assert!(restored.wrap && restored.unwrap);
+        for (index, hex) in [
+            "97781d706b6373313172732d736f6674776172652d707269766174652d6b6579040303666c65676163794101f5f4f4f5f4f5f5f4f5f5f500f6f4f6f6f6",
+            "9819781d706b6373313172732d736f6674776172652d707269766174652d6b6579040303666c65676163794101f5f4f4f5f4f5f4f4f5f4f5f5f500f6f4f6f6f6",
+        ].into_iter().enumerate() {
+            let decoded = decode_stored_attributes(&crate::scp03::parse_hex(hex).unwrap());
+            if index == 0 { assert!(decoded.is_err()); }
+            else {
+                let decoded = decoded.unwrap();
+                assert!(!decoded.flags.wrap && !decoded.flags.unwrap);
+                assert!(decoded.flags.private && decoded.flags.sensitive);
+            }
+        }
+        let mut trailing = encode_stored_attributes(&attributes).unwrap();
+        trailing.push(0);
+        assert!(decode_stored_attributes(&trailing).is_err());
     }
 
     #[test]
@@ -2604,12 +2802,12 @@ mod tests {
         let (attributes, material) = decode_stored_private_key_info(decrypted.as_bytes()).unwrap();
         assert_eq!(attributes.label, original.label);
         assert_eq!(attributes.id, original.id);
-        assert!(attributes.extractable);
+        assert!(attributes.flags.extractable);
         assert_eq!(
             attributes.allowed_mechanisms,
             Some(vec![u64::from(crate::CKM_ECDSA)])
         );
-        assert!(attributes.wrap_with_trusted);
+        assert!(attributes.flags.wrap_with_trusted);
         assert_eq!(
             decode_policy_template(attributes.derive_template.clone()).unwrap(),
             original.policy_templates.derive

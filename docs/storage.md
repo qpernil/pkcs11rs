@@ -24,6 +24,33 @@ additionally validate its own backing schema or translate a legacy physical
 representation to canonical logical bytes. Providers do not re-encode
 canonical records submitted to `put`.
 
+PKCS #11 object identity is distinct from content addressing. Persistent
+backed-key metadata stores `CKA_UNIQUE_ID`; new objects and copies receive
+fresh random IDs, while attribute updates retain them. For legacy backed-key
+records with no `CKA_UNIQUE_ID`, readers retain the old identity calculation:
+`pkcs11rs stored ` followed by the SHA3-256 digest of the original record bytes.
+This fallback emits a warning and never writes during discovery. The next
+explicit update embeds that same identity, making later content changes
+independent of identity. An explicitly empty or malformed ID is rejected.
+
+Backed-object attribute maps omit boolean flags equal to these conservative defaults:
+
+| Attribute kind | Missing value |
+| --- | --- |
+| Usage permissions and `CKA_EXTRACTABLE` | `false` |
+| `CKA_PRIVATE`, `CKA_SENSITIVE` | `true` |
+| `CKA_ALWAYS_SENSITIVE`, `CKA_NEVER_EXTRACTABLE`, `CKA_LOCAL` | `false` (no unproven historical claim) |
+| `CKA_WRAP_WITH_TRUSTED` on private/secret keys | `true` |
+
+Readers log the defaulted attribute names at debug level; legacy identity
+fallbacks emit warnings. Logs contain no attribute values or key material.
+Present attributes must still have the correct type. Positional formats retain
+explicit fields; a recognized historical format can supply only its documented
+missing defaults. Refresh rejects multiple records with the same object ID,
+including an interrupted replacement. Native-key companion deltas and policy
+templates retain their own omission semantics; these defaults do not replace
+native capabilities or remove template restrictions.
+
 The trait has no `Send` or `Sync` supertrait. A provider follows its owning
 context's concurrency model: the local provider is independently thread-safe,
 each memory provider is reached through its owning session context, and the
@@ -241,7 +268,7 @@ Canonical metadata can contain sparse private-key overrides and a complete
 public aspect. Presence of validated public key material creates a genuine
 public token object; removing that public object removes only the public aspect
 and leaves the hardware private key and unrelated metadata intact. A
-standalone public key instead has its own content identity and lifecycle: it
+standalone public key instead has its own stable object identity and lifecycle: it
 survives rediscovery without any private key, and destroying it removes only
 its own internal record.
 
@@ -278,7 +305,7 @@ registered. It is never treated as an empty store. An unavailable or
 unidentified slot remains usable for its hardware objects, but provider-backed
 `CKA_TOKEN=CK_TRUE` creation returns `CKR_TOKEN_WRITE_PROTECTED`.
 
-There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
+There is no Git, HTTP, cloud, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
@@ -297,12 +324,15 @@ boundary](preview-sign.md).
 ## Stored data and certificate records
 
 Standalone public data and certificate objects use a canonical CBOR array:
-`["pkcs11rs.data-object", 1, class, label, id, private, application, object_id, value, instance]`.
+`["pkcs11rs.data-object", 2, class, label, id, private, application, object_id, value, unique_id]`.
 Class is an unsigned PKCS #11 class number, label is text, private is a boolean,
-and the remaining attributes are byte strings. The 16-byte random instance
-identity keeps separate creations and copies distinct even when their visible
-attributes are identical. Attribute updates preserve this identity. Certificate records require
-empty application/object-ID fields and valid DER X.509 in value. Decoders
+and `unique_id` is text; the remaining attributes are byte strings. The stable
+object ID keeps separate creations and copies distinct even when their visible
+attributes are identical. Version-1 records have a 16-byte instance field in
+place of the text ID. Readers validate that exact historical format and preserve
+its original content-derived identity, with a warning; the next explicit update
+writes version 2 with the same ID. Certificate records require empty
+application/object-ID fields and valid DER X.509 in value. Decoders
 reject unsupported versions, classes, trailing bytes, and noncanonical input.
 Public providers reject records declaring private visibility. Software USER
 storage encrypts private records separately; see [software slots](software.md).

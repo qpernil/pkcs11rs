@@ -277,7 +277,6 @@ impl Slot for HostSlot {
                 object.label = name.clone();
                 object.id = id.clone();
                 object.material = KeyMaterial::Certificate {
-                    instance: [0; 16],
                     value: Zeroizing::new(certificate),
                 };
                 objects.push(object);

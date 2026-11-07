@@ -35,6 +35,92 @@ use software_key_core::{post_quantum::MlKemPrivateKey, software_signing::Signatu
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
 
+/// Object identity is independent of mutable attributes and storage addresses.
+pub(crate) fn new_object_id() -> Result<String, Error> {
+    use std::fmt::Write;
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut id = String::from("pkcs11rs-object-");
+    for byte in random {
+        let _ = write!(id, "{byte:02x}");
+    }
+    Ok(id)
+}
+
+// One mapping for policy flags shared by public metadata and encrypted storage.
+macro_rules! key_policy_flags {
+    ($($field:ident => $attribute:ident),+ $(,)?) => {
+        #[derive(Clone, Debug, Default, Eq, PartialEq)]
+        pub(crate) struct KeyPolicyFlags { $(pub(crate) $field: bool,)+ }
+
+        impl KeyPolicyFlags {
+            pub(crate) fn from_object(object: &TokenObject) -> Self {
+                Self { $($field: object.$field,)+ }
+            }
+            pub(crate) fn attributes(&self) -> impl Iterator<Item = (CK_ATTRIBUTE_TYPE, bool)> {
+                [$(($attribute as CK_ATTRIBUTE_TYPE, self.$field),)+].into_iter()
+            }
+        }
+    };
+}
+
+key_policy_flags! {
+    private => CKA_PRIVATE,
+    encrypt => CKA_ENCRYPT,
+    decrypt => CKA_DECRYPT,
+    sign => CKA_SIGN,
+    verify => CKA_VERIFY,
+    derive => CKA_DERIVE,
+    wrap => CKA_WRAP,
+    unwrap => CKA_UNWRAP,
+    encapsulate => CKA_ENCAPSULATE,
+    decapsulate => CKA_DECAPSULATE,
+    sensitive => CKA_SENSITIVE,
+    extractable => CKA_EXTRACTABLE,
+    always_sensitive => CKA_ALWAYS_SENSITIVE,
+    never_extractable => CKA_NEVER_EXTRACTABLE,
+    local => CKA_LOCAL,
+    wrap_with_trusted => CKA_WRAP_WITH_TRUSTED,
+}
+
+impl KeyPolicyFlags {
+    /// Conservative defaults for missing persisted flags, distinct from create templates.
+    pub(crate) const STORED_DEFAULTS: [(CK_ATTRIBUTE_TYPE, &'static str, bool); 16] = [
+        (CKA_PRIVATE as _, "CKA_PRIVATE", true),
+        (CKA_ENCRYPT as _, "CKA_ENCRYPT", false),
+        (CKA_DECRYPT as _, "CKA_DECRYPT", false),
+        (CKA_SIGN as _, "CKA_SIGN", false),
+        (CKA_VERIFY as _, "CKA_VERIFY", false),
+        (CKA_DERIVE as _, "CKA_DERIVE", false),
+        (CKA_WRAP as _, "CKA_WRAP", false),
+        (CKA_UNWRAP as _, "CKA_UNWRAP", false),
+        (CKA_ENCAPSULATE as _, "CKA_ENCAPSULATE", false),
+        (CKA_DECAPSULATE as _, "CKA_DECAPSULATE", false),
+        (CKA_SENSITIVE as _, "CKA_SENSITIVE", true),
+        (CKA_EXTRACTABLE as _, "CKA_EXTRACTABLE", false),
+        (CKA_ALWAYS_SENSITIVE as _, "CKA_ALWAYS_SENSITIVE", false),
+        (CKA_NEVER_EXTRACTABLE as _, "CKA_NEVER_EXTRACTABLE", false),
+        (CKA_LOCAL as _, "CKA_LOCAL", false),
+        (CKA_WRAP_WITH_TRUSTED as _, "CKA_WRAP_WITH_TRUSTED", true),
+    ];
+
+    pub(crate) fn stored_default(
+        attribute: CK_ATTRIBUTE_TYPE,
+        class: CK_OBJECT_CLASS,
+    ) -> Option<bool> {
+        if attribute == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
+            && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            && class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+        {
+            return Some(false); // Not applicable to public keys.
+        }
+        Self::STORED_DEFAULTS
+            .iter()
+            .find(|(kind, _, _)| *kind == attribute)
+            .map(|(_, _, value)| *value)
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct KeyPolicyTemplates {
     pub(crate) wrap: Option<KeyAttributes>,
@@ -267,13 +353,11 @@ pub(crate) enum KeyMaterial {
         profile_id: CK_PROFILE_ID,
     },
     Data {
-        instance: [u8; 16],
         application: Vec<u8>,
         object_id: Vec<u8>,
         value: Zeroizing<Vec<u8>>,
     },
     Certificate {
-        instance: [u8; 16],
         value: Zeroizing<Vec<u8>>,
     },
     Public(PublicKeyMaterial),
@@ -2326,6 +2410,25 @@ pub(crate) fn rsa_public_key_material(
         }
         _ => Ok(None),
     }
+}
+
+pub(crate) fn validate_software_secret_length(
+    key_type: CK_KEY_TYPE,
+    length: usize,
+) -> Result<(), Error> {
+    let valid = if key_type == CKK_AES as CK_KEY_TYPE {
+        matches!(length, 16 | 24 | 32)
+    } else if key_type == CKK_DES3 as CK_KEY_TYPE {
+        length == 24
+    } else if key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE || crate::is_hmac_key_type(key_type) {
+        (1..=1024).contains(&length)
+    } else {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    };
+    if !valid {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_new_object_access(
