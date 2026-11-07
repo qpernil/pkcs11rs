@@ -929,9 +929,9 @@ For an I2C-only controller, replace the unit's `ExecStart` with:
 ExecStart=/usr/local/bin/pkcs11rs-connector --listen 127.0.0.1:12345 --hardware-discovery false --i2c-yubihsm /dev/i2c-1@0x24=/dev/gpiochip0:23
 ```
 
-Grant the service account read/write access to the configured bus and, when
-used, GPIO chip through udev or device groups. Add the READY suffix to the
-endpoint if wired. The HSM target uses its separate
+Grant the service account read/write access to the configured bus and GPIO
+chip through udev or device groups. Every I2C endpoint requires a wired READY
+signal and the `=GPIOCHIP:OFFSET` suffix. The HSM target uses its separate
 [target service recipe](https://github.com/qpernil/virtual-yubihsm/blob/main/docs/i2c.md#service-installation).
 
 Use the HTTPS and mTLS options documented above when the listener is reachable

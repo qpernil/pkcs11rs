@@ -818,9 +818,11 @@ The credential is tried independently on every YubiHSM. The module retains all
 objects whose effective `CKA_PRIVATE` is false; internal PKCS #11 metadata
 companions remain hidden. The public-certificate profile is advertised only on
 slots with public discovery configured, independently of successful login or the
-currently provisioned object inventory. Malformed provisioned objects are
-logged and skipped individually. The discovery session is retained and reused
-until login, cleanup, reconnection, or secure-session invalidation. `C_Login`
+currently provisioned object inventory. Invalid stored metadata keeps the HSM
+visible but blocks object access with an explicit error; see
+[metadata failure and recovery](docs/storage.md#yubihsm-backend-metadata).
+The discovery session is retained and reused until login, cleanup,
+reconnection, or secure-session invalidation. `C_Login`
 closes it and installs the user session; after `C_Logout`, the discovery session
 is reopened lazily by the next public hardware read. While the profile is
 active, user-login Authentication Keys must have exactly the same domains as
@@ -928,10 +930,10 @@ See [Named software slots](docs/software.md) and
 
 ## CCID Configuration
 
-The default CCID discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
-and FIDO2. Each selectable applet is exposed as its own PKCS #11 slot. Native
-builds enumerate readers through PC/SC on desktop platforms and CryptoTokenKit
-on iOS.
+The default CCID discovery set contains PIV, OpenPGP, OATH, YubiHSM Auth,
+Issuer SD, and FIDO2. Each selectable applet is exposed as its own PKCS #11 slot.
+Native builds enumerate readers through PC/SC on desktop platforms and
+CryptoTokenKit on iOS.
 
 Each fresh `C_GetSlotList` enumeration queries the current native reader
 names, but uses them only to locate candidates. PC/SC names are not portable or

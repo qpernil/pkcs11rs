@@ -181,8 +181,8 @@ Windows through `nusb`; it does not require libusb.
 
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For
-one YubiKey with all five default applets and one YubiHSM, the result is six
-slots.
+one YubiKey with all six default CCID applets and one YubiHSM, the result is
+seven slots, in addition to any separately discovered native FIDO HID slot.
 
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
 Symmetric credentials use `CKO_SECRET_KEY` and

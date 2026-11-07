@@ -190,9 +190,12 @@ on the main `Slot` trait. `SlotContext` owns that backend alongside `SlotState`,
 which holds sessions, handles, and storage bookkeeping. The fields can be borrowed
 separately for an operation; backend state is neither copied nor temporarily
 removed. Existing validation, publication, and failure cleanup remain shared.
-Native HSM Auth discovery and execution use its vendor profile. Authentication
-source discovery excludes the target by weak-reference equality before locking
-candidates, so two distinct slots with the same serial remain distinct sources.
+Native HSM Auth discovery and execution use the backend's
+`supports_native_hsmauth` capability and dedicated credential key types; see
+[HSM Auth discovery](yubihsm-auth.md#hsm-auth-slot-discovery-and-execution).
+Authentication source discovery excludes the target by weak-reference equality
+before locking candidates, so two distinct slots with the same serial remain
+distinct sources.
 
 Storage namespaces, native administration support, token mutation policy, and
 discovery refresh behavior are backend-declared `Slot` capabilities. Ordinary

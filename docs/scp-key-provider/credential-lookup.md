@@ -66,7 +66,7 @@ Examples:
 
 ```text
 pkcs11:
-pkcs11:token=PIV%20%23YUBIKEY_A_SERIAL;object=Authentication;id=%9A;type=private?pkcs11rs-authkey=1003
+pkcs11:token=PIV%20%23YUBIKEY_A_SERIAL;object=Authentication;id=%01;type=private?pkcs11rs-authkey=1003
 pkcs11:token=Secure%20Enclave;object=reserve;type=public
 pkcs11:token=HSM%20Auth%20%23YUBIKEY_B_SERIAL;object=client;id=client;type=private?pkcs11rs-authkey=0001
 pkcs11:?pkcs11rs-direct=phone-client&pkcs11rs-authkey=0001
@@ -151,11 +151,11 @@ credential password in their native operation, and direct authentication uses
 it to derive the temporary credential. The HSM Auth slot has no USER login. SO
 management authorization remains separate.
 
-Native discovery uses the advertised profile followed by explicit searches for
-the two credential key types. Further native authentication protocols can define
-their own profiles, key types, and operations without changing ordinary key
-selection. The source index contains weak slot references and capabilities,
-not a separate credential inventory.
+Native discovery uses the backend's `supports_native_hsmauth` capability followed
+by explicit searches for the two credential key types. No vendor profile is
+required. See [HSM Auth discovery](../yubihsm-auth.md#hsm-auth-slot-discovery-and-execution)
+for the capability and operation boundary. The source index contains weak slot
+references and capabilities, not a separate credential inventory.
 
 ## Binding and lifetime
 
