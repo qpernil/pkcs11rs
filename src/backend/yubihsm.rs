@@ -3068,7 +3068,15 @@ impl StorageProvider for YubiHsmSlot {
     }
 
     fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
-        let mut references = Vec::new();
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect())
+    }
+
+    fn read_all(&self) -> Result<Vec<(ContentReference, Vec<u8>)>, StorageError> {
+        let mut objects = std::collections::BTreeMap::new();
         for info in self
             .refresh_storage_objects()
             .map_err(yubihsm_storage_error)?
@@ -3079,12 +3087,9 @@ impl StorageProvider for YubiHsmSlot {
             BackedKeyMetadata::from_cbor(&object)
                 .map_err(|error| StorageError::Provider(error.to_string()))?;
             let reference = ContentReference::for_object(&object);
-            if !references.contains(&reference) {
-                references.push(reference);
-            }
+            objects.insert(reference, object);
         }
-        references.sort();
-        Ok(references)
+        Ok(objects.into_iter().collect())
     }
 
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {

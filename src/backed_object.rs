@@ -976,18 +976,14 @@ pub(crate) fn stored_objects(
     slot_id: CK_SLOT_ID,
     token: bool,
 ) -> Result<Vec<(ContentReference, TokenObject)>, Error> {
-    let references = match provider.list() {
-        Ok(references) => references,
+    let records = match provider.read_all() {
+        Ok(records) => records,
         Err(StorageError::Unavailable) => return Ok(Vec::new()),
         Err(error) => return Err(storage_error(error)),
     };
     let mut objects = Vec::new();
     let mut identities = std::collections::BTreeSet::new();
-    for reference in references {
-        let encoded = provider
-            .get(&reference)
-            .map_err(storage_error)?
-            .ok_or(CKR_DEVICE_ERROR)?;
+    for (reference, encoded) in records {
         let decoded = decode_backed_object(provider, slot_id, token, &encoded).map_err(|error| {
             tracing::warn!(
                 target: "pkcs11rs::storage", slot_id, reference = ?reference, error = ?error,
@@ -1016,11 +1012,15 @@ mod tests {
 
     impl StorageProvider for FixedProvider {
         fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
-            Ok(vec![self.reference.clone()])
+            panic!("refresh must use the bulk read")
         }
 
-        fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
-            Ok((reference == &self.reference).then(|| self.object.clone()))
+        fn get(&self, _reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+            panic!("refresh must not perform per-record lookups")
+        }
+
+        fn read_all(&self) -> Result<Vec<(ContentReference, Vec<u8>)>, StorageError> {
+            Ok(vec![(self.reference.clone(), self.object.clone())])
         }
 
         fn put(&self, _object: &[u8]) -> Result<ContentReference, StorageError> {

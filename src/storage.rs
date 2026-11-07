@@ -245,6 +245,17 @@ pub trait StorageProvider {
     /// Retrieve and verify an object, returning `None` when it is absent.
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError>;
 
+    /// Read a refresh snapshot without requiring a separate lookup per object.
+    fn read_all(&self) -> Result<Vec<(ContentReference, Vec<u8>)>, StorageError> {
+        self.list()?
+            .into_iter()
+            .map(|reference| {
+                let object = self.get(&reference)?.ok_or(StorageError::Integrity)?;
+                Ok((reference, object))
+            })
+            .collect()
+    }
+
     /// Store canonical-CBOR logical bytes idempotently and return their reference.
     ///
     /// `get` must return the exact submitted bytes. A provider may choose a

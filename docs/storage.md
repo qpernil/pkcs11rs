@@ -10,10 +10,11 @@ providers on slots with a stable physical Yubico serial.
 
 ## Provider boundary
 
-`StorageProvider` has four operations:
+`StorageProvider` exposes these operations:
 
 - `list` returns all valid content references in stable order;
 - `get` retrieves an object and verifies its content hash;
+- `read_all` reads references and contents together for a refresh;
 - `put` stores one CBOR item idempotently and returns its reference;
 - `delete` removes one referenced object and reports whether it existed.
 
@@ -23,6 +24,11 @@ contain exactly one well-formed CBOR item. A device-specific provider may
 additionally validate its own backing schema or translate a legacy physical
 representation to canonical logical bytes. Providers do not re-encode
 canonical records submitted to `put`.
+
+The default bulk read uses `list` and `get`. Software public storage and
+YubiHSM override it to traverse their records once, avoiding a complete store
+scan for each object during refresh. Decrypted software public records are
+held for that read only, without a persistent plaintext cache.
 
 PKCS #11 object identity is distinct from content addressing. Persistent
 backed-key metadata stores `CKA_UNIQUE_ID`; new objects and copies receive

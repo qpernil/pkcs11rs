@@ -207,6 +207,14 @@ impl StorageProvider for SoftwarePublicStorageProvider {
     }
 
     fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+        Ok(self
+            .read_all()?
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect())
+    }
+
+    fn read_all(&self) -> Result<Vec<(ContentReference, Vec<u8>)>, StorageError> {
         if !self.store.is_initialized().map_err(public_storage_error)? {
             return Ok(Vec::new());
         }
@@ -216,14 +224,14 @@ impl StorageProvider for SoftwarePublicStorageProvider {
             }
             return Err(error);
         }
-        let mut references = self
+        let mut objects = self
             .logical_objects()?
             .into_iter()
-            .map(|(logical, _, _)| logical)
+            .map(|(logical, _, object)| (logical, object))
             .collect::<Vec<_>>();
-        references.sort();
-        references.dedup();
-        Ok(references)
+        objects.sort_by(|left, right| left.0.cmp(&right.0));
+        objects.dedup_by(|left, right| left.0 == right.0);
+        Ok(objects)
     }
 
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
