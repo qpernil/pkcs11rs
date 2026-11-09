@@ -1184,6 +1184,13 @@ Cargo dependencies and compilation artifacts, excluding test-library copies,
 cloned client sources, token state and logs. A newer CI run cancels an older
 run of the same workflow on the same branch or pull request.
 
+Linux Rust configurations, PQC qualification, lint/binding checks, and Linux
+client/ABI tests run as independent CI jobs. macOS desktop tests, client/ABI
+tests, and iOS framework/example builds also run independently on GitHub-hosted
+runners. Each job has its own Cargo compilation cache. Checks that reuse a
+feature configuration or a running connector remain sequential within their
+job; no Cargo build directory or token fixture is shared between concurrent jobs.
+
 Run the production-module external client suite with OpenSC and libp11's
 OpenSSL 3 provider:
 

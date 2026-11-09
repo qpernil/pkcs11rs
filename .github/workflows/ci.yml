@@ -166,36 +166,52 @@ jobs:
             libudev-dev \
             pkg-config
 
-      - name: Build OpenSC 0.27.1
-        run: |
-          cd "$RUNNER_TEMP"
-          curl --fail --location --silent --show-error \
-            https://github.com/OpenSC/OpenSC/releases/download/0.27.1/opensc-0.27.1.tar.gz \
-            --output opensc-0.27.1.tar.gz
-          echo '976f4a23eaf3397a1a2c3a7aac80bf971a8c3d829c9a79f06145bfaeeae5eca7  opensc-0.27.1.tar.gz' | sha256sum --check
-          tar -xzf opensc-0.27.1.tar.gz
-          cd opensc-0.27.1
-          ./configure --prefix="$RUNNER_TEMP/opensc" \
-            --enable-p11_system_config_modules="$RUNNER_TEMP/opensc/share/p11-kit/modules" \
-            --disable-man --disable-tests --disable-notify --disable-readline
-          make -j2
-          make install
-          echo "$RUNNER_TEMP/opensc/bin" >> "$GITHUB_PATH"
-
-      - name: Check generated PKCS #11 bindings
-        run: cargo xtask bindings --check
-
       - name: Run Rust tests
         run: cargo test --locked
-
-      - name: Run published cryptographic known-answer tests
-        run: cargo test --release --manifest-path ../software-key-core/Cargo.toml --locked kat_
 
       - name: Run portable provider tests
         run: cargo test --locked -p pkcs11rs --no-default-features --lib
 
       - name: Run release Rust tests
         run: cargo test --release --locked --all-features
+
+  pqc-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libclang-dev \
+            libpcsclite-dev \
+            libssl-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Run published cryptographic known-answer tests
+        run: cargo test --release --manifest-path ../software-key-core/Cargo.toml --locked kat_
 
       - name: Run embedded virtual YubiKey PKCS #11 tests
         run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
@@ -238,11 +254,100 @@ jobs:
       - name: Run all virtual FIDO ML-DSA credential variants
         run: cargo test --release --manifest-path ../virtual-yubikey/Cargo.toml --locked -p virtual-yubikey-core ml_dsa_credentials_persist_and_complete_verified_assertions
 
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libclang-dev \
+            libpcsclite-dev \
+            libssl-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Check generated PKCS #11 bindings
+        run: cargo xtask bindings --check
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  linux-clients:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libclang-dev \
+            libpcsclite-dev \
+            libssl-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Build OpenSC 0.27.1
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --location --silent --show-error \
+            https://github.com/OpenSC/OpenSC/releases/download/0.27.1/opensc-0.27.1.tar.gz \
+            --output opensc-0.27.1.tar.gz
+          echo '976f4a23eaf3397a1a2c3a7aac80bf971a8c3d829c9a79f06145bfaeeae5eca7  opensc-0.27.1.tar.gz' | sha256sum --check
+          tar -xzf opensc-0.27.1.tar.gz
+          cd opensc-0.27.1
+          ./configure --prefix="$RUNNER_TEMP/opensc" \
+            --enable-p11_system_config_modules="$RUNNER_TEMP/opensc/share/p11-kit/modules" \
+            --disable-man --disable-tests --disable-notify --disable-readline
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/opensc/bin" >> "$GITHUB_PATH"
 
       - name: Test shared-library build reuse
         run: python -m unittest discover -s integration -p 'test_library_builds.py'
@@ -376,9 +481,6 @@ jobs:
         run: |
           brew install pkg-config opensc libp11 openssl@3
 
-      - name: Install iOS Rust targets
-        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-
       - name: Check generated PKCS #11 bindings
         run: cargo xtask bindings --check
 
@@ -405,6 +507,46 @@ jobs:
           name: macos-rust-crash-reports
           path: ~/Library/Logs/DiagnosticReports/pkcs11rs*.ips
           if-no-files-found: warn
+
+      - name: Run embedded virtual YubiKey PKCS #11 tests
+        run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check ABI test backend
+        run: cargo check --locked --features abi-tests
+
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install native dependencies
+        run: |
+          brew install pkg-config opensc libp11 openssl@3
+
+      - name: Install iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       - name: Build iOS XCFramework
         run: cargo xtask ios --release
@@ -439,14 +581,33 @@ jobs:
             ONLY_ACTIVE_ARCH=YES \
             build
 
-      - name: Run embedded virtual YubiKey PKCS #11 tests
-        run: cargo test --locked --no-default-features --features embedded-virtual-yubikey preview_sign_embedded
+  macos-clients:
+    runs-on: macos-latest
 
-      - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
 
-      - name: Check ABI test backend
-        run: cargo check --locked --features abi-tests
+      - name: Check out first-party dependencies
+        run: |
+          git clone --depth 1 https://github.com/qpernil/software-key-core.git ../software-key-core
+          git clone --depth 1 https://github.com/qpernil/usb-gadget-supervisor.git ../usb-gadget-supervisor
+          git clone --depth 1 https://github.com/qpernil/display-backends.git ../display-backends
+          git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+          git clone --depth 1 https://github.com/qpernil/virtual-yubihsm.git ../virtual-yubihsm
+          git clone --depth 1 https://github.com/qpernil/raspberry-pi-i2c-target.git ../raspberry-pi-i2c-target
+
+      - name: Cache Cargo dependencies and compilation
+        uses: ./.github/actions/cargo-cache
+
+      - name: Install Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install native dependencies
+        run: |
+          brew install pkg-config opensc libp11 openssl@3
 
       - name: Run OpenSC and OpenSSL provider integration tests
         run: |
