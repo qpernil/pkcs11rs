@@ -28,60 +28,44 @@ reported only as `CKS_RW_SO_FUNCTIONS`. The role is token-wide, so every open
 session on the slot observes the same role. SO login requires an RW session and
 is rejected while an RO session exists.
 
-This logical role is the only PKCS #11 authentication state retained by the
-module for PIV. The PIV backend does not cache separate `PIN authenticated` or
-`management key authenticated` flags, and `C_GetSessionInfo` does not probe PIN
-retries or derive the role from applet state. The CCID connector has only a
-selected-applet guard while a role is active; that guard is not an
-authentication role and is never used to synthesize `CK_SESSION_INFO.state`.
+The logical role is separate from the card's authentication state. PIV can
+retain PIN verification and management-key authentication simultaneously.
+The backend does not retain either credential or maintain parallel hardware
+authorization flags; the applet enforces whether the necessary authorization
+is still active, including per-key one-use `ALWAYS` PIN policies.
 
-PIV itself remains authoritative for its authentication facts. It may retain
-PIN verification and management-key authentication at the same time even
-though PKCS #11 exposes only one logical role. It also enforces per-key PIN
-policies, including one-use `ALWAYS` verification. The module performs the
-minimum PKCS #11 role checks before issuing a command: management operations
-require the logical SO role, and operations on login-protected private keys
-require the logical USER role. The PIV command can still fail when the applet's
-corresponding authentication is absent or has been consumed.
+PIV follows the card's administrative model: SO can generate, import, and
+remove native private keys, and can find those objects and read their
+non-sensitive attributes. This is an explicit PKCS #11 deviation: the standard
+normally reserves private-object creation, visibility, and deletion to USER.
+`CKA_PRIVATE` remains true, private key material stays unreadable, and SO
+cannot use the keys for signing, decryption, or derivation. The exception does
+not expose private software session objects or private objects on other
+backends. Read/write session requirements still apply to token mutations.
 
-`C_Logout` de-authenticates the active logical role before changing the slot
-role to PUBLIC and releasing the connector's selected-applet guard. USER logout
-uses the YubiKey 5.4.3 direct PIN de-authentication command, `VERIFY` with
-`P1=FF` and `P2=80`. SO logout starts an ordinary management-key
-mutual-authentication exchange and stops after receiving the card's challenge.
-The module immediately discards that response and retains neither it nor the
-management key, so it cannot construct a valid continuation.
-While that challenge is pending, only `GENERAL AUTHENTICATE` for key reference
-`9B` can continue the exchange. Any other APDU clears the pending exchange and
-existing management authorization before the applet processes that APDU
-normally. A wrong continuation to `9B` likewise consumes the challenge and
-clears management authorization. This permits logout without retaining the
-challenge, retaining the management key, or selecting another applet. The
-behavior is verified on YubiKey firmware 5.2.4 and 5.7.4: a harmless
-management-protected probe using an invalid key reference returns `6B00` while
-authenticated and `6982` when it is the first command after SO logout.
+The normal provisioning flow is `C_Login(CKU_SO, management_key)`, object
+management, then `C_Logout`. Subsequent private-key use requires
+`C_Login(CKU_USER, pin)`. Direct USER login while SO is active still returns
+`CKR_USER_ANOTHER_ALREADY_LOGGED_IN`. Administrative APDUs can also be attempted
+under USER, but PIN verification alone does not authorize them: the card
+requires management-key authentication. No parallel host permission state or
+retained management key substitutes for that authorization.
 
-NIST SP 800-73-5 Part 2, Section 2.4.2, requires an aborted or failed
-authentication protocol to set the credential's security-status indicator to
-false, and identifies the PIV Card Application Administration Key indicator as
-application-local. Appendix A.2 specifies the two-command `GENERAL
-AUTHENTICATE` protocol for reference `9B`. Taken together, a later APDU that is
-not a valid continuation of that protocol abandons it and therefore must clear
-the Administration Key security status. The standard's separate rollback rule
-for interrupted `GENERAL AUTHENTICATE` APDU command chaining concerns a
-different transport mechanism. Firmware 5.2.4 and 5.7.4 verify the resulting
-multi-command behavior used here.
+SO logout attempts to revoke management authorization by starting a fresh
+management-key authentication exchange and leaving its challenge unanswered.
+The next ordinary APDU cancels that exchange with management authorization
+cleared. This does not require selecting another applet or retaining the key.
+USER logout attempts the YubiKey 5.4.3 PIN de-authentication command, `VERIFY`
+with `P1=FF` and `P2=80`; it does not revoke management authorization. Both
+logout paths are best-effort: a device error is logged and the logical role
+is cleared even when firmware rejects the command. Applet changes, card
+resets, and removal also invalidate authorization; neither credential is
+retained or replayed to restore it.
 
-The two de-authentication paths are role-specific. PIN de-authentication does
-not clear management-key authentication, while failed management authentication
-does not clear PIN verification. Successful PIN and management authentication
-are likewise independent and may both be active in the PIV applet even though
-PKCS #11 exposes only one logical role. A failure in either de-authentication
-path is logged and ignored so firmware-specific behavior cannot prevent the
-logical logout. The module never falls back to selecting a management or
-Yubico applet; in particular, selecting the management applet can strand a
-YubiKey NEO outside PIV. A later SO or USER login establishes the requested
-logical role and performs the corresponding PIV authentication.
+Logout releases the host secure channel, its authentication-source binding,
+and the selected-applet guard. It does not select a different applet, avoiding
+the YubiKey NEO hazard of stranding the card outside PIV by selecting the
+management applet as a logout workaround.
 
 When a prompt provider is configured, the token reports
 `CKF_PROTECTED_AUTHENTICATION_PATH`; a null PIN and zero length prompts for the
@@ -140,6 +124,15 @@ native PIV key references and data-object tags differ. Mapped `CKO_DATA`
 objects also expose `CKA_OBJECT_ID` as the value bytes of the corresponding
 PIV ASN.1 object identifier. Unmapped vendor data objects expose neither
 standard attribute.
+
+Native key attributes are immutable (`CKA_MODIFIABLE=false`). In particular,
+`C_SetAttributeValue(CKA_ID)` does not physically move a key. Use a PIV
+management tool for a physical slot move; rediscovery treats the new native
+location as a different object. Unique IDs include the native location,
+public-key fingerprint, and public/private role, distinguishing identical key
+material stored in separate slots. Imported private keys report
+`CKA_ALWAYS_SENSITIVE=false` and `CKA_NEVER_EXTRACTABLE=false`, regardless of
+their current hardware nonextractability.
 
 `CKA_PKCS11RS_PIV_OBJECT_TAG` (`CKA_VENDOR_DEFINED | 0x5056`) exposes the
 native one-to-three-byte PIV BER-TLV object tag on every PIV `CKO_DATA` object.

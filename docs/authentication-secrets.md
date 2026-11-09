@@ -14,8 +14,16 @@ lifetime is distinct from retaining the login secret to authenticate again.
   when password protection is enabled and retains only connection-bound
   authorization. Deselection, reconnect, logout, and session cleanup require
   fresh authentication. See [OATH](oath.md).
-- OpenPGP retains neither clear nor derived PINs. An operation requiring fresh
-  verification obtains its PIN through `CKU_CONTEXT_SPECIFIC` login. See
+- PIV retains neither the user PIN nor the management key. SO can manage and
+  inspect native keys but cannot perform private-key cryptographic operations.
+  SO logout attempts management-key de-authentication; USER logout attempts
+  PIN de-authentication. Logical logout completes even if the card rejects
+  de-authentication. Neither credential is replayed after an applet change or
+  connection loss. See [PIV roles and authentication](piv.md#pkcs-11-role-and-piv-authentication).
+- OpenPGP retains neither clear nor derived PINs. SO can provision empty native
+  key references and manage their touch policy; logout attempts to revoke applet
+  authorization.
+  An operation requiring fresh verification obtains its PIN through `CKU_CONTEXT_SPECIFIC` login. See
   [OpenPGP authentication](openpgp.md).
 - FIDO assertions use an operation-scoped authorization token obtained by
   context-specific login. Neither the PIN nor the token is retained for another

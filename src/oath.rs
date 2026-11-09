@@ -549,6 +549,7 @@ pub(crate) fn sign_init(
         public_key: None,
         slot_id: slot,
         requires_login: object.private,
+        always_authenticate: false,
         context_specific_extended: false,
         context_specific_rp_id: None,
         oath_time: time,

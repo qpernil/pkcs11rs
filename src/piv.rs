@@ -1218,6 +1218,7 @@ impl Client {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn move_key(
         &self,
         connector: &dyn Connector,

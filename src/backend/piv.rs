@@ -100,11 +100,6 @@ fn piv_pq_public_key_length(algorithm: piv::Algorithm) -> Option<usize> {
     })
 }
 
-pub(crate) fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
-    let digest = hash(MessageDigest::sha256(), value)?;
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 pub(crate) fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
     let mut encoded = vec![key.algorithm as u8];
     match &key.public_key {
@@ -116,7 +111,7 @@ pub(crate) fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
             encoded.extend_from_slice(public_key);
         }
     }
-    piv_object_fingerprint(&encoded)
+    native_object_fingerprint(&encoded)
 }
 
 pub(crate) fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
@@ -625,7 +620,9 @@ impl Slot for PivSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = if self.connector.secure_channel_required() {
+            let info = if self.connector.secure_channel_required()
+                || self.connector.ccid_login_state().is_some()
+            {
                 PivClient.selected_info(self.connector.as_ref())?
             } else {
                 PivClient.select(self.connector.as_ref(), &self.application_aid)?
@@ -679,7 +676,9 @@ impl Slot for PivSlot {
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
-            let info = if self.connector.secure_channel_required() {
+            let info = if self.connector.secure_channel_required()
+                || self.connector.ccid_login_state().is_some()
+            {
                 PivClient.selected_info(self.connector.as_ref())?
             } else {
                 PivClient.select(self.connector.as_ref(), &self.application_aid)?
@@ -732,7 +731,7 @@ impl Slot for PivSlot {
                 target: "pkcs11rs::auth",
                 component = "piv",
                 ?role,
-                "PIV role de-authentication completed"
+                "PIV role logout completed"
             ),
             Err(error) => tracing::debug!(
                 target: "pkcs11rs::auth",
@@ -1184,21 +1183,6 @@ impl Slot for PivSlot {
         self.keys.retain(|key| key.slot != slot);
         Ok(())
     }
-    fn piv_move_key(&mut self, from: piv::Slot, to: piv::Slot) -> Result<(), Error> {
-        if (self.reported_version().major, self.reported_version().minor) < (5, 7) {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
-        observe_piv_authentication_result(
-            self.connector.as_ref(),
-            LoginRole::So,
-            PivClient.move_key(self.connector.as_ref(), from, to),
-        )?;
-        if let Some(key) = self.keys.iter_mut().find(|key| key.slot == from) {
-            key.slot = to;
-            key.attestation = Rc::new(RefCell::new(LazyCache::Unattempted));
-        }
-        Ok(())
-    }
     fn piv_delete_certificate(&mut self, slot: piv::Slot) -> Result<(), Error> {
         observe_piv_authentication_result(
             self.connector.as_ref(),
@@ -1454,8 +1438,8 @@ impl Slot for PivSlot {
                 decapsulate: can_kem,
                 sensitive: true,
                 extractable: false,
-                always_sensitive: true,
-                never_extractable: true,
+                always_sensitive: local,
+                never_extractable: local,
                 local,
                 key_gen_mechanism,
                 allowed_mechanisms: None,
@@ -1468,7 +1452,7 @@ impl Slot for PivSlot {
             });
         }
         for certificate in &self.certificates {
-            let fingerprint = piv_object_fingerprint(&certificate.value)?;
+            let fingerprint = native_object_fingerprint(&certificate.value)?;
             let key_type = match certificate.algorithm {
                 piv::Algorithm::Rsa1024
                 | piv::Algorithm::Rsa2048
@@ -1577,7 +1561,7 @@ impl Slot for PivSlot {
             });
         }
         for data in &self.data_objects {
-            let fingerprint = piv_object_fingerprint(&data.value)?;
+            let fingerprint = native_object_fingerprint(&data.value)?;
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-data-{:06x}-{fingerprint}", data.object_id),

@@ -398,6 +398,9 @@ pub(crate) fn login(
                 let mut sign_operation = false;
                 let session = ctx.get_session_context_mut(session_handle)?;
                 if let Some(operation) = &session.sign_operation {
+                    if !operation.always_authenticate {
+                        return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+                    }
                     context_operation = Some((
                         operation.slot_id,
                         operation.context_specific_extended,
@@ -406,6 +409,9 @@ pub(crate) fn login(
                     sign_operation = true;
                 }
                 if let Some(operation) = &session.decrypt_operation {
+                    if !operation.always_authenticate {
+                        return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+                    }
                     if context_operation.is_some() {
                         return Err(CKR_OPERATION_ACTIVE.into());
                     }

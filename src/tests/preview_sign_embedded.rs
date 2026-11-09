@@ -819,7 +819,12 @@ fn find_objects(
     handles[..count as usize].to_vec()
 }
 
-fn authorize_preview_operation(session: CK_SESSION_HANDLE, digest: &[u8; 32]) {
+fn authorize_preview_operation(
+    session: CK_SESSION_HANDLE,
+    mechanism: &mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+    digest: &[u8; 32],
+) {
     let mut length = 0;
     assert_eq!(
         crate::api::C_Sign(
@@ -830,6 +835,11 @@ fn authorize_preview_operation(session: CK_SESSION_HANDLE, digest: &[u8; 32]) {
             &mut length
         ),
         CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    // A failed C_Sign terminates the operation, including missing authorization.
+    assert_eq!(
+        crate::api::C_SignInit(session, mechanism, key),
+        CKR_OK as CK_RV
     );
     let mut pin = *b"123456";
     assert_eq!(
@@ -1337,7 +1347,7 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
         CKR_OK as CK_RV
     );
-    authorize_preview_operation(session, &digest);
+    authorize_preview_operation(session, &mut mechanism, restored_signing_key, &digest);
     assert_eq!(
         read_attribute(
             session,
@@ -1436,7 +1446,7 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
         CKR_OK as CK_RV
     );
-    authorize_preview_operation(session, &digest);
+    authorize_preview_operation(session, &mut mechanism, restored_signing_key, &digest);
     assert_eq!(
         crate::api::C_Sign(
             session,
@@ -1692,7 +1702,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         crate::api::C_SignInit(session, &mut mechanism, signing_key),
         CKR_OK as CK_RV
     );
-    authorize_preview_operation(session, &digest);
+    authorize_preview_operation(session, &mut mechanism, signing_key, &digest);
     let mut signature_length = 0;
     assert_eq!(
         crate::api::C_Sign(
@@ -1908,6 +1918,19 @@ fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
             &mut response_len,
         ),
         CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private_key),
+        CKR_OK as CK_RV
     );
     assert_eq!(
         crate::api::C_Login(

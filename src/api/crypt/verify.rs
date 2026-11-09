@@ -172,6 +172,7 @@ pub(crate) fn verify_init(
             public_key: object.public_key.clone(),
             slot_id,
             requires_login: object.private,
+            always_authenticate: false,
             context_specific_extended: false,
             context_specific_rp_id: None,
             oath_time: None,

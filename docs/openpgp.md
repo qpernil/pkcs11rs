@@ -126,6 +126,13 @@ PKCS #11 key-pair generation mechanism. Imported keys report
 `CKA_LOCAL=false`; when status is unavailable, the client uses the same
 conservative non-local value.
 
+Imported keys also report `CKA_ALWAYS_SENSITIVE=false` and
+`CKA_NEVER_EXTRACTABLE=false`: current nonextractability does not establish
+their history before import. Key identities include a public-key fingerprint
+and the key reference, with separate IDs for the public and private objects.
+Changing touch policy preserves those IDs; replacing the key material changes
+them. Certificate identities include the certificate fingerprint.
+
 The applet version and serial number are reported in the slot and token
 information. The token-wide minimum is the smaller of the user and admin
 password minima, and the maximum is the larger of their applet-reported
@@ -180,7 +187,12 @@ OpenPGP applet's DER form to PKCS #11's fixed-width `r || s` form.
 
 `C_Login` selects the applet and establishes the configured secure channel if
 needed. `CKU_USER` verifies PW1, while `CKU_SO` verifies the OpenPGP
-administrator password PW3. SO login requires a read/write session and cannot
+administrator password PW3. SO can generate or import a key into an empty
+reference, inspect native private-key attributes, and change its touch policy.
+This deliberately extends PKCS #11 SO access to match the applet's administrator
+role. Private-key cryptographic operations still require USER authorization;
+private key material remains unreadable. Existing keys cannot be replaced or
+deleted under either role. SO login requires a read/write session and cannot
 coexist with read-only sessions. When the applet publishes an OpenPGP KDF Data
 Object (`F9`), the client derives PW1 and PW3 using their advertised salts
 before sending `VERIFY`. SHA-256 and SHA-512 KDF hashes are supported. The
@@ -192,7 +204,9 @@ or PW3 according to the requested role.
 
 No clear or derived PIN is cached. `CKU_CONTEXT_SPECIFIC` login supplies a PIN
 for an operation that needs a fresh PW1 verification. `C_Logout` clears the
-applet authentication state and applet-scoped secure-channel state.
+local login and applet-scoped secure-channel state and attempts to revoke
+PW1 and PW3 on the card. Logical logout completes even if a card rejects
+de-authentication.
 
 In a read/write session, `C_SetPIN` changes PW3 while SO is logged in and PW1
 otherwise, using `CHANGE REFERENCE DATA`. `C_InitPIN` resets PW1 under an

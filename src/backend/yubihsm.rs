@@ -565,6 +565,8 @@ pub(crate) struct YubiHsmPkcs11Metadata {
     pub(crate) target_id: u16,
     pub(crate) target_sequence: u8,
     pub(crate) primary_class: Option<CK_OBJECT_CLASS>,
+    pub(crate) unique_id: Option<String>,
+    pub(crate) public_unique_id: Option<String>,
     pub(crate) id: Option<Vec<u8>>,
     pub(crate) label: Option<String>,
     pub(crate) public: bool,
@@ -575,8 +577,13 @@ pub(crate) struct YubiHsmPkcs11Metadata {
 }
 
 impl YubiHsmPkcs11Metadata {
-    fn is_empty(&self) -> bool {
-        self.id.is_none()
+    fn is_empty(&self, target: &YubiHsmObjectInfo) -> bool {
+        // A stored non-default identity cannot be discarded without changing
+        // the exposed object identity. Derived IDs need no companion alone.
+        self.unique_id
+            .as_ref()
+            .is_none_or(|id| *id == yubihsm_native_unique_id(target))
+            && self.id.is_none()
             && self.label.is_none()
             && !self.public
             && self.public_id.is_none()
@@ -596,6 +603,7 @@ impl YubiHsmPkcs11Metadata {
             self.public_id = None;
             self.public_label = None;
             self.public_attributes = KeyAttributes::new();
+            self.public_unique_id = None;
         }
     }
 
@@ -634,6 +642,7 @@ impl YubiHsmPkcs11Metadata {
         let mut record = BackedKeyMetadata::new(backing);
         let mut primary = self.primary_attributes.clone();
         insert_sparse_identity(&mut primary, self.id.as_deref(), self.label.as_deref())?;
+        insert_unique_id(&mut primary, &self.primary_unique_id(target))?;
         record
             .insert_aspect(primary_class, primary)
             .map_err(key_metadata_error)?;
@@ -648,6 +657,7 @@ impl YubiHsmPkcs11Metadata {
                 return Err(CKR_DATA_INVALID.into());
             }
             let mut public_attributes = self.public_attributes.clone();
+            insert_unique_id(&mut public_attributes, &self.projected_unique_id(target))?;
             public_attributes.remove(u64::from(CKA_ID));
             public_attributes.remove(u64::from(CKA_LABEL));
             insert_sparse_identity(
@@ -689,22 +699,35 @@ impl YubiHsmPkcs11Metadata {
             .aspect(backing.primary_class)
             .ok_or(CKR_DATA_INVALID)?;
         let (id, label) = primary_metadata_identity(primary)?;
+        let unique_id = metadata_unique_id(primary)?;
         let mut primary_attributes = primary.clone();
+        primary_attributes.remove(u64::from(CKA_UNIQUE_ID));
         primary_attributes.remove(u64::from(CKA_ID));
         primary_attributes.remove(u64::from(CKA_LABEL));
         let projected_public = backing.primary_class != u64::from(CKO_PUBLIC_KEY)
             && record.aspect(u64::from(CKO_PUBLIC_KEY)).is_some();
-        let (public_id, public_label, public_attributes) =
+        let (public_id, public_label, public_unique_id, public_attributes) =
             match record.aspect(u64::from(CKO_PUBLIC_KEY)) {
                 Some(public) if backing.primary_class != u64::from(CKO_PUBLIC_KEY) => {
                     let (id, label) = metadata_identity(public)?;
-                    (id, label, public.clone())
+                    let unique_id = metadata_unique_id(public)?;
+                    let mut attributes = public.clone();
+                    attributes.remove(u64::from(CKA_UNIQUE_ID));
+                    (id, label, unique_id, attributes)
                 }
-                Some(_) | None => (None, None, KeyAttributes::new()),
+                Some(_) | None => (None, None, None, KeyAttributes::new()),
             };
         let expected_aspects = 1 + usize::from(projected_public);
         if record.aspects().count() != expected_aspects {
             return Err(CKR_DATA_INVALID.into());
+        }
+        if unique_id.is_none() || projected_public && public_unique_id.is_none() {
+            log!(
+                2,
+                "YubiHSM metadata for type {:02x} ID {:04x} omits CKA_UNIQUE_ID; using stable native-derived defaults",
+                backing.object_type,
+                backing.id
+            );
         }
         Ok(Self {
             target_type: backing.object_type,
@@ -716,12 +739,53 @@ impl YubiHsmPkcs11Metadata {
             ),
             id,
             label,
+            unique_id,
+            public_unique_id,
             public: projected_public,
             public_id,
             public_label,
             public_attributes,
             primary_attributes,
         })
+    }
+
+    fn primary_unique_id(&self, info: &YubiHsmObjectInfo) -> String {
+        self.unique_id
+            .clone()
+            .unwrap_or_else(|| yubihsm_native_unique_id(info))
+    }
+
+    fn projected_unique_id(&self, info: &YubiHsmObjectInfo) -> String {
+        self.public_unique_id
+            .clone()
+            .unwrap_or_else(|| format!("{}-public", yubihsm_native_unique_id(info)))
+    }
+}
+
+// Native identifiers are stable across clients and independent of PKCS #11
+// attribute overrides. The device's finite sequence can eventually be reused.
+fn yubihsm_native_unique_id(info: &YubiHsmObjectInfo) -> String {
+    format!(
+        "yubihsm-{:02x}-{:04x}-{:02x}",
+        info.object_type, info.id, info.sequence
+    )
+}
+
+fn insert_unique_id(attributes: &mut KeyAttributes, unique_id: &str) -> Result<(), Error> {
+    attributes
+        .insert(
+            u64::from(CKA_UNIQUE_ID),
+            KeyAttributeValue::Text(unique_id.to_owned()),
+        )
+        .map_err(key_metadata_error)?;
+    Ok(())
+}
+
+fn metadata_unique_id(attributes: &KeyAttributes) -> Result<Option<String>, Error> {
+    match attributes.get(u64::from(CKA_UNIQUE_ID)) {
+        None => Ok(None),
+        Some(KeyAttributeValue::Text(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => Err(CKR_DATA_INVALID.into()),
     }
 }
 
@@ -783,6 +847,7 @@ fn primary_metadata_identity(
             (attribute, KeyAttributeValue::Text(value)) if attribute == u64::from(CKA_LABEL) => {
                 label = Some(value.clone());
             }
+            (attribute, KeyAttributeValue::Text(_)) if attribute == u64::from(CKA_UNIQUE_ID) => {}
             (attribute, KeyAttributeValue::Boolean(_))
                 if [
                     CKA_ENCRYPT,
@@ -2095,7 +2160,7 @@ impl YubiHsmSlot {
             } else {
                 None
             };
-            let generation = self.object_generation(&info)?;
+            self.object_generation(&info)?;
             let attribute_metadata = metadata
                 .remove(&YubiHsmMetadataScope {
                     target: YubiHsmMetadataTarget {
@@ -2109,11 +2174,10 @@ impl YubiHsmSlot {
                         .primary_class
                         .is_none_or(|class| class == yubihsm_object_class(&info))
                 });
-            let mut objects = match yubihsm_token_objects_with_generation(
+            let mut objects = match yubihsm_token_objects_with_metadata(
                 slot_id,
                 info.clone(),
                 public_key,
-                generation,
                 attribute_metadata.as_ref(),
             ) {
                 Ok(objects) => objects,
@@ -2546,11 +2610,10 @@ impl YubiHsmSlot {
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
         for metadata in metadata.values() {
-            let objects = yubihsm_token_objects_with_generation(
+            let objects = yubihsm_token_objects_with_metadata(
                 slot_id,
                 metadata.info.clone(),
                 metadata.public_key.clone(),
-                metadata.generation,
                 metadata.attributes.as_ref(),
             )?;
             if let Some((index, _)) = objects
@@ -2639,6 +2702,8 @@ impl YubiHsmSlot {
             target_type: info.object_type,
             target_id: info.id,
             target_sequence: info.sequence,
+            unique_id: None,
+            public_unique_id: None,
             primary_class: Some(yubihsm_object_class(info)),
             id: None,
             label: None,
@@ -2678,7 +2743,7 @@ impl YubiHsmSlot {
             old_canonical_info.push(info);
         }
 
-        if metadata.is_empty() && !has_legacy_metadata {
+        if metadata.is_empty(info) && !has_legacy_metadata {
             for reference in old_references {
                 StorageProvider::delete(self, &reference)
                     .map_err(crate::backed_object::storage_error)?;
@@ -2728,6 +2793,11 @@ impl YubiHsmSlot {
             .clone()
             .unwrap_or_else(|| Self::empty_pkcs11_metadata(&info));
         metadata.prepare_for_canonical_write(&info);
+        // A newly created public aspect is a distinct object even when the
+        // native private key survives a previous public aspect's deletion.
+        if !metadata.public {
+            metadata.public_unique_id = Some(crate::object::new_object_id()?);
+        }
         metadata.public = true;
         metadata.public_id =
             (projection.id != info.id.to_be_bytes()).then(|| projection.id.clone());
@@ -2745,6 +2815,7 @@ impl YubiHsmSlot {
         }
         let previous = metadata.clone();
         metadata.public = false;
+        metadata.public_unique_id = None;
         metadata.public_id = None;
         metadata.public_label = None;
         metadata.public_attributes = KeyAttributes::new();
@@ -2778,11 +2849,10 @@ impl YubiHsmSlot {
                 .get(&key)
                 .cloned()
                 .ok_or(CKR_DEVICE_ERROR)?;
-            let mut public_object = yubihsm_token_objects_with_generation(
+            let mut public_object = yubihsm_token_objects_with_metadata(
                 slot_id,
                 metadata.info,
                 metadata.public_key,
-                metadata.generation,
                 metadata.attributes.as_ref(),
             )?
             .into_iter()
@@ -3632,6 +3702,8 @@ pub(crate) fn parse_yubihsm_pkcs11_metadata(
         target_type,
         target_id,
         target_sequence,
+        unique_id: None,
+        public_unique_id: None,
         primary_class: None,
         id: None,
         label: None,
@@ -3692,15 +3764,13 @@ pub(crate) fn yubihsm_token_objects(
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
 ) -> Result<Vec<TokenObject>, Error> {
-    let generation = info.sequence as u64;
-    yubihsm_token_objects_with_generation(slot_id, info, public_key, generation, None)
+    yubihsm_token_objects_with_metadata(slot_id, info, public_key, None)
 }
 
-pub(crate) fn yubihsm_token_objects_with_generation(
+pub(crate) fn yubihsm_token_objects_with_metadata(
     slot_id: CK_SLOT_ID,
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
-    generation: u64,
     metadata: Option<&YubiHsmPkcs11Metadata>,
 ) -> Result<Vec<TokenObject>, Error> {
     let key_type = yubihsm_key_type(info.algorithm);
@@ -3711,10 +3781,9 @@ pub(crate) fn yubihsm_token_objects_with_generation(
     let id = metadata
         .and_then(|metadata| metadata.id.clone())
         .unwrap_or_else(|| info.id.to_be_bytes().to_vec());
-    let unique = format!(
-        "yubihsm-{:02x}-{:04x}-{:02x}-{generation}",
-        info.object_type, info.id, info.sequence
-    );
+    let unique = metadata
+        .map(|metadata| metadata.primary_unique_id(&info))
+        .unwrap_or_else(|| yubihsm_native_unique_id(&info));
     let generated = info.origin & 0x01 != 0;
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
     let operational_algorithm_supported =
@@ -3800,7 +3869,7 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         };
         let mut public_object = TokenObject {
             slot_id: Some(slot_id),
-            unique_id: format!("{unique}-public"),
+            unique_id: metadata.ok_or(CKR_DEVICE_ERROR)?.projected_unique_id(&info),
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             key_type,
             label: metadata
@@ -4141,6 +4210,8 @@ pub(crate) fn yubihsm_abi_public_projection_metadata(
         target_type: target.object_type,
         target_id: target.id,
         target_sequence: target.sequence,
+        unique_id: None,
+        public_unique_id: None,
         primary_class: Some(yubihsm_object_class(target)),
         id: None,
         label: None,
@@ -4556,11 +4627,10 @@ impl Slot for YubiHsmSlot {
             if info.label.starts_with(YUBIHSM_STORED_OBJECT_LABEL_PREFIX) {
                 continue;
             }
-            let mut discovered_objects = yubihsm_token_objects_with_generation(
+            let mut discovered_objects = yubihsm_token_objects_with_metadata(
                 slot_id,
                 info.clone(),
                 public_key,
-                generation,
                 attribute_metadata.as_ref(),
             )?;
             self.bind_cached_object_value(&info, &mut discovered_objects)?;
@@ -4605,11 +4675,10 @@ impl Slot for YubiHsmSlot {
             .cloned()
             .collect::<Vec<_>>();
         for metadata in metadata {
-            let mut objects = yubihsm_token_objects_with_generation(
+            let mut objects = yubihsm_token_objects_with_metadata(
                 slot_id,
                 metadata.info.clone(),
                 metadata.public_key,
-                metadata.generation,
                 metadata.attributes.as_ref(),
             )?;
             self.bind_cached_object_value(&metadata.info, &mut objects)?;
@@ -4655,11 +4724,12 @@ impl Slot for YubiHsmSlot {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!(
-                    "yubihsm-{:02x}-{:04x}-{:02x}-{}-attestation",
-                    metadata.info.object_type,
-                    metadata.info.id,
-                    metadata.info.sequence,
-                    metadata.generation
+                    "{}-attestation",
+                    metadata
+                        .attributes
+                        .as_ref()
+                        .map(|attributes| attributes.primary_unique_id(&metadata.info))
+                        .unwrap_or_else(|| yubihsm_native_unique_id(&metadata.info))
                 ),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type: yubihsm_key_type(metadata.info.algorithm),
@@ -5144,9 +5214,55 @@ mod primary_policy_tests {
         companion.label =
             yubihsm_metadata_label_for_target(info, YubiHsmMetadataPhysicalFormat::CanonicalCbor);
         let decoded = YubiHsmPkcs11Metadata::from_backed_key(&companion, &record).unwrap();
-        yubihsm_token_objects_with_generation(7, info.clone(), None, 1, Some(&decoded))
+        yubihsm_token_objects_with_metadata(7, info.clone(), None, Some(&decoded))
             .unwrap()
             .remove(0)
+    }
+
+    #[test]
+    fn canonical_metadata_accepts_missing_unique_id_and_preserves_stored_identity() {
+        let info = aes_info();
+        let metadata = YubiHsmSlot::empty_pkcs11_metadata(&info);
+        let mut record = metadata.to_backed_key(&info, false).unwrap();
+        let class = u64::from(CKO_SECRET_KEY);
+        let mut primary = record.aspect(class).unwrap().clone();
+        primary.remove(u64::from(CKA_UNIQUE_ID));
+        record.insert_aspect(class, primary.clone()).unwrap();
+        let mut companion = info.clone();
+        companion.object_type = YUBIHSM_OPAQUE;
+        companion.algorithm = YUBIHSM_ALGO_OPAQUE_DATA;
+        companion.label =
+            yubihsm_metadata_label_for_target(&info, YubiHsmMetadataPhysicalFormat::CanonicalCbor);
+        let decoded = YubiHsmPkcs11Metadata::from_backed_key(&companion, &record).unwrap();
+        assert!(decoded.unique_id.is_none());
+        assert!(decoded.is_empty(&info));
+        assert_eq!(
+            decoded.primary_unique_id(&info),
+            yubihsm_native_unique_id(&info)
+        );
+        let encoded = decoded.encode(&info).unwrap();
+        let persisted = BackedKeyMetadata::from_cbor(&encoded).unwrap();
+        assert_eq!(
+            persisted
+                .aspect(class)
+                .unwrap()
+                .get(u64::from(CKA_UNIQUE_ID)),
+            Some(&KeyAttributeValue::Text(yubihsm_native_unique_id(&info)))
+        );
+        insert_unique_id(&mut primary, "stored-native-id").unwrap();
+        record.insert_aspect(class, primary.clone()).unwrap();
+        let decoded = YubiHsmPkcs11Metadata::from_backed_key(&companion, &record).unwrap();
+        let object = yubihsm_token_objects_with_metadata(7, info.clone(), None, Some(&decoded))
+            .unwrap()
+            .remove(0);
+        assert_eq!(object.unique_id, "stored-native-id");
+        assert!(
+            !decoded.is_empty(&info),
+            "an existing non-default identity must survive removing other overrides"
+        );
+        insert_unique_id(&mut primary, "").unwrap();
+        record.insert_aspect(class, primary).unwrap();
+        assert!(YubiHsmPkcs11Metadata::from_backed_key(&companion, &record).is_err());
     }
 
     #[test]

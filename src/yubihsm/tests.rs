@@ -38,6 +38,191 @@ use virtual_yubihsm_core::{
 
 const PASSWORD: &[u8] = b"password";
 
+#[test]
+fn native_unique_ids_survive_clients_and_metadata_transitions_without_extra_records() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let count = peer.metadata_objects.borrow().len();
+    Slot::yubihsm_set_attributes(&slot, 7, &private.unique_id, None, None, None).unwrap();
+    assert_eq!(peer.metadata_objects.borrow().len(), count);
+    Slot::init_slot(&mut slot).unwrap();
+    login_slot(&mut slot, b"0001password").unwrap();
+    assert!(
+        Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| object.unique_id == private.unique_id)
+    );
+
+    Slot::yubihsm_set_attributes(
+        &slot,
+        7,
+        &private.unique_id,
+        Some(b"override"),
+        Some("override"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(peer.metadata_objects.borrow().len(), count + 1);
+    let encoded = peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .find(|(info, _)| info.label.starts_with("pkcs11rs metadata "))
+        .unwrap()
+        .1
+        .clone();
+    let record = BackedKeyMetadata::from_cbor(&encoded).unwrap();
+    assert_eq!(
+        record
+            .aspect(u64::from(CKO_PRIVATE_KEY))
+            .unwrap()
+            .get(u64::from(crate::CKA_UNIQUE_ID)),
+        Some(&KeyAttributeValue::Text(private.unique_id.clone()))
+    );
+    let mut reopened = cache_test_slot(peer.clone(), false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    let restored = Slot::token_objects(&reopened, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.unique_id == private.unique_id)
+        .unwrap();
+    assert_eq!(restored.id, b"override");
+    assert_eq!(restored.label, "override");
+    Slot::yubihsm_set_attributes(
+        &reopened,
+        7,
+        &private.unique_id,
+        Some(&private.id),
+        Some(&private.label),
+        None,
+    )
+    .unwrap();
+    assert_eq!(peer.metadata_objects.borrow().len(), count);
+    assert!(
+        Slot::token_objects(&reopened, 7)
+            .unwrap()
+            .iter()
+            .any(|object| object.unique_id == private.unique_id)
+    );
+}
+
+#[test]
+fn removing_last_override_preserves_an_existing_nondefault_unique_id() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    Slot::yubihsm_set_attributes(&slot, 7, &private.unique_id, None, Some("override"), None)
+        .unwrap();
+    {
+        let mut records = peer.metadata_objects.borrow_mut();
+        let (_, value) = records
+            .values_mut()
+            .find(|(info, _)| info.label.starts_with("pkcs11rs metadata "))
+            .unwrap();
+        let mut record = BackedKeyMetadata::from_cbor(value).unwrap();
+        let class = u64::from(CKO_PRIVATE_KEY);
+        let mut attributes = record.aspect(class).unwrap().clone();
+        attributes
+            .insert(
+                u64::from(crate::CKA_UNIQUE_ID),
+                KeyAttributeValue::Text("persisted-identity".to_owned()),
+            )
+            .unwrap();
+        record.insert_aspect(class, attributes).unwrap();
+        *value = record.to_cbor().unwrap();
+    }
+    let mut reopened = cache_test_slot(peer.clone(), false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    Slot::token_objects(&reopened, 7).unwrap();
+    Slot::yubihsm_set_attributes(
+        &reopened,
+        7,
+        "persisted-identity",
+        None,
+        Some(&private.label),
+        None,
+    )
+    .unwrap();
+    let mut reopened = cache_test_slot(peer, false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    assert!(
+        Slot::token_objects(&reopened, 7)
+            .unwrap()
+            .iter()
+            .any(|object| {
+                object.unique_id == "persisted-identity" && object.label == private.label
+            })
+    );
+}
+
+#[test]
+fn public_projection_ids_are_persisted_independently_and_renewed_after_deletion() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let projection = persisted_public_projection(&private, &private.id, &private.label);
+    let count = peer.metadata_objects.borrow().len();
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    let get_public = |slot: &crate::YubiHsmSlot| {
+        Slot::token_objects(slot, 7)
+            .unwrap()
+            .into_iter()
+            .find(|object| {
+                object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == private.id
+            })
+            .unwrap()
+    };
+    let public = get_public(&slot);
+    assert_ne!(public.unique_id, private.unique_id);
+    assert_eq!(peer.metadata_objects.borrow().len(), count + 1);
+    Slot::yubihsm_set_attributes(
+        &slot,
+        7,
+        &public.unique_id,
+        Some(b"public override"),
+        None,
+        None,
+    )
+    .unwrap();
+    // Updating the public aspect preserves its identity as well as the private one.
+    let mut reopened = cache_test_slot(peer.clone(), false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    let objects = Slot::token_objects(&reopened, 7).unwrap();
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.unique_id == private.unique_id)
+    );
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.unique_id == public.unique_id && object.id == b"public override")
+    );
+    Slot::yubihsm_destroy_public_projection(&reopened, 7, &public.unique_id).unwrap();
+    assert_eq!(peer.metadata_objects.borrow().len(), count);
+    Slot::token_objects(&reopened, 7).unwrap();
+    Slot::yubihsm_persist_public_projection(&reopened, 7, &private.unique_id, &projection).unwrap();
+    assert_ne!(get_public(&reopened).unique_id, public.unique_id);
+    assert_eq!(peer.metadata_objects.borrow().len(), count + 1);
+}
+
 fn login_slot(slot: &mut dyn Slot, pin: &[u8]) -> Result<(), crate::Error> {
     Slot::login(slot, Some(pin), &crate::pinentry::Pinentry::unconfigured())
 }
@@ -269,6 +454,7 @@ impl ProtocolPeer {
 
     fn new_virtual_device() -> VirtualYubiHsm {
         let config = VirtualYubiHsmConfig {
+            unlimited_storage: false,
             version: [2, 4, 1],
             serial: 0x0102_0304,
             log_capacity: 62,
@@ -2992,11 +3178,11 @@ fn deleting_the_only_public_aspect_leaves_a_canonical_legacy_shadow() {
         })
         .unwrap();
     let record = BackedKeyMetadata::from_cbor(&canonical).unwrap();
-    assert!(
-        record
-            .aspect(u64::from(CKO_PRIVATE_KEY))
-            .unwrap()
-            .is_empty()
+    let primary = record.aspect(u64::from(CKO_PRIVATE_KEY)).unwrap();
+    assert_eq!(primary.iter().count(), 1);
+    assert_eq!(
+        primary.get(u64::from(crate::CKA_UNIQUE_ID)),
+        Some(&KeyAttributeValue::Text(private.unique_id.clone()))
     );
     assert!(record.aspect(u64::from(CKO_PUBLIC_KEY)).is_none());
     assert!(peer.metadata_objects.borrow().contains_key(&101));

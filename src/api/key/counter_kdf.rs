@@ -115,7 +115,7 @@ pub(super) fn derive(
 ) -> Result<(), Error> {
     let fields = fields(mechanism)?;
     let template = unsafe { from_raw_parts(template, count as usize) }?;
-    validate_unique_template(template)?;
+    validate_mutation_template(template)?;
     with_session_context_mut(session, |ctx| {
         let (slot, flags, logged_in) = ctx.session_details(session)?;
         require_slot_mechanism(ctx, slot, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;

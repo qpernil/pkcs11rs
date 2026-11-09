@@ -29,6 +29,7 @@ impl AbiYubiHsmConnector {
             .and_then(|serial| serial.parse().ok())
             .ok_or(CKR_ARGUMENTS_BAD)?;
         let config = VirtualYubiHsmConfig {
+            unlimited_storage: false,
             version: [2, 4, 0],
             serial,
             log_capacity: 62,

@@ -461,6 +461,21 @@ created when native attributes suffice, and
 setting the final override back to its native value deletes an otherwise empty
 record. A private and its linked public aspect share one record.
 
+Each aspect stores its own `CKA_UNIQUE_ID` whenever its companion is written.
+An existing record without that attribute uses the same stable fallback as an
+object without metadata: native object type, object ID, and device sequence,
+with a separate suffix for the public aspect. Native primary identities are
+preserved when overrides are added or removed. Derived identity fields alone
+never cause a companion to be created or retained, and discovery never writes
+one. An existing record with a non-default stored identity is retained even
+after its last attribute override is removed, so that identity remains stable.
+New persistent public aspects receive independent random IDs; updates and
+rediscovery preserve them, while deletion followed by recreation assigns a new
+ID. Process-local cache generations are not part of exposed identities.
+The metadata-free fallback cannot distinguish a replacement after the device's
+finite sequence counter wraps to an earlier value. It is not a globally unique
+identifier across tokens or token resets.
+
 `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` with `CKA_TOKEN=CK_TRUE` creates or replaces
 the canonical public aspect for an asymmetric or RSA wrap key. The object is
 rediscovered by stable hardware identity and its public key is checked against

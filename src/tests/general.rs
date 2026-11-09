@@ -1377,14 +1377,18 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
 
     let public = objects
         .iter()
-        .find(|object| object.unique_id == "openpgp-81-public")
+        .find(|object| {
+            object.unique_id.starts_with("openpgp-81-") && object.unique_id.ends_with("-public")
+        })
         .unwrap();
     assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     assert!(public.verify);
 
     let private = objects
         .iter()
-        .find(|object| object.unique_id == "openpgp-81-private")
+        .find(|object| {
+            object.unique_id.starts_with("openpgp-81-") && object.unique_id.ends_with("-private")
+        })
         .unwrap();
     assert_eq!(private.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
     assert!(private.private);
@@ -1400,7 +1404,10 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
 
     let certificate = objects
         .iter()
-        .find(|object| object.unique_id == "openpgp-81-certificate")
+        .find(|object| {
+            object.unique_id.starts_with("openpgp-81-")
+                && object.unique_id.ends_with("-certificate")
+        })
         .unwrap();
     assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
 }
@@ -2484,7 +2491,7 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
 }
 
 #[test]
-fn context_specific_login_does_not_require_always_authenticate_attribute() {
+fn context_specific_login_requires_always_authenticate_attribute() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     TEST_CONTEXT_LOGIN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -2531,11 +2538,11 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
             pin.as_mut_ptr(),
             pin.len() as CK_ULONG
         ),
-        CKR_OK as CK_RV
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
         TEST_CONTEXT_LOGIN_COUNT.load(std::sync::atomic::Ordering::SeqCst),
-        1
+        0
     );
 
     assert_eq!(
@@ -2557,6 +2564,12 @@ fn context_specific_login_requires_user_login() {
     with_test_slot_context(TEST_SLOT_ID, |context| {
         let object = context.memory_objects.get_mut(&2).unwrap();
         object.private = false;
+        object.material = crate::KeyMaterial::PivPrivate {
+            slot: crate::piv::Slot::Signature,
+            algorithm: crate::piv::Algorithm::Rsa1024,
+            pin_policy: 3,
+            touch_policy: 1,
+        };
     });
 
     let mut mechanism = CK_MECHANISM {

@@ -12,7 +12,7 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
     if registration_attribute.is_none() && derived_attribute.is_none() {
         return Ok(None);
     }
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let registration_encoded =
         read_attribute_value(registration_attribute.ok_or(CKR_TEMPLATE_INCOMPLETE)?)
             .map_err(Error::from)?;
@@ -36,7 +36,7 @@ pub(super) fn preview_sign_object_template(
     templ: &[CK_ATTRIBUTE],
     derived: bool,
 ) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let mut parsed = TokenObjectTemplate {
         class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
         key_type: Some(if derived {
@@ -131,6 +131,7 @@ pub(crate) fn create_object(
 ) -> Result<(), Error> {
     let object_handle = unsafe { as_mut(object) }?;
     let templ = unsafe { from_raw_parts(templ, count as usize) }?;
+    validate_mutation_template(templ)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let class = template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE)
@@ -250,7 +251,7 @@ pub(crate) struct OpenPgpImport {
 }
 
 pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
         .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
@@ -340,14 +341,6 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
         object,
         touch_policy,
     })
-}
-
-pub(super) fn piv_key_object_handles(
-    ctx: &SlotContext,
-    slot_id: CK_SLOT_ID,
-    piv_slot: piv::Slot,
-) -> Result<Vec<(CK_OBJECT_HANDLE, CK_OBJECT_CLASS, bool)>, Error> {
-    piv_key_object_handles_in_slot(&*ctx.slot, &ctx.state, slot_id, piv_slot)
 }
 
 enum PivImport {
@@ -535,7 +528,7 @@ fn piv_hybrid_private_import(
 }
 
 fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
         .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
@@ -919,7 +912,7 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
 }
 
 fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let class_attribute =
         template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     match read_ulong_template_attribute(class_attribute).map_err(Error::from)? {
@@ -1215,7 +1208,7 @@ fn yubihsm_import_command(
 }
 
 fn parse_data_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let mut common = TokenObjectTemplate {
         class: Some(CKO_DATA as CK_OBJECT_CLASS),
         // TokenObject shares its representation with keys; this field is not exposed for data.
@@ -1264,7 +1257,7 @@ fn parse_data_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Err
 }
 
 fn parse_certificate_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let value =
         Zeroizing::new(required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?.to_vec());
     crate::certificate_chain::subject(&value)
@@ -1335,7 +1328,7 @@ fn parse_create_object_template_with_policy(
     templ: &[CK_ATTRIBUTE],
     software_secret: bool,
 ) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let mut object_template = TokenObjectTemplate::default();
     let mut key_components = HashMap::new();
     for attribute in templ {
@@ -1752,7 +1745,13 @@ fn padded_private_scalar(value: &[u8], length: usize) -> Result<Zeroizing<Vec<u8
     Ok(scalar)
 }
 
-pub(super) fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
+pub(super) fn validate_mutation_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
+    if templ
+        .iter()
+        .any(|attribute| attribute.type_ == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE)
+    {
+        return Err(CKR_ATTRIBUTE_READ_ONLY.into());
+    }
     let mut types = HashSet::new();
     if templ.iter().all(|attribute| types.insert(attribute.type_)) {
         Ok(())
@@ -1790,12 +1789,12 @@ pub(crate) fn copy_object(
 ) -> Result<(), Error> {
     let new_object_handle = unsafe { as_mut(new_object) }?;
     let templ = unsafe { from_raw_parts(templ, count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(logged_in))
+            .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         // Use the same effective policy exposed by C_GetAttributeValue, including
         // backend restrictions and immutable device-key projections.
@@ -1880,20 +1879,19 @@ pub(crate) fn destroy_object(
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(logged_in))
+            .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
-        if matches!(
-            stored_object.material,
-            KeyMaterial::Profile { .. }
-                | KeyMaterial::IssuerSecurityDomainData { .. }
-                | KeyMaterial::IssuerSecurityDomainCertificate { .. }
-                | KeyMaterial::HsmAuthCredential { .. }
-                | KeyMaterial::OpenPgpPrivate { .. }
-                | KeyMaterial::OpenPgpCertificate { .. }
-        ) {
+        if object_attribute_value(
+            ctx,
+            session_handle,
+            object,
+            &stored_object,
+            CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE,
+        )? != Some(bool_attribute(true))
+        {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
         if stored_object.token
@@ -1946,12 +1944,6 @@ pub(crate) fn destroy_object(
             ctx.refresh_slot_token_objects(slot_id)?;
             return Ok(());
         }
-        if stored_object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-            && ctx.is_native_token_object_handle(object)
-            && matches!(stored_object.material, KeyMaterial::Public(_))
-        {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
         let piv_action = match &stored_object.material {
             KeyMaterial::PivPrivate { slot, .. } => Some((true, *slot)),
             KeyMaterial::PivCertificate { .. } => {
@@ -1960,16 +1952,11 @@ pub(crate) fn destroy_object(
                 };
                 Some((false, piv::Slot::from_cka_id(*id).ok_or(CKR_DEVICE_ERROR)?))
             }
-            KeyMaterial::PivAttestation { .. } => {
-                ctx.remove_object_handle(object);
-                return Ok(());
-            }
-            KeyMaterial::YubiHsmAttestation { .. } => {
-                ctx.remove_object_handle(object);
-                return Ok(());
-            }
             KeyMaterial::PivData { object_id, .. } => {
-                if ctx.login_role(slot_id) != Some(LoginRole::So) {
+                if !matches!(
+                    ctx.login_role(slot_id),
+                    Some(LoginRole::User | LoginRole::So)
+                ) {
                     return Err(CKR_USER_NOT_LOGGED_IN.into());
                 }
                 ctx._get_slot_mut(slot_id)?.piv_delete_data(*object_id)?;
@@ -1979,7 +1966,10 @@ pub(crate) fn destroy_object(
             _ => None,
         };
         if let Some((delete_key, piv_slot)) = piv_action {
-            if ctx.login_role(slot_id) != Some(LoginRole::So) {
+            if !matches!(
+                ctx.login_role(slot_id),
+                Some(LoginRole::User | LoginRole::So)
+            ) {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             if delete_key {
@@ -2062,10 +2052,10 @@ fn get_object_size(
 ) -> Result<(), Error> {
     let size = unsafe { as_mut(size) }?;
     with_session_context(session_handle, |ctx| {
-        let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (slot_id, _, _) = ctx.session_details(session_handle)?;
         let object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(logged_in))
+            .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
         Ok(())
@@ -2099,11 +2089,11 @@ pub(crate) fn get_attribute_value(
 ) -> Result<(), Error> {
     let templ = unsafe { _from_raw_parts_mut(templ, count as usize) }?;
     with_session_context(session_handle, |ctx| {
-        let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (slot_id, _, _) = ctx.session_details(session_handle)?;
         let object_handle = object;
         let object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(logged_in))
+            .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
         let mut rv = CKR_OK as CK_RV;
@@ -2369,15 +2359,25 @@ fn set_attribute_value(
     count: CK_ULONG,
 ) -> Result<(), Error> {
     let templ = unsafe { from_raw_parts(templ, count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(logged_in))
+            .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        if object_attribute_value(
+            ctx,
+            session_handle,
+            object,
+            &stored_object,
+            CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE,
+        )? != Some(bool_attribute(true))
+        {
+            return Err(CKR_ACTION_PROHIBITED.into());
         }
         if let KeyMaterial::OpenPgpPrivate { key_ref, .. } = stored_object.material {
             let [attribute] = templ else {
@@ -2433,54 +2433,6 @@ fn set_attribute_value(
                 return Err(error);
             }
             refresh?;
-            return Ok(());
-        }
-        if let KeyMaterial::PivPrivate { slot: from, .. } = stored_object.material {
-            if ctx.login_role(slot_id) != Some(LoginRole::So) {
-                return Err(CKR_USER_NOT_LOGGED_IN.into());
-            }
-            let [attribute] = templ else {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            };
-            if attribute.type_ != CKA_ID as CK_ATTRIBUTE_TYPE {
-                return Err(CKR_ATTRIBUTE_READ_ONLY.into());
-            }
-            let id = read_attribute_value(attribute).map_err(Error::from)?;
-            let [id] = id.as_slice() else {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            };
-            let to = piv::Slot::from_cka_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
-            if to == piv::Slot::Attestation {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
-            let source_objects = piv_key_object_handles(ctx, slot_id, from)?;
-            let destination_objects = piv_key_object_handles(ctx, slot_id, to)?;
-            ctx._get_slot_mut(slot_id)?.piv_move_key(from, to)?;
-            for (handle, _, _) in source_objects
-                .iter()
-                .chain(destination_objects.iter())
-                .copied()
-                .filter(|(_, _, token)| !token)
-            {
-                ctx.remove_object_handle(handle);
-            }
-            let token_objects = ctx.get_slot(slot_id)?.token_objects(slot_id)?;
-            let source_handles = source_objects
-                .into_iter()
-                .filter(|(_, _, token)| *token)
-                .map(|(handle, class, _)| (handle, class))
-                .collect::<Vec<_>>();
-            let mut rebindings = Vec::with_capacity(source_handles.len());
-            for (handle, class) in source_handles {
-                let target = token_objects
-                    .iter()
-                    .find(|candidate| {
-                        candidate.id == [to.cka_id()] && candidate.class == class && candidate.token
-                    })
-                    .ok_or(CKR_DEVICE_ERROR)?;
-                rebindings.push((handle, target.unique_id.clone()));
-            }
-            ctx.reconcile_slot_token_objects_with_rebindings(slot_id, token_objects, &rebindings)?;
             return Ok(());
         }
         let mut updated_object = stored_object.clone();
@@ -2589,7 +2541,7 @@ pub(crate) fn find_objects_init(
         })
         .collect::<Result<_, Error>>()?;
     with_session_context_mut(session_handle, |ctx| {
-        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (slot_id, _, _) = ctx.session_details(session_handle)?;
         if ctx
             .get_session_context(session_handle)?
             .find_operation
@@ -2612,7 +2564,7 @@ pub(crate) fn find_objects_init(
         }
         let mut objects = Vec::new();
         for (handle, object) in ctx.resolved_objects()? {
-            if !object.is_visible_to(logged_in) {
+            if !object.is_visible_for_management(ctx.login_role(slot_id)) {
                 continue;
             }
             let mut matches = true;
@@ -2710,6 +2662,10 @@ pub(crate) fn create_piv_object_in_slot<S: Slot + ?Sized>(
     templ: &[CK_ATTRIBUTE],
 ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
     let (slot_id, flags, logged_in) = ctx.session_details(backend, session_handle)?;
+    let management_access = matches!(
+        ctx.login_role(backend, slot_id),
+        Some(LoginRole::User | LoginRole::So)
+    );
     let class = template_attribute(templ, CKA_CLASS as _)
         .map(read_ulong_template_attribute)
         .transpose()?;
@@ -2725,7 +2681,7 @@ pub(crate) fn create_piv_object_in_slot<S: Slot + ?Sized>(
                 || class == CKO_DATA as CK_OBJECT_CLASS
         })
     {
-        if ctx.login_role(backend, slot_id) != Some(LoginRole::So) {
+        if !management_access {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let import = piv_import_parameters(templ)?;
@@ -2737,7 +2693,7 @@ pub(crate) fn create_piv_object_in_slot<S: Slot + ?Sized>(
                 touch_policy,
                 object,
             } => {
-                validate_new_object_access(&object, flags, logged_in)?;
+                validate_new_object_access(&object, flags, management_access)?;
                 let replaced = piv_key_object_handles_in_slot(backend, ctx, slot_id, slot)?;
                 ctx._get_slot_mut(backend, slot_id)?
                     .piv_import_private_key(slot, &key, pin_policy, touch_policy)?;
@@ -2842,7 +2798,8 @@ pub(crate) fn create_openpgp_object_in_slot<S: Slot + ?Sized>(
     session_handle: CK_SESSION_HANDLE,
     templ: &[CK_ATTRIBUTE],
 ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
-    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+    let (slot_id, flags, _) = ctx.session_details(slot, session_handle)?;
+    let management_access = ctx.login_role(slot, slot_id).is_some();
     let class = template_attribute(templ, CKA_CLASS as _)
         .map(read_ulong_template_attribute)
         .transpose()?;
@@ -2853,7 +2810,7 @@ pub(crate) fn create_openpgp_object_in_slot<S: Slot + ?Sized>(
     let handle;
     if token && class == Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS) {
         let import = openpgp_private_import(templ)?;
-        validate_new_object_access(&import.object, flags, logged_in)?;
+        validate_new_object_access(&import.object, flags, management_access)?;
         ctx._get_slot_mut(slot, slot_id)?
             .openpgp_import_private_key(import.key_ref, import.algorithm, &import.material)?;
         if import.touch_policy != 0 {

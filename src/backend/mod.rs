@@ -89,13 +89,11 @@ pub(crate) use traits::profile_token_objects;
 pub(crate) use yubihsm::{
     YubiHsmPkcs11Metadata, YubiHsmSessionRole, expand_packed_yubihsm_login, parse_hsmauth_username,
     parse_yubihsm_login_username, parse_yubihsm_pkcs11_metadata, split_yubihsm_login,
-    yubihsm_object_has_public_key, yubihsm_object_label, yubihsm_token_objects_with_generation,
+    yubihsm_object_has_public_key, yubihsm_object_label, yubihsm_token_objects_with_metadata,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) use ccid::IssuerSecurityDomainSession;
-#[cfg(test)]
-pub(crate) use piv::piv_object_fingerprint;
 #[cfg(test)]
 pub(crate) use piv::{PivDataObject, PivKey};
 #[cfg(feature = "abi-tests")]

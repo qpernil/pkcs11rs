@@ -1278,6 +1278,17 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
             ),
             CKR_USER_NOT_LOGGED_IN,
         )
+        # Missing authorization terminates C_Sign; a new operation is required.
+        self.assertEqual(
+            self.lib.C_Login(session.value, CKU_CONTEXT_SPECIFIC, pin, len(pin)),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+        self.assertEqual(
+            self.lib.C_SignInit(
+                session.value, ctypes.byref(mechanism), private_key.value
+            ),
+            CKR_OK,
+        )
         self.assertEqual(
             self.lib.C_Login(
                 session.value,
@@ -1325,9 +1336,15 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
             self.lib.C_Login(session.value, CKU_USER, pin, len(pin)),
             CKR_OK,
         )
+        # Ordinary resident credentials are immutable through PKCS #11. The
+        # disposable embedded device is released by tearDown's C_Finalize.
+        self.assertEqual(
+            self.read_attribute(session.value, private_key.value, CKA_DESTROYABLE),
+            b"\x00",
+        )
         self.assertEqual(
             self.lib.C_DestroyObject(session.value, private_key.value),
-            CKR_OK,
+            CKR_ACTION_PROHIBITED,
         )
         self.assertEqual(self.lib.C_Logout(session.value), CKR_OK)
         self.assertEqual(self.lib.C_CloseSession(session.value), CKR_OK)
@@ -4299,7 +4316,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKR_OK,
                 )
                 self.assertEqual(derived_local.value, 0)
-                self.assertEqual(derived_mechanism.value, CKM_ECDH1_DERIVE)
+                self.assertEqual(derived_mechanism.value, CK_UNAVAILABLE_INFORMATION)
                 self.assertEqual(
                     self.lib.C_SignInit(
                         restored, ctypes.byref(hmac), restored_derived[0]

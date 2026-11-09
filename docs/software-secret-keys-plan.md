@@ -71,8 +71,8 @@ hash-specific HMAC session keys and private token keys where the mechanism
 permits that output.
 
 Derived objects inherit the required sensitivity and extractability state from
-their base key. They report `CKA_LOCAL=CK_FALSE` and identify the derivation
-mechanism through `CKA_KEY_GEN_MECHANISM`.
+their base key. They report `CKA_LOCAL=CK_FALSE` and
+`CKA_KEY_GEN_MECHANISM=CK_UNAVAILABLE_INFORMATION`.
 
 ## Wrapping and unwrapping
 

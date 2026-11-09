@@ -2,7 +2,7 @@ use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
     import_yubihsm_token_object_in_slot, persist_software_private_object_in_slot,
     piv_key_object_handles_in_slot, publish_software_secret_object, required_template_value,
-    validate_unique_template, yubihsm_hardware_import_object, yubihsm_id,
+    validate_mutation_template, yubihsm_hardware_import_object, yubihsm_id,
     yubihsm_object_parameters,
 };
 use crate::software_key_ops::agreement::software_ecdh;
@@ -210,7 +210,7 @@ pub(crate) fn yubihsm_generate_key_command(
     {
         return Err(CKR_MECHANISM_INVALID.into());
     }
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let default_key_type = if mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE {
         CKK_AES as CK_KEY_TYPE
     } else {
@@ -312,7 +312,7 @@ fn generate_key_object(
     } else {
         None
     };
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
 
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
@@ -715,7 +715,7 @@ pub(crate) fn generate_key_pair(
                 ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
             });
             // Validate both templates before creating anything on the authenticator.
-            validate_unique_template(private_template)?;
+            validate_mutation_template(private_template)?;
             if private_template.iter().any(|attribute| {
                 matches!(
                     attribute.type_,
@@ -965,8 +965,8 @@ fn piv_generate_key_pair_parameters(
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    validate_unique_template(public_template)?;
-    validate_unique_template(private_template)?;
+    validate_mutation_template(public_template)?;
+    validate_mutation_template(private_template)?;
     let (key_type, algorithm) = match mechanism.mechanism {
         x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             let bits_attribute =
@@ -1108,7 +1108,7 @@ pub(super) fn key_pair_object(
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
 ) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let mut parsed = TokenObjectTemplate {
         class: Some(class),
         key_type: Some(key_type),
@@ -1142,7 +1142,7 @@ fn software_key_pair_object(
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
 ) -> Result<TokenObject, Error> {
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let private = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut parsed = TokenObjectTemplate {
         class: Some(class),
@@ -1522,8 +1522,8 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         ),
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
-    validate_unique_template(public_template)?;
-    validate_unique_template(private_template)?;
+    validate_mutation_template(public_template)?;
+    validate_mutation_template(private_template)?;
     let public_wrap =
         optional_bool_template_attribute(public_template, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
             .unwrap_or(false);
@@ -1791,7 +1791,7 @@ pub(crate) fn derive_key(
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
         let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-        validate_unique_template(templ)?;
+        validate_mutation_template(templ)?;
         return with_session_context_mut(session_handle, |ctx| {
             let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
@@ -1880,7 +1880,7 @@ pub(crate) fn derive_key(
         }?
         .to_vec();
         let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-        validate_unique_template(templ)?;
+        validate_mutation_template(templ)?;
         return with_session_context_mut(session_handle, |ctx| {
             let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
@@ -2015,7 +2015,7 @@ pub(crate) fn derive_key(
         (kdf, shared_data, public_data, &[][..])
     };
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
 
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -2427,7 +2427,7 @@ fn derive_hkdf_key(
         &[]
     };
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
 
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -2727,15 +2727,18 @@ pub(crate) fn generate_piv_token_pair_in_slot<S: Slot + ?Sized>(
     // The PKCS #11 role is owned by SlotState. The PIV backend deliberately
     // retains no parallel authentication state; the applet itself enforces
     // whether management-key authentication is still valid.
-    if ctx.login_role(slot, slot_id) != Some(LoginRole::So) {
+    let management_access = matches!(
+        ctx.login_role(slot, slot_id),
+        Some(LoginRole::User | LoginRole::So)
+    );
+    if !management_access {
         return Err(CKR_USER_NOT_LOGGED_IN.into());
     }
-    let logged_in = true;
 
     let generation =
         piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;
-    validate_new_object_access(&generation.public_object, flags, logged_in)?;
-    validate_new_object_access(&generation.private_object, flags, logged_in)?;
+    validate_new_object_access(&generation.public_object, flags, management_access)?;
+    validate_new_object_access(&generation.private_object, flags, management_access)?;
     let replaced = piv_key_object_handles_in_slot(slot, ctx, slot_id, generation.slot)?;
     ctx._get_slot_mut(slot, slot_id)?.piv_generate_key_pair(
         generation.slot,
@@ -2772,12 +2775,13 @@ pub(crate) fn generate_openpgp_token_pair_in_slot<S: Slot + ?Sized>(
     public_template: &[CK_ATTRIBUTE],
     private_template: &[CK_ATTRIBUTE],
 ) -> Result<(CK_OBJECT_HANDLE, CK_OBJECT_HANDLE), Error> {
-    let (slot_id, flags, logged_in) = ctx.session_details(slot, session_handle)?;
+    let (slot_id, flags, _) = ctx.session_details(slot, session_handle)?;
+    let management_access = ctx.login_role(slot, slot_id).is_some();
 
     let generation =
         openpgp_generate_key_pair_parameters(mechanism, public_template, private_template)?;
-    validate_new_object_access(&generation.public_object, flags, logged_in)?;
-    validate_new_object_access(&generation.private_object, flags, logged_in)?;
+    validate_new_object_access(&generation.public_object, flags, management_access)?;
+    validate_new_object_access(&generation.private_object, flags, management_access)?;
     ctx._get_slot_mut(slot, slot_id)?
         .openpgp_generate_key_pair(generation.key_ref, generation.algorithm)?;
     if generation.touch_policy != 0 {

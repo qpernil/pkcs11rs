@@ -776,9 +776,9 @@ impl Slot for OpenPgpSlot {
                 touch_policy: key.touch_policy,
             };
             let public_material = KeyMaterial::Public(public_key.clone());
-            objects.push(TokenObject {
+            let mut public_object = TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8),
+                unique_id: String::new(),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label: label.clone(),
@@ -807,10 +807,16 @@ impl Slot for OpenPgpSlot {
                 public_key: None,
                 rp_id: None,
                 material: public_material,
-            });
+            };
+            let fingerprint = crate::native_object_fingerprint(
+                &public_object.public_key_info().ok_or(CKR_DEVICE_ERROR)?,
+            )?;
+            public_object.unique_id =
+                format!("openpgp-{:02x}-{fingerprint}-public", key.key_ref as u8);
+            objects.push(public_object);
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-private", key.key_ref as u8),
+                unique_id: format!("openpgp-{:02x}-{fingerprint}-private", key.key_ref as u8),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label,
@@ -829,8 +835,8 @@ impl Slot for OpenPgpSlot {
                 decapsulate: false,
                 sensitive: true,
                 extractable: false,
-                always_sensitive: true,
-                never_extractable: true,
+                always_sensitive: key.local,
+                never_extractable: key.local,
                 local: key.local,
                 key_gen_mechanism,
                 allowed_mechanisms: None,
@@ -845,7 +851,11 @@ impl Slot for OpenPgpSlot {
         for certificate in &self.certificates {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-certificate", certificate.key_ref as u8),
+                unique_id: format!(
+                    "openpgp-{:02x}-{}-certificate",
+                    certificate.key_ref as u8,
+                    crate::native_object_fingerprint(&certificate.value)?
+                ),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type: certificate.key_type,
                 label: format!("OpenPGP {:?} certificate", certificate.key_ref),

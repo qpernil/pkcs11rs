@@ -1,5 +1,5 @@
 use super::key::derived_secret_object;
-use super::object::{publish_software_secret_object, validate_unique_template};
+use super::object::{publish_software_secret_object, validate_mutation_template};
 use crate::*;
 use zeroize::Zeroizing;
 
@@ -43,7 +43,7 @@ fn encapsulate_key(
     let mechanism = unsafe { _as_ref(mechanism) }?;
     require_kem_mechanism(mechanism)?;
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let ciphertext_len = unsafe { as_mut(ciphertext_len) }?;
 
     with_session_context_mut(session_handle, |ctx| {
@@ -143,7 +143,7 @@ fn decapsulate_key(
     let mechanism = unsafe { _as_ref(mechanism) }?;
     require_kem_mechanism(mechanism)?;
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
-    validate_unique_template(templ)?;
+    validate_mutation_template(templ)?;
     let ciphertext = unsafe { from_raw_parts(ciphertext, ciphertext_len as usize) }?;
     let key_handle = unsafe { as_mut(key) }?;
 

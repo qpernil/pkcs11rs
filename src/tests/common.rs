@@ -52,6 +52,10 @@ fn scalar_attribute<T>(type_: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE 
     }
 }
 
+#[cfg(feature = "abi-tests")]
+#[path = "native_object_contracts.rs"]
+mod native_object_contracts;
+
 #[path = "api_contracts.rs"]
 mod api_contracts;
 #[path = "crypto.rs"]
@@ -92,11 +96,10 @@ fn yubihsm_objects_with_persisted_public(
     info: crate::yubihsm::ObjectInfo,
     public_key: crate::yubihsm::PublicKey,
 ) -> Vec<crate::TokenObject> {
-    let native = crate::yubihsm_token_objects_with_generation(
+    let native = crate::yubihsm_token_objects_with_metadata(
         slot_id,
         info.clone(),
         Some(public_key.clone()),
-        1,
         None,
     )
     .unwrap();
@@ -114,6 +117,8 @@ fn yubihsm_objects_with_persisted_public(
         target_type: info.object_type,
         target_id: info.id,
         target_sequence: info.sequence,
+        unique_id: None,
+        public_unique_id: None,
         primary_class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
         id: None,
         label: None,
@@ -123,14 +128,8 @@ fn yubihsm_objects_with_persisted_public(
         public_attributes,
         primary_attributes: crate::key_metadata::KeyAttributes::new(),
     };
-    crate::yubihsm_token_objects_with_generation(
-        slot_id,
-        info,
-        Some(public_key),
-        1,
-        Some(&metadata),
-    )
-    .unwrap()
+    crate::yubihsm_token_objects_with_metadata(slot_id, info, Some(public_key), Some(&metadata))
+        .unwrap()
 }
 
 #[test]
@@ -4538,6 +4537,8 @@ fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
         target_type: crate::YUBIHSM_ASYMMETRIC_KEY,
         target_id: 0x1234,
         target_sequence: 1,
+        unique_id: None,
+        public_unique_id: None,
         primary_class: None,
         id: Some(b"private-id".to_vec()),
         label: Some("private label".to_owned()),
@@ -4547,14 +4548,9 @@ fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
         public_attributes: crate::key_metadata::KeyAttributes::new(),
         primary_attributes: crate::key_metadata::KeyAttributes::new(),
     };
-    let objects = crate::yubihsm_token_objects_with_generation(
-        99,
-        info,
-        Some(public_key),
-        1,
-        Some(&metadata),
-    )
-    .unwrap();
+    let objects =
+        crate::yubihsm_token_objects_with_metadata(99, info, Some(public_key), Some(&metadata))
+            .unwrap();
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].id, b"private-id");
     assert_eq!(objects[0].label, "private label");
@@ -7853,7 +7849,7 @@ fn yubihsm_ed448_generation_signing_and_verification_cross_the_provider_path() {
 }
 
 #[test]
-fn yubihsm_object_identity_survives_device_sequence_wraps() {
+fn yubihsm_native_identity_depends_on_device_incarnation() {
     let info = crate::yubihsm::ObjectInfo {
         capabilities: [0; 8],
         id: 0x1234,
@@ -7866,17 +7862,18 @@ fn yubihsm_object_identity_survives_device_sequence_wraps() {
         label: "authentication".to_owned(),
         delegated_capabilities: [0; 8],
     };
-    let first =
-        crate::yubihsm_token_objects_with_generation(99, info.clone(), None, 1, None).unwrap();
-    let wrapped = crate::yubihsm_token_objects_with_generation(99, info, None, 257, None).unwrap();
-    assert_ne!(first[0].unique_id, wrapped[0].unique_id);
+    let first = crate::yubihsm_token_objects_with_metadata(99, info.clone(), None, None).unwrap();
+    let mut replacement = info;
+    replacement.sequence += 1;
+    let replaced = crate::yubihsm_token_objects_with_metadata(99, replacement, None, None).unwrap();
+    assert_ne!(first[0].unique_id, replaced[0].unique_id);
 }
 
 #[test]
 fn piv_native_identity_changes_with_object_contents() {
     assert_ne!(
-        crate::piv_object_fingerprint(b"first").unwrap(),
-        crate::piv_object_fingerprint(b"second").unwrap()
+        crate::native_object_fingerprint(b"first").unwrap(),
+        crate::native_object_fingerprint(b"second").unwrap()
     );
 }
 

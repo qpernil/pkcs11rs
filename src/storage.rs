@@ -279,11 +279,11 @@ pub trait StorageProvider {
             Ok(false) => StorageError::Integrity,
             Err(error) => error,
         };
-        if matches!(self.get(previous), Ok(Some(_))) {
-            if let Err(rollback) = self.delete(replacement) {
-                tracing::warn!(target: "pkcs11rs::storage", error = %rollback,
-                    "Stored object replacement rollback failed; reload required");
-            }
+        if matches!(self.get(previous), Ok(Some(_)))
+            && let Err(rollback) = self.delete(replacement)
+        {
+            tracing::warn!(target: "pkcs11rs::storage", error = %rollback,
+                "Stored object replacement rollback failed; reload required");
         }
         Err(error)
     }

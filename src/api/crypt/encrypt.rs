@@ -416,6 +416,9 @@ pub(crate) fn crypt_init(
             public_key: object.public_key.clone(),
             slot_id,
             requires_login: object.private,
+            always_authenticate: object
+                .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+                == Some(vec![CK_TRUE as CK_BBOOL]),
             context_specific_extended: matches!(
                 &object.material,
                 KeyMaterial::OpenPgpPrivate { .. }

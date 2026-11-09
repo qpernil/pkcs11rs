@@ -9,7 +9,7 @@ use crate::{
     CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_PKCS11RS_URI, CKA_YUBICO_HSMAUTH_RETRIES,
     CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY,
     CKK_PKCS11RS_MLKEM768_P256, CKK_PKCS11RS_MLKEM768_X25519, CKK_PKCS11RS_MLKEM1024_P384,
-    Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient,
+    Connector, Error, HsmAuthAlgorithm, LoginRole, MessageDigest, OpenPgpAlgorithm, OpenPgpClient,
     OpenPgpKeyRef, PivClient, YUBIHSM_ALGO_ML_DSA_44, YUBIHSM_ALGO_ML_KEM_512, YUBIHSM_OPAQUE,
     YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState,
     der_octet_string, edwards_curve_from_parameters, edwards_curve_parameters, hash, is_yubihsm_ec,
@@ -45,6 +45,11 @@ pub(crate) fn new_object_id() -> Result<String, Error> {
         let _ = write!(id, "{byte:02x}");
     }
     Ok(id)
+}
+
+pub(crate) fn native_object_fingerprint(value: &[u8]) -> Result<String, Error> {
+    let digest = hash(MessageDigest::sha256(), value)?;
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 // One mapping for policy flags shared by public metadata and encrypted storage.
@@ -663,6 +668,7 @@ pub(crate) struct SignatureOperation {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
+    pub(crate) always_authenticate: bool,
     pub(crate) context_specific_rp_id: Option<String>,
     pub(crate) oath_time: Option<u64>,
     pub(crate) fido_authorization: Option<crate::ctap::CredentialAuthorization>,
@@ -711,6 +717,7 @@ pub(crate) struct CryptOperation {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
+    pub(crate) always_authenticate: bool,
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) iv: Option<[u8; 16]>,
     pub(crate) des3_iv: Option<[u8; 8]>,
@@ -1644,6 +1651,17 @@ impl TokenObject {
         !self.private || logged_in
     }
 
+    /// PIV and OpenPGP administrators can inspect and manage native objects.
+    /// This exception is for object APIs only; cryptographic APIs require USER access.
+    pub(crate) fn is_visible_for_management(&self, role: Option<LoginRole>) -> bool {
+        self.is_visible_to(role == Some(LoginRole::User))
+            || (role == Some(LoginRole::So)
+                && matches!(
+                    self.material,
+                    KeyMaterial::PivPrivate { .. } | KeyMaterial::OpenPgpPrivate { .. }
+                ))
+    }
+
     pub(crate) fn set_creator(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
         self.slot_id = Some(slot_id);
         self.creator_session = (!self.token).then_some(session_handle);
@@ -1768,6 +1786,11 @@ impl TokenObject {
             {
                 Some(bool_attribute(false))
             }
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                && matches!(self.material, KeyMaterial::OpenPgpPrivate { .. }) =>
+            {
+                Some(bool_attribute(true))
+            }
             x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }
@@ -1880,16 +1903,16 @@ impl TokenObject {
             x if x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
                 && self.has_sensitive_attributes() =>
             {
-                Some(bool_attribute(
-                    self.never_extractable || self.is_nonextractable_key_object(),
-                ))
+                Some(bool_attribute(self.never_extractable))
             }
             x if x == CKA_LOCAL as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.local))
             }
             x if x == CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(ulong_attribute(
-                    self.key_gen_mechanism
+                    self.local
+                        .then_some(self.key_gen_mechanism)
+                        .flatten()
                         .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 ))
             }
@@ -2456,6 +2479,7 @@ pub(crate) fn validate_new_object_access(
 impl TokenObjectTemplate {
     pub(crate) fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         match attribute.type_ {
+            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => {
                 self.class = Some(read_ulong_template_attribute(attribute)?);
                 Ok(())

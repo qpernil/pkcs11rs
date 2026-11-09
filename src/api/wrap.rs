@@ -6,8 +6,8 @@ use super::{
     },
     key::yubihsm_ec_algorithm,
     object::{
-        persist_software_private_object, publish_software_secret_object, validate_unique_template,
-        yubihsm_hardware_import_object, yubihsm_id,
+        persist_software_private_object, publish_software_secret_object,
+        validate_mutation_template, yubihsm_hardware_import_object, yubihsm_id,
     },
 };
 use crate::*;
@@ -449,7 +449,7 @@ fn software_rsa_aes_unwrap(
 }
 
 fn software_unwrap_template(template: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
-    validate_unique_template(template)?;
+    validate_mutation_template(template)?;
     let requested_class = template
         .iter()
         .find(|attribute| attribute.type_ == CKA_CLASS as CK_ATTRIBUTE_TYPE)
@@ -1070,7 +1070,7 @@ fn unwrap_key(
 fn parse_yubihsm_unwrap_template(
     template: &[CK_ATTRIBUTE],
 ) -> Result<YubiHsmUnwrapTemplate, Error> {
-    validate_unique_template(template)?;
+    validate_mutation_template(template)?;
     let mut object_template = TokenObjectTemplate {
         token: true,
         private: true,
