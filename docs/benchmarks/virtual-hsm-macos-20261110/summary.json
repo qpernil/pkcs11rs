@@ -1,0 +1,1550 @@
+[
+  {
+    "algorithm": "RSA-2048",
+    "operation": "keygen",
+    "median_us": 87603.25,
+    "run_medians_us": [
+      147825.5,
+      82591.416,
+      87603.25
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 15228,
+    "retained_key_rust_heap_bytes": 1636,
+    "process_peak_rss_bytes": 3457024,
+    "native_key_bytes": 896,
+    "native_key_pages": 8,
+    "public_bytes": 256,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "RSA-2048",
+    "operation": "keypair",
+    "median_us": 121942.459,
+    "run_medians_us": [
+      80787.584,
+      138558,
+      121942.459
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 15228,
+    "retained_key_rust_heap_bytes": 1636,
+    "process_peak_rss_bytes": 3473408,
+    "native_key_bytes": 896,
+    "native_key_pages": 8,
+    "public_bytes": 256,
+    "response_bytes": 257
+  },
+  {
+    "algorithm": "RSA-2048",
+    "operation": "sign",
+    "median_us": 754.958,
+    "run_medians_us": [
+      758.75,
+      754.958,
+      739.75
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 11979,
+    "retained_key_rust_heap_bytes": 1636,
+    "process_peak_rss_bytes": 3457024,
+    "native_key_bytes": 896,
+    "native_key_pages": 8,
+    "public_bytes": 256,
+    "response_bytes": 256
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "keygen",
+    "median_us": 388082.916,
+    "run_medians_us": [
+      273024.958,
+      625248.042,
+      388082.916
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 28796,
+    "retained_key_rust_heap_bytes": 2660,
+    "process_peak_rss_bytes": 3538944,
+    "native_key_bytes": 1344,
+    "native_key_pages": 11,
+    "public_bytes": 384,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "keypair",
+    "median_us": 274419.417,
+    "run_medians_us": [
+      274419.417,
+      346686.75,
+      230241.875
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 28796,
+    "retained_key_rust_heap_bytes": 2660,
+    "process_peak_rss_bytes": 3522560,
+    "native_key_bytes": 1344,
+    "native_key_pages": 11,
+    "public_bytes": 384,
+    "response_bytes": 385
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "sign",
+    "median_us": 2180.791,
+    "run_medians_us": [
+      2149.417,
+      2188,
+      2180.791
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 22859,
+    "retained_key_rust_heap_bytes": 2660,
+    "process_peak_rss_bytes": 3555328,
+    "native_key_bytes": 1344,
+    "native_key_pages": 11,
+    "public_bytes": 384,
+    "response_bytes": 384
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "keygen",
+    "median_us": 1289394.666,
+    "run_medians_us": [
+      1289394.666,
+      1459777.125,
+      1154104.875
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 29436,
+    "retained_key_rust_heap_bytes": 2788,
+    "process_peak_rss_bytes": 3440640,
+    "native_key_bytes": 1792,
+    "native_key_pages": 15,
+    "public_bytes": 512,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "keypair",
+    "median_us": 1187276.666,
+    "run_medians_us": [
+      2240183.584,
+      1187276.666,
+      1141416.5
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 29436,
+    "retained_key_rust_heap_bytes": 2788,
+    "process_peak_rss_bytes": 3522560,
+    "native_key_bytes": 1792,
+    "native_key_pages": 15,
+    "public_bytes": 512,
+    "response_bytes": 513
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "sign",
+    "median_us": 4916.583,
+    "run_medians_us": [
+      4819.333,
+      4916.583,
+      4940.542
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 23243,
+    "retained_key_rust_heap_bytes": 2788,
+    "process_peak_rss_bytes": 3555328,
+    "native_key_bytes": 1792,
+    "native_key_pages": 15,
+    "public_bytes": 512,
+    "response_bytes": 512
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "keygen",
+    "median_us": 1.208,
+    "run_medians_us": [
+      1.209,
+      1.208,
+      1.167
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 48,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 84,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "keypair",
+    "median_us": 69.958,
+    "run_medians_us": [
+      69.958,
+      70.084,
+      69.833
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 134,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 84,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 57
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "sign",
+    "median_us": 144.333,
+    "run_medians_us": [
+      144.333,
+      144.375,
+      144.292
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 119,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3129344,
+    "native_key_bytes": 84,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 63
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "derive",
+    "median_us": 68.583,
+    "run_medians_us": [
+      68.5,
+      68.583,
+      68.583
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 56,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2932736,
+    "native_key_bytes": 84,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 28
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "keygen",
+    "median_us": 1.167,
+    "run_medians_us": [
+      1.125,
+      1.167,
+      1.167
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 52,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "keypair",
+    "median_us": 29.5,
+    "run_medians_us": [
+      29.5,
+      29.667,
+      29.458
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 150,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 65
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "sign",
+    "median_us": 59.916,
+    "run_medians_us": [
+      60.292,
+      59.667,
+      59.916
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 135,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3096576,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 71
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "derive",
+    "median_us": 89.709,
+    "run_medians_us": [
+      89.834,
+      89.709,
+      88.375
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2916352,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "keygen",
+    "median_us": 1.167,
+    "run_medians_us": [
+      1.208,
+      1.167,
+      1.167
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 68,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2949120,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "keypair",
+    "median_us": 89.708,
+    "run_medians_us": [
+      88.583,
+      89.708,
+      90.917
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 214,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2949120,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 97
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "sign",
+    "median_us": 172.834,
+    "run_medians_us": [
+      173.875,
+      171.875,
+      172.834
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 199,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3145728,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 103
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "derive",
+    "median_us": 305.5,
+    "run_medians_us": [
+      304.834,
+      306.584,
+      305.5
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 96,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2998272,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 48
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "keygen",
+    "median_us": 92.791,
+    "run_medians_us": [
+      92.791,
+      113.708,
+      65.458
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 86,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 198,
+    "native_key_pages": 2,
+    "public_bytes": 132,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "keypair",
+    "median_us": 248.875,
+    "run_medians_us": [
+      248.875,
+      290.542,
+      234.834
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 286,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 198,
+    "native_key_pages": 2,
+    "public_bytes": 132,
+    "response_bytes": 133
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "sign",
+    "median_us": 421.792,
+    "run_medians_us": [
+      426.042,
+      420.875,
+      421.792
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 270,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3096576,
+    "native_key_bytes": 198,
+    "native_key_pages": 2,
+    "public_bytes": 132,
+    "response_bytes": 138
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "derive",
+    "median_us": 205.75,
+    "run_medians_us": [
+      205.75,
+      204.584,
+      206.292
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 132,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2899968,
+    "native_key_bytes": 198,
+    "native_key_pages": 2,
+    "public_bytes": 132,
+    "response_bytes": 66
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "keygen",
+    "median_us": 1.167,
+    "run_medians_us": [
+      1.125,
+      1.167,
+      1.167
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 52,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "keypair",
+    "median_us": 21.708,
+    "run_medians_us": [
+      21.708,
+      21.667,
+      21.917
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 150,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 65
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "sign",
+    "median_us": 45.541,
+    "run_medians_us": [
+      44.791,
+      45.541,
+      46.083
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 134,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3047424,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 70
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "derive",
+    "median_us": 20.292,
+    "run_medians_us": [
+      20.292,
+      20.292,
+      20.291
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2818048,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "keygen",
+    "median_us": 1.208,
+    "run_medians_us": [
+      1.208,
+      1.167,
+      2.125
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 52,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2899968,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "keypair",
+    "median_us": 115.875,
+    "run_medians_us": [
+      117.75,
+      115.875,
+      115.709
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 150,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2899968,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 65
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "sign",
+    "median_us": 234.833,
+    "run_medians_us": [
+      234.916,
+      234.833,
+      234
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 135,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3112960,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 71
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "derive",
+    "median_us": 113.375,
+    "run_medians_us": [
+      113.542,
+      112.917,
+      113.375
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2932736,
+    "native_key_bytes": 96,
+    "native_key_pages": 1,
+    "public_bytes": 64,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "keygen",
+    "median_us": 1.542,
+    "run_medians_us": [
+      1.542,
+      3.833,
+      1.542
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 68,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "keypair",
+    "median_us": 300.333,
+    "run_medians_us": [
+      298.875,
+      300.333,
+      309.25
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 214,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 97
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "sign",
+    "median_us": 612.209,
+    "run_medians_us": [
+      611.958,
+      616.625,
+      612.209
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 199,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3129344,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 103
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "derive",
+    "median_us": 308.458,
+    "run_medians_us": [
+      307.917,
+      308.458,
+      310.25
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 96,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2932736,
+    "native_key_bytes": 144,
+    "native_key_pages": 2,
+    "public_bytes": 96,
+    "response_bytes": 48
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "keygen",
+    "median_us": 2.166,
+    "run_medians_us": [
+      1.333,
+      2.166,
+      2.25
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 84,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 192,
+    "native_key_pages": 2,
+    "public_bytes": 128,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "keypair",
+    "median_us": 781.667,
+    "run_medians_us": [
+      781.667,
+      784.542,
+      777.875
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 278,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2883584,
+    "native_key_bytes": 192,
+    "native_key_pages": 2,
+    "public_bytes": 128,
+    "response_bytes": 129
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "sign",
+    "median_us": 1575.083,
+    "run_medians_us": [
+      1577.375,
+      1575.083,
+      1572.375
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 264,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 3342336,
+    "native_key_bytes": 192,
+    "native_key_pages": 2,
+    "public_bytes": 128,
+    "response_bytes": 136
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "derive",
+    "median_us": 774.208,
+    "run_medians_us": [
+      774.208,
+      774.083,
+      774.959
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 128,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2916352,
+    "native_key_bytes": 192,
+    "native_key_pages": 2,
+    "public_bytes": 128,
+    "response_bytes": 64
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "keygen",
+    "median_us": 8.375,
+    "run_medians_us": [
+      8.417,
+      8.375,
+      8.375
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 292,
+    "retained_key_rust_heap_bytes": 260,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 128,
+    "native_key_pages": 2,
+    "public_bytes": 32,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "keypair",
+    "median_us": 8.333,
+    "run_medians_us": [
+      8.333,
+      8.334,
+      8.333
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 325,
+    "retained_key_rust_heap_bytes": 260,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 128,
+    "native_key_pages": 2,
+    "public_bytes": 32,
+    "response_bytes": 33
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "sign",
+    "median_us": 7.292,
+    "run_medians_us": [
+      7.292,
+      7.292,
+      7.291
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 260,
+    "process_peak_rss_bytes": 2785280,
+    "native_key_bytes": 128,
+    "native_key_pages": 2,
+    "public_bytes": 32,
+    "response_bytes": 64
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "keygen",
+    "median_us": 226.334,
+    "run_medians_us": [
+      227.333,
+      226.334,
+      225.75
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 557,
+    "retained_key_rust_heap_bytes": 500,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 228,
+    "native_key_pages": 2,
+    "public_bytes": 57,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "keypair",
+    "median_us": 227.875,
+    "run_medians_us": [
+      225.125,
+      227.875,
+      232.333
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 615,
+    "retained_key_rust_heap_bytes": 500,
+    "process_peak_rss_bytes": 2801664,
+    "native_key_bytes": 228,
+    "native_key_pages": 2,
+    "public_bytes": 57,
+    "response_bytes": 58
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "sign",
+    "median_us": 231.208,
+    "run_medians_us": [
+      231,
+      231.333,
+      231.208
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 114,
+    "retained_key_rust_heap_bytes": 500,
+    "process_peak_rss_bytes": 2768896,
+    "native_key_bytes": 228,
+    "native_key_pages": 2,
+    "public_bytes": 57,
+    "response_bytes": 114
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "keygen",
+    "median_us": 44.375,
+    "run_medians_us": [
+      44.375,
+      44.25,
+      44.625
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 65942,
+    "retained_key_rust_heap_bytes": 65940,
+    "process_peak_rss_bytes": 3194880,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1312,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "keypair",
+    "median_us": 45.083,
+    "run_medians_us": [
+      45.125,
+      45.083,
+      44.333
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 68565,
+    "retained_key_rust_heap_bytes": 65940,
+    "process_peak_rss_bytes": 3194880,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1312,
+    "response_bytes": 1313
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "sign",
+    "median_us": 95.875,
+    "run_medians_us": [
+      97,
+      95.875,
+      94
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 7540,
+    "retained_key_rust_heap_bytes": 65940,
+    "process_peak_rss_bytes": 3309568,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1312,
+    "response_bytes": 2420
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "keygen",
+    "median_us": 84.125,
+    "run_medians_us": [
+      84.125,
+      92.375,
+      83.375
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 108982,
+    "retained_key_rust_heap_bytes": 108980,
+    "process_peak_rss_bytes": 3342336,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1952,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "keypair",
+    "median_us": 84.208,
+    "run_medians_us": [
+      84.208,
+      83.25,
+      86.083
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 112885,
+    "retained_key_rust_heap_bytes": 108980,
+    "process_peak_rss_bytes": 3342336,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1952,
+    "response_bytes": 1953
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "sign",
+    "median_us": 171.084,
+    "run_medians_us": [
+      168.5,
+      171.084,
+      173.833
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 9965,
+    "retained_key_rust_heap_bytes": 108980,
+    "process_peak_rss_bytes": 3538944,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1952,
+    "response_bytes": 3309
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "keygen",
+    "median_us": 114.084,
+    "run_medians_us": [
+      122.75,
+      114.084,
+      113.958
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 178646,
+    "retained_key_rust_heap_bytes": 178644,
+    "process_peak_rss_bytes": 3457024,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 2592,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "keypair",
+    "median_us": 115.25,
+    "run_medians_us": [
+      115.25,
+      114.792,
+      122.834
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 183829,
+    "retained_key_rust_heap_bytes": 178644,
+    "process_peak_rss_bytes": 3473408,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 2592,
+    "response_bytes": 2593
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "sign",
+    "median_us": 186.125,
+    "run_medians_us": [
+      187.25,
+      186.125,
+      149.542
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 13843,
+    "retained_key_rust_heap_bytes": 178644,
+    "process_peak_rss_bytes": 3653632,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 2592,
+    "response_bytes": 4627
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "keygen",
+    "median_us": 1.208,
+    "run_medians_us": [
+      1.208,
+      1.208,
+      1.166
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 52,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2785280,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 32,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "keypair",
+    "median_us": 8.375,
+    "run_medians_us": [
+      8.375,
+      8.459,
+      8.333
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 85,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2785280,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 32,
+    "response_bytes": 33
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "derive",
+    "median_us": 17.792,
+    "run_medians_us": [
+      17.792,
+      17.792,
+      17.792
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2785280,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 32,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "X448",
+    "operation": "keygen",
+    "median_us": 1.208,
+    "run_medians_us": [
+      1.208,
+      1.209,
+      1.208
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 76,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 112,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "X448",
+    "operation": "keypair",
+    "median_us": 212.667,
+    "run_medians_us": [
+      212.667,
+      214.375,
+      211.875
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 133,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 112,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 57
+  },
+  {
+    "algorithm": "X448",
+    "operation": "derive",
+    "median_us": 210.5,
+    "run_medians_us": [
+      211.333,
+      210.5,
+      210.333
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 112,
+    "retained_key_rust_heap_bytes": 20,
+    "process_peak_rss_bytes": 2834432,
+    "native_key_bytes": 112,
+    "native_key_pages": 1,
+    "public_bytes": 56,
+    "response_bytes": 56
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "keygen",
+    "median_us": 9.416,
+    "run_medians_us": [
+      9.416,
+      9.417,
+      9.375
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 2246,
+    "retained_key_rust_heap_bytes": 2244,
+    "process_peak_rss_bytes": 3031040,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 800,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "keypair",
+    "median_us": 9.542,
+    "run_medians_us": [
+      9.542,
+      9.5,
+      9.542
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 3845,
+    "retained_key_rust_heap_bytes": 2244,
+    "process_peak_rss_bytes": 3031040,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 800,
+    "response_bytes": 801
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "encapsulate",
+    "median_us": 9.042,
+    "run_medians_us": [
+      9.042,
+      8.959,
+      9.25
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 2656,
+    "retained_key_rust_heap_bytes": 2244,
+    "process_peak_rss_bytes": 3162112,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 800,
+    "response_bytes": 800
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "decapsulate",
+    "median_us": 8.792,
+    "run_medians_us": [
+      8.708,
+      8.792,
+      8.833
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 2244,
+    "process_peak_rss_bytes": 3080192,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 800,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "keygen",
+    "median_us": 16.417,
+    "run_medians_us": [
+      16.417,
+      16.666,
+      16.333
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 3270,
+    "retained_key_rust_heap_bytes": 3268,
+    "process_peak_rss_bytes": 3063808,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1184,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "keypair",
+    "median_us": 16.625,
+    "run_medians_us": [
+      16.917,
+      16.292,
+      16.625
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 5637,
+    "retained_key_rust_heap_bytes": 3268,
+    "process_peak_rss_bytes": 3063808,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1184,
+    "response_bytes": 1185
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "encapsulate",
+    "median_us": 14.833,
+    "run_medians_us": [
+      14.916,
+      14.833,
+      14.666
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 3872,
+    "retained_key_rust_heap_bytes": 3268,
+    "process_peak_rss_bytes": 3145728,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1184,
+    "response_bytes": 1120
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "decapsulate",
+    "median_us": 14.875,
+    "run_medians_us": [
+      14.875,
+      14.792,
+      14.875
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 3268,
+    "process_peak_rss_bytes": 3080192,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1184,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "keygen",
+    "median_us": 25.875,
+    "run_medians_us": [
+      26.167,
+      25.875,
+      25.458
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 4294,
+    "retained_key_rust_heap_bytes": 4292,
+    "process_peak_rss_bytes": 3047424,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1568,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "keypair",
+    "median_us": 26.709,
+    "run_medians_us": [
+      26,
+      27.125,
+      26.709
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 7429,
+    "retained_key_rust_heap_bytes": 4292,
+    "process_peak_rss_bytes": 3096576,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1568,
+    "response_bytes": 1569
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "encapsulate",
+    "median_us": 22.584,
+    "run_medians_us": [
+      22.584,
+      22.333,
+      22.75
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 5248,
+    "retained_key_rust_heap_bytes": 4292,
+    "process_peak_rss_bytes": 3145728,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1568,
+    "response_bytes": 1600
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "decapsulate",
+    "median_us": 23.083,
+    "run_medians_us": [
+      23.083,
+      22.958,
+      24.208
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 64,
+    "retained_key_rust_heap_bytes": 4292,
+    "process_peak_rss_bytes": 3129344,
+    "native_key_bytes": 64,
+    "native_key_pages": 1,
+    "public_bytes": 1568,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "keygen",
+    "median_us": 1.125,
+    "run_medians_us": [
+      1.208,
+      1.084,
+      1.125
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 70,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3178496,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1249,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "keypair",
+    "median_us": 46.375,
+    "run_medians_us": [
+      46,
+      46.458,
+      46.375
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 5750,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3211264,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1249,
+    "response_bytes": 1250
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "encapsulate",
+    "median_us": 174.833,
+    "run_medians_us": [
+      174.458,
+      176.542,
+      174.833
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 5681,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3407872,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1249,
+    "response_bytes": 1185
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "decapsulate",
+    "median_us": 145.792,
+    "run_medians_us": [
+      145.917,
+      145.792,
+      145.458
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 3505,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3375104,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1249,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "keygen",
+    "median_us": 1.084,
+    "run_medians_us": [
+      1.084,
+      1.083,
+      1.125
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 70,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3096576,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1216,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "keypair",
+    "median_us": 25.334,
+    "run_medians_us": [
+      25.334,
+      25.417,
+      24.833
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 5717,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3129344,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1216,
+    "response_bytes": 1217
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "encapsulate",
+    "median_us": 59.25,
+    "run_medians_us": [
+      59.25,
+      59,
+      59.75
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 5648,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3227648,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1216,
+    "response_bytes": 1152
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "decapsulate",
+    "median_us": 52.416,
+    "run_medians_us": [
+      52.416,
+      52.542,
+      52.375
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 3376,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3211264,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1216,
+    "response_bytes": 32
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "keygen",
+    "median_us": 1.125,
+    "run_medians_us": [
+      1.125,
+      1.208,
+      1.125
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 70,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3260416,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1665,
+    "response_bytes": 2
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "keypair",
+    "median_us": 116.542,
+    "run_medians_us": [
+      116.542,
+      134.375,
+      113.708
+    ],
+    "timing_samples": 9,
+    "peak_extra_rust_heap_bytes": 7574,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3325952,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1665,
+    "response_bytes": 1666
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "encapsulate",
+    "median_us": 536.5,
+    "run_medians_us": [
+      536.5,
+      521.208,
+      549.833
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 7505,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3440640,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1665,
+    "response_bytes": 1697
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "decapsulate",
+    "median_us": 432.875,
+    "run_medians_us": [
+      440.25,
+      432.875,
+      432.75
+    ],
+    "timing_samples": 600,
+    "peak_extra_rust_heap_bytes": 4481,
+    "retained_key_rust_heap_bytes": 68,
+    "process_peak_rss_bytes": 3440640,
+    "native_key_bytes": 32,
+    "native_key_pages": 1,
+    "public_bytes": 1665,
+    "response_bytes": 32
+  }
+]

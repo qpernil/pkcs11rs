@@ -1,0 +1,41 @@
+{
+  "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "commits": {
+    "pkcs11rs": "7e7f566f445368b45522eddec7c0c38cf2c39bd6",
+    "virtual-yubihsm": "c44d6d45eedc9ebb63ffa759af75756588560f86",
+    "software-key-core": "59a0521b89c5a62e2ebfa522f396b2c2c34a5cb4"
+  },
+  "source_status": "?? tools/virtual-hsm-benchmark.py\n?? tools/virtual-hsm-benchmark.rs",
+  "benchmark_source_sha256": {
+    "virtual-hsm-benchmark.py": "6b96ebe73f592581e964c3475a3594ac1b1bde034115632781cc9ccc6686dbe0",
+    "virtual-hsm-benchmark.rs": "f10b4af45947f9ed303efe7d4f514da80e4cf2228145b3207dd1c3939fe632ec"
+  },
+  "cargo_lock_sha256": "8e2030d76a47bf779077db7d1c04b564795d327dd0b775f66af233a6a21eb7ca",
+  "build": [
+    "cargo",
+    "build",
+    "--locked",
+    "--release",
+    "-p",
+    "pkcs11rs-connector",
+    "--bin",
+    "pkcs11rs-connector",
+    "--features",
+    "firmware-full",
+    "--message-format=json"
+  ],
+  "runs": 3,
+  "scope": "Device.execute_inner with factory authorization; fresh disposable in-memory device per algorithm/operation/process",
+  "excluded": "HTTP, USB, secure-channel encryption, login, persistence, PKCS #11 metadata and host public-key verification timings",
+  "timing": "uninstrumented release executable; native command dispatch, authorization, crypto and response allocation included; request construction and output disposal excluded; 10 warmups except keygen/keypair; keygen returns native ID only, keypair also retrieves the new public key",
+  "signing": "RSA PKCS1v1.5 and ECDSA sign prepared digests; EdDSA and pure hedged ML-DSA sign messages; message/digest length 32 except P224=28, P384/Brainpool384=48, P521/Brainpool512=64",
+  "memory": "separate executable using System allocator with atomic accounting of requested Rust allocation sizes; maximum extra live Rust heap above each operation baseline; excludes stack, allocator overhead and allocations made outside Rust",
+  "retained_key_memory": "Rust live-heap delta across first key generation; includes device bookkeeping and any lazily initialized caches, not a serialized key size",
+  "process_memory": "fresh-process peak RSS from /usr/bin/time; includes device initialization, preflight, warmups, runtime, heap, stack, and code pages; not an isolated per-operation stack measurement",
+  "public_bytes": "native GetPublicKey response excluding its algorithm byte; RSA exponent is implicit and EC points omit the SEC1 prefix; not DER/SPKI size",
+  "storage": "native object-reported key length and ceil(length/126) pages; one object record per native key; separate from RAM",
+  "comparison": "different security levels are shown explicitly; ECDH derive is one side of raw key agreement, not equivalent protocol work to KEM encapsulation/decapsulation",
+  "cpu": "Apple M5 Pro"
+}

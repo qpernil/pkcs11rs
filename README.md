@@ -1162,6 +1162,9 @@ it, and unloads it. It lives outside Cargo's integration-test discovery, so
 ordinary and all-features `cargo test` runs do not compile a second library
 test target.
 
+For native virtual-HSM algorithm timings and memory measurements, see the
+[reproducible RSA/ECC/PQC and hybrid benchmarks](docs/virtual-hsm-benchmarks.md).
+
 Run the hardware-independent Python ABI tests:
 
 ```sh

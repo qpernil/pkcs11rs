@@ -1,0 +1,4732 @@
+[
+  {
+    "algorithm": "RSA-2048",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 147825.5,
+        "mean_us": 124981.361,
+        "p95_us": 152157.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 82591.416,
+        "mean_us": 82285.33333333333,
+        "p95_us": 106409.042,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 87603.25,
+        "mean_us": 120210.847,
+        "p95_us": 200012.75,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 86817.5,
+      "mean_us": 95107.06966666668,
+      "p95_us": 116143.042,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 15228,
+      "retained_key_rust_heap_bytes": 1636,
+      "native_key_bytes": 896,
+      "native_key_pages": 8,
+      "public_bytes": 256,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3457024
+    }
+  },
+  {
+    "algorithm": "RSA-2048",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 80787.584,
+        "mean_us": 87037.20866666667,
+        "p95_us": 104017.125,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 257
+      },
+      {
+        "median_us": 138558,
+        "mean_us": 122497.861,
+        "p95_us": 156431.333,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 257
+      },
+      {
+        "median_us": 121942.459,
+        "mean_us": 134790.806,
+        "p95_us": 170540.959,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 257
+      }
+    ],
+    "memory_run": {
+      "median_us": 109661.625,
+      "mean_us": 94083.77766666668,
+      "p95_us": 115638.125,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 15228,
+      "retained_key_rust_heap_bytes": 1636,
+      "native_key_bytes": 896,
+      "native_key_pages": 8,
+      "public_bytes": 256,
+      "response_bytes": 257,
+      "process_peak_rss_bytes": 3473408
+    }
+  },
+  {
+    "algorithm": "RSA-2048",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 758.75,
+        "mean_us": 756.215595,
+        "p95_us": 782.5,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 256
+      },
+      {
+        "median_us": 754.958,
+        "mean_us": 753.00083,
+        "p95_us": 780.667,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 256
+      },
+      {
+        "median_us": 739.75,
+        "mean_us": 738.1822900000001,
+        "p95_us": 767.459,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 896,
+        "native_key_pages": 8,
+        "public_bytes": 256,
+        "response_bytes": 256
+      }
+    ],
+    "memory_run": {
+      "median_us": 771.708,
+      "mean_us": 771.722,
+      "p95_us": 778.833,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 11979,
+      "retained_key_rust_heap_bytes": 1636,
+      "native_key_bytes": 896,
+      "native_key_pages": 8,
+      "public_bytes": 256,
+      "response_bytes": 256,
+      "process_peak_rss_bytes": 3457024
+    }
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 273024.958,
+        "mean_us": 255162.80533333335,
+        "p95_us": 276177.458,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 625248.042,
+        "mean_us": 701413.5693333334,
+        "p95_us": 935070.291,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 388082.916,
+        "mean_us": 423237.1386666667,
+        "p95_us": 644501.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 518144.667,
+      "mean_us": 478190.15266666666,
+      "p95_us": 586383.708,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 28796,
+      "retained_key_rust_heap_bytes": 2660,
+      "native_key_bytes": 1344,
+      "native_key_pages": 11,
+      "public_bytes": 384,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3538944
+    }
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 274419.417,
+        "mean_us": 339123.09766666667,
+        "p95_us": 482371.709,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 385
+      },
+      {
+        "median_us": 346686.75,
+        "mean_us": 422193.236,
+        "p95_us": 651262.75,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 385
+      },
+      {
+        "median_us": 230241.875,
+        "mean_us": 323687.708,
+        "p95_us": 519105.791,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 385
+      }
+    ],
+    "memory_run": {
+      "median_us": 401485.834,
+      "mean_us": 465840.1113333333,
+      "p95_us": 690945.209,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 28796,
+      "retained_key_rust_heap_bytes": 2660,
+      "native_key_bytes": 1344,
+      "native_key_pages": 11,
+      "public_bytes": 384,
+      "response_bytes": 385,
+      "process_peak_rss_bytes": 3522560
+    }
+  },
+  {
+    "algorithm": "RSA-3072",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 2149.417,
+        "mean_us": 2141.5539449999997,
+        "p95_us": 2201.208,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 384
+      },
+      {
+        "median_us": 2188,
+        "mean_us": 2178.56128,
+        "p95_us": 2284.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 384
+      },
+      {
+        "median_us": 2180.791,
+        "mean_us": 2162.992675,
+        "p95_us": 2219.834,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1344,
+        "native_key_pages": 11,
+        "public_bytes": 384,
+        "response_bytes": 384
+      }
+    ],
+    "memory_run": {
+      "median_us": 2143.625,
+      "mean_us": 2113.389,
+      "p95_us": 2157.334,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 22859,
+      "retained_key_rust_heap_bytes": 2660,
+      "native_key_bytes": 1344,
+      "native_key_pages": 11,
+      "public_bytes": 384,
+      "response_bytes": 384,
+      "process_peak_rss_bytes": 3555328
+    }
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1289394.666,
+        "mean_us": 1233855.6246666668,
+        "p95_us": 1625171.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1459777.125,
+        "mean_us": 1299912.806,
+        "p95_us": 1510867.209,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1154104.875,
+        "mean_us": 1904428.5416666667,
+        "p95_us": 3432600.125,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1941344.208,
+      "mean_us": 1907844.7913333334,
+      "p95_us": 2371525.458,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 29436,
+      "retained_key_rust_heap_bytes": 2788,
+      "native_key_bytes": 1792,
+      "native_key_pages": 15,
+      "public_bytes": 512,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3440640
+    }
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 2240183.584,
+        "mean_us": 1993430.5973333332,
+        "p95_us": 2991672.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 513
+      },
+      {
+        "median_us": 1187276.666,
+        "mean_us": 1198181.236,
+        "p95_us": 1333445.667,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 513
+      },
+      {
+        "median_us": 1141416.5,
+        "mean_us": 1180135.1113333332,
+        "p95_us": 1457450.292,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 513
+      }
+    ],
+    "memory_run": {
+      "median_us": 1303696.375,
+      "mean_us": 1406253.9723333332,
+      "p95_us": 1697573.292,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 29436,
+      "retained_key_rust_heap_bytes": 2788,
+      "native_key_bytes": 1792,
+      "native_key_pages": 15,
+      "public_bytes": 512,
+      "response_bytes": 513,
+      "process_peak_rss_bytes": 3522560
+    }
+  },
+  {
+    "algorithm": "RSA-4096",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 4819.333,
+        "mean_us": 4838.461255,
+        "p95_us": 4974.417,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 512
+      },
+      {
+        "median_us": 4916.583,
+        "mean_us": 4934.911045,
+        "p95_us": 5083.333,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 512
+      },
+      {
+        "median_us": 4940.542,
+        "mean_us": 4986.1614850000005,
+        "p95_us": 5151.5,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 1792,
+        "native_key_pages": 15,
+        "public_bytes": 512,
+        "response_bytes": 512
+      }
+    ],
+    "memory_run": {
+      "median_us": 4759.875,
+      "mean_us": 4765.319333333333,
+      "p95_us": 4786.083,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 23243,
+      "retained_key_rust_heap_bytes": 2788,
+      "native_key_bytes": 1792,
+      "native_key_pages": 15,
+      "public_bytes": 512,
+      "response_bytes": 512,
+      "process_peak_rss_bytes": 3555328
+    }
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.209,
+        "mean_us": 1.292,
+        "p95_us": 1.542,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.208,
+        "mean_us": 2.1943333333333337,
+        "p95_us": 4.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 2.2083333333333335,
+        "p95_us": 4.291,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.167,
+      "mean_us": 1.292,
+      "p95_us": 1.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 48,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 84,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 69.958,
+        "mean_us": 70.06933333333333,
+        "p95_us": 70.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      },
+      {
+        "median_us": 70.084,
+        "mean_us": 70.19466666666668,
+        "p95_us": 70.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      },
+      {
+        "median_us": 69.833,
+        "mean_us": 69.972,
+        "p95_us": 70.333,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      }
+    ],
+    "memory_run": {
+      "median_us": 69.917,
+      "mean_us": 69.94466666666668,
+      "p95_us": 70.208,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 134,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 84,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 57,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 144.333,
+        "mean_us": 145.62518,
+        "p95_us": 155.334,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 63
+      },
+      {
+        "median_us": 144.375,
+        "mean_us": 145.50393499999998,
+        "p95_us": 149.792,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 63
+      },
+      {
+        "median_us": 144.292,
+        "mean_us": 145.498785,
+        "p95_us": 149.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 64
+      }
+    ],
+    "memory_run": {
+      "median_us": 144.375,
+      "mean_us": 145.361,
+      "p95_us": 147.375,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 119,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 84,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 63,
+      "process_peak_rss_bytes": 3129344
+    }
+  },
+  {
+    "algorithm": "P-224",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 68.5,
+        "mean_us": 68.96003,
+        "p95_us": 71.458,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 28
+      },
+      {
+        "median_us": 68.583,
+        "mean_us": 68.89769,
+        "p95_us": 71.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 28
+      },
+      {
+        "median_us": 68.583,
+        "mean_us": 68.902305,
+        "p95_us": 71.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 84,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 28
+      }
+    ],
+    "memory_run": {
+      "median_us": 68.834,
+      "mean_us": 69.70866666666667,
+      "p95_us": 71.667,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 56,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 84,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 28,
+      "process_peak_rss_bytes": 2932736
+    }
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.125,
+        "mean_us": 1.2776666666666667,
+        "p95_us": 1.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.278,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.278,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.166,
+      "mean_us": 1.2916666666666667,
+      "p95_us": 1.584,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 52,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 29.5,
+        "mean_us": 29.333333333333332,
+        "p95_us": 29.542,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 29.667,
+        "mean_us": 30.667,
+        "p95_us": 32.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 29.458,
+        "mean_us": 29.667,
+        "p95_us": 30.334,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      }
+    ],
+    "memory_run": {
+      "median_us": 29.458,
+      "mean_us": 29.417,
+      "p95_us": 29.584,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 150,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 65,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 60.292,
+        "mean_us": 61.21168,
+        "p95_us": 64.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 70
+      },
+      {
+        "median_us": 59.667,
+        "mean_us": 60.267705,
+        "p95_us": 63.125,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 71
+      },
+      {
+        "median_us": 59.916,
+        "mean_us": 60.847265,
+        "p95_us": 63.916,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 70
+      }
+    ],
+    "memory_run": {
+      "median_us": 59.875,
+      "mean_us": 59.861333333333334,
+      "p95_us": 59.917,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 135,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 71,
+      "process_peak_rss_bytes": 3096576
+    }
+  },
+  {
+    "algorithm": "P-256",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 89.834,
+        "mean_us": 91.30355499999999,
+        "p95_us": 98.208,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 89.709,
+        "mean_us": 90.79812,
+        "p95_us": 95.459,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 88.375,
+        "mean_us": 89.135625,
+        "p95_us": 92.667,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 88.416,
+      "mean_us": 88.486,
+      "p95_us": 88.75,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 2916352
+    }
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.208,
+        "mean_us": 1.3053333333333332,
+        "p95_us": 1.542,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.3053333333333332,
+        "p95_us": 1.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.2916666666666667,
+        "p95_us": 1.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.583,
+      "mean_us": 2.375,
+      "p95_us": 4.042,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 68,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2949120
+    }
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 88.583,
+        "mean_us": 89.389,
+        "p95_us": 94.459,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      },
+      {
+        "median_us": 89.708,
+        "mean_us": 89.68033333333332,
+        "p95_us": 95.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      },
+      {
+        "median_us": 90.917,
+        "mean_us": 90.41633333333333,
+        "p95_us": 95.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      }
+    ],
+    "memory_run": {
+      "median_us": 89.958,
+      "mean_us": 91.59733333333332,
+      "p95_us": 96,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 214,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 97,
+      "process_peak_rss_bytes": 2949120
+    }
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 173.875,
+        "mean_us": 177.28771,
+        "p95_us": 197.25,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 103
+      },
+      {
+        "median_us": 171.875,
+        "mean_us": 173.858325,
+        "p95_us": 184.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 104
+      },
+      {
+        "median_us": 172.834,
+        "mean_us": 174.61607500000002,
+        "p95_us": 185.333,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 104
+      }
+    ],
+    "memory_run": {
+      "median_us": 172.625,
+      "mean_us": 172.597,
+      "p95_us": 172.833,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 199,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 103,
+      "process_peak_rss_bytes": 3145728
+    }
+  },
+  {
+    "algorithm": "P-384",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 304.834,
+        "mean_us": 306.773325,
+        "p95_us": 318,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      },
+      {
+        "median_us": 306.584,
+        "mean_us": 308.82685499999997,
+        "p95_us": 319,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      },
+      {
+        "median_us": 305.5,
+        "mean_us": 307.993515,
+        "p95_us": 319.25,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      }
+    ],
+    "memory_run": {
+      "median_us": 305.125,
+      "mean_us": 305.222,
+      "p95_us": 305.458,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 96,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 48,
+      "process_peak_rss_bytes": 2998272
+    }
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 92.791,
+        "mean_us": 223.958,
+        "p95_us": 559.042,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 113.708,
+        "mean_us": 132.87466666666666,
+        "p95_us": 220.458,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 65.458,
+        "mean_us": 73.153,
+        "p95_us": 107.709,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 215.625,
+      "mean_us": 187.73633333333333,
+      "p95_us": 233.25,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 86,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 198,
+      "native_key_pages": 2,
+      "public_bytes": 132,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 248.875,
+        "mean_us": 294.4026666666667,
+        "p95_us": 425.667,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 133
+      },
+      {
+        "median_us": 290.542,
+        "mean_us": 352.875,
+        "p95_us": 490,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 133
+      },
+      {
+        "median_us": 234.834,
+        "mean_us": 320.2503333333333,
+        "p95_us": 510.708,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 133
+      }
+    ],
+    "memory_run": {
+      "median_us": 275.375,
+      "mean_us": 293.778,
+      "p95_us": 387.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 286,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 198,
+      "native_key_pages": 2,
+      "public_bytes": 132,
+      "response_bytes": 133,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 426.042,
+        "mean_us": 427.591885,
+        "p95_us": 447.959,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 138
+      },
+      {
+        "median_us": 420.875,
+        "mean_us": 424.033925,
+        "p95_us": 442.416,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 138
+      },
+      {
+        "median_us": 421.792,
+        "mean_us": 425.02104499999996,
+        "p95_us": 444.875,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 138
+      }
+    ],
+    "memory_run": {
+      "median_us": 429.541,
+      "mean_us": 431.3606666666667,
+      "p95_us": 439.916,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 270,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 198,
+      "native_key_pages": 2,
+      "public_bytes": 132,
+      "response_bytes": 138,
+      "process_peak_rss_bytes": 3096576
+    }
+  },
+  {
+    "algorithm": "P-521",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 205.75,
+        "mean_us": 207.63748999999999,
+        "p95_us": 219.459,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 66
+      },
+      {
+        "median_us": 204.584,
+        "mean_us": 207.079225,
+        "p95_us": 217.458,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 66
+      },
+      {
+        "median_us": 206.292,
+        "mean_us": 208.21372,
+        "p95_us": 220.334,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 198,
+        "native_key_pages": 2,
+        "public_bytes": 132,
+        "response_bytes": 66
+      }
+    ],
+    "memory_run": {
+      "median_us": 203.208,
+      "mean_us": 204.236,
+      "p95_us": 206.417,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 132,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 198,
+      "native_key_pages": 2,
+      "public_bytes": 132,
+      "response_bytes": 66,
+      "process_peak_rss_bytes": 2899968
+    }
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.125,
+        "mean_us": 1.25,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.278,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.25,
+        "p95_us": 1.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.167,
+      "mean_us": 1.3196666666666668,
+      "p95_us": 1.625,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 52,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 21.708,
+        "mean_us": 21.819333333333333,
+        "p95_us": 22.042,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 21.667,
+        "mean_us": 21.833333333333332,
+        "p95_us": 22.166,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 21.917,
+        "mean_us": 24.653,
+        "p95_us": 30.459,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      }
+    ],
+    "memory_run": {
+      "median_us": 21.75,
+      "mean_us": 21.875333333333334,
+      "p95_us": 22.167,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 150,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 65,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 44.791,
+        "mean_us": 45.92332,
+        "p95_us": 50.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 71
+      },
+      {
+        "median_us": 45.541,
+        "mean_us": 46.10276,
+        "p95_us": 49.458,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 70
+      },
+      {
+        "median_us": 46.083,
+        "mean_us": 46.294145,
+        "p95_us": 50.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 71
+      }
+    ],
+    "memory_run": {
+      "median_us": 48.667,
+      "mean_us": 48.361333333333334,
+      "p95_us": 50.792,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 134,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 70,
+      "process_peak_rss_bytes": 3047424
+    }
+  },
+  {
+    "algorithm": "secp256k1",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 20.292,
+        "mean_us": 20.559794999999998,
+        "p95_us": 22.417,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 20.292,
+        "mean_us": 20.40002,
+        "p95_us": 20.5,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 20.291,
+        "mean_us": 20.399605,
+        "p95_us": 21.541,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 20.416,
+      "mean_us": 20.458,
+      "p95_us": 20.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 2818048
+    }
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.208,
+        "mean_us": 1.2776666666666667,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.167,
+        "mean_us": 1.2223333333333333,
+        "p95_us": 1.333,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 2.125,
+        "mean_us": 2.236,
+        "p95_us": 3.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.542,
+      "mean_us": 1.6386666666666667,
+      "p95_us": 2.208,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 52,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2899968
+    }
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 117.75,
+        "mean_us": 121.38866666666667,
+        "p95_us": 130.958,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 115.875,
+        "mean_us": 115.79166666666667,
+        "p95_us": 116,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      },
+      {
+        "median_us": 115.709,
+        "mean_us": 116.04166666666667,
+        "p95_us": 117.208,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 65
+      }
+    ],
+    "memory_run": {
+      "median_us": 116.292,
+      "mean_us": 116.30566666666667,
+      "p95_us": 116.5,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 150,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 65,
+      "process_peak_rss_bytes": 2899968
+    }
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 234.916,
+        "mean_us": 237.576915,
+        "p95_us": 253.334,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 71
+      },
+      {
+        "median_us": 234.833,
+        "mean_us": 236.936275,
+        "p95_us": 245.041,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 70
+      },
+      {
+        "median_us": 234,
+        "mean_us": 235.621645,
+        "p95_us": 245.333,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 70
+      }
+    ],
+    "memory_run": {
+      "median_us": 234.083,
+      "mean_us": 234.08333333333334,
+      "p95_us": 234.208,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 135,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 71,
+      "process_peak_rss_bytes": 3112960
+    }
+  },
+  {
+    "algorithm": "Brainpool-P256",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 113.542,
+        "mean_us": 114.79813,
+        "p95_us": 122.333,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 112.917,
+        "mean_us": 114.12582499999999,
+        "p95_us": 121.708,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 113.375,
+        "mean_us": 114.97105,
+        "p95_us": 123.667,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 96,
+        "native_key_pages": 1,
+        "public_bytes": 64,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 113.292,
+      "mean_us": 113.31933333333333,
+      "p95_us": 113.458,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 96,
+      "native_key_pages": 1,
+      "public_bytes": 64,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 2932736
+    }
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.542,
+        "mean_us": 2.306,
+        "p95_us": 4.209,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 3.833,
+        "mean_us": 3.7363333333333335,
+        "p95_us": 4.167,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.542,
+        "mean_us": 1.625,
+        "p95_us": 2.208,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 3.666,
+      "mean_us": 3.6383333333333336,
+      "p95_us": 6.041,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 68,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 298.875,
+        "mean_us": 299.0693333333333,
+        "p95_us": 300.833,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      },
+      {
+        "median_us": 300.333,
+        "mean_us": 300.1526666666667,
+        "p95_us": 301.958,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      },
+      {
+        "median_us": 309.25,
+        "mean_us": 313.1666666666667,
+        "p95_us": 323.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 97
+      }
+    ],
+    "memory_run": {
+      "median_us": 300.041,
+      "mean_us": 300.16633333333334,
+      "p95_us": 301.083,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 214,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 97,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 611.958,
+        "mean_us": 616.421525,
+        "p95_us": 640.459,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 102
+      },
+      {
+        "median_us": 616.625,
+        "mean_us": 622.245655,
+        "p95_us": 644.583,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 102
+      },
+      {
+        "median_us": 612.209,
+        "mean_us": 617.696865,
+        "p95_us": 644.833,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 104
+      }
+    ],
+    "memory_run": {
+      "median_us": 642.958,
+      "mean_us": 637.319,
+      "p95_us": 651.916,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 199,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 103,
+      "process_peak_rss_bytes": 3129344
+    }
+  },
+  {
+    "algorithm": "Brainpool-P384",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 307.917,
+        "mean_us": 311.44791499999997,
+        "p95_us": 326.25,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      },
+      {
+        "median_us": 308.458,
+        "mean_us": 311.83478499999995,
+        "p95_us": 326.834,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      },
+      {
+        "median_us": 310.25,
+        "mean_us": 317.53747999999996,
+        "p95_us": 346.125,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 144,
+        "native_key_pages": 2,
+        "public_bytes": 96,
+        "response_bytes": 48
+      }
+    ],
+    "memory_run": {
+      "median_us": 310.542,
+      "mean_us": 317.222,
+      "p95_us": 331.666,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 96,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 144,
+      "native_key_pages": 2,
+      "public_bytes": 96,
+      "response_bytes": 48,
+      "process_peak_rss_bytes": 2932736
+    }
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.333,
+        "mean_us": 2.3333333333333335,
+        "p95_us": 4.458,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 2.166,
+        "mean_us": 1.958,
+        "p95_us": 2.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 2.25,
+        "mean_us": 4.333333333333333,
+        "p95_us": 9.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.209,
+      "mean_us": 1.4583333333333333,
+      "p95_us": 1.958,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 84,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 192,
+      "native_key_pages": 2,
+      "public_bytes": 128,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 781.667,
+        "mean_us": 791.4863333333334,
+        "p95_us": 818,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 129
+      },
+      {
+        "median_us": 784.542,
+        "mean_us": 787.4863333333334,
+        "p95_us": 797.458,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 129
+      },
+      {
+        "median_us": 777.875,
+        "mean_us": 786.5,
+        "p95_us": 809.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 129
+      }
+    ],
+    "memory_run": {
+      "median_us": 823.292,
+      "mean_us": 809.1666666666666,
+      "p95_us": 832.416,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 278,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 192,
+      "native_key_pages": 2,
+      "public_bytes": 128,
+      "response_bytes": 129,
+      "process_peak_rss_bytes": 2883584
+    }
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 1577.375,
+        "mean_us": 1604.9204,
+        "p95_us": 1692.5,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 136
+      },
+      {
+        "median_us": 1575.083,
+        "mean_us": 1588.9856399999999,
+        "p95_us": 1675.708,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 135
+      },
+      {
+        "median_us": 1572.375,
+        "mean_us": 1581.6180900000002,
+        "p95_us": 1661.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 137
+      }
+    ],
+    "memory_run": {
+      "median_us": 1568.458,
+      "mean_us": 1567.1666666666667,
+      "p95_us": 1578.792,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 264,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 192,
+      "native_key_pages": 2,
+      "public_bytes": 128,
+      "response_bytes": 136,
+      "process_peak_rss_bytes": 3342336
+    }
+  },
+  {
+    "algorithm": "Brainpool-P512",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 774.208,
+        "mean_us": 780.27713,
+        "p95_us": 810.75,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 64
+      },
+      {
+        "median_us": 774.083,
+        "mean_us": 779.402705,
+        "p95_us": 808.542,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 64
+      },
+      {
+        "median_us": 774.959,
+        "mean_us": 786.0275350000001,
+        "p95_us": 837.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 192,
+        "native_key_pages": 2,
+        "public_bytes": 128,
+        "response_bytes": 64
+      }
+    ],
+    "memory_run": {
+      "median_us": 772,
+      "mean_us": 783.4723333333334,
+      "p95_us": 807.75,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 128,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 192,
+      "native_key_pages": 2,
+      "public_bytes": 128,
+      "response_bytes": 64,
+      "process_peak_rss_bytes": 2916352
+    }
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 8.417,
+        "mean_us": 8.472,
+        "p95_us": 8.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 8.375,
+        "mean_us": 8.430666666666665,
+        "p95_us": 8.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 8.375,
+        "mean_us": 8.458666666666666,
+        "p95_us": 8.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 8.334,
+      "mean_us": 8.458333333333334,
+      "p95_us": 8.708,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 292,
+      "retained_key_rust_heap_bytes": 260,
+      "native_key_bytes": 128,
+      "native_key_pages": 2,
+      "public_bytes": 32,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 8.333,
+        "mean_us": 8.485666666666667,
+        "p95_us": 8.791,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 33
+      },
+      {
+        "median_us": 8.334,
+        "mean_us": 8.458333333333334,
+        "p95_us": 8.708,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 33
+      },
+      {
+        "median_us": 8.333,
+        "mean_us": 8.430666666666665,
+        "p95_us": 8.667,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 33
+      }
+    ],
+    "memory_run": {
+      "median_us": 8.459,
+      "mean_us": 8.555666666666665,
+      "p95_us": 8.875,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 325,
+      "retained_key_rust_heap_bytes": 260,
+      "native_key_bytes": 128,
+      "native_key_pages": 2,
+      "public_bytes": 32,
+      "response_bytes": 33,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "Ed25519",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 7.292,
+        "mean_us": 7.32207,
+        "p95_us": 7.542,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 64
+      },
+      {
+        "median_us": 7.292,
+        "mean_us": 7.3291,
+        "p95_us": 7.458,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 64
+      },
+      {
+        "median_us": 7.291,
+        "mean_us": 7.283720000000001,
+        "p95_us": 7.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 128,
+        "native_key_pages": 2,
+        "public_bytes": 32,
+        "response_bytes": 64
+      }
+    ],
+    "memory_run": {
+      "median_us": 7.416,
+      "mean_us": 7.388666666666667,
+      "p95_us": 7.417,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 260,
+      "native_key_bytes": 128,
+      "native_key_pages": 2,
+      "public_bytes": 32,
+      "response_bytes": 64,
+      "process_peak_rss_bytes": 2785280
+    }
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 227.333,
+        "mean_us": 228.06933333333333,
+        "p95_us": 231.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 226.334,
+        "mean_us": 228.61133333333333,
+        "p95_us": 234,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 225.75,
+        "mean_us": 228.86066666666665,
+        "p95_us": 235.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 228.5,
+      "mean_us": 230.042,
+      "p95_us": 235.334,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 557,
+      "retained_key_rust_heap_bytes": 500,
+      "native_key_bytes": 228,
+      "native_key_pages": 2,
+      "public_bytes": 57,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 225.125,
+        "mean_us": 225.347,
+        "p95_us": 225.833,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 58
+      },
+      {
+        "median_us": 227.875,
+        "mean_us": 227.52766666666665,
+        "p95_us": 229.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 58
+      },
+      {
+        "median_us": 232.333,
+        "mean_us": 234.44433333333333,
+        "p95_us": 245.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 58
+      }
+    ],
+    "memory_run": {
+      "median_us": 227,
+      "mean_us": 227.58333333333334,
+      "p95_us": 228.875,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 615,
+      "retained_key_rust_heap_bytes": 500,
+      "native_key_bytes": 228,
+      "native_key_pages": 2,
+      "public_bytes": 57,
+      "response_bytes": 58,
+      "process_peak_rss_bytes": 2801664
+    }
+  },
+  {
+    "algorithm": "Ed448",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 231,
+        "mean_us": 233.155415,
+        "p95_us": 241.708,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 114
+      },
+      {
+        "median_us": 231.333,
+        "mean_us": 233.465195,
+        "p95_us": 244,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 114
+      },
+      {
+        "median_us": 231.208,
+        "mean_us": 234.32023999999998,
+        "p95_us": 254.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 228,
+        "native_key_pages": 2,
+        "public_bytes": 57,
+        "response_bytes": 114
+      }
+    ],
+    "memory_run": {
+      "median_us": 233.458,
+      "mean_us": 233.52766666666665,
+      "p95_us": 233.708,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 114,
+      "retained_key_rust_heap_bytes": 500,
+      "native_key_bytes": 228,
+      "native_key_pages": 2,
+      "public_bytes": 57,
+      "response_bytes": 114,
+      "process_peak_rss_bytes": 2768896
+    }
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 44.375,
+        "mean_us": 44.667,
+        "p95_us": 45.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 44.25,
+        "mean_us": 44.77766666666666,
+        "p95_us": 46,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 44.625,
+        "mean_us": 45.083333333333336,
+        "p95_us": 46.75,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 44.542,
+      "mean_us": 45.138666666666666,
+      "p95_us": 46.541,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 65942,
+      "retained_key_rust_heap_bytes": 65940,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1312,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3194880
+    }
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 45.125,
+        "mean_us": 45.458333333333336,
+        "p95_us": 46.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 1313
+      },
+      {
+        "median_us": 45.083,
+        "mean_us": 45.472,
+        "p95_us": 46.708,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 1313
+      },
+      {
+        "median_us": 44.333,
+        "mean_us": 44.833333333333336,
+        "p95_us": 46,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 1313
+      }
+    ],
+    "memory_run": {
+      "median_us": 45.208,
+      "mean_us": 45.52766666666666,
+      "p95_us": 47.042,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 68565,
+      "retained_key_rust_heap_bytes": 65940,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1312,
+      "response_bytes": 1313,
+      "process_peak_rss_bytes": 3194880
+    }
+  },
+  {
+    "algorithm": "ML-DSA-44",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 97,
+        "mean_us": 144.55631,
+        "p95_us": 374.625,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2420
+      },
+      {
+        "median_us": 95.875,
+        "mean_us": 133.93329500000002,
+        "p95_us": 372.166,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2420
+      },
+      {
+        "median_us": 94,
+        "mean_us": 129.85231,
+        "p95_us": 357.083,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1312,
+        "response_bytes": 2420
+      }
+    ],
+    "memory_run": {
+      "median_us": 170.834,
+      "mean_us": 142.34766666666667,
+      "p95_us": 212.584,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 7540,
+      "retained_key_rust_heap_bytes": 65940,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1312,
+      "response_bytes": 2420,
+      "process_peak_rss_bytes": 3309568
+    }
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 84.125,
+        "mean_us": 86.30533333333332,
+        "p95_us": 91.958,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 92.375,
+        "mean_us": 94.79166666666667,
+        "p95_us": 104.125,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 83.375,
+        "mean_us": 86.06933333333333,
+        "p95_us": 91.791,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 83.792,
+      "mean_us": 84.93066666666667,
+      "p95_us": 88.5,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 108982,
+      "retained_key_rust_heap_bytes": 108980,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1952,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3342336
+    }
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 84.208,
+        "mean_us": 86.41666666666667,
+        "p95_us": 91.292,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 1953
+      },
+      {
+        "median_us": 83.25,
+        "mean_us": 86.44466666666668,
+        "p95_us": 93.167,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 1953
+      },
+      {
+        "median_us": 86.083,
+        "mean_us": 87.58333333333333,
+        "p95_us": 91.708,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 1953
+      }
+    ],
+    "memory_run": {
+      "median_us": 85,
+      "mean_us": 85.47233333333332,
+      "p95_us": 88.125,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 112885,
+      "retained_key_rust_heap_bytes": 108980,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1952,
+      "response_bytes": 1953,
+      "process_peak_rss_bytes": 3342336
+    }
+  },
+  {
+    "algorithm": "ML-DSA-65",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 168.5,
+        "mean_us": 203.075195,
+        "p95_us": 465.292,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 3309
+      },
+      {
+        "median_us": 171.084,
+        "mean_us": 237.09464499999999,
+        "p95_us": 615.625,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 3309
+      },
+      {
+        "median_us": 173.833,
+        "mean_us": 214.53542499999998,
+        "p95_us": 569.875,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1952,
+        "response_bytes": 3309
+      }
+    ],
+    "memory_run": {
+      "median_us": 242.583,
+      "mean_us": 228.597,
+      "p95_us": 303.083,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 9965,
+      "retained_key_rust_heap_bytes": 108980,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1952,
+      "response_bytes": 3309,
+      "process_peak_rss_bytes": 3538944
+    }
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 122.75,
+        "mean_us": 125.764,
+        "p95_us": 135.917,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 114.084,
+        "mean_us": 117.514,
+        "p95_us": 125.667,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 113.958,
+        "mean_us": 118.04133333333333,
+        "p95_us": 127.083,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 117.333,
+      "mean_us": 126.76366666666667,
+      "p95_us": 150.041,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 178646,
+      "retained_key_rust_heap_bytes": 178644,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 2592,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3457024
+    }
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 115.25,
+        "mean_us": 117.94433333333333,
+        "p95_us": 124.208,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2593
+      },
+      {
+        "median_us": 114.792,
+        "mean_us": 117.48666666666666,
+        "p95_us": 123.834,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2593
+      },
+      {
+        "median_us": 122.834,
+        "mean_us": 121.917,
+        "p95_us": 122.834,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 2593
+      }
+    ],
+    "memory_run": {
+      "median_us": 114.5,
+      "mean_us": 116.597,
+      "p95_us": 121.666,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 183829,
+      "retained_key_rust_heap_bytes": 178644,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 2592,
+      "response_bytes": 2593,
+      "process_peak_rss_bytes": 3473408
+    }
+  },
+  {
+    "algorithm": "ML-DSA-87",
+    "operation": "sign",
+    "timing_runs": [
+      {
+        "median_us": 187.25,
+        "mean_us": 242.83785,
+        "p95_us": 678.75,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 4627
+      },
+      {
+        "median_us": 186.125,
+        "mean_us": 226.91296499999999,
+        "p95_us": 501.625,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 4627
+      },
+      {
+        "median_us": 149.542,
+        "mean_us": 234.61442000000002,
+        "p95_us": 644.25,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 2592,
+        "response_bytes": 4627
+      }
+    ],
+    "memory_run": {
+      "median_us": 133,
+      "mean_us": 179.014,
+      "p95_us": 320.375,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 13843,
+      "retained_key_rust_heap_bytes": 178644,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 2592,
+      "response_bytes": 4627,
+      "process_peak_rss_bytes": 3653632
+    }
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.208,
+        "mean_us": 1.2913333333333332,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.208,
+        "mean_us": 1.2913333333333332,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.166,
+        "mean_us": 1.2636666666666667,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.208,
+      "mean_us": 1.3473333333333333,
+      "p95_us": 1.667,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 52,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 32,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2785280
+    }
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 8.375,
+        "mean_us": 8.472333333333333,
+        "p95_us": 8.75,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 33
+      },
+      {
+        "median_us": 8.459,
+        "mean_us": 8.542,
+        "p95_us": 8.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 33
+      },
+      {
+        "median_us": 8.333,
+        "mean_us": 8.458333333333334,
+        "p95_us": 8.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 33
+      }
+    ],
+    "memory_run": {
+      "median_us": 8.375,
+      "mean_us": 8.528,
+      "p95_us": 8.834,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 85,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 32,
+      "response_bytes": 33,
+      "process_peak_rss_bytes": 2785280
+    }
+  },
+  {
+    "algorithm": "X25519",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 17.792,
+        "mean_us": 17.801285,
+        "p95_us": 17.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 17.792,
+        "mean_us": 17.96144,
+        "p95_us": 17.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 17.792,
+        "mean_us": 17.84375,
+        "p95_us": 17.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 32,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 17.792,
+      "mean_us": 17.791666666666668,
+      "p95_us": 17.833,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 32,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 2785280
+    }
+  },
+  {
+    "algorithm": "X448",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.208,
+        "mean_us": 1.3193333333333332,
+        "p95_us": 1.584,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.209,
+        "mean_us": 2.2643333333333335,
+        "p95_us": 4.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.208,
+        "mean_us": 1.2913333333333332,
+        "p95_us": 1.5,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.209,
+      "mean_us": 1.3196666666666668,
+      "p95_us": 1.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 76,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 112,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "X448",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 212.667,
+        "mean_us": 213.181,
+        "p95_us": 214.542,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      },
+      {
+        "median_us": 214.375,
+        "mean_us": 217.139,
+        "p95_us": 225.125,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      },
+      {
+        "median_us": 211.875,
+        "mean_us": 212.04133333333334,
+        "p95_us": 212.583,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 57
+      }
+    ],
+    "memory_run": {
+      "median_us": 215.25,
+      "mean_us": 218.889,
+      "p95_us": 229.042,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 133,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 112,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 57,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "X448",
+    "operation": "derive",
+    "timing_runs": [
+      {
+        "median_us": 211.333,
+        "mean_us": 215.49958999999998,
+        "p95_us": 233.833,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 56
+      },
+      {
+        "median_us": 210.5,
+        "mean_us": 215.578935,
+        "p95_us": 234.166,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 56
+      },
+      {
+        "median_us": 210.333,
+        "mean_us": 212.256505,
+        "p95_us": 219.166,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 112,
+        "native_key_pages": 1,
+        "public_bytes": 56,
+        "response_bytes": 56
+      }
+    ],
+    "memory_run": {
+      "median_us": 209.959,
+      "mean_us": 209.86166666666665,
+      "p95_us": 209.959,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 112,
+      "retained_key_rust_heap_bytes": 20,
+      "native_key_bytes": 112,
+      "native_key_pages": 1,
+      "public_bytes": 56,
+      "response_bytes": 56,
+      "process_peak_rss_bytes": 2834432
+    }
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 9.416,
+        "mean_us": 9.471666666666666,
+        "p95_us": 9.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 9.417,
+        "mean_us": 9.472333333333333,
+        "p95_us": 9.916,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 9.375,
+        "mean_us": 9.541666666666666,
+        "p95_us": 10,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 9.458,
+      "mean_us": 9.5,
+      "p95_us": 9.875,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 2246,
+      "retained_key_rust_heap_bytes": 2244,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 800,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3031040
+    }
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 9.542,
+        "mean_us": 9.791666666666666,
+        "p95_us": 10.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 801
+      },
+      {
+        "median_us": 9.5,
+        "mean_us": 9.833333333333334,
+        "p95_us": 10.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 801
+      },
+      {
+        "median_us": 9.542,
+        "mean_us": 9.736333333333334,
+        "p95_us": 10.292,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 801
+      }
+    ],
+    "memory_run": {
+      "median_us": 9.75,
+      "mean_us": 9.736,
+      "p95_us": 10.25,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 3845,
+      "retained_key_rust_heap_bytes": 2244,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 800,
+      "response_bytes": 801,
+      "process_peak_rss_bytes": 3031040
+    }
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 9.042,
+        "mean_us": 9.097700000000001,
+        "p95_us": 9.084,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 800
+      },
+      {
+        "median_us": 8.959,
+        "mean_us": 8.979395,
+        "p95_us": 9.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 800
+      },
+      {
+        "median_us": 9.25,
+        "mean_us": 9.282290000000001,
+        "p95_us": 9.416,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 800
+      }
+    ],
+    "memory_run": {
+      "median_us": 9.083,
+      "mean_us": 9.069,
+      "p95_us": 9.166,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 2656,
+      "retained_key_rust_heap_bytes": 2244,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 800,
+      "response_bytes": 800,
+      "process_peak_rss_bytes": 3162112
+    }
+  },
+  {
+    "algorithm": "ML-KEM-512",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 8.708,
+        "mean_us": 8.74639,
+        "p95_us": 8.791,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 8.792,
+        "mean_us": 8.811069999999999,
+        "p95_us": 8.917,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 8.833,
+        "mean_us": 8.92292,
+        "p95_us": 9.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 800,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 8.75,
+      "mean_us": 8.736333333333334,
+      "p95_us": 8.75,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 2244,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 800,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3080192
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 16.417,
+        "mean_us": 16.694666666666667,
+        "p95_us": 17.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 16.666,
+        "mean_us": 16.889,
+        "p95_us": 17.584,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 16.333,
+        "mean_us": 16.263666666666666,
+        "p95_us": 16.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 16.375,
+      "mean_us": 18.333333333333332,
+      "p95_us": 22.375,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 3270,
+      "retained_key_rust_heap_bytes": 3268,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1184,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3063808
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 16.917,
+        "mean_us": 16.625,
+        "p95_us": 17.292,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1185
+      },
+      {
+        "median_us": 16.292,
+        "mean_us": 16.417,
+        "p95_us": 16.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1185
+      },
+      {
+        "median_us": 16.625,
+        "mean_us": 16.555666666666667,
+        "p95_us": 16.709,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1185
+      }
+    ],
+    "memory_run": {
+      "median_us": 17.25,
+      "mean_us": 17.472,
+      "p95_us": 18.625,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5637,
+      "retained_key_rust_heap_bytes": 3268,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1184,
+      "response_bytes": 1185,
+      "process_peak_rss_bytes": 3063808
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 14.916,
+        "mean_us": 15.278135,
+        "p95_us": 18.25,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1120
+      },
+      {
+        "median_us": 14.833,
+        "mean_us": 14.92041,
+        "p95_us": 15.833,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1120
+      },
+      {
+        "median_us": 14.666,
+        "mean_us": 14.70184,
+        "p95_us": 14.792,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 1120
+      }
+    ],
+    "memory_run": {
+      "median_us": 15.167,
+      "mean_us": 15.278,
+      "p95_us": 15.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 3872,
+      "retained_key_rust_heap_bytes": 3268,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1184,
+      "response_bytes": 1120,
+      "process_peak_rss_bytes": 3145728
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 14.875,
+        "mean_us": 15.044575,
+        "p95_us": 15.792,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 14.792,
+        "mean_us": 14.851035,
+        "p95_us": 15.208,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 14.875,
+        "mean_us": 14.93916,
+        "p95_us": 15.584,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1184,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 15.083,
+      "mean_us": 15.055333333333333,
+      "p95_us": 15.167,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 3268,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1184,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3080192
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 26.167,
+        "mean_us": 25.931,
+        "p95_us": 26.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 25.875,
+        "mean_us": 25.75,
+        "p95_us": 26.709,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 25.458,
+        "mean_us": 25.819666666666667,
+        "p95_us": 26.584,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 25.334,
+      "mean_us": 25.764,
+      "p95_us": 26.958,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 4294,
+      "retained_key_rust_heap_bytes": 4292,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1568,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3047424
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 26,
+        "mean_us": 26.583333333333332,
+        "p95_us": 28.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1569
+      },
+      {
+        "median_us": 27.125,
+        "mean_us": 29.88866666666667,
+        "p95_us": 35.916,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1569
+      },
+      {
+        "median_us": 26.709,
+        "mean_us": 27.514333333333333,
+        "p95_us": 29.25,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1569
+      }
+    ],
+    "memory_run": {
+      "median_us": 26.5,
+      "mean_us": 28.139,
+      "p95_us": 32.208,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 7429,
+      "retained_key_rust_heap_bytes": 4292,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1568,
+      "response_bytes": 1569,
+      "process_peak_rss_bytes": 3096576
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 22.584,
+        "mean_us": 23.015855,
+        "p95_us": 24.042,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1600
+      },
+      {
+        "median_us": 22.333,
+        "mean_us": 22.55188,
+        "p95_us": 23.291,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1600
+      },
+      {
+        "median_us": 22.75,
+        "mean_us": 22.96123,
+        "p95_us": 22.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 1600
+      }
+    ],
+    "memory_run": {
+      "median_us": 23.25,
+      "mean_us": 23.249666666666666,
+      "p95_us": 23.291,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5248,
+      "retained_key_rust_heap_bytes": 4292,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1568,
+      "response_bytes": 1600,
+      "process_peak_rss_bytes": 3145728
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 23.083,
+        "mean_us": 23.23395,
+        "p95_us": 24.208,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 22.958,
+        "mean_us": 23.545855,
+        "p95_us": 25.75,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 24.208,
+        "mean_us": 24.52813,
+        "p95_us": 25.667,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 64,
+        "native_key_pages": 1,
+        "public_bytes": 1568,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 23.583,
+      "mean_us": 23.597,
+      "p95_us": 23.625,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 64,
+      "retained_key_rust_heap_bytes": 4292,
+      "native_key_bytes": 64,
+      "native_key_pages": 1,
+      "public_bytes": 1568,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3129344
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.208,
+        "mean_us": 1.2916666666666667,
+        "p95_us": 1.584,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.084,
+        "mean_us": 1.1946666666666668,
+        "p95_us": 1.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.125,
+        "mean_us": 1.2083333333333333,
+        "p95_us": 1.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.084,
+      "mean_us": 1.2226666666666668,
+      "p95_us": 1.542,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 70,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1249,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3178496
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 46,
+        "mean_us": 47.30566666666667,
+        "p95_us": 50.042,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1250
+      },
+      {
+        "median_us": 46.458,
+        "mean_us": 51.43066666666667,
+        "p95_us": 61.875,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1250
+      },
+      {
+        "median_us": 46.375,
+        "mean_us": 46.903,
+        "p95_us": 48.209,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1250
+      }
+    ],
+    "memory_run": {
+      "median_us": 46.458,
+      "mean_us": 46.43033333333334,
+      "p95_us": 47.291,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5750,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1249,
+      "response_bytes": 1250,
+      "process_peak_rss_bytes": 3211264
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 174.458,
+        "mean_us": 176.77626999999998,
+        "p95_us": 189.333,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1185
+      },
+      {
+        "median_us": 176.542,
+        "mean_us": 179.84605,
+        "p95_us": 197.958,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1185
+      },
+      {
+        "median_us": 174.833,
+        "mean_us": 176.56167499999998,
+        "p95_us": 186.291,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 1185
+      }
+    ],
+    "memory_run": {
+      "median_us": 180.292,
+      "mean_us": 181.23633333333333,
+      "p95_us": 186.084,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5681,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1249,
+      "response_bytes": 1185,
+      "process_peak_rss_bytes": 3407872
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+P-256",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 145.917,
+        "mean_us": 147.538105,
+        "p95_us": 156.541,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 145.792,
+        "mean_us": 147.36185999999998,
+        "p95_us": 155.792,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 145.458,
+        "mean_us": 146.585635,
+        "p95_us": 151.334,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1249,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 144.667,
+      "mean_us": 145.26433333333335,
+      "p95_us": 147.459,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 3505,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1249,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3375104
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.084,
+        "mean_us": 1.1806666666666668,
+        "p95_us": 1.375,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.083,
+        "mean_us": 1.208,
+        "p95_us": 1.458,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.125,
+        "mean_us": 1.1943333333333332,
+        "p95_us": 1.417,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.125,
+      "mean_us": 1.1943333333333332,
+      "p95_us": 1.416,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 70,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1216,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3096576
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 25.334,
+        "mean_us": 25.416666666666668,
+        "p95_us": 26.666,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1217
+      },
+      {
+        "median_us": 25.417,
+        "mean_us": 25.639,
+        "p95_us": 26.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1217
+      },
+      {
+        "median_us": 24.833,
+        "mean_us": 25.430666666666667,
+        "p95_us": 26.792,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1217
+      }
+    ],
+    "memory_run": {
+      "median_us": 25.541,
+      "mean_us": 25.499666666666666,
+      "p95_us": 25.875,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5717,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1216,
+      "response_bytes": 1217,
+      "process_peak_rss_bytes": 3129344
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 59.25,
+        "mean_us": 59.71268,
+        "p95_us": 62.75,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1152
+      },
+      {
+        "median_us": 59,
+        "mean_us": 59.578934999999994,
+        "p95_us": 61.541,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1152
+      },
+      {
+        "median_us": 59.75,
+        "mean_us": 60.32708,
+        "p95_us": 63.625,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 1152
+      }
+    ],
+    "memory_run": {
+      "median_us": 59.292,
+      "mean_us": 59.31966666666666,
+      "p95_us": 59.375,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 5648,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1216,
+      "response_bytes": 1152,
+      "process_peak_rss_bytes": 3227648
+    }
+  },
+  {
+    "algorithm": "ML-KEM-768+X25519",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 52.416,
+        "mean_us": 52.91935,
+        "p95_us": 55.417,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 52.542,
+        "mean_us": 52.963375,
+        "p95_us": 54.708,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 52.375,
+        "mean_us": 52.739405,
+        "p95_us": 53.5,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1216,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 54.209,
+      "mean_us": 54.19466666666666,
+      "p95_us": 54.292,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 3376,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1216,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3211264
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "keygen",
+    "timing_runs": [
+      {
+        "median_us": 1.125,
+        "mean_us": 1.4026666666666667,
+        "p95_us": 1.958,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.208,
+        "mean_us": 1.361,
+        "p95_us": 1.75,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 2
+      },
+      {
+        "median_us": 1.125,
+        "mean_us": 1.2636666666666667,
+        "p95_us": 1.541,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 2
+      }
+    ],
+    "memory_run": {
+      "median_us": 1.208,
+      "mean_us": 1.3886666666666667,
+      "p95_us": 1.791,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 70,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1665,
+      "response_bytes": 2,
+      "process_peak_rss_bytes": 3260416
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "keypair",
+    "timing_runs": [
+      {
+        "median_us": 116.542,
+        "mean_us": 118.014,
+        "p95_us": 121.625,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1666
+      },
+      {
+        "median_us": 134.375,
+        "mean_us": 130.33333333333331,
+        "p95_us": 137.167,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1666
+      },
+      {
+        "median_us": 113.708,
+        "mean_us": 114.20833333333333,
+        "p95_us": 116.292,
+        "samples": 3,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1666
+      }
+    ],
+    "memory_run": {
+      "median_us": 115.416,
+      "mean_us": 115.736,
+      "p95_us": 119.875,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 7574,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1665,
+      "response_bytes": 1666,
+      "process_peak_rss_bytes": 3325952
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "encapsulate",
+    "timing_runs": [
+      {
+        "median_us": 536.5,
+        "mean_us": 536.58209,
+        "p95_us": 568.834,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1697
+      },
+      {
+        "median_us": 521.208,
+        "mean_us": 527.5798249999999,
+        "p95_us": 556.792,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1697
+      },
+      {
+        "median_us": 549.833,
+        "mean_us": 549.321285,
+        "p95_us": 596.708,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 1697
+      }
+    ],
+    "memory_run": {
+      "median_us": 543.875,
+      "mean_us": 615.8333333333334,
+      "p95_us": 767.25,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 7505,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1665,
+      "response_bytes": 1697,
+      "process_peak_rss_bytes": 3440640
+    }
+  },
+  {
+    "algorithm": "ML-KEM-1024+P-384",
+    "operation": "decapsulate",
+    "timing_runs": [
+      {
+        "median_us": 440.25,
+        "mean_us": 443.821015,
+        "p95_us": 478.583,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 432.875,
+        "mean_us": 436.11295,
+        "p95_us": 452.541,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 32
+      },
+      {
+        "median_us": 432.75,
+        "mean_us": 436.1254,
+        "p95_us": 460.375,
+        "samples": 200,
+        "peak_extra_rust_heap_bytes": 0,
+        "retained_key_rust_heap_bytes": 0,
+        "native_key_bytes": 32,
+        "native_key_pages": 1,
+        "public_bytes": 1665,
+        "response_bytes": 32
+      }
+    ],
+    "memory_run": {
+      "median_us": 432.625,
+      "mean_us": 432.611,
+      "p95_us": 432.708,
+      "samples": 3,
+      "peak_extra_rust_heap_bytes": 4481,
+      "retained_key_rust_heap_bytes": 68,
+      "native_key_bytes": 32,
+      "native_key_pages": 1,
+      "public_bytes": 1665,
+      "response_bytes": 32,
+      "process_peak_rss_bytes": 3440640
+    }
+  }
+]
