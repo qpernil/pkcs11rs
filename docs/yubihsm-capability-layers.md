@@ -95,7 +95,14 @@ PKCS #11 mechanism
 
 Consequently, seeing a mechanism in `C_GetMechanismList` does not by itself
 mean that a physical YubiHSM has a matching command. Per-key policy determines
-whether that mechanism is usable for a particular object. Firmware discovery
+whether that mechanism is usable for a particular object. New persistent native
+keys use [hardware-granularity permission mapping](yubihsm-capability-mapping.md):
+creation maps usage and allowed mechanisms to native bits, and reads report the
+effective operations rather than preserving the input template in metadata.
+Old native permission overrides are ignored with a diagnostic. Projected public
+objects and software objects retain their own policy; local public operations
+do not require private native capabilities.
+Firmware discovery
 uses device algorithms and object capability bits; it does not use invented
 algorithm markers or speculative command probes.
 

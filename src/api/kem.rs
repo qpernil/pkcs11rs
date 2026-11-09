@@ -79,24 +79,8 @@ fn encapsulate_key(
         }
         let key_handle = unsafe { as_mut(key) }?;
         let output = unsafe { _from_raw_parts_mut(ciphertext, required) }?;
-        let (encapsulated, shared) = if let KeyMaterial::YubiHsm { id, .. } = &public.material {
-            let response = Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
-                &if mechanism.mechanism == CKM_ML_KEM as CK_MECHANISM_TYPE {
-                    YubiHsmCommand::encapsulate_ml_kem(*id)
-                } else {
-                    YubiHsmCommand::encapsulate_hybrid_kem(*id)
-                },
-            )?);
-            if response.len() != required + ML_KEM_SHARED_SECRET_LENGTH {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            (
-                response[..required].to_vec(),
-                Zeroizing::new(response[required..].to_vec()),
-            )
-        } else {
-            kem_encapsulate(&public_material)?
-        };
+        // Encapsulation uses public material only; no native private capability is required.
+        let (encapsulated, shared) = kem_encapsulate(&public_material)?;
         let object = ml_kem_secret_object(templ, shared, flags, logged_in, mechanism.mechanism)?;
         *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
         output.copy_from_slice(&encapsulated);

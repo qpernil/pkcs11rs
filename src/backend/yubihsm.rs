@@ -576,6 +576,62 @@ pub(crate) struct YubiHsmPkcs11Metadata {
     pub(crate) primary_attributes: KeyAttributes,
 }
 
+// Native capability/class defaults are authoritative, including when older
+// companions carry a software permission policy. Identity/provenance stay separate.
+const YUBIHSM_STORED_PERMISSION_ATTRIBUTES: [u32; 12] = [
+    CKA_ENCRYPT,
+    CKA_DECRYPT,
+    CKA_SIGN,
+    CKA_VERIFY,
+    CKA_DERIVE,
+    CKA_WRAP,
+    CKA_UNWRAP,
+    CKA_ENCAPSULATE,
+    CKA_DECAPSULATE,
+    CKA_ALLOWED_MECHANISMS,
+    CKA_PRIVATE,
+    CKA_EXTRACTABLE,
+];
+
+fn is_yubihsm_stored_permission(attribute: u64) -> bool {
+    YUBIHSM_STORED_PERMISSION_ATTRIBUTES
+        .iter()
+        .any(|kind| u64::from(*kind) == attribute)
+}
+
+fn log_yubihsm_ignored_permissions(object: &TokenObject, attributes: &KeyAttributes) {
+    if attributes
+        .iter()
+        .any(|(kind, _)| is_yubihsm_stored_permission(*kind))
+    {
+        log!(
+            1,
+            "YubiHSM object {}: ignoring stored permissions; using native capabilities",
+            object.unique_id
+        );
+    }
+}
+
+/// Generated ordinary asymmetric keys imply a public half, even after native wrapping/import.
+/// RSA wrapping keys have a separate native public-wrap object instead.
+fn yubihsm_default_public_presence(info: &YubiHsmObjectInfo) -> bool {
+    info.object_type == YUBIHSM_ASYMMETRIC_KEY && info.origin & 0x01 != 0
+}
+
+fn yubihsm_has_public_aspect(
+    info: &YubiHsmObjectInfo,
+    metadata: Option<&YubiHsmPkcs11Metadata>,
+) -> bool {
+    metadata.map_or_else(
+        || yubihsm_default_public_presence(info),
+        |metadata| metadata.public,
+    )
+}
+
+fn yubihsm_public_unique_id(info: &YubiHsmObjectInfo) -> String {
+    format!("{}-public", yubihsm_native_unique_id(info))
+}
+
 impl YubiHsmPkcs11Metadata {
     fn is_empty(&self, target: &YubiHsmObjectInfo) -> bool {
         // A stored non-default identity cannot be discarded without changing
@@ -585,7 +641,11 @@ impl YubiHsmPkcs11Metadata {
             .is_none_or(|id| *id == yubihsm_native_unique_id(target))
             && self.id.is_none()
             && self.label.is_none()
-            && !self.public
+            && self.public == yubihsm_default_public_presence(target)
+            && self
+                .public_unique_id
+                .as_ref()
+                .is_none_or(|id| *id == yubihsm_public_unique_id(target))
             && self.public_id.is_none()
             && self.public_label.is_none()
             && self.public_attributes.is_empty()
@@ -605,6 +665,46 @@ impl YubiHsmPkcs11Metadata {
             self.public_attributes = KeyAttributes::new();
             self.public_unique_id = None;
         }
+    }
+
+    fn remove_native_defaults(&mut self, target: &YubiHsmObjectInfo) -> Result<(), Error> {
+        if self.id.as_deref() == Some(target.id.to_be_bytes().as_slice()) {
+            self.id = None;
+        }
+        if self.label.as_deref() == Some(yubihsm_object_label(target).as_str()) {
+            self.label = None;
+        }
+        if self.public_id.as_deref() == Some(target.id.to_be_bytes().as_slice()) {
+            self.public_id = None;
+        }
+        if self.public_label.as_deref() == Some(yubihsm_object_label(target).as_str()) {
+            self.public_label = None;
+        }
+        let mut native =
+            yubihsm_token_objects_with_metadata(0, target.clone(), None, None)?.remove(0);
+        apply_yubihsm_primary_policy(&mut native, &self.primary_attributes)?;
+        self.primary_attributes = yubihsm_primary_policy(&native)?;
+        let public = yubihsm_public_defaults(yubihsm_key_type(target.algorithm));
+        for (kind, default) in [
+            (
+                CKA_ENCRYPT,
+                yubihsm_algorithm_supported(target.algorithm) && public.encrypt,
+            ),
+            (
+                CKA_VERIFY,
+                yubihsm_algorithm_supported(target.algorithm) && public.verify,
+            ),
+            (CKA_ENCAPSULATE, public.encapsulate),
+            (CKA_PRIVATE, false),
+            (CKA_EXTRACTABLE, true),
+        ] {
+            if self.public_attributes.get(u64::from(kind))
+                == Some(&KeyAttributeValue::Boolean(default))
+            {
+                self.public_attributes.remove(u64::from(kind));
+            }
+        }
+        Ok(())
     }
 
     fn encode(&self, target: &YubiHsmObjectInfo) -> Result<Vec<u8>, Error> {
@@ -758,7 +858,7 @@ impl YubiHsmPkcs11Metadata {
     fn projected_unique_id(&self, info: &YubiHsmObjectInfo) -> String {
         self.public_unique_id
             .clone()
-            .unwrap_or_else(|| format!("{}-public", yubihsm_native_unique_id(info)))
+            .unwrap_or_else(|| yubihsm_public_unique_id(info))
     }
 }
 
@@ -2672,7 +2772,8 @@ impl YubiHsmSlot {
             if public || policy.class != yubihsm_object_class(&info) {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
-            metadata.primary_attributes = yubihsm_primary_policy(policy, &info)?;
+            // All native objects use hardware permission granularity.
+            metadata.primary_attributes = yubihsm_creation_policy(policy, &info)?;
         }
 
         if let Some(id) = id {
@@ -2694,7 +2795,7 @@ impl YubiHsmSlot {
             }
         }
 
-        self.replace_pkcs11_metadata_record(&info, current.as_ref(), &metadata)
+        self.save_pkcs11_metadata(&info, metadata)
     }
 
     fn empty_pkcs11_metadata(info: &YubiHsmObjectInfo) -> YubiHsmPkcs11Metadata {
@@ -2707,7 +2808,7 @@ impl YubiHsmSlot {
             primary_class: Some(yubihsm_object_class(info)),
             id: None,
             label: None,
-            public: false,
+            public: yubihsm_default_public_presence(info),
             public_id: None,
             public_label: None,
             public_attributes: KeyAttributes::new(),
@@ -2715,12 +2816,12 @@ impl YubiHsmSlot {
         }
     }
 
-    fn replace_pkcs11_metadata_record(
+    fn save_pkcs11_metadata(
         &self,
         info: &YubiHsmObjectInfo,
-        current: Option<&YubiHsmPkcs11Metadata>,
-        metadata: &YubiHsmPkcs11Metadata,
+        mut metadata: YubiHsmPkcs11Metadata,
     ) -> Result<(), Error> {
+        metadata.remove_native_defaults(info)?;
         let old_objects = self.related_metadata_object(info.id, info.object_type)?;
         let old_canonical_objects = self.metadata_objects_in_format(
             &old_objects,
@@ -2731,6 +2832,7 @@ impl YubiHsmSlot {
             .is_empty();
         let mut old_references = Vec::new();
         let mut old_canonical_info = Vec::new();
+        let mut old_values = Vec::new();
         for (id, sequence) in &old_canonical_objects {
             let info = self
                 .cached_object_info(*id, YUBIHSM_OPAQUE, Some(*sequence))?
@@ -2741,37 +2843,36 @@ impl YubiHsmSlot {
                 old_references.push(reference);
             }
             old_canonical_info.push(info);
+            old_values.push(value);
         }
 
-        if metadata.is_empty(info) && !has_legacy_metadata {
-            for reference in old_references {
-                StorageProvider::delete(self, &reference)
-                    .map_err(crate::backed_object::storage_error)?;
+        // None means no companion is needed: reuse the same cleanup path to
+        // remove old records, or do nothing when none exists. A legacy shadow
+        // and a non-default persisted identity still have semantic value.
+        let value = if metadata.is_empty(info) && !has_legacy_metadata {
+            None
+        } else {
+            Some(metadata.encode(info)?)
+        };
+        let new_reference = match value {
+            Some(value) => {
+                if old_values.len() == 1 && old_values[0] == value {
+                    return Ok(());
+                }
+                Some(match old_canonical_info.first() {
+                    Some(existing) => match self.try_update_storage_object(existing, &value)? {
+                        Some(reference) => reference,
+                        None => StorageProvider::put(self, &value)
+                            .map_err(crate::backed_object::storage_error)?,
+                    },
+                    None => StorageProvider::put(self, &value)
+                        .map_err(crate::backed_object::storage_error)?,
+                })
             }
-            return Ok(());
-        }
-
-        let value = metadata.encode(info)?;
-        if !old_canonical_objects.is_empty()
-            && current
-                .and_then(|current| current.encode(info).ok())
-                .as_deref()
-                == Some(value.as_slice())
-        {
-            return Ok(());
-        }
-        let new_reference = match old_canonical_info.first() {
-            Some(existing) => match self.try_update_storage_object(existing, &value)? {
-                Some(reference) => reference,
-                None => StorageProvider::put(self, &value)
-                    .map_err(crate::backed_object::storage_error)?,
-            },
-            None => {
-                StorageProvider::put(self, &value).map_err(crate::backed_object::storage_error)?
-            }
+            None => None,
         };
         for reference in old_references {
-            if reference != new_reference {
+            if Some(&reference) != new_reference.as_ref() {
                 StorageProvider::delete(self, &reference)
                     .map_err(crate::backed_object::storage_error)?;
             }
@@ -2803,23 +2904,32 @@ impl YubiHsmSlot {
             (projection.id != info.id.to_be_bytes()).then(|| projection.id.clone());
         metadata.public_label =
             (projection.label != yubihsm_object_label(&info)).then(|| projection.label.clone());
-        metadata.public_attributes = yubihsm_public_projection_attributes(&info, projection)?;
-        self.replace_pkcs11_metadata_record(&info, current.as_ref(), &metadata)
+        let mut projection = projection.clone();
+        if let Some(requested) = projection.allowed_mechanisms.take() {
+            let defaults = crate::key_mechanisms::allowed(self, &projection);
+            let mut requested = requested;
+            requested.sort_unstable();
+            requested.dedup();
+            if requested != defaults {
+                projection.allowed_mechanisms = Some(requested);
+            }
+        }
+        metadata.public_attributes = yubihsm_public_projection_attributes(&info, &projection)?;
+        self.save_pkcs11_metadata(&info, metadata)
     }
 
     fn destroy_public_projection(&self, slot_id: CK_SLOT_ID, unique_id: &str) -> Result<(), Error> {
         let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
-        let mut metadata = current.ok_or(CKR_ACTION_PROHIBITED)?;
+        let mut metadata = current.unwrap_or_else(|| Self::empty_pkcs11_metadata(&info));
         if !public || !metadata.has_public_aspect() {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
-        let previous = metadata.clone();
         metadata.public = false;
         metadata.public_unique_id = None;
         metadata.public_id = None;
         metadata.public_label = None;
         metadata.public_attributes = KeyAttributes::new();
-        self.replace_pkcs11_metadata_record(&info, Some(&previous), &metadata)
+        self.save_pkcs11_metadata(&info, metadata)
     }
 
     fn destroy_native_object(
@@ -2837,10 +2947,8 @@ impl YubiHsmSlot {
             YubiHsmMetadataPhysicalFormat::CanonicalCbor,
         )?;
         let mut replaced_metadata = None;
-        let detached = if current
-            .as_ref()
-            .is_some_and(YubiHsmPkcs11Metadata::has_public_aspect)
-        {
+        let mut created_standalone = None;
+        let detached = if yubihsm_has_public_aspect(&info, current.as_ref()) {
             let key = YubiHsmObjectKey::from_info(&info);
             let metadata = self
                 .object_metadata
@@ -2865,53 +2973,65 @@ impl YubiHsmSlot {
             let existed = StorageProvider::list(self)
                 .map_err(crate::backed_object::storage_error)?
                 .contains(&reference);
-            let linked_value = current.as_ref().ok_or(CKR_DEVICE_ERROR)?.encode(&info)?;
+            let linked_value = current
+                .as_ref()
+                .map(|current| current.encode(&info))
+                .transpose()?;
             let mut linked_object = None;
             for (id, sequence) in &canonical_metadata {
                 let candidate = self
                     .cached_object_info(*id, YUBIHSM_OPAQUE, Some(*sequence))?
                     .ok_or(CKR_DEVICE_ERROR)?;
                 let value = self.storage_object_value(&candidate)?;
-                if value == linked_value {
+                if Some(&value) == linked_value.as_ref() {
                     linked_object = Some((candidate, value));
                     break;
                 }
             }
-            let (linked_info, linked_value) = linked_object.ok_or(CKR_DEVICE_ERROR)?;
-            self.delete_metadata_objects(&[(linked_info.id, linked_info.sequence)])?;
-            if !existed {
-                if let Err(error) = self.write_standalone_storage_object(
-                    &encoded,
-                    &reference,
-                    linked_info.id,
-                    linked_info.domains,
-                ) {
-                    let restore = send_yubihsm_secure_command(
-                        self.connector.as_ref(),
-                        self.session.as_ref(),
-                        &YubiHsmCommand::put_object(
-                            YubiHsmCommandCode::PutOpaque,
-                            &YubiHsmObjectParameters {
-                                id: linked_info.id,
-                                label: &linked_info.label,
-                                domains: linked_info.domains,
-                                capabilities: linked_info.capabilities,
-                                algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
-                            },
-                            &linked_value,
-                        )?,
-                    );
-                    if restore.is_ok() {
-                        let _ = self.forget_cached_object(linked_info.id, YUBIHSM_OPAQUE);
+            if let Some((linked_info, linked_value)) = linked_object {
+                self.delete_metadata_objects(&[(linked_info.id, linked_info.sequence)])?;
+                if !existed {
+                    if let Err(error) = self.write_standalone_storage_object(
+                        &encoded,
+                        &reference,
+                        linked_info.id,
+                        linked_info.domains,
+                    ) {
+                        let restore = send_yubihsm_secure_command(
+                            self.connector.as_ref(),
+                            self.session.as_ref(),
+                            &YubiHsmCommand::put_object(
+                                YubiHsmCommandCode::PutOpaque,
+                                &YubiHsmObjectParameters {
+                                    id: linked_info.id,
+                                    label: &linked_info.label,
+                                    domains: linked_info.domains,
+                                    capabilities: linked_info.capabilities,
+                                    algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                                },
+                                &linked_value,
+                            )?,
+                        );
+                        if restore.is_ok() {
+                            let _ = self.forget_cached_object(linked_info.id, YUBIHSM_OPAQUE);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
+                    self.metadata_storage_writes
+                        .try_borrow_mut()
+                        .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                        .insert(reference.clone(), linked_info.id);
                 }
+                replaced_metadata = Some((linked_info, linked_value, existed));
+            } else if !existed {
+                let id =
+                    self.write_standalone_storage_object(&encoded, &reference, 0, info.domains)?;
                 self.metadata_storage_writes
                     .try_borrow_mut()
                     .map_err(|_| Error::from(CKR_CANT_LOCK))?
-                    .insert(reference.clone(), linked_info.id);
+                    .insert(reference, id);
+                created_standalone = Some(id);
             }
-            replaced_metadata = Some((linked_info, linked_value, existed));
             Some(public_object.unique_id)
         } else {
             None
@@ -2922,6 +3042,11 @@ impl YubiHsmSlot {
             self.session.as_ref(),
             &YubiHsmCommand::delete_object(info.id, info.object_type),
         ) {
+            if let Some(id) = created_standalone
+                && let Err(cleanup) = self.delete_metadata_objects(&[(id, 0)])
+            {
+                log!(1, "YubiHSM public-object rollback failed: {:?}", cleanup);
+            }
             if let Some((linked_info, linked_value, existed)) = replaced_metadata {
                 if !existed {
                     let _ = send_yubihsm_secure_command(
@@ -3134,7 +3259,10 @@ impl YubiHsmSlot {
 }
 
 fn yubihsm_storage_error(error: Error) -> StorageError {
-    StorageError::Provider(format!("{error:?}"))
+    match error {
+        Error::Generic(rv) if rv == CKR_DEVICE_MEMORY as CK_RV => StorageError::Capacity,
+        error => StorageError::Provider(format!("{error:?}")),
+    }
 }
 
 impl StorageProvider for YubiHsmSlot {
@@ -3555,23 +3683,7 @@ pub(crate) fn yubihsm_remote_material_with_type(
 }
 
 pub(crate) fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
-    if !info.label.is_empty() {
-        return info.label.clone();
-    }
-    let kind = match (info.object_type, info.algorithm) {
-        (YUBIHSM_OPAQUE, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE) => "certificate",
-        (YUBIHSM_OPAQUE, _) => "opaque object",
-        (YUBIHSM_AUTHENTICATION_KEY, _) => "authentication key",
-        (YUBIHSM_ASYMMETRIC_KEY, _) => "asymmetric key",
-        (YUBIHSM_WRAP_KEY, _) => "wrap key",
-        (YUBIHSM_HMAC_KEY, _) => "HMAC key",
-        (YUBIHSM_TEMPLATE, _) => "template",
-        (YUBIHSM_OTP_AEAD_KEY, _) => "OTP AEAD key",
-        (YUBIHSM_SYMMETRIC_KEY, _) => "symmetric key",
-        (YUBIHSM_PUBLIC_WRAP_KEY, _) => "public wrap key",
-        _ => "object",
-    };
-    format!("YubiHSM {kind} {}", info.id)
+    info.label.clone()
 }
 
 pub(crate) fn yubihsm_device_public_key_object(
@@ -3846,7 +3958,8 @@ pub(crate) fn yubihsm_token_objects_with_metadata(
     }
 
     if (info.object_type == YUBIHSM_ASYMMETRIC_KEY || rsa_wrap_key)
-        && metadata.is_some_and(YubiHsmPkcs11Metadata::has_public_aspect)
+        && yubihsm_has_public_aspect(&info, metadata)
+        && (metadata.is_some() || public_key.is_some())
     {
         let public_key = public_key.ok_or(CKR_DEVICE_ERROR)?;
         if public_key.algorithm != info.algorithm {
@@ -3869,19 +3982,17 @@ pub(crate) fn yubihsm_token_objects_with_metadata(
         };
         let mut public_object = TokenObject {
             slot_id: Some(slot_id),
-            unique_id: metadata.ok_or(CKR_DEVICE_ERROR)?.projected_unique_id(&info),
+            unique_id: metadata.map_or_else(
+                || yubihsm_public_unique_id(&info),
+                |metadata| metadata.projected_unique_id(&info),
+            ),
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             key_type,
             label: metadata
-                .and_then(|metadata| {
-                    metadata
-                        .public_label
-                        .clone()
-                        .or_else(|| metadata.label.clone())
-                })
+                .and_then(|metadata| metadata.public_label.clone())
                 .unwrap_or(hardware_label),
             id: metadata
-                .and_then(|metadata| metadata.public_id.clone().or_else(|| metadata.id.clone()))
+                .and_then(|metadata| metadata.public_id.clone())
                 .unwrap_or_else(|| info.id.to_be_bytes().to_vec()),
             token: true,
             private: false,
@@ -3922,42 +4033,42 @@ pub(crate) fn yubihsm_token_objects_with_metadata(
     Ok(objects)
 }
 
-/// Preserve policy distinctions that native capabilities cannot express.
-fn yubihsm_primary_policy(
+/// Creation stores provenance only; usage and mechanism permissions round-trip
+/// through native capabilities instead of allocating a policy companion.
+fn yubihsm_creation_policy(
     object: &TokenObject,
     info: &YubiHsmObjectInfo,
 ) -> Result<KeyAttributes, Error> {
-    let native =
-        yubihsm_capabilities_to_attributes(info.object_type, info.algorithm, &info.capabilities);
+    let mut native = yubihsm_token_objects_with_metadata(0, info.clone(), None, None)?.remove(0);
+    if [
+        object.encrypt != native.encrypt,
+        object.decrypt != native.decrypt,
+        object.sign != native.sign,
+        object.verify != native.verify,
+        object.derive != native.derive,
+        object.wrap != native.wrap,
+        object.unwrap != native.unwrap,
+        object.encapsulate != native.encapsulate,
+        object.decapsulate != native.decapsulate,
+    ]
+    .into_iter()
+    .any(|changed| changed)
+        || object.allowed_mechanisms.is_some()
+    {
+        log!(
+            1,
+            "YubiHSM type {:02x} ID {:04x}: usage/mechanism template mapped to native capabilities; effective permissions may differ (see docs/yubihsm-capability-mapping.md)",
+            info.object_type,
+            info.id
+        );
+    }
+    native.key_gen_mechanism = object.key_gen_mechanism;
+    yubihsm_primary_policy(&native)
+}
+
+/// Only provenance that the native object cannot express needs a primary delta.
+fn yubihsm_primary_policy(object: &TokenObject) -> Result<KeyAttributes, Error> {
     let mut attributes = KeyAttributes::new();
-    for (kind, value, native_value) in [
-        (CKA_ENCRYPT, object.encrypt, native.encrypt),
-        (CKA_DECRYPT, object.decrypt, native.decrypt),
-        (CKA_SIGN, object.sign, native.sign),
-        (CKA_VERIFY, object.verify, native.verify),
-        (CKA_DERIVE, object.derive, native.derive),
-        (CKA_WRAP, object.wrap, native.wrap),
-        (CKA_UNWRAP, object.unwrap, native.unwrap),
-        (CKA_ENCAPSULATE, object.encapsulate, native.encapsulate),
-        (CKA_DECAPSULATE, object.decapsulate, native.decapsulate),
-    ] {
-        if value == native_value {
-            continue;
-        }
-        attributes
-            .insert(u64::from(kind), KeyAttributeValue::Boolean(value))
-            .map_err(key_metadata_error)?;
-    }
-    if let Some(allowed) = &object.allowed_mechanisms {
-        attributes
-            .insert(
-                u64::from(CKA_ALLOWED_MECHANISMS),
-                KeyAttributeValue::Mechanisms(
-                    allowed.iter().copied().map(cryptoki_ulong_to_u64).collect(),
-                ),
-            )
-            .map_err(key_metadata_error)?;
-    }
     if let Some(generation) = object.key_gen_mechanism
         && object.local
         && sha_hmac_generation_key_type(generation) == Some(object.key_type)
@@ -3976,19 +4087,9 @@ fn apply_yubihsm_primary_policy(
     object: &mut TokenObject,
     attributes: &KeyAttributes,
 ) -> Result<(), Error> {
+    log_yubihsm_ignored_permissions(object, attributes);
     for (kind, value) in attributes.iter() {
-        if let KeyAttributeValue::Mechanisms(mechanisms) = value
-            && *kind == u64::from(CKA_ALLOWED_MECHANISMS)
-        {
-            object.allowed_mechanisms = Some(
-                mechanisms
-                    .iter()
-                    .map(|mechanism| {
-                        CK_MECHANISM_TYPE::try_from(*mechanism)
-                            .map_err(|_| Error::from(CKR_DATA_INVALID))
-                    })
-                    .collect::<Result<_, _>>()?,
-            );
+        if is_yubihsm_stored_permission(*kind) {
             continue;
         }
         if let KeyAttributeValue::Unsigned(generation) = value
@@ -4002,23 +4103,7 @@ fn apply_yubihsm_primary_policy(
             object.key_gen_mechanism = Some(generation);
             continue;
         }
-        let KeyAttributeValue::Boolean(value) = value else {
-            return Err(CKR_DATA_INVALID.into());
-        };
-        let permission = match *kind {
-            x if x == u64::from(CKA_ENCRYPT) => &mut object.encrypt,
-            x if x == u64::from(CKA_DECRYPT) => &mut object.decrypt,
-            x if x == u64::from(CKA_SIGN) => &mut object.sign,
-            x if x == u64::from(CKA_VERIFY) => &mut object.verify,
-            x if x == u64::from(CKA_DERIVE) => &mut object.derive,
-            x if x == u64::from(CKA_WRAP) => &mut object.wrap,
-            x if x == u64::from(CKA_UNWRAP) => &mut object.unwrap,
-            x if x == u64::from(CKA_ENCAPSULATE) => &mut object.encapsulate,
-            x if x == u64::from(CKA_DECAPSULATE) => &mut object.decapsulate,
-            _ => return Err(CKR_DATA_INVALID.into()),
-        };
-        // Companion metadata may narrow a device capability, never grant one.
-        *permission &= *value;
+        return Err(CKR_DATA_INVALID.into());
     }
     Ok(())
 }
@@ -4027,12 +4112,27 @@ fn apply_yubihsm_public_projection_metadata(
     object: &mut TokenObject,
     metadata: Option<&YubiHsmPkcs11Metadata>,
 ) -> Result<(), Error> {
-    let metadata = metadata.ok_or(CKR_DATA_INVALID)?;
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
     if !metadata.has_public_aspect() {
         return Err(CKR_DATA_INVALID.into());
     }
     for (attribute, value) in metadata.public_attributes.iter() {
         match (*attribute, value) {
+            (attribute, KeyAttributeValue::Mechanisms(values))
+                if attribute == u64::from(CKA_ALLOWED_MECHANISMS) =>
+            {
+                object.allowed_mechanisms = Some(
+                    values
+                        .iter()
+                        .map(|value| {
+                            CK_MECHANISM_TYPE::try_from(*value)
+                                .map_err(|_| Error::from(CKR_DATA_INVALID))
+                        })
+                        .collect::<Result<_, _>>()?,
+                );
+            }
             (attribute, KeyAttributeValue::Bytes(value)) if attribute == u64::from(CKA_ID) => {
                 if metadata.public_id.as_deref() != Some(value.as_slice()) {
                     return Err(CKR_DATA_INVALID.into());
@@ -4102,7 +4202,7 @@ fn apply_yubihsm_public_projection_metadata(
                 {
                     return Err(CKR_DATA_INVALID.into());
                 }
-                object.encapsulate &= *value;
+                object.encapsulate = *value;
             }
             (attribute, KeyAttributeValue::Boolean(value))
                 if attribute == u64::from(CKA_EXTRACTABLE) =>
@@ -4153,8 +4253,37 @@ fn yubihsm_public_projection_attributes(
     let native =
         yubihsm_capabilities_to_attributes(public_object_type, info.algorithm, &info.capabilities);
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
+    if object.sign
+        || object.decrypt
+        || object.derive
+        || object.wrap
+        || object.unwrap
+        || object.decapsulate
+        || object.sensitive
+        || !object.extractable
+        || (object.encrypt && !(algorithm_supported && native.encrypt))
+        || (object.verify && !(algorithm_supported && native.verify))
+        || (object.encapsulate && !native.encapsulate)
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
     let mut attributes = KeyAttributes::new();
+    if let Some(mechanisms) = &object.allowed_mechanisms {
+        attributes
+            .insert(
+                u64::from(CKA_ALLOWED_MECHANISMS),
+                KeyAttributeValue::Mechanisms(
+                    mechanisms
+                        .iter()
+                        .copied()
+                        .map(cryptoki_ulong_to_u64)
+                        .collect(),
+                ),
+            )
+            .map_err(key_metadata_error)?;
+    }
     for (attribute, actual, default) in [
+        (u64::from(CKA_PRIVATE), object.private, false),
         (
             u64::from(CKA_ENCRYPT),
             object.encrypt,
@@ -4290,16 +4419,18 @@ impl Slot for YubiHsmSlot {
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: TokenObject,
+        id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
-        crate::api::native::store_yubihsm_token_key_in_slot(self, ctx, session, object)
+        crate::api::native::store_yubihsm_token_key_in_slot(self, ctx, session, object, id_supplied)
     }
     fn store_data(
         &mut self,
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: TokenObject,
+        id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
-        crate::api::native::store_yubihsm_data_in_slot(self, ctx, session, object)
+        crate::api::native::store_yubihsm_data_in_slot(self, ctx, session, object, id_supplied)
     }
     fn generate_key(
         &mut self,
@@ -4839,6 +4970,16 @@ impl Slot for YubiHsmSlot {
     ) -> Result<Option<String>, Error> {
         self.destroy_native_object(slot_id, unique_id)
     }
+    fn yubihsm_rollback_created_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
+        let companions = self.related_metadata_object(id, object_type)?;
+        send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &YubiHsmCommand::delete_object(id, object_type),
+        )?;
+        self.forget_cached_object(id, object_type)?;
+        self.delete_metadata_objects(&companions)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5098,75 +5239,7 @@ pub(crate) fn key_mechanism_operations(key: &TokenObject, m: CK_MECHANISM_TYPE) 
     if key.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && m != CKM_YUBICO_RSA_WRAP {
         return common;
     }
-    let cap = |bit| yubihsm_capability(capabilities, bit);
-    let pair = |yes, flags| if yes { flags } else { 0 };
-    let native = match m {
-        x if crate::is_ml_dsa_mechanism(x) => pair(cap(0x3a), CKF_SIGN),
-        x if x == CKM_ML_KEM as CK_MECHANISM_TYPE => pair(cap(0x3c), CKF_DECAPSULATE),
-        CKM_PKCS11RS_MLKEM768_P256 | CKM_PKCS11RS_MLKEM768_X25519 | CKM_PKCS11RS_MLKEM1024_P384 => {
-            pair(cap(0x3e), CKF_DECAPSULATE)
-        }
-        x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
-            pair(cap(0x05), CKF_SIGN)
-                | pair(cap(0x09), CKF_DECRYPT)
-                | pair(*object_type == YUBIHSM_WRAP_KEY && cap(0x0d), CKF_UNWRAP)
-        }
-        x if crate::mechanism::HASHED_RSA_PKCS_MECHANISMS.contains(&x) => pair(cap(0x05), CKF_SIGN),
-        x if x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-            || crate::mechanism::HASHED_RSA_PSS_MECHANISMS.contains(&x) =>
-        {
-            pair(cap(0x06), CKF_SIGN)
-        }
-        x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
-            pair(cap(0x0a), CKF_DECRYPT)
-                | pair(*object_type == YUBIHSM_WRAP_KEY && cap(0x0d), CKF_UNWRAP)
-        }
-        x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE || x == CKM_YUBICO_RSA_WRAP => {
-            pair(cap(0x0c), CKF_WRAP) | pair(cap(0x0d), CKF_UNWRAP)
-        }
-        x if x == CKM_ECDSA as CK_MECHANISM_TYPE
-            || crate::mechanism::HASHED_ECDSA_MECHANISMS.contains(&x) =>
-        {
-            pair(cap(0x07), CKF_SIGN)
-        }
-        x if x == CKM_EDDSA as CK_MECHANISM_TYPE => pair(cap(0x08), CKF_SIGN),
-        x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
-            || x == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE =>
-        {
-            pair(cap(0x0b), CKF_DERIVE)
-        }
-        x if x == CKM_PKCS11RS_PREFIXED_ECDH_DERIVE => pair(cap(0x38), CKF_DERIVE),
-        x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => {
-            pair(cap(0x33), CKF_ENCRYPT) | pair(cap(0x32), CKF_DECRYPT)
-        }
-        x if x == CKM_AES_CBC as CK_MECHANISM_TYPE || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE => {
-            pair(cap(0x35), CKF_ENCRYPT) | pair(cap(0x34), CKF_DECRYPT)
-        }
-        x if x == CKM_AES_CTR as CK_MECHANISM_TYPE || x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
-            pair(cap(0x33), CKF_ENCRYPT | CKF_DECRYPT)
-        }
-        x if x == CKM_AES_CCM as CK_MECHANISM_TYPE => {
-            pair(cap(0x33) && cap(0x35), CKF_ENCRYPT | CKF_DECRYPT)
-        }
-        x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
-            || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
-            || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
-        {
-            pair(cap(0x33), CKF_SIGN | CKF_VERIFY)
-        }
-        x if x == CKM_SP800_108_COUNTER_KDF as CK_MECHANISM_TYPE => pair(cap(0x33), CKF_DERIVE),
-        x if x == CKM_YUBICO_AES_CCM_WRAP => {
-            pair(cap(0x0c), CKF_WRAP)
-                | pair(cap(0x0d), CKF_UNWRAP)
-                | pair(cap(0x25), CKF_ENCRYPT)
-                | pair(cap(0x26), CKF_DECRYPT)
-        }
-        _ if crate::key_mechanisms::hmac_key_type_and_length(m).is_some() => {
-            pair(cap(0x16), CKF_SIGN) | pair(cap(0x17), CKF_VERIFY)
-        }
-        _ => 0,
-    };
-    common & native as CK_FLAGS
+    common & crate::yubihsm::capabilities::operations(*object_type, capabilities, m)
 }
 
 #[cfg(test)]
@@ -5205,7 +5278,36 @@ mod primary_policy_tests {
 
     fn roundtrip(info: &YubiHsmObjectInfo, object: &TokenObject) -> TokenObject {
         let mut metadata = YubiHsmSlot::empty_pkcs11_metadata(info);
-        metadata.primary_attributes = yubihsm_primary_policy(object, info).unwrap();
+        metadata.public = false; // This helper exercises only the primary policy.
+        metadata.primary_attributes = yubihsm_primary_policy(object).unwrap();
+        // Reproduce records written by the older permission-preserving writer.
+        for (kind, value) in [
+            (CKA_ENCRYPT, object.encrypt),
+            (CKA_DECRYPT, object.decrypt),
+            (CKA_SIGN, object.sign),
+            (CKA_VERIFY, object.verify),
+            (CKA_DERIVE, object.derive),
+            (CKA_WRAP, object.wrap),
+            (CKA_UNWRAP, object.unwrap),
+            (CKA_ENCAPSULATE, object.encapsulate),
+            (CKA_DECAPSULATE, object.decapsulate),
+        ] {
+            metadata
+                .primary_attributes
+                .insert(u64::from(kind), KeyAttributeValue::Boolean(value))
+                .unwrap();
+        }
+        if let Some(allowed) = &object.allowed_mechanisms {
+            metadata
+                .primary_attributes
+                .insert(
+                    u64::from(CKA_ALLOWED_MECHANISMS),
+                    KeyAttributeValue::Mechanisms(
+                        allowed.iter().copied().map(cryptoki_ulong_to_u64).collect(),
+                    ),
+                )
+                .unwrap();
+        }
         let encoded = metadata.encode(info).unwrap();
         let record = BackedKeyMetadata::from_cbor(&encoded).unwrap();
         let mut companion = info.clone();
@@ -5217,6 +5319,86 @@ mod primary_policy_tests {
         yubihsm_token_objects_with_metadata(7, info.clone(), None, Some(&decoded))
             .unwrap()
             .remove(0)
+    }
+
+    #[test]
+    fn origin_defaults_and_explicit_absence_survive_cbor_roundtrips() {
+        for origin in [0, 1, 2, 3] {
+            let mut info = ml_kem_info();
+            info.origin = origin;
+            let public = YubiHsmPublicKey {
+                algorithm: info.algorithm,
+                key: vec![0; 1568],
+            };
+            let objects = yubihsm_token_objects(7, info.clone(), Some(public.clone())).unwrap();
+            let generated = origin & 1 != 0;
+            assert_eq!(objects.len(), if generated { 2 } else { 1 });
+            let mut metadata = YubiHsmSlot::empty_pkcs11_metadata(&info);
+            assert!(metadata.is_empty(&info));
+            metadata.public = !generated;
+            assert!(!metadata.is_empty(&info));
+            let mut physical = info.clone();
+            physical.object_type = YUBIHSM_OPAQUE;
+            physical.algorithm = YUBIHSM_ALGO_OPAQUE_DATA;
+            physical.label = yubihsm_metadata_label_for_target(
+                &info,
+                YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+            );
+            let decoded =
+                parse_yubihsm_pkcs11_metadata(&physical, &metadata.encode(&info).unwrap()).unwrap();
+            let changed =
+                yubihsm_token_objects_with_metadata(7, info, Some(public), Some(&decoded)).unwrap();
+            assert_eq!(changed.len(), if generated { 1 } else { 2 });
+            assert_eq!(objects[0].unique_id, changed[0].unique_id);
+        }
+    }
+
+    #[test]
+    fn obsolete_permissions_are_removed_without_losing_identity_or_public_presence() {
+        let info = aes_info();
+        let mut metadata = YubiHsmSlot::empty_pkcs11_metadata(&info);
+        metadata.id = Some(info.id.to_be_bytes().to_vec());
+        metadata.label = Some(info.label.clone());
+        metadata.unique_id = Some(yubihsm_native_unique_id(&info));
+        metadata
+            .primary_attributes
+            .insert(u64::from(CKA_ENCRYPT), KeyAttributeValue::Boolean(true))
+            .unwrap();
+        metadata.remove_native_defaults(&info).unwrap();
+        assert!(metadata.is_empty(&info));
+        metadata
+            .primary_attributes
+            .insert(u64::from(CKA_ENCRYPT), KeyAttributeValue::Boolean(false))
+            .unwrap();
+        metadata.remove_native_defaults(&info).unwrap();
+        assert!(
+            metadata.is_empty(&info),
+            "obsolete permission restrictions need no storage"
+        );
+        metadata.primary_attributes = KeyAttributes::new();
+        metadata
+            .primary_attributes
+            .insert(
+                u64::from(CKA_ALLOWED_MECHANISMS),
+                KeyAttributeValue::Mechanisms(vec![]),
+            )
+            .unwrap();
+        metadata.remove_native_defaults(&info).unwrap();
+        assert!(
+            metadata.is_empty(&info),
+            "an old empty allowed list is ignored like any other stored list"
+        );
+        metadata.primary_attributes = KeyAttributes::new();
+        metadata.unique_id = Some("independent-identity".to_owned());
+        metadata.remove_native_defaults(&info).unwrap();
+        assert!(!metadata.is_empty(&info));
+        metadata.unique_id = None;
+        metadata.public = true;
+        metadata.remove_native_defaults(&info).unwrap();
+        assert!(
+            !metadata.is_empty(&info),
+            "a public aspect represents an independent object"
+        );
     }
 
     #[test]
@@ -5266,7 +5448,7 @@ mod primary_policy_tests {
     }
 
     #[test]
-    fn yubihsm_primary_policy_survives_cbor_rediscovery() {
+    fn yubihsm_stored_permissions_are_ignored_after_cbor_rediscovery() {
         let info = aes_info();
         let mut object = yubihsm_token_objects(7, info.clone(), None)
             .unwrap()
@@ -5278,8 +5460,8 @@ mod primary_policy_tests {
         object.allowed_mechanisms = Some(vec![CKM_AES_ECB as _]);
         let restored = roundtrip(&info, &object);
         assert!(restored.encrypt);
-        assert!(!restored.derive && !restored.sign && !restored.verify);
-        assert_eq!(restored.allowed_mechanisms, object.allowed_mechanisms);
+        assert!(restored.derive && restored.sign && restored.verify);
+        assert_eq!(restored.allowed_mechanisms, None);
     }
 
     #[test]
@@ -5298,26 +5480,26 @@ mod primary_policy_tests {
         );
         let mut wrong_type = object.clone();
         wrong_type.key_type = CKK_SHA512_HMAC as CK_KEY_TYPE;
-        let policy = yubihsm_primary_policy(&object, &info).unwrap();
+        let policy = yubihsm_primary_policy(&object).unwrap();
         assert!(apply_yubihsm_primary_policy(&mut wrong_type, &policy).is_err());
         object.local = false;
         assert!(apply_yubihsm_primary_policy(&mut object, &policy).is_err());
     }
 
     #[test]
-    fn yubihsm_primary_policy_preserves_empty_vs_unspecified_mechanisms() {
+    fn yubihsm_stored_empty_and_unspecified_mechanisms_have_the_same_native_policy() {
         let info = aes_info();
         let mut object = yubihsm_token_objects(7, info.clone(), None)
             .unwrap()
             .remove(0);
-        assert!(yubihsm_primary_policy(&object, &info).unwrap().is_empty());
+        assert!(yubihsm_primary_policy(&object).unwrap().is_empty());
         assert_eq!(roundtrip(&info, &object).allowed_mechanisms, None);
         object.allowed_mechanisms = Some(vec![]);
-        assert_eq!(roundtrip(&info, &object).allowed_mechanisms, Some(vec![]));
+        assert_eq!(roundtrip(&info, &object).allowed_mechanisms, None);
     }
 
     #[test]
-    fn yubihsm_ml_kem_primary_policy_survives_cbor_rediscovery() {
+    fn yubihsm_ml_kem_uses_native_policy_despite_stored_permissions() {
         let info = ml_kem_info();
         let mut object = yubihsm_token_objects(7, info.clone(), None)
             .unwrap()
@@ -5326,7 +5508,7 @@ mod primary_policy_tests {
         object.decapsulate = false;
         let restored = roundtrip(&info, &object);
         assert!(!restored.encapsulate);
-        assert!(!restored.decapsulate);
+        assert!(restored.decapsulate);
     }
 
     #[test]
@@ -5335,11 +5517,13 @@ mod primary_policy_tests {
         let mut object = yubihsm_token_objects(7, info.clone(), None)
             .unwrap()
             .remove(0);
-        assert!(!object.decrypt && !object.wrap && !object.unwrap);
+        assert!(object.decrypt); // ECB encryption also implements CTR/GCM decryption.
+        assert!(!object.wrap && !object.unwrap);
         object.decrypt = true;
         object.wrap = true;
         object.unwrap = true;
         let restored = roundtrip(&info, &object);
-        assert!(!restored.decrypt && !restored.wrap && !restored.unwrap);
+        assert!(restored.decrypt);
+        assert!(!restored.wrap && !restored.unwrap);
     }
 }

@@ -188,6 +188,8 @@ pub enum StorageError {
     InvalidCbor,
     /// A provider encountered different bytes under the same content reference.
     Conflict,
+    /// The provider has no capacity for this write.
+    Capacity,
     /// A provider-specific backend operation failed.
     Provider(String),
     /// The reference uses an algorithm this implementation does not support.
@@ -205,6 +207,7 @@ impl fmt::Display for StorageError {
             Self::Conflict => {
                 formatter.write_str("different content exists under the same reference")
             }
+            Self::Capacity => formatter.write_str("storage capacity exhausted"),
             Self::Provider(error) => write!(formatter, "storage provider failed: {error}"),
             Self::UnsupportedHashAlgorithm(name) => {
                 write!(formatter, "unsupported content hash algorithm {name}")

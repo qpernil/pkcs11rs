@@ -1156,7 +1156,8 @@ mod hardware_provisioning {
             );
             let mut message = [0u8; 64];
             message[..8].copy_from_slice(&(cycle as u64).to_be_bytes());
-            message[8..16].copy_from_slice(&(slot.0 as u64).to_be_bytes());
+            message[8..16]
+                .copy_from_slice(&crate::key_metadata::cryptoki_ulong_to_u64(slot.0).to_be_bytes());
             let mut signature = [0u8; 256];
             let mut signature_length = signature.len() as CK_ULONG;
             assert_eq!(
@@ -1705,7 +1706,8 @@ mod hardware_provisioning {
         for cycle in 0..cycles {
             let mut message = [0_u8; 64];
             message[..8].copy_from_slice(&(cycle as u64).to_be_bytes());
-            message[8..16].copy_from_slice(&(slot.0 as u64).to_be_bytes());
+            message[8..16]
+                .copy_from_slice(&crate::key_metadata::cryptoki_ulong_to_u64(slot.0).to_be_bytes());
             assert_eq!(
                 crate::api::C_SignInit(session, &mut mechanism, private_key),
                 CKR_OK as CK_RV

@@ -56,6 +56,10 @@ fn scalar_attribute<T>(type_: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE 
 #[path = "native_object_contracts.rs"]
 mod native_object_contracts;
 
+#[cfg(feature = "abi-tests")]
+#[path = "yubihsm_capacity.rs"]
+mod yubihsm_capacity;
+
 #[path = "api_contracts.rs"]
 mod api_contracts;
 #[path = "crypto.rs"]
@@ -3973,7 +3977,7 @@ fn yubihsm_authentication_keys_report_algorithm_types_without_operations() {
 }
 
 #[test]
-fn yubihsm_wrap_key_object_types_match_the_reference_module() {
+fn yubihsm_wrap_key_native_and_projected_operations_are_separate() {
     let info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
         let label = std::str::from_utf8(name).unwrap().to_owned();
         crate::yubihsm::ObjectInfo {
@@ -4044,7 +4048,8 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
         private.attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
         Some(vec![CK_TRUE as CK_BBOOL])
     );
-    assert!(!public.encrypt && !public.verify);
+    // Local public operations do not inherit the native wrapping-only policy.
+    assert!(public.encrypt && public.verify);
     assert_eq!(
         public.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
         Some(vec![CK_FALSE as CK_BBOOL])
@@ -4600,7 +4605,7 @@ fn yubihsm_created_invalid_metadata_object_is_hidden_and_not_applied() {
         .unwrap();
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
-    assert!(!objects.iter().any(|object| {
+    assert!(objects.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 1]
     }));
 }
@@ -5613,7 +5618,7 @@ fn yubihsm_secret_key_sign_capability_matches_key_type() {
     assert!(objects[0].encrypt);
     assert!(objects[0].sign);
     assert!(objects[0].verify);
-    assert!(!objects[0].decrypt);
+    assert!(objects[0].decrypt); // CTR/GCM decrypt use native ECB encryption.
     gcm_info.capabilities = crate::yubihsm_capabilities(&[0x32, 0x33]);
     let objects = crate::yubihsm_token_objects(99, gcm_info, None).unwrap();
     assert!(objects[0].decrypt);
@@ -10317,9 +10322,16 @@ impl crate::Slot for TestSlot {
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: crate::TokenObject,
+        id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
         if self.kind == crate::SlotKind::YubiHsm {
-            crate::api::native::store_yubihsm_token_key_in_slot(self, ctx, session, object)
+            crate::api::native::store_yubihsm_token_key_in_slot(
+                self,
+                ctx,
+                session,
+                object,
+                id_supplied,
+            )
         } else {
             crate::api::native::store_common_token_key_in_slot(self, ctx, session, object)
         }
@@ -10329,9 +10341,10 @@ impl crate::Slot for TestSlot {
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: crate::TokenObject,
+        id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, crate::error::Error> {
         if self.kind == crate::SlotKind::YubiHsm {
-            crate::api::native::store_yubihsm_data_in_slot(self, ctx, session, object)
+            crate::api::native::store_yubihsm_data_in_slot(self, ctx, session, object, id_supplied)
         } else {
             crate::api::native::store_common_data_in_slot(self, ctx, session, object)
         }
@@ -10904,7 +10917,7 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
                     algorithm: crate::YUBIHSM_ALGO_RSA_2048,
                     length: 256,
                     domains: 0xffff,
-                    capabilities: crate::yubihsm_capabilities(&[0x06]),
+                    capabilities: crate::yubihsm_capabilities(&[0x05, 0x06]),
                     delegated_capabilities: [0; 8],
                     public_key: rsa_public.n().to_bytes_be(),
                     value: std::rc::Rc::new(std::cell::RefCell::new(None)),
@@ -10915,7 +10928,7 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
                     algorithm: crate::YUBIHSM_ALGO_EC_P256,
                     length: 32,
                     domains: 0xffff,
-                    capabilities: crate::yubihsm_capabilities(&[0x06]),
+                    capabilities: crate::yubihsm_capabilities(&[0x07]),
                     delegated_capabilities: [0; 8],
                     public_key: match &ec_public {
                         crate::PublicKeyMaterial::Ec { public_key, .. } => public_key.clone(),

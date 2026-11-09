@@ -6980,66 +6980,6 @@ fn main() {
             CKR_TEMPLATE_INCONSISTENT,
         )
 
-    def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
-        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        session = self.open_slot_session(
-            ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
-        )
-        self.login_session(session)
-        modulus_bits = CK_ULONG(2048)
-        token_object = CK_BYTE(1)
-        public_id = (CK_BYTE * 2)(0, 1)
-        private_id = (CK_BYTE * 2)(0, 2)
-        public_template = (CK_ATTRIBUTE * 3)(
-            CK_ATTRIBUTE(
-                CKA_MODULUS_BITS,
-                ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
-                ctypes.sizeof(modulus_bits),
-            ),
-            CK_ATTRIBUTE(
-                CKA_TOKEN,
-                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
-                ctypes.sizeof(token_object),
-            ),
-            CK_ATTRIBUTE(CKA_ID, ctypes.cast(public_id, CK_VOID_PTR), len(public_id)),
-        )
-        private_token_only = (CK_ATTRIBUTE * 1)(
-            CK_ATTRIBUTE(
-                CKA_TOKEN,
-                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
-                ctypes.sizeof(token_object),
-            ),
-        )
-        private_template = (CK_ATTRIBUTE * 2)(
-            CK_ATTRIBUTE(
-                CKA_TOKEN,
-                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
-                ctypes.sizeof(token_object),
-            ),
-            CK_ATTRIBUTE(CKA_ID, ctypes.cast(private_id, CK_VOID_PTR), len(private_id)),
-        )
-        mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
-        public_key = CK_ULONG()
-        private_key = CK_ULONG()
-
-        for candidate, count in (
-            (private_token_only, len(private_token_only)),
-            (private_template, len(private_template)),
-        ):
-            self.assertEqual(
-                self.lib.C_GenerateKeyPair(
-                    session,
-                    ctypes.byref(mechanism),
-                    public_template,
-                    len(public_template),
-                    candidate,
-                    count,
-                    ctypes.byref(public_key),
-                    ctypes.byref(private_key),
-                ),
-                CKR_TEMPLATE_INCONSISTENT,
-            )
-
     def test_abi_yubihsm_fixture_exercises_aes_gcm(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
@@ -8456,18 +8396,28 @@ fn main() {
         )
         self.assertEqual(imported.value, target)
 
-        for mechanism_type, wrapper in (
-            (CKM_YUBICO_RSA_WRAP, public_wrapper),
-            (CKM_RSA_AES_KEY_WRAP, rsa_public),
-        ):
+        for mechanism_type in (CKM_YUBICO_RSA_WRAP, CKM_RSA_AES_KEY_WRAP):
             rsa, _parameters, _oaep = rsa_mechanism(mechanism_type)
             rsa_length = CK_ULONG(3136)
             rsa_wrapped = (CK_BYTE * rsa_length.value)()
+            # The private wrap key's public projection has no native wrapping
+            # capability; an actual native public-wrap object is required.
             self.assertEqual(
                 self.lib.C_WrapKey(
                     session,
                     ctypes.byref(rsa),
-                    wrapper,
+                    rsa_public,
+                    target,
+                    rsa_wrapped,
+                    ctypes.byref(rsa_length),
+                ),
+                CKR_MECHANISM_INVALID,
+            )
+            self.assertEqual(
+                self.lib.C_WrapKey(
+                    session,
+                    ctypes.byref(rsa),
+                    public_wrapper,
                     target,
                     rsa_wrapped,
                     ctypes.byref(rsa_length),

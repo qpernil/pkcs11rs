@@ -102,6 +102,11 @@ pub(crate) fn verify_init(
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        crate::yubihsm::capabilities::require_operation(
+            &object,
+            mechanism.mechanism,
+            CKF_VERIFY as _,
+        )?;
         let asymmetric_key = if !aes_mac_mechanism && hmac_mechanism.is_none() {
             Some(projected_public_key_material(&object)?)
         } else {

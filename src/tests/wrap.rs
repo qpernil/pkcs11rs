@@ -1397,7 +1397,7 @@ fn install_yubihsm_wrap_test_objects(
                 id: 31,
                 object_type: crate::YUBIHSM_WRAP_KEY,
                 algorithm: crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
-                capabilities: &[],
+                capabilities: &[0x0c, 0x0d],
                 delegated_capabilities: &[],
                 label: "AES-CCM wrap",
                 public_key: None,
@@ -1409,7 +1409,7 @@ fn install_yubihsm_wrap_test_objects(
                 id: 32,
                 object_type: crate::YUBIHSM_WRAP_KEY,
                 algorithm: crate::YUBIHSM_ALGO_RSA_2048,
-                capabilities: &[0x10],
+                capabilities: &[0x0c, 0x0d, 0x10],
                 delegated_capabilities: &[],
                 label: "RSA wrap",
                 public_key: Some(public_key.clone()),
@@ -2006,32 +2006,22 @@ pub(super) fn rsa_public_wrap_round_trip(slot_id: CK_SLOT_ID, pin: &[u8]) -> Res
 
         let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(true);
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
-        let mut denied_length = 0;
-        checked_rv(
-            "C_WrapKey size query with a private RSA wrap key",
-            crate::api::C_WrapKey(
+        let mut denied_output = [0u8; 512];
+        for output in [std::ptr::null_mut(), denied_output.as_mut_ptr()] {
+            let mut denied_length = denied_output.len() as CK_ULONG;
+            let denied_rv = crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
                 wrapper_private,
                 target_private,
-                std::ptr::null_mut(),
+                output,
                 &mut denied_length,
-            ),
-        )?;
-        // Device-enforced key-type policy is checked by the output call.
-        let mut denied_output = vec![0; denied_length as usize];
-        let denied_rv = crate::api::C_WrapKey(
-            session,
-            &mut mechanism,
-            wrapper_private,
-            target_private,
-            denied_output.as_mut_ptr(),
-            &mut denied_length,
-        );
-        if denied_rv != CKR_OBJECT_HANDLE_INVALID as CK_RV {
-            return Err(format!(
-                "C_WrapKey with a private RSA wrap key returned CK_RV 0x{denied_rv:08x}, expected CKR_OBJECT_HANDLE_INVALID"
-            ));
+            );
+            if denied_rv != CKR_MECHANISM_INVALID as CK_RV {
+                return Err(format!(
+                    "C_WrapKey with a private RSA key lacking export-wrapped returned CK_RV 0x{denied_rv:08x}, expected CKR_MECHANISM_INVALID"
+                ));
+            }
         }
 
         let mut wrapped = checked_wrap_key(session, wrapper_public, target_private)?;
@@ -2234,10 +2224,9 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     };
     assert_eq!(
         opaque_command_count(),
-        0,
-        "native generation without overrides must not create metadata"
+        1,
+        "a session public half requires an absence marker on the generated native key"
     );
-    let private_metadata_mutation_start = commands.borrow().len();
     let mut override_label = b"temporary private label override".to_vec();
     let mut override_template = [bytes_attribute(
         CKA_LABEL as CK_ATTRIBUTE_TYPE,
@@ -2252,7 +2241,7 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(opaque_command_count(), 1);
+    assert_eq!(opaque_command_count(), 2);
     let mut restore_template = [bytes_attribute(
         CKA_LABEL as CK_ATTRIBUTE_TYPE,
         &mut native_private_label,
@@ -2268,17 +2257,12 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     );
     assert_eq!(
         opaque_command_count(),
-        1,
-        "restoring the native label must delete metadata instead of replacing it"
+        3,
+        "restoring the native label must retain the public absence marker"
     );
-    assert!(
-        commands.borrow()[private_metadata_mutation_start..]
-            .iter()
-            .any(|(command, payload)| {
-                *command == crate::YubiHsmCommandCode::DeleteObject as u8
-                    && payload.get(2) == Some(&crate::YUBIHSM_OPAQUE)
-            }),
-        "restoring the native private-key label must delete the empty metadata object"
+    assert_eq!(
+        checked_attribute(session, ordinary_private, CKA_LABEL as _).unwrap(),
+        native_private_label
     );
 
     let mut modulus =
@@ -2816,13 +2800,9 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let (target, ccm_wrapper, rsa_private, rsa_synthetic_public, rsa_public_wrap) =
         install_yubihsm_wrap_test_objects(session, SLOT_ID);
     let wrap_targets = install_yubihsm_wrap_targets(SLOT_ID);
-    assert!(!checked_bool_attribute(session, ccm_wrapper, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
-    assert!(
-        !checked_bool_attribute(session, ccm_wrapper, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap()
-    );
-    assert!(
-        !checked_bool_attribute(session, rsa_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap()
-    );
+    assert!(checked_bool_attribute(session, ccm_wrapper, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(checked_bool_attribute(session, ccm_wrapper, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(checked_bool_attribute(session, rsa_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap());
     assert!(
         checked_bool_attribute(session, rsa_public_wrap, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap()
     );

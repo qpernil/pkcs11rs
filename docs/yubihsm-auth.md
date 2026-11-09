@@ -32,7 +32,8 @@ operation to generate its subkeys and one unpadded CBC operation with a zero IV
 for the complete prepared message. Without CBC permission, chaining uses ECB
 block operations. CBC selection checks both slot support and key permissions;
 a CBC failure is returned without retrying through ECB.
-Explicit mechanism restrictions apply to either path. ENC and MAC may choose
+Effective mechanism permissions apply to either path, including software-object restrictions
+and the [native mapping](yubihsm-capability-mapping.md) for YubiHSM keys. ENC and MAC may choose
 different paths; both are checked before the first derivation. Failures during
 execution, including incompatible output policies, never trigger a retry through
 the alternative mechanism.
@@ -422,22 +423,24 @@ credential.
 ### PKCS #11 metadata
 
 YubiHSM PKCS #11 metadata objects are internal opaque-data companions and are
-never exposed as PKCS #11 objects. Metadata may contain any subset of the
-primary object's `CKA_ID` and `CKA_LABEL`, usage-flag restrictions, and
-`CKA_ALLOWED_MECHANISMS`. Import, generation, and template-based unwrap preserve
-these PKCS #11 restrictions when native capabilities cannot express them exactly.
-For example, native AES-ECB capability supports encryption, CMAC, and counter
-derivation; separate PKCS #11 flags can prohibit individual uses. Rediscovery
-intersects stored usage flags with native capabilities, and mechanism selection
-also checks the stored allowed list. An explicitly empty list permits no
-mechanisms; an absent list imposes no additional restriction. Keys without this
-metadata retain the native capability mapping; existing objects and identity
-metadata require no migration. Restrictions lost during an earlier import cannot
-be reconstructed. Canonical metadata may additionally
-contain an explicit public aspect with sparse public-object attribute deltas.
+never exposed as PKCS #11 objects. New native keys map usage attributes and
+`CKA_ALLOWED_MECHANISMS` to hardware capabilities and report the resulting
+permissions without saving permission-only companions. Multiple mechanisms
+sharing a native primitive can become available together. See the complete
+[capability mapping](yubihsm-capability-mapping.md) for mappings, empty-list
+handling, independent public/private policies, and deliberate PKCS #11 deviations.
+
+Native primary usage restrictions and allowed lists in existing companions are
+ignored with a diagnostic. Discovery does not write metadata; an explicit save
+removes obsolete primary permission fields. Public objects retain explicit
+restrictions relative to algorithm-based defaults, independently of private
+native capabilities. Canonical metadata can contain an explicit public aspect
+with sparse public-object attribute deltas, including mechanism restrictions.
 The linked native key supplies the public material, so its SPKI is not
-duplicated in metadata. Public-aspect presence represents a real public token
-object even when no attribute delta is required. Valid overrides apply
+duplicated in metadata. Generated native asymmetric keys expose a real public token object by default,
+without metadata. Non-generated imports default to private-only; the generated
+bit still wins when native wrapped import adds the imported bit. Explicit
+canonical aspect presence overrides that origin-derived default. Valid overrides apply
 regardless of whether the target was first seen by public discovery, user
 login, or a successful mutation.
 
@@ -456,8 +459,9 @@ canonical companion's existing ID and exact policy. A device that accepts
 replacement updates that companion directly. An Object Exists response selects
 a create-before-delete fallback; other failures preserve the existing
 companions. Creating an object automatically creates metadata when requested
-attributes cannot be encoded by the native YubiHSM object. Metadata is not
-created when native attributes suffice, and
+identity or provenance cannot be encoded by the native YubiHSM object, or a
+public presence differs from the native origin default. Usage and mechanism differences use native
+normalization instead. Metadata is not created when native attributes suffice, and
 setting the final override back to its native value deletes an otherwise empty
 record. A private and its linked public aspect share one record.
 
@@ -469,31 +473,61 @@ preserved when overrides are added or removed. Derived identity fields alone
 never cause a companion to be created or retained, and discovery never writes
 one. An existing record with a non-default stored identity is retained even
 after its last attribute override is removed, so that identity remains stable.
-New persistent public aspects receive independent random IDs; updates and
-rediscovery preserve them, while deletion followed by recreation assigns a new
-ID. Process-local cache generations are not part of exposed identities.
+Implicit generated public aspects use the stable native-derived public ID.
+Adding an explicit public aspect to a private-only key, or recreating a deleted
+public aspect, assigns an independent random ID. Updates and rediscovery
+preserve it; its non-default identity keeps the companion necessary. Process-local
+cache generations are not part of exposed identities.
 The metadata-free fallback cannot distinguish a replacement after the device's
 finite sequence counter wraps to an earlier value. It is not a globally unique
 identifier across tokens or token resets.
 
 `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` with `CKA_TOKEN=CK_TRUE` creates or replaces
-the canonical public aspect for an asymmetric or RSA wrap key. The object is
-rediscovered by stable hardware identity and its public key is checked against
+the public aspect for an asymmetric or RSA wrap key, saving only deviations
+from its native defaults. The object is rediscovered by stable hardware identity and its public key is checked against
 the current hardware response before it is exposed. `C_GenerateKeyPair`
-returns a session public object unless its public template explicitly requests
-`CKA_TOKEN=CK_TRUE`, in which case it uses the same persistence path. Destroying
-the public object removes only the public aspect and does not delete the
-hardware private key or legacy metadata. If removing the aspect would otherwise
+defaults the public half of a native token key pair to `CKA_TOKEN=CK_TRUE`,
+using the same persistence path. This deliberately differs from the PKCS #11
+session-object default: generated native keys already imply their public half,
+so an omitted attribute does not require an on-device absence marker. Explicit
+`CKA_TOKEN=CK_FALSE` still creates a session public object and suppresses the
+implicit token public half. Software session-key generation and
+`CKM_PKCS11RS_PROJECT_PUBLIC_KEY` retain their session-object defaults. Destroying
+the public object removes only that aspect and does not delete the
+hardware private key or legacy metadata. Generated ordinary asymmetric keys
+retain an explicit absence marker to suppress their default public half.
+If removing the aspect would otherwise
 reveal a legacy record, pkcs11rs retains an empty canonical shadow so legacy
 input cannot silently regain authority.
 
-Deleting the private key first preserves the public object's lifetime.
-pkcs11rs reads the native public material, removes the private aspect, and
-morphs the same physical metadata-object ID into a standalone
-`pkcs11rs.public-key` record before deleting the hardware key. The public
-handle is rebound to that standalone backing. This transition consumes no
-additional steady-state YubiHSM object and remains possible at the device's
-256-object limit.
+Deleting the private key first preserves the public object's lifetime. A linked
+companion is converted into a standalone `pkcs11rs.public-key` record; when no
+companion exists, the standalone record is written before deleting the private
+key. Identity, public material, and restrictions survive the transition, and the
+public handle is rebound to that record. Creating that record needs a free object
+slot and sufficient storage pages. At full capacity, failure preserves both
+halves rather than deleting the private key first and risking the public object.
+
+### Native object IDs
+
+`CKA_ID` remains an arbitrary byte string. If it is omitted on native creation,
+ID zero requests device allocation and the returned attribute is the assigned
+two-byte ID. An explicit two-byte value from `0001` through `FFFE` uses those
+same wire bytes when free in the native object-type namespace. There is no
+padding, truncation, or host-endian interpretation.
+
+Other explicit values—including empty, one-byte zero, `0000`, `FFFF`, and longer
+values—request native allocation and are preserved exactly in metadata. A
+collision in the same native object-type namespace also allocates another ID
+and preserves the requested `CKA_ID`; it never replaces the existing object.
+Certificates and keys can use the same native ID because their native types
+have separate namespaces. Public and private template IDs can differ; their
+attribute overrides are independent. When only the public template supplies an
+ID, it can select the native backing ID; an omitted ordinary projected-public ID defaults to the
+private object's effective ID. Native public wrapping keys use their own
+automatically allocated IDs when omitted. Changing either ID never changes `CKA_UNIQUE_ID`
+or the other object's ID. Empty native labels remain empty rather than creating
+synthetic labels and compensating metadata.
 
 ### RSA public wrap keys
 
@@ -529,13 +563,14 @@ the base key are known:
 | Base private object | `CKA_WRAP` | `CKA_TOKEN` | Resulting public object | Device representation and relationship |
 | --- | --- | --- | --- | --- |
 | Any projectable private key | Absent or false | Absent/false | Ordinary session `CKO_PUBLIC_KEY` | Session-memory projection; no persistent object |
-| Native YubiHSM asymmetric or RSA wrap key | Absent or false | True | Ordinary token `CKO_PUBLIC_KEY` | Canonical metadata public aspect linked to the base hardware object |
+| Native YubiHSM asymmetric or RSA wrap key | Absent or false | True | Ordinary token `CKO_PUBLIC_KEY` | Native origin default or canonical public-aspect override linked to the base hardware object |
 | Native RSA wrap key | True | Absent/false | None: `CKR_TEMPLATE_INCONSISTENT` | None |
 | Native RSA wrap key | True | True | Wrap-capable token `CKO_PUBLIC_KEY` | Separate native `YUBIHSM_PUBLIC_WRAP_KEY`; not a metadata aspect |
 | Any other private key | True | Either | None: `CKR_TEMPLATE_INCONSISTENT` | None |
 
 The ordinary token projection in the second row remains synthetic and
-metadata-backed even when its base is a native private wrap key. Only the
+metadata-backed when its base is a native private wrap key. Generated ordinary
+asymmetric bases need metadata only for deviations from their defaults. Only the
 explicit true/true row materializes the distinct native public wrap object.
 “Linked” describes its backing and validation source, not a shared PKCS #11
 lifetime: the projected public key is a genuine token object with its own

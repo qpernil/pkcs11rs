@@ -132,9 +132,9 @@ the selected provider supplies the lifetime. The same canonical logical object
 can therefore be held in a session memory provider or a slot token provider.
 Aspect presence alone does not prove that a provider can reconstruct an
 object: each provider must validate the stable material required by its backing
-model. For example, a YubiHSM-linked public aspect is a persistent presence
-marker plus sparse attribute deltas; its public material comes from the linked
-native key. A standalone public-key record instead contains the complete
+model. For example, YubiHSM derives default public presence from native origin;
+a companion records presence exceptions and sparse attribute deltas. Public
+material comes from the linked native key. A standalone public-key record instead contains the complete
 public material because it has no native source.
 
 The generic layer validates the CBOR representation and the semantic type of

@@ -822,7 +822,7 @@ pub fn yubihsm_persisted_public_objects_require_a_yubihsm_backend() {
 }
 
 #[test]
-fn yubihsm_empty_hardware_labels_receive_descriptive_fallbacks() {
+fn yubihsm_empty_hardware_labels_remain_empty() {
     for object_type in [
         crate::YUBIHSM_OPAQUE,
         crate::YUBIHSM_AUTHENTICATION_KEY,
@@ -847,8 +847,7 @@ fn yubihsm_empty_hardware_labels_receive_descriptive_fallbacks() {
             delegated_capabilities: [0; 8],
         };
         let label = crate::yubihsm_object_label(&info);
-        assert!(label.starts_with("YubiHSM "));
-        assert!(label.ends_with(" 42"));
+        assert!(label.is_empty());
     }
 
     let mut info = crate::YubiHsmObjectInfo {
@@ -866,7 +865,7 @@ fn yubihsm_empty_hardware_labels_receive_descriptive_fallbacks() {
     assert_eq!(crate::yubihsm_object_label(&info), "configured label");
     info.algorithm = crate::YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE;
     info.label.clear();
-    assert_eq!(crate::yubihsm_object_label(&info), "YubiHSM certificate 42");
+    assert!(crate::yubihsm_object_label(&info).is_empty());
 }
 
 #[test]

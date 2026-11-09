@@ -59,7 +59,8 @@ pub(crate) use traits::{
 };
 pub(crate) use yubihsm::{
     NativeHsmAuth, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
-    send_yubihsm_secure_command,
+    key_mechanism_operations as yubihsm_key_mechanism_operations, send_yubihsm_secure_command,
+    yubihsm_key_type,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -67,10 +68,7 @@ pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential;
 #[cfg(any(test, not(feature = "abi-tests")))]
 pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential_with_pinentry;
 #[cfg(test)]
-pub(crate) use yubihsm::{
-    YubiHsmDiscoveryCache, YubiHsmObjectKey,
-    key_mechanism_operations as yubihsm_key_mechanism_operations,
-};
+pub(crate) use yubihsm::{YubiHsmDiscoveryCache, YubiHsmObjectKey};
 
 #[cfg(test)]
 pub(crate) use ccid::{

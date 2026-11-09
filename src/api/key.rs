@@ -1,9 +1,9 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    import_yubihsm_token_object_in_slot, persist_software_private_object_in_slot,
-    piv_key_object_handles_in_slot, publish_software_secret_object, required_template_value,
-    validate_mutation_template, yubihsm_hardware_import_object, yubihsm_id,
-    yubihsm_object_parameters,
+    create_yubihsm_native_object, import_yubihsm_token_object_with_id_in_slot,
+    persist_software_private_object_in_slot, piv_key_object_handles_in_slot,
+    publish_software_secret_object, required_template_value, rollback_yubihsm_created_object,
+    validate_mutation_template, yubihsm_hardware_import_object, yubihsm_object_parameters,
 };
 use crate::software_key_ops::agreement::software_ecdh;
 use crate::*;
@@ -235,7 +235,12 @@ pub(crate) fn yubihsm_generate_key_command(
                 .map_err(Error::from)?;
         }
     }
+    // Native secret keys can be exported under wrapping when the hardware
+    // capability is requested; the generic opaque-secret template forbids it.
+    let extractable = key_template.extractable.take().unwrap_or(false);
     let mut object = key_template.into_object().map_err(Error::from)?;
+    object.extractable = extractable;
+    object.never_extractable = !extractable;
     if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
@@ -1103,6 +1108,37 @@ fn piv_generation_25519_algorithm(
     Ok(algorithm)
 }
 
+/// Apply omitted public permissions only; explicit template restrictions take precedence.
+pub(super) fn yubihsm_public_template_defaults(
+    object: &mut TokenObject,
+    templ: &[CK_ATTRIBUTE],
+) -> Result<(), Error> {
+    // A requested native wrapping key follows the native wrap-object policy.
+    if object.wrap {
+        return Ok(());
+    }
+    let defaults = yubihsm_public_defaults(object.key_type);
+    for (kind, permission, default) in [
+        (CKA_ENCRYPT, &mut object.encrypt, defaults.encrypt),
+        (CKA_VERIFY, &mut object.verify, defaults.verify),
+        (
+            CKA_ENCAPSULATE,
+            &mut object.encapsulate,
+            defaults.encapsulate,
+        ),
+    ] {
+        if template_attribute(templ, kind as CK_ATTRIBUTE_TYPE).is_none() {
+            *permission = default;
+        } else if *permission && !default {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+    }
+    if object.sign || object.decrypt || object.derive || object.unwrap || object.decapsulate {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    Ok(())
+}
+
 pub(super) fn key_pair_object(
     templ: &[CK_ATTRIBUTE],
     class: CK_OBJECT_CLASS,
@@ -1557,22 +1593,19 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
-    if template_attribute(public_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE).is_none() {
-        public_object.token = false;
-    }
     let mut private_object = key_pair_object(
         &private_filtered,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
     let wrap_key = public_wrap || private_unwrap.unwrap_or(false);
+    if !wrap_key {
+        yubihsm_public_template_defaults(&mut public_object, public_template)?;
+    }
     private_object.unwrap = wrap_key;
     private_object.extractable = private_extractable;
     private_object.never_extractable = !private_extractable;
     if !private_object.token {
-        return Err(CKR_TEMPLATE_INCONSISTENT.into());
-    }
-    if public_object.token && public_object.id != private_object.id {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     if is_montgomery_key_type(key_type)
@@ -1588,11 +1621,18 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    if private_object.label.is_empty() {
+    if private_object.label.is_empty()
+        && template_attribute(private_template, CKA_LABEL as _).is_none()
+    {
         private_object.label = public_object.label.clone();
     }
     let mut hardware = yubihsm_hardware_import_object(&private_object)?;
-    hardware.encapsulate = public_object.encapsulate;
+    if template_attribute(private_template, CKA_ID as _).is_none()
+        && template_attribute(public_template, CKA_ID as _).is_some()
+    {
+        hardware.id = public_object.id.clone();
+    }
+    hardware.encapsulate = false;
     if public_unwrap
         || private_wrap
         || (wrap_key && key_type != CKK_RSA as CK_KEY_TYPE)
@@ -1612,32 +1652,17 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     let command = if wrap_key {
-        let attributes = YubiHsmPkcs11Attributes {
-            wrap: false,
-            unwrap: true,
-            extractable: private_extractable,
-            ..YubiHsmPkcs11Attributes::default()
-        };
+        let mut parameters = yubihsm_object_parameters(&hardware, YUBIHSM_WRAP_KEY, algorithm)?;
+        // The public wrap object is stored separately after generation.
+        set_yubihsm_capability(&mut parameters.capabilities, 0x0c, false);
         let parameters = YubiHsmDelegatedObjectParameters {
-            object: YubiHsmObjectParameters {
-                id: yubihsm_id(&hardware.id)?,
-                label: &hardware.label,
-                domains: 0xffff,
-                capabilities: yubihsm_attributes_to_capabilities(
-                    YUBIHSM_WRAP_KEY,
-                    algorithm,
-                    attributes,
-                ),
-                algorithm,
-            },
+            object: parameters,
             delegated_capabilities: [0xff; 8],
         };
         YubiHsmCommand::generate_wrap_key(&parameters)?
     } else {
-        YubiHsmCommand::generate_object(
-            YubiHsmCommandCode::GenerateAsymmetricKey,
-            &yubihsm_object_parameters(&hardware, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
-        )?
+        let parameters = yubihsm_object_parameters(&hardware, YUBIHSM_ASYMMETRIC_KEY, algorithm)?;
+        YubiHsmCommand::generate_object(YubiHsmCommandCode::GenerateAsymmetricKey, &parameters)?
     };
     Ok((private_object, public_object, command))
 }
@@ -1665,12 +1690,13 @@ ffi_entry_point! {
 fn project_public_key_object(
     base: &TokenObject,
     templ: &[CK_ATTRIBUTE],
+    default_token: bool,
 ) -> Result<TokenObject, Error> {
     let material = KeyMaterial::Public(base.projected_public_key()?);
     let mut parsed = TokenObjectTemplate {
         class: Some(CKO_PUBLIC_KEY as CK_OBJECT_CLASS),
         key_type: Some(base.key_type),
-        token: false,
+        token: default_token,
         private: false,
         ..TokenObjectTemplate::default()
     };
@@ -1691,6 +1717,15 @@ fn project_public_key_object(
         }
     }
     let mut projected = parsed.into_object().map_err(Error::from)?;
+    if matches!(base.material, KeyMaterial::YubiHsm { .. }) {
+        yubihsm_public_template_defaults(&mut projected, templ)?;
+        if !projected.wrap && template_attribute(templ, CKA_ID as _).is_none() {
+            projected.id = base.id.clone();
+        }
+        if template_attribute(templ, CKA_LABEL as _).is_none() {
+            projected.label = base.label.clone();
+        }
+    }
     if projected.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
         || projected.key_type != base.key_type
         || projected.sensitive
@@ -1808,7 +1843,7 @@ pub(crate) fn derive_key(
             if !base.allows_derive() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
-            let projected = project_public_key_object(&base, templ)?;
+            let projected = project_public_key_object(&base, templ, false)?;
             validate_new_object_access(&projected, flags, logged_in)?;
             if projected.wrap {
                 *key_handle =
@@ -2669,13 +2704,21 @@ pub(crate) fn generate_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
 
     let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
     validate_new_object_access(&object, flags, logged_in)?;
-    let response = ctx
-        ._get_session(slot, session_handle)?
-        .1
-        .yubihsm_command(&command)?;
+    let response = create_yubihsm_native_object(
+        slot,
+        ctx,
+        session_handle,
+        &command,
+        if command.code() == YubiHsmCommandCode::GenerateSymmetricKey {
+            YUBIHSM_SYMMETRIC_KEY
+        } else {
+            YUBIHSM_HMAC_KEY
+        },
+    )?;
     let id = parse_yubihsm_object_id(&response)?;
-    ctx.refresh_slot_token_objects(slot, slot_id)?;
-    let (handle, imported) = ctx.resolved_objects(slot)?
+    let publish = (|| {
+        ctx.refresh_slot_token_objects(slot, slot_id)?;
+        let (handle, imported) = ctx.resolved_objects(slot)?
                 .into_iter()
                 .find(|(_, object)| {
                     object.slot_id == Some(slot_id)
@@ -2683,20 +2726,37 @@ pub(crate) fn generate_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
                         && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
                 })
                 .ok_or(CKR_DEVICE_ERROR)?;
-    let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
-        slot_id,
-        &imported.unique_id,
-        (!object.id.is_empty()).then_some(object.id.as_slice()),
-        (!object.label.is_empty()).then_some(object.label.as_str()),
-        Some(&object),
-    );
-    let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
-    if let Err(error) = metadata_result {
-        let _ = refresh;
-        return Err(error);
+        let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
+            slot_id,
+            &imported.unique_id,
+            template_attribute(templ, CKA_ID as _)
+                .is_some()
+                .then_some(object.id.as_slice()),
+            (!object.label.is_empty()).then_some(object.label.as_str()),
+            Some(&object),
+        );
+        let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
+        if let Err(error) = metadata_result {
+            let _ = refresh;
+            return Err(error);
+        }
+        refresh?;
+        Ok(handle)
+    })();
+    if publish.is_err() {
+        rollback_yubihsm_created_object(
+            slot,
+            ctx,
+            slot_id,
+            id,
+            if command.code() == YubiHsmCommandCode::GenerateSymmetricKey {
+                YUBIHSM_SYMMETRIC_KEY
+            } else {
+                YUBIHSM_HMAC_KEY
+            },
+        );
     }
-    refresh?;
-    Ok(handle)
+    publish
 }
 
 pub(crate) fn generate_software_token_key_in_slot<S: Slot + ?Sized>(
@@ -2826,78 +2886,97 @@ pub(crate) fn generate_yubihsm_token_pair_in_slot<S: Slot + ?Sized>(
     };
     validate_new_object_access(&private_object, flags, logged_in)?;
     validate_new_object_access(&public_object, flags, logged_in)?;
-    let response = ctx
-        ._get_session(slot, session_handle)?
-        .1
-        .yubihsm_command(&command)?;
+    let response =
+        create_yubihsm_native_object(slot, ctx, session_handle, &command, private_object_type)?;
     let id = parse_yubihsm_object_id(&response)?;
-    ctx.refresh_slot_token_objects(slot, slot_id)?;
-    let (private, imported_private) = ctx
-        .resolved_objects(slot)?
-        .into_iter()
-        .find(|(_, object)| {
-            object.slot_id == Some(slot_id)
-                && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                && matches!(
-                    &object.material,
-                    KeyMaterial::YubiHsm {
-                        id: object_id,
-                        object_type,
-                        ..
-                    } if *object_id == id && *object_type == private_object_type
-                )
-        })
-        .ok_or(CKR_DEVICE_ERROR)?;
-    let private_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
-        slot_id,
-        &imported_private.unique_id,
-        (!private_object.id.is_empty()).then_some(private_object.id.as_slice()),
-        (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
-        Some(&private_object),
-    );
-    let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
-    if let Err(error) = private_result {
-        let _ = refresh;
-        return Err(error);
-    }
-    refresh?;
-    let imported_private = ctx.resolve_object(slot, private)?.ok_or(CKR_DEVICE_ERROR)?;
-    let mut projected = project_public_key_object(&imported_private, public_template)?;
-    if !projected.wrap && template_attribute(public_template, CKA_ID as CK_ATTRIBUTE_TYPE).is_none()
-    {
-        // The device may allocate the native ID during generation. Keep the
-        // default public projection paired with that returned private object.
-        projected.id = imported_private.id.clone();
-    }
-    projected.local = true;
-    projected.key_gen_mechanism = Some(mechanism.mechanism);
-    let public = if projected.wrap {
-        import_yubihsm_token_object_in_slot(slot, ctx, session_handle, slot_id, &projected)?
-    } else if projected.token {
-        ctx.get_slot(slot, slot_id)?
-            .yubihsm_persist_public_projection(slot_id, &imported_private.unique_id, &projected)?;
+    let publish = (|| {
         ctx.refresh_slot_token_objects(slot, slot_id)?;
-        ctx.resolved_objects(slot)?
+        let (private, imported_private) = ctx
+            .resolved_objects(slot)?
             .into_iter()
             .find(|(_, object)| {
                 object.slot_id == Some(slot_id)
-                    && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                     && matches!(
-                        object.material,
+                        &object.material,
                         KeyMaterial::YubiHsm {
                             id: object_id,
-                            object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                            object_type,
                             ..
-                        } if object_id == id
+                        } if *object_id == id && *object_type == private_object_type
                     )
             })
-            .map(|(handle, _)| handle)
-            .ok_or(CKR_DEVICE_ERROR)?
-    } else {
-        ctx.store_backed_object(slot, session_handle, projected)?
-    };
+            .ok_or(CKR_DEVICE_ERROR)?;
+        let private_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
+            slot_id,
+            &imported_private.unique_id,
+            template_attribute(private_template, CKA_ID as _)
+                .is_some()
+                .then_some(private_object.id.as_slice()),
+            (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
+            Some(&private_object),
+        );
+        let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
+        if let Err(error) = private_result {
+            let _ = refresh;
+            return Err(error);
+        }
+        refresh?;
+        let imported_private = ctx.resolve_object(slot, private)?.ok_or(CKR_DEVICE_ERROR)?;
+        let mut projected = project_public_key_object(&imported_private, public_template, true)?;
+        projected.local = true;
+        projected.key_gen_mechanism = Some(mechanism.mechanism);
+        let public = if projected.wrap {
+            import_yubihsm_token_object_with_id_in_slot(
+                slot,
+                ctx,
+                session_handle,
+                slot_id,
+                &projected,
+                template_attribute(public_template, CKA_ID as _).is_some(),
+            )?
+        } else if projected.token {
+            ctx.get_slot(slot, slot_id)?
+                .yubihsm_persist_public_projection(
+                    slot_id,
+                    &imported_private.unique_id,
+                    &projected,
+                )?;
+            ctx.refresh_slot_token_objects(slot, slot_id)?;
+            ctx.resolved_objects(slot)?
+                .into_iter()
+                .find(|(_, object)| {
+                    object.slot_id == Some(slot_id)
+                        && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                        && matches!(
+                            object.material,
+                            KeyMaterial::YubiHsm {
+                                id: object_id,
+                                object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                                ..
+                            } if object_id == id
+                        )
+                })
+                .map(|(handle, _)| handle)
+                .ok_or(CKR_DEVICE_ERROR)?
+        } else {
+            let implicit = ctx.resolved_objects(slot)?.into_iter().find(|(_, object)| {
+                matches!(object.material, KeyMaterial::YubiHsm { id: object_id, object_type: YUBIHSM_PUBLIC_KEY, .. } if object_id == id)
+            });
+            if let Some((_, implicit)) = implicit {
+                ctx.get_slot(slot, slot_id)?
+                    .yubihsm_destroy_public_projection(slot_id, &implicit.unique_id)?;
+                ctx.refresh_slot_token_objects(slot, slot_id)?;
+            }
+            ctx.store_backed_object(slot, session_handle, projected)?
+        };
 
-    Ok((public, private))
+        Ok((public, private))
+    })();
+    if publish.is_err() {
+        rollback_yubihsm_created_object(slot, ctx, slot_id, id, private_object_type);
+    }
+    publish
 }
 
 pub(super) fn find_piv_key_handle_in_slot<S: Slot + ?Sized>(

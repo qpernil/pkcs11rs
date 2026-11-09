@@ -545,6 +545,11 @@ fn sign_init(
         if !object.sign {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        crate::yubihsm::capabilities::require_operation(
+            &object,
+            mechanism.mechanism,
+            CKF_SIGN as _,
+        )?;
         let expected_key_type = match mechanism.mechanism {
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(x) => {
                 CKK_EC as CK_KEY_TYPE

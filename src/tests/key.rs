@@ -4145,11 +4145,21 @@ pub fn yubihsm_post_quantum_generation_accepts_parameter_and_usage_attributes() 
             crate::yubihsm::CommandCode::GenerateAsymmetricKey
         );
         assert_eq!(command.data().last(), Some(&expected_algorithm));
+        let bit = if expected_key_type == CKK_ML_DSA as CK_KEY_TYPE {
+            0x3a
+        } else {
+            0x3c
+        };
+        let end = command.data().len() - 1;
+        assert_eq!(
+            &command.data()[end - 8..end],
+            &crate::yubihsm_capabilities(&[bit])
+        );
     }
 }
 
 #[test]
-pub fn yubihsm_key_pair_generation_requires_matching_ids() {
+pub fn yubihsm_key_pair_generation_accepts_independent_ids() {
     let mut modulus_bits = 2048 as CK_ULONG;
     let mut token_object = CK_TRUE as CK_BBOOL;
     let mut session_object = CK_FALSE as CK_BBOOL;
@@ -4188,14 +4198,13 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     let public_template = [modulus_attribute, token_attribute, public_id_attribute];
 
     for private_template in [&[][..], &[private_id_attribute][..]] {
-        let rv: CK_RV = crate::yubihsm_generate_key_pair_command(
+        let (_, public, _) = crate::yubihsm_generate_key_pair_command(
             &mechanism,
             &public_template,
             private_template,
         )
-        .unwrap_err()
-        .into();
-        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
+        .unwrap();
+        assert_eq!(public.id, public_id);
     }
 
     private_id.copy_from_slice(&public_id);
@@ -4210,7 +4219,7 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     let (object, public, _) =
         crate::yubihsm_generate_key_pair_command(&mechanism, &[modulus_attribute], &[]).unwrap();
     assert!(object.id.is_empty());
-    assert!(!public.token);
+    assert!(public.token);
 
     private_id.copy_from_slice(&[0, 2]);
     let (private, public, _) = crate::yubihsm_generate_key_pair_command(
@@ -5020,4 +5029,35 @@ fn software_module_hash_ml_dsa_supports_all_hashes_and_multipart() {
         assert_module_hash_ml_dsa_roundtrip(TEST_SESSION_HANDLE, public, private);
     }
     finalize_for_test();
+}
+
+#[test]
+fn yubihsm_public_defaults_and_overrides_do_not_grant_private_capabilities() {
+    let mut bits = 2048 as CK_ULONG;
+    let mut no = CK_FALSE as CK_BBOOL;
+    let mut yes = CK_TRUE as CK_BBOOL;
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as _,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut template = vec![scalar_attribute(CKA_MODULUS_BITS as _, &mut bits)];
+    let (_, public, command) =
+        crate::yubihsm_generate_key_pair_command(&mechanism, &template, &[]).unwrap();
+    assert!(public.verify && public.encrypt);
+    // Native parameters end with the eight capability bytes and algorithm byte.
+    let end = command.data().len() - 1;
+    assert_eq!(&command.data()[end - 8..end], &[0; 8]);
+    template.push(scalar_attribute(CKA_VERIFY as _, &mut no));
+    let (_, public, command) =
+        crate::yubihsm_generate_key_pair_command(&mechanism, &template, &[]).unwrap();
+    assert!(!public.verify && public.encrypt);
+    assert_eq!(&command.data()[end - 8..end], &[0; 8]);
+    template.push(scalar_attribute(CKA_SIGN as _, &mut yes));
+    assert_eq!(
+        CK_RV::from(
+            crate::yubihsm_generate_key_pair_command(&mechanism, &template, &[]).unwrap_err()
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
 }

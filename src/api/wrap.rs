@@ -7,7 +7,8 @@ use super::{
     key::yubihsm_ec_algorithm,
     object::{
         persist_software_private_object, publish_software_secret_object,
-        validate_mutation_template, yubihsm_hardware_import_object, yubihsm_id,
+        rollback_yubihsm_created_object, validate_mutation_template,
+        yubihsm_hardware_import_object, yubihsm_id,
     },
 };
 use crate::*;
@@ -634,6 +635,11 @@ fn wrap_key(
                 return Err(CKR_KEY_NOT_WRAPPABLE.into());
             }
             require_key_mechanism(&wrapper, mechanism.mechanism)?;
+            crate::yubihsm::capabilities::require_operation(
+                &wrapper,
+                mechanism.mechanism,
+                CKF_WRAP as _,
+            )?;
             if !wrapper.can_wrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
@@ -741,6 +747,11 @@ fn wrap_key(
             return Err(CKR_KEY_NOT_WRAPPABLE.into());
         }
         require_key_mechanism(&wrapper, mechanism.mechanism)?;
+        crate::yubihsm::capabilities::require_operation(
+            &wrapper,
+            mechanism.mechanism,
+            CKF_WRAP as _,
+        )?;
         let (wrapping_key_id, _wrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, false)?;
 
@@ -879,6 +890,11 @@ fn unwrap_key(
             }
             validate_new_object_access(&object, flags, logged_in)?;
             require_key_mechanism(&wrapper, mechanism.mechanism)?;
+            crate::yubihsm::capabilities::require_operation(
+                &wrapper,
+                mechanism.mechanism,
+                CKF_UNWRAP as _,
+            )?;
             if !wrapper.can_unwrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
@@ -951,6 +967,11 @@ fn unwrap_key(
         let mut merged = merge_policy_template(template, wrapper.policy_templates.unwrap.as_ref())?;
         let template = merged.as_slice();
         require_key_mechanism(&wrapper, mechanism.mechanism)?;
+        crate::yubihsm::capabilities::require_operation(
+            &wrapper,
+            mechanism.mechanism,
+            CKF_UNWRAP as _,
+        )?;
         let (unwrapping_key_id, _unwrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, true)?;
 
@@ -1022,47 +1043,56 @@ fn unwrap_key(
             .1
             .yubihsm_command(&command)?;
         let (target_type, target_id) = parse_yubihsm_import_response(&response)?;
-        if expected_target_type.is_some_and(|expected| expected != target_type) {
-            let _ = ctx
-                ._get_session(session_handle)?
-                .1
-                .yubihsm_command(&YubiHsmCommand::delete_object(target_id, target_type));
-            let _ = ctx.refresh_slot_token_objects(slot_id);
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        ctx.refresh_slot_token_objects(slot_id)?;
-        let (handle, imported) = ctx
-            .resolved_objects()?
-            .into_iter()
-            .find(|(_, object)| {
-                object.slot_id == Some(slot_id)
-                    && matches!(
-                        object.material,
-                        KeyMaterial::YubiHsm {
-                            id,
-                            object_type,
-                            ..
-                        } if id == target_id && object_type == target_type
-                    )
-            })
-            .ok_or(CKR_DEVICE_ERROR)?;
-
-        if let Some(requested) = requested_attributes {
-            let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-                slot_id,
-                &imported.unique_id,
-                (!requested.id.is_empty()).then_some(requested.id.as_slice()),
-                (!requested.label.is_empty()).then_some(requested.label.as_str()),
-                Some(&requested),
-            );
-            let refresh = ctx.refresh_slot_token_objects(slot_id);
-            if let Err(error) = metadata_result {
-                let _ = refresh;
-                return Err(error);
+        let publish = (|| -> Result<CK_OBJECT_HANDLE, Error> {
+            if expected_target_type.is_some_and(|expected| expected != target_type) {
+                return Err(CKR_DEVICE_ERROR.into());
             }
-            refresh?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+            let (handle, imported) = ctx
+                .resolved_objects()?
+                .into_iter()
+                .find(|(_, object)| {
+                    object.slot_id == Some(slot_id)
+                        && matches!(
+                            object.material,
+                            KeyMaterial::YubiHsm {
+                                id,
+                                object_type,
+                                ..
+                            } if id == target_id && object_type == target_type
+                        )
+                })
+                .ok_or(CKR_DEVICE_ERROR)?;
+
+            if let Some(requested) = requested_attributes {
+                let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+                    slot_id,
+                    &imported.unique_id,
+                    super::key::template_attribute(template, CKA_ID as _)
+                        .is_some()
+                        .then_some(requested.id.as_slice()),
+                    (!requested.label.is_empty()).then_some(requested.label.as_str()),
+                    Some(&requested),
+                );
+                let refresh = ctx.refresh_slot_token_objects(slot_id);
+                if let Err(error) = metadata_result {
+                    let _ = refresh;
+                    return Err(error);
+                }
+                refresh?;
+            }
+            Ok(handle)
+        })();
+        if publish.is_err() {
+            rollback_yubihsm_created_object(
+                &mut *ctx.slot,
+                &mut ctx.state,
+                slot_id,
+                target_id,
+                target_type,
+            );
         }
-        *output_handle = handle;
+        *output_handle = publish?;
         Ok(())
     })
 }
@@ -1163,7 +1193,7 @@ fn parse_yubihsm_unwrap_template(
     if object.derive
         && !matches!(
             object.key_type,
-            x if x == CKK_EC as CK_KEY_TYPE || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+            x if x == CKK_EC as CK_KEY_TYPE || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE || x == CKK_AES as CK_KEY_TYPE
         )
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
@@ -1187,22 +1217,72 @@ fn parse_yubihsm_unwrap_template(
     } else {
         YUBIHSM_SYMMETRIC_KEY
     };
-    let attributes = YubiHsmPkcs11Attributes {
-        encrypt: object.encrypt,
-        decrypt: object.decrypt,
-        sign: object.sign,
-        verify: object.verify,
-        derive: object.derive,
-        extractable: exportable_under_wrap,
-        ..YubiHsmPkcs11Attributes::default()
-    };
-
-    let hardware = yubihsm_hardware_import_object(&object)?;
+    let mut hardware = yubihsm_hardware_import_object(&object)?;
+    hardware.extractable = exportable_under_wrap;
+    let capabilities = crate::yubihsm::capabilities::for_object(&hardware, object_type, algorithm)?;
     Ok(YubiHsmUnwrapTemplate {
         object,
-        hardware_id: yubihsm_id(&hardware.id)?,
+        hardware_id: yubihsm_id(&hardware.id),
         hardware_label: hardware.label,
-        capabilities: yubihsm_attributes_to_capabilities(object_type, algorithm, attributes),
+        capabilities,
         algorithm,
     })
+}
+
+#[cfg(test)]
+mod native_mapping_tests {
+    use super::*;
+
+    fn attribute<T>(kind: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE {
+        CK_ATTRIBUTE {
+            type_: kind,
+            pValue: (value as *mut T).cast(),
+            ulValueLen: std::mem::size_of::<T>() as _,
+        }
+    }
+
+    #[test]
+    fn native_mapping_unwrap_uses_the_same_rsa_and_aes_capabilities() {
+        for (class, kind, usage, mechanism, expected) in [
+            (
+                CKO_PRIVATE_KEY,
+                CKK_RSA,
+                CKA_SIGN,
+                CKM_SHA256_RSA_PKCS_PSS,
+                vec![0x06, 0x10],
+            ),
+            (
+                CKO_SECRET_KEY,
+                CKK_AES,
+                CKA_DECRYPT,
+                CKM_AES_GCM,
+                vec![0x10, 0x33],
+            ),
+            (
+                CKO_SECRET_KEY,
+                CKK_AES,
+                CKA_DERIVE,
+                CKM_SP800_108_COUNTER_KDF,
+                vec![0x10, 0x33],
+            ),
+        ] {
+            let mut class = class as CK_OBJECT_CLASS;
+            let mut kind = kind as CK_KEY_TYPE;
+            let mut yes = CK_TRUE as CK_BBOOL;
+            let mut mechanism = mechanism as CK_MECHANISM_TYPE;
+            let mut bits = 2048 as CK_ULONG;
+            let mut length = 16 as CK_ULONG;
+            let template = [
+                attribute(CKA_CLASS as _, &mut class),
+                attribute(CKA_KEY_TYPE as _, &mut kind),
+                attribute(usage as _, &mut yes),
+                attribute(CKA_EXTRACTABLE as _, &mut yes),
+                attribute(CKA_ALLOWED_MECHANISMS as _, &mut mechanism),
+                attribute(CKA_MODULUS_BITS as _, &mut bits),
+                attribute(CKA_VALUE_LEN as _, &mut length),
+            ];
+            let parsed = parse_yubihsm_unwrap_template(&template).unwrap();
+            assert_eq!(parsed.capabilities, yubihsm_capabilities(&expected));
+        }
+    }
 }

@@ -961,3 +961,39 @@ impl Drop for DeployedKeyCleanup {
 fn pqc_matrix_deployed_yubihsm() {
     run_matrix(Backend::DeployedYubiHsm);
 }
+
+#[test]
+fn yubihsm_public_kem_encapsulation_is_independent_of_native_encapsulation_capabilities() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        initialize_with_configuration(serde_json::json!({
+            "version": 1, "hardware": {"discovery": false},
+            "platform": {"enabled": false}, "yubihsm": {"urls": []}
+        })),
+        CKR_OK as CK_RV
+    );
+    let (slot, _trust) = crate::yubihsm::tests::make_yubihsm_native_hmac_test_slot();
+    install_test_slot_with_backend(0x484d, slot);
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            0x484d,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as _,
+            std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_OK as CK_RV
+    );
+    login(session, CKU_USER as _, b"0001password");
+    for index in [3, 6] {
+        let case = &cases()[index];
+        let mut id = (0x7e40 + index as u16).to_be_bytes();
+        let (public, private) = generate(session, case, &mut id, true);
+        // Generation grants only native decapsulation. Public encapsulation
+        // must still succeed and agree with the device's decapsulated secret.
+        assert_kem(session, case, public, private);
+    }
+    finalize_for_test();
+}

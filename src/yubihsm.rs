@@ -19,6 +19,7 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+pub(crate) mod capabilities;
 #[allow(dead_code)]
 mod commands;
 mod key_provider;

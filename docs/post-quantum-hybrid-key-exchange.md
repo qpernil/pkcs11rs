@@ -97,7 +97,9 @@ The virtual YubiHSM assignments are asymmetric algorithms `65`, `66`, and
 `DecapsulateHybridKem` (`0x11`); and capabilities
 `encapsulate-hybrid-kem` (`0x3d`) and `decapsulate-hybrid-kem` (`0x3e`).
 Generation and import reuse the ordinary asymmetric object commands, with
-exactly the 32-byte seed on import. Attestation uses private SPKI OIDs
+exactly the 32-byte seed on import. PKCS #11 projected-public encapsulation
+runs locally from the public encoding; private decapsulation uses the device
+command. Attestation uses private SPKI OIDs
 `1.3.6.1.4.1.41482.12.1`, `.12.2`, and `.12.3`.
 
 The device-side byte layouts, status mapping, and authorization rules are

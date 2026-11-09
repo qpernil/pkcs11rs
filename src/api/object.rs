@@ -153,7 +153,13 @@ pub(crate) fn create_object(
                 parse_certificate_object_template(templ)?
             };
             validate_new_object_access(&object, flags, logged_in)?;
-            *object_handle = publish_data_object(ctx, session_handle, slot_id, object)?;
+            *object_handle = publish_data_object(
+                ctx,
+                session_handle,
+                slot_id,
+                object,
+                template_attribute(templ, CKA_ID as _).is_some(),
+            )?;
             return Ok(());
         }
         let software_secret = class == Some(CKO_SECRET_KEY as CK_OBJECT_CLASS);
@@ -162,6 +168,11 @@ pub(crate) fn create_object(
         } else {
             parse_create_object_template(templ)?
         };
+        if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && ctx.get_slot(slot_id)?.supports_yubihsm_management()
+        {
+            super::key::yubihsm_public_template_defaults(&mut object, templ)?;
+        }
         if matches!(
             object.material,
             KeyMaterial::SoftwareSecret(_) | KeyMaterial::SoftwarePrivate(_)
@@ -175,9 +186,12 @@ pub(crate) fn create_object(
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         if object.token {
-            *object_handle = ctx
-                .slot
-                .store_token_key(&mut ctx.state, session_handle, object)?;
+            *object_handle = ctx.slot.store_token_key(
+                &mut ctx.state,
+                session_handle,
+                object,
+                template_attribute(templ, CKA_ID as _).is_some(),
+            )?;
             return Ok(());
         }
         if crate::backed_object::supports_backed_object(&object) {
@@ -200,6 +214,7 @@ fn publish_data_object(
     session: CK_SESSION_HANDLE,
     slot_id: CK_SLOT_ID,
     mut object: TokenObject,
+    id_supplied: bool,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
     if !matches!(
         object.material,
@@ -211,7 +226,8 @@ fn publish_data_object(
         object.set_creator(session, slot_id);
         return ctx.insert_object(object);
     }
-    ctx.slot.store_data(&mut ctx.state, session, object)
+    ctx.slot
+        .store_data(&mut ctx.state, session, object, id_supplied)
 }
 
 pub(crate) fn publish_software_secret_object(
@@ -923,24 +939,54 @@ fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     }
 }
 
-pub(super) fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
+pub(super) fn yubihsm_id(id: &[u8]) -> u16 {
     match id {
-        [] => Ok(0),
-        [high, low] => Ok(u16::from_be_bytes([*high, *low])),
-        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        [high, low] if id != [0, 0] && id != [0xff, 0xff] => u16::from_be_bytes([*high, *low]),
+        _ => 0,
     }
+}
+
+/// Check the type-specific native ID namespace before creation, preserving existing objects.
+/// All native create commands begin with the same two-byte object ID.
+pub(super) fn create_yubihsm_native_object<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session: CK_SESSION_HANDLE,
+    command: &YubiHsmCommand,
+    object_type: u8,
+) -> Result<Vec<u8>, Error> {
+    let bytes = command.data().get(..2).ok_or(CKR_ARGUMENTS_BAD)?;
+    let id = u16::from_be_bytes([bytes[0], bytes[1]]);
+    if id != 0 {
+        match ctx
+            ._get_session(slot, session)?
+            .1
+            .yubihsm_command(&YubiHsmCommand::get_object_info(id, object_type))
+        {
+            Ok(_) => {
+                let mut data = Zeroizing::new(command.data().to_vec());
+                data[..2].fill(0);
+                return ctx
+                    ._get_session(slot, session)?
+                    .1
+                    .yubihsm_command(&YubiHsmCommand::raw(command.code(), &data)?);
+            }
+            Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as CK_RV => {}
+            Err(error) => return Err(error),
+        }
+    }
+    ctx._get_session(slot, session)?.1.yubihsm_command(command)
 }
 
 pub(super) fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<TokenObject, Error> {
     const HARDWARE_LABEL_LENGTH: usize = 40;
     const METADATA_ATTRIBUTE_LENGTH: usize = 256;
 
-    if object.id.len() > METADATA_ATTRIBUTE_LENGTH || object.label.len() > METADATA_ATTRIBUTE_LENGTH
-    {
+    if object.label.len() > METADATA_ATTRIBUTE_LENGTH {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
     let mut hardware = object.clone();
-    if !matches!(hardware.id.as_slice(), [] | [_, _]) {
+    if yubihsm_id(&hardware.id) == 0 {
         hardware.id.clear();
     }
     if hardware.label.len() > HARDWARE_LABEL_LENGTH {
@@ -975,41 +1021,9 @@ pub(super) fn yubihsm_object_parameters(
     if !object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let attributes = YubiHsmPkcs11Attributes {
-        encapsulate: object.encapsulate,
-        decapsulate: object.decapsulate,
-        encrypt: object.encrypt,
-        decrypt: object.decrypt,
-        sign: object.sign,
-        verify: object.verify,
-        derive: object.derive,
-        wrap: object.can_wrap(),
-        unwrap: object.can_unwrap(),
-        extractable: object.extractable,
-    };
-    let mut capabilities = yubihsm_attributes_to_capabilities(object_type, algorithm, attributes);
-    if object_type == YUBIHSM_ASYMMETRIC_KEY
-        && object.derive
-        && (is_yubihsm_ec(algorithm) || is_yubihsm_montgomery(algorithm))
-    {
-        let (raw, protected) =
-            object
-                .allowed_mechanisms
-                .as_ref()
-                .map_or((true, false), |allowed| {
-                    (
-                        allowed.contains(&(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE)),
-                        allowed.contains(&CKM_PKCS11RS_PREFIXED_ECDH_DERIVE),
-                    )
-                });
-        if !raw && !protected {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-        set_yubihsm_capability(&mut capabilities, 0x0b, raw);
-        set_yubihsm_capability(&mut capabilities, 0x38, protected);
-    }
+    let capabilities = crate::yubihsm::capabilities::for_object(object, object_type, algorithm)?;
     Ok(YubiHsmObjectParameters {
-        id: yubihsm_id(&object.id)?,
+        id: yubihsm_id(&object.id),
         label: &object.label,
         domains: 0xffff,
         capabilities,
@@ -1831,13 +1845,14 @@ pub(crate) fn copy_object(
             copied_object.material,
             KeyMaterial::Data { .. } | KeyMaterial::Certificate { .. }
         ) {
-            *new_object_handle = publish_data_object(ctx, session_handle, slot_id, copied_object)?;
+            *new_object_handle =
+                publish_data_object(ctx, session_handle, slot_id, copied_object, true)?;
             return Ok(());
         }
         if copied_object.token {
             *new_object_handle =
                 ctx.slot
-                    .store_token_key(&mut ctx.state, session_handle, copied_object)?;
+                    .store_token_key(&mut ctx.state, session_handle, copied_object, true)?;
             return Ok(());
         }
         if matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
@@ -2849,6 +2864,7 @@ pub(crate) fn store_yubihsm_data_in_slot<S: Slot + ?Sized>(
     ctx: &mut crate::context::SlotState,
     session: CK_SESSION_HANDLE,
     object: TokenObject,
+    id_supplied: bool,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
     let (slot_id, _, _) = ctx.session_details(slot, session)?;
 
@@ -2866,7 +2882,7 @@ pub(crate) fn store_yubihsm_data_in_slot<S: Slot + ?Sized>(
     {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
-    import_yubihsm_token_object_in_slot(slot, ctx, session, slot_id, &object)
+    import_yubihsm_token_object_with_id_in_slot(slot, ctx, session, slot_id, &object, id_supplied)
 }
 
 pub(crate) fn store_common_data_in_slot<S: Slot + ?Sized>(
@@ -2900,6 +2916,7 @@ pub(crate) fn store_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
     ctx: &mut crate::context::SlotState,
     session: CK_SESSION_HANDLE,
     object: TokenObject,
+    id_supplied: bool,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
     let (slot_id, _, _) = ctx.session_details(slot, session)?;
     let public_wrap = object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
@@ -2908,7 +2925,7 @@ pub(crate) fn store_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
     if crate::backed_object::supports_backed_object(&object) && !public_wrap {
         return ctx.store_backed_object(slot, session, object);
     }
-    import_yubihsm_token_object_in_slot(slot, ctx, session, slot_id, &object)
+    import_yubihsm_token_object_with_id_in_slot(slot, ctx, session, slot_id, &object, id_supplied)
 }
 
 pub(crate) fn import_yubihsm_token_object_in_slot<S: Slot + ?Sized>(
@@ -2918,12 +2935,28 @@ pub(crate) fn import_yubihsm_token_object_in_slot<S: Slot + ?Sized>(
     slot_id: CK_SLOT_ID,
     object: &TokenObject,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
+    import_yubihsm_token_object_with_id_in_slot(
+        slot,
+        ctx,
+        session_handle,
+        slot_id,
+        object,
+        !object.id.is_empty(),
+    )
+}
+
+pub(super) fn import_yubihsm_token_object_with_id_in_slot<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    session_handle: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+    object: &TokenObject,
+    id_supplied: bool,
+) -> Result<CK_OBJECT_HANDLE, Error> {
     let hardware_object = yubihsm_hardware_import_object(object)?;
     let (command, expected_class, expected_object_type) = yubihsm_import_command(&hardware_object)?;
-    let response = ctx
-        ._get_session(slot, session_handle)?
-        .1
-        .yubihsm_command(&command)?;
+    let response =
+        create_yubihsm_native_object(slot, ctx, session_handle, &command, expected_object_type)?;
     let id = parse_yubihsm_object_id(&response)?;
     let publish = (|| -> Result<CK_OBJECT_HANDLE, Error> {
         ctx.refresh_slot_token_objects(slot, slot_id)?;
@@ -2947,7 +2980,7 @@ pub(crate) fn import_yubihsm_token_object_in_slot<S: Slot + ?Sized>(
         let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
             slot_id,
             &imported.unique_id,
-            (!object.id.is_empty()).then_some(object.id.as_slice()),
+            id_supplied.then_some(object.id.as_slice()),
             (!object.label.is_empty()).then_some(object.label.as_str()),
             Some(object),
         );
@@ -2977,13 +3010,26 @@ pub(crate) fn import_yubihsm_token_object_in_slot<S: Slot + ?Sized>(
     if publish.is_err() {
         // A failed metadata/publication step must not leave an imported object
         // behind when C_CreateObject has returned no handle to its caller.
-        let _ = ctx
-            ._get_session(slot, session_handle)?
-            .1
-            .yubihsm_command(&YubiHsmCommand::delete_object(id, expected_object_type));
-        let _ = ctx.refresh_slot_token_objects(slot, slot_id);
+        rollback_yubihsm_created_object(slot, ctx, slot_id, id, expected_object_type);
     }
     publish
+}
+
+pub(super) fn rollback_yubihsm_created_object<S: Slot + ?Sized>(
+    slot: &mut S,
+    ctx: &mut crate::context::SlotState,
+    slot_id: CK_SLOT_ID,
+    id: u16,
+    object_type: u8,
+) {
+    if let Err(error) = ctx
+        .get_slot(slot, slot_id)
+        .and_then(|backend| backend.yubihsm_rollback_created_object(id, object_type))
+    {
+        tracing::warn!(target: "pkcs11rs::storage", ?error,
+            "Failed to roll back an unpublished YubiHSM object; reload required");
+    }
+    let _ = ctx.refresh_slot_token_objects(slot, slot_id);
 }
 
 pub(crate) fn persist_software_private_object_in_slot<S: Slot + ?Sized>(

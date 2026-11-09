@@ -39,6 +39,154 @@ use virtual_yubihsm_core::{
 const PASSWORD: &[u8] = b"password";
 
 #[test]
+fn native_permissions_ignore_old_companions_and_remove_permission_only_storage_on_update() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert!(private.sign);
+    let count = peer.metadata_objects.borrow().len();
+    Slot::yubihsm_set_attributes(&slot, 7, &private.unique_id, None, Some("override"), None)
+        .unwrap();
+    {
+        let mut objects = peer.metadata_objects.borrow_mut();
+        let (_, value) = objects
+            .values_mut()
+            .find(|(info, _)| info.label.starts_with("pkcs11rs metadata "))
+            .unwrap();
+        let mut record = BackedKeyMetadata::from_cbor(value).unwrap();
+        let class = u64::from(CKO_PRIVATE_KEY);
+        let mut attributes = record.aspect(class).unwrap().clone();
+        attributes
+            .insert(
+                u64::from(crate::CKA_SIGN),
+                KeyAttributeValue::Boolean(false),
+            )
+            .unwrap();
+        attributes
+            .insert(
+                u64::from(crate::CKA_ENCRYPT),
+                KeyAttributeValue::Boolean(true),
+            )
+            .unwrap();
+        attributes
+            .insert(
+                u64::from(crate::CKA_ALLOWED_MECHANISMS),
+                KeyAttributeValue::Mechanisms(vec![]),
+            )
+            .unwrap();
+        record.insert_aspect(class, attributes).unwrap();
+        *value = record.to_cbor().unwrap();
+    }
+    let before = peer.metadata_objects.borrow().clone();
+    let mut reopened = cache_test_slot(peer.clone(), false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    let restored = Slot::token_objects(&reopened, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.unique_id == private.unique_id)
+        .unwrap();
+    assert_eq!(
+        (restored.sign, restored.encrypt),
+        (private.sign, private.encrypt)
+    );
+    assert!(restored.allowed_mechanisms.is_none());
+    assert_eq!(restored.label, "override");
+    assert_eq!(
+        *peer.metadata_objects.borrow(),
+        before,
+        "reading must not rewrite the HSM"
+    );
+    Slot::yubihsm_set_attributes(
+        &reopened,
+        7,
+        &private.unique_id,
+        None,
+        Some(&private.label),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        peer.metadata_objects.borrow().len(),
+        count,
+        "obsolete permission-only companion must be removed"
+    );
+}
+
+#[test]
+fn public_permission_overrides_survive_rediscovery_and_private_deletion() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let mut projection = persisted_public_projection(&private, b"public-id", "public label");
+    projection.verify = true;
+    projection.encrypt = false;
+    projection.private = true;
+    projection.allowed_mechanisms = Some(vec![]);
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    let public = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"public-id"
+        })
+        .unwrap();
+    assert!(public.verify && !public.encrypt);
+    assert!(public.private);
+    assert_eq!(public.allowed_mechanisms, Some(vec![]));
+    let mut reopened = cache_test_slot(peer.clone(), false);
+    login_slot(&mut reopened, b"0001password").unwrap();
+    let restored = Slot::token_objects(&reopened, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.unique_id == public.unique_id)
+        .unwrap();
+    assert_eq!(
+        (
+            restored.verify,
+            restored.encrypt,
+            restored.private,
+            restored.extractable
+        ),
+        (true, false, true, true)
+    );
+    assert_eq!(restored.allowed_mechanisms, Some(vec![]));
+    assert_eq!(
+        Slot::yubihsm_destroy_native_object(&reopened, 7, &private.unique_id).unwrap(),
+        Some(public.unique_id.clone())
+    );
+    let detached = crate::storage::StorageProvider::read_all(&reopened)
+        .unwrap()
+        .into_iter()
+        .filter_map(|(_, encoded)| {
+            crate::backed_object::decode_backed_object(&reopened, 7, true, &encoded).unwrap()
+        })
+        .find(|object| object.unique_id == public.unique_id)
+        .unwrap();
+    assert!(matches!(detached.material, KeyMaterial::Public(_)));
+    assert_eq!(detached.allowed_mechanisms, Some(vec![]));
+    assert_eq!((detached.id, detached.label), (public.id, public.label));
+    assert_eq!(
+        (
+            detached.verify,
+            detached.encrypt,
+            detached.private,
+            detached.extractable
+        ),
+        (true, false, true, true)
+    );
+}
+
+#[test]
 fn native_unique_ids_survive_clients_and_metadata_transitions_without_extra_records() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = cache_test_slot(peer.clone(), false);
@@ -216,7 +364,7 @@ fn public_projection_ids_are_persisted_independently_and_renewed_after_deletion(
             .any(|object| object.unique_id == public.unique_id && object.id == b"public override")
     );
     Slot::yubihsm_destroy_public_projection(&reopened, 7, &public.unique_id).unwrap();
-    assert_eq!(peer.metadata_objects.borrow().len(), count);
+    assert_eq!(peer.metadata_objects.borrow().len(), count + 1);
     Slot::token_objects(&reopened, 7).unwrap();
     Slot::yubihsm_persist_public_projection(&reopened, 7, &private.unique_id, &projection).unwrap();
     assert_ne!(get_public(&reopened).unique_id, public.unique_id);
@@ -305,7 +453,7 @@ static NEXT_TRUST_ENTRY: AtomicU64 = AtomicU64::new(1);
 fn unused_trust_prefix() -> OsString {
     let id = NEXT_TRUST_ENTRY.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("pkcs11rs-yubihsm-{id}-"))
+        .join(format!("pkcs11rs-yubihsm-{}-{id}-", std::process::id()))
         .into_os_string()
 }
 
@@ -361,6 +509,7 @@ pub(crate) struct ProtocolPeer {
     fail_next_put_opaque: Cell<bool>,
     supports_opaque_update: Cell<bool>,
     fail_delete_opaque: RefCell<HashSet<u16>>,
+    fail_delete_native: Cell<bool>,
     last_wrapped_object: RefCell<Option<ObjectInfo>>,
     product: &'static str,
     serial: &'static str,
@@ -438,6 +587,7 @@ impl ProtocolPeer {
             fail_next_put_opaque: Cell::new(false),
             supports_opaque_update: Cell::new(true),
             fail_delete_opaque: RefCell::new(HashSet::new()),
+            fail_delete_native: Cell::new(false),
             last_wrapped_object: RefCell::new(None),
             product: "YubiHSM",
             serial: "16909060",
@@ -1015,8 +1165,8 @@ impl ProtocolPeer {
                                 .filter(|(info, _)| info.object_type == inner.data[2])
                             {
                                 (inner.command | RESPONSE_BIT, encode_object_info(info))
-                            } else if inner.data[2] != 3 {
-                                return Err(CKR_DEVICE_ERROR.into());
+                            } else if inner.data[2] != 3 || !self.objects.borrow().contains(&id) {
+                                return Err(CKR_OBJECT_HANDLE_INVALID.into());
                             } else if let Some(key) =
                                 self.montgomery_private_keys.borrow().get(&id)
                             {
@@ -1034,7 +1184,7 @@ impl ProtocolPeer {
                                 info[10..12].copy_from_slice(&length.to_be_bytes());
                                 info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
                                 info[14..18].copy_from_slice(&[3, algorithm, 1, 1]);
-                                info[18..26].copy_from_slice(b"test-mont");
+                                info[18..27].copy_from_slice(b"test-mont");
                                 (inner.command | RESPONSE_BIT, info)
                             } else {
                                 let mut info = vec![0; 66];
@@ -1336,6 +1486,9 @@ impl ProtocolPeer {
                         value if value == CommandCode::DeleteObject as u8 => {
                             let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                             let object_type = inner.data[2];
+                            if object_type != YUBIHSM_OPAQUE && self.fail_delete_native.get() {
+                                return Err(CKR_DEVICE_ERROR.into());
+                            }
                             if object_type == YUBIHSM_OPAQUE
                                 && self.fail_delete_opaque.borrow().contains(&id)
                             {
@@ -1783,8 +1936,31 @@ pub(crate) fn make_yubihsm_native_session_test_slot()
 
 // This peer delegates every command to the actual virtual-device core.
 #[derive(Debug)]
-struct NativeHmacPeer(RefCell<VirtualYubiHsm>);
-impl Connector for NativeHmacPeer {
+pub(crate) struct NativeDevicePeer(RefCell<VirtualYubiHsm>);
+#[cfg(feature = "abi-tests")]
+impl NativeDevicePeer {
+    pub(crate) fn native_ids(&self, object_type: u8) -> Vec<u16> {
+        self.0
+            .borrow()
+            .objects()
+            .filter(|object| object.info.object_type as u8 == object_type)
+            .map(|object| object.info.id)
+            .collect()
+    }
+
+    pub(crate) fn storage_usage(&self) -> (usize, Vec<usize>) {
+        let device = self.0.borrow();
+        let metadata = device
+            .objects()
+            .filter_map(|object| match &object.material {
+                VirtualObjectMaterial::Opaque(value) => Some(value.len()),
+                _ => None,
+            })
+            .collect();
+        (device.objects().count(), metadata)
+    }
+}
+impl Connector for NativeDevicePeer {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -1822,16 +1998,22 @@ impl Connector for NativeHmacPeer {
 }
 
 pub(crate) fn make_yubihsm_native_hmac_test_slot() -> (Box<dyn crate::Slot>, TestTrustEntry) {
+    let (slot, _, trust) = make_yubihsm_capacity_test_slot();
+    (slot, trust)
+}
+
+pub(crate) fn make_yubihsm_capacity_test_slot()
+-> (Box<dyn crate::Slot>, Rc<NativeDevicePeer>, TestTrustEntry) {
     let config = VirtualYubiHsmConfig::default();
     let version = (config.version[0], config.version[1], config.version[2]);
     let algorithms = config.algorithms.clone();
-    let peer = Rc::new(NativeHmacPeer(RefCell::new(
+    let peer = Rc::new(NativeDevicePeer(RefCell::new(
         VirtualYubiHsm::factory_default(config),
     )));
     let trust = TestTrustEntry::new();
-    let mut slot = crate::YubiHsmSlot::new(peer, version, algorithms);
+    let mut slot = crate::YubiHsmSlot::new(peer.clone(), version, algorithms);
     slot.trust_prefix = Some(trust.prefix.clone());
-    (Box::new(slot), trust)
+    (Box::new(slot), peer, trust)
 }
 
 pub(crate) fn make_yubihsm_provisioning_test_slot()
@@ -3229,7 +3411,7 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
         .unwrap();
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
-    assert!(!objects.iter().any(|object| {
+    assert!(objects.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 1]
     }));
     let mut related =
@@ -3266,8 +3448,8 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
         .unwrap();
     assert_eq!(private.id, b"repaired-id");
     assert_eq!(private.label, "repaired label");
-    assert!(!repaired.iter().any(|object| {
-        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"repaired-id"
+    assert!(repaired.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 1]
     }));
     assert_eq!(
         peer.metadata_objects
@@ -4352,7 +4534,7 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
     assert!(!objects.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == certificate.id
     }));
-    assert!(!objects.iter().any(|object| {
+    assert!(objects.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 5]
     }));
     let public_data = yubihsm_opaque_object(&objects, 4);
@@ -4745,7 +4927,7 @@ fn public_certificate_profile_does_not_require_provisioned_certificates() {
     assert!(
         objects
             .iter()
-            .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .any(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
     );
 }
 
@@ -7271,4 +7453,98 @@ fn auth_source_exclusion_uses_reference_equality_not_serial() {
         .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].label, "credential");
+}
+
+#[test]
+fn public_permission_metadata_stores_only_deviations_and_preserves_them_on_identity_edits() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let mut projection = persisted_public_projection(&private, b"public-id", "public label");
+    let public_attributes = || {
+        let objects = peer.metadata_objects.borrow();
+        let (_, value) = objects
+            .values()
+            .find(|(info, _)| info.label.starts_with("pkcs11rs metadata "))
+            .unwrap();
+        BackedKeyMetadata::from_cbor(value)
+            .unwrap()
+            .aspect(u64::from(CKO_PUBLIC_KEY))
+            .unwrap()
+            .clone()
+    };
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    Slot::token_objects(&slot, 7).unwrap();
+    let defaults = public_attributes();
+    for kind in [
+        crate::CKA_VERIFY,
+        crate::CKA_ENCRYPT,
+        crate::CKA_ALLOWED_MECHANISMS,
+    ] {
+        assert!(defaults.get(u64::from(kind)).is_none());
+    }
+    projection.verify = false;
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    Slot::token_objects(&slot, 7).unwrap();
+    assert_eq!(
+        public_attributes().get(u64::from(crate::CKA_VERIFY)),
+        Some(&KeyAttributeValue::Boolean(false))
+    );
+    Slot::yubihsm_set_attributes(&slot, 7, &private.unique_id, None, Some("renamed"), None)
+        .unwrap();
+    Slot::token_objects(&slot, 7).unwrap();
+    assert_eq!(
+        public_attributes().get(u64::from(crate::CKA_VERIFY)),
+        Some(&KeyAttributeValue::Boolean(false))
+    );
+    projection.verify = true;
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    Slot::token_objects(&slot, 7).unwrap();
+    assert!(
+        public_attributes()
+            .get(u64::from(crate::CKA_VERIFY))
+            .is_none()
+    );
+}
+
+#[test]
+fn implicit_public_preservation_rolls_back_if_native_deletion_fails() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let before = Slot::token_objects(&slot, 7).unwrap();
+    let private = before
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let public = before
+        .iter()
+        .find(|object| object.is_yubihsm_public_projection())
+        .unwrap();
+    let metadata_count = peer.metadata_objects.borrow().len();
+    peer.fail_delete_native.set(true);
+    assert!(Slot::yubihsm_destroy_native_object(&slot, 7, &private.unique_id).is_err());
+    assert_eq!(peer.metadata_objects.borrow().len(), metadata_count);
+    let after = Slot::token_objects(&slot, 7).unwrap();
+    assert!(
+        after
+            .iter()
+            .any(|object| object.unique_id == private.unique_id)
+    );
+    assert!(
+        after
+            .iter()
+            .any(|object| object.unique_id == public.unique_id)
+    );
+    peer.fail_delete_native.set(false);
+    assert_eq!(
+        Slot::yubihsm_destroy_native_object(&slot, 7, &private.unique_id).unwrap(),
+        Some(public.unique_id.clone())
+    );
+    assert_eq!(peer.metadata_objects.borrow().len(), metadata_count + 1);
 }

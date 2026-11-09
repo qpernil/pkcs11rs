@@ -457,6 +457,21 @@ struct YubiHsmPkcs11Attributes {
     extractable: bool,
 }
 
+/// Software operations on public material, independent of native private permissions.
+fn yubihsm_public_defaults(key_type: CK_KEY_TYPE) -> YubiHsmPkcs11Attributes {
+    YubiHsmPkcs11Attributes {
+        encrypt: key_type == CKK_RSA as CK_KEY_TYPE,
+        verify: matches!(key_type, x if x == CKK_RSA as CK_KEY_TYPE
+            || x == CKK_EC as CK_KEY_TYPE || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+            || x == CKK_ML_DSA as CK_KEY_TYPE),
+        encapsulate: matches!(key_type, x if x == CKK_ML_KEM as CK_KEY_TYPE
+            || x == CKK_PKCS11RS_MLKEM768_P256 || x == CKK_PKCS11RS_MLKEM768_X25519
+            || x == CKK_PKCS11RS_MLKEM1024_P384),
+        extractable: true,
+        ..YubiHsmPkcs11Attributes::default()
+    }
+}
+
 fn yubihsm_capabilities_to_attributes(
     object_type: u8,
     algorithm: u8,
@@ -490,24 +505,8 @@ fn yubihsm_capabilities_to_attributes(
                     || yubihsm_capability(capabilities, 0x38);
             }
         }
-        YUBIHSM_PUBLIC_KEY => {
-            attributes.extractable = true;
-            if is_yubihsm_rsa(algorithm) {
-                attributes.verify = yubihsm_capability(capabilities, 0x05)
-                    || yubihsm_capability(capabilities, 0x06);
-                attributes.encrypt = yubihsm_capability(capabilities, 0x09)
-                    || yubihsm_capability(capabilities, 0x0a);
-            } else if yubihsm_ml_dsa(algorithm).is_some() {
-                attributes.verify = true;
-            } else if yubihsm_ml_kem(algorithm).is_some() {
-                attributes.encapsulate = yubihsm_capability(capabilities, 0x3b);
-            } else if yubihsm_hybrid_kem(algorithm).is_some() {
-                attributes.encapsulate = yubihsm_capability(capabilities, 0x3d);
-            } else if is_yubihsm_edwards(algorithm) {
-                attributes.verify = yubihsm_capability(capabilities, 0x08);
-            } else if is_yubihsm_ec(algorithm) {
-                attributes.verify = yubihsm_capability(capabilities, 0x07);
-            }
+        YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC => {
+            attributes = yubihsm_public_defaults(crate::backend::yubihsm_key_type(algorithm));
         }
         YUBIHSM_WRAP_KEY if is_yubihsm_rsa(algorithm) || is_yubihsm_ccm_wrap(algorithm) => {
             attributes.wrap = yubihsm_capability(capabilities, 0x0c);
@@ -516,9 +515,6 @@ fn yubihsm_capabilities_to_attributes(
                 attributes.encrypt = yubihsm_capability(capabilities, 0x25);
                 attributes.decrypt = yubihsm_capability(capabilities, 0x26);
             }
-        }
-        YUBIHSM_WRAP_KEY_PUBLIC => {
-            attributes.extractable = true;
         }
         YUBIHSM_PUBLIC_WRAP_KEY => {
             attributes.extractable = true;
@@ -533,8 +529,9 @@ fn yubihsm_capabilities_to_attributes(
         YUBIHSM_SYMMETRIC_KEY if is_yubihsm_aes(algorithm) => {
             attributes.encrypt =
                 yubihsm_capability(capabilities, 0x33) || yubihsm_capability(capabilities, 0x35);
-            attributes.decrypt =
-                yubihsm_capability(capabilities, 0x32) || yubihsm_capability(capabilities, 0x34);
+            attributes.decrypt = yubihsm_capability(capabilities, 0x32)
+                || yubihsm_capability(capabilities, 0x34)
+                || yubihsm_capability(capabilities, 0x33);
             attributes.sign = yubihsm_capability(capabilities, 0x33);
             attributes.verify = attributes.sign;
             attributes.derive = attributes.sign;

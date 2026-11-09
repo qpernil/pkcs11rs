@@ -348,6 +348,15 @@ pub(crate) fn crypt_init(
         if (encrypting && !object.encrypt) || (!encrypting && !object.decrypt) {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        crate::yubihsm::capabilities::require_operation(
+            &object,
+            mechanism.mechanism,
+            if encrypting {
+                CKF_ENCRYPT as _
+            } else {
+                CKF_DECRYPT as _
+            },
+        )?;
         let rsa_mechanism = matches!(
             mechanism.mechanism,
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE

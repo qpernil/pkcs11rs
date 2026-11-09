@@ -190,11 +190,13 @@ pub(crate) trait Slot {
     ) -> Result<Option<CK_OBJECT_HANDLE>, Error> {
         Ok(None)
     }
+    /// `id_supplied` distinguishes an explicit empty CKA_ID from native auto-allocation.
     fn store_token_key(
         &mut self,
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: TokenObject,
+        _id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
         crate::api::native::store_common_token_key_in_slot(self, ctx, session, object)
     }
@@ -203,6 +205,7 @@ pub(crate) trait Slot {
         ctx: &mut crate::context::SlotState,
         session: CK_SESSION_HANDLE,
         object: TokenObject,
+        _id_supplied: bool,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
         crate::api::native::store_common_data_in_slot(self, ctx, session, object)
     }
@@ -796,6 +799,11 @@ pub(crate) trait Slot {
         _unique_id: &str,
     ) -> Result<Option<String>, Error> {
         Err(CKR_ACTION_PROHIBITED.into())
+    }
+    /// Roll back a newly allocated native object which has not been returned
+    /// to the caller, including any companion created while publishing it.
+    fn yubihsm_rollback_created_object(&self, _id: u16, _object_type: u8) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn hsmauth_administration(
         &mut self,

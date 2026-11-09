@@ -30,6 +30,7 @@ fn metadata_error(_: crate::key_metadata::KeyMetadataError) -> Error {
 pub(crate) fn storage_error(error: StorageError) -> Error {
     match error {
         StorageError::Unavailable => CKR_TOKEN_WRITE_PROTECTED.into(),
+        StorageError::Capacity => CKR_DEVICE_MEMORY.into(),
         StorageError::InvalidReference
         | StorageError::InvalidCbor
         | StorageError::UnsupportedHashAlgorithm(_) => CKR_DATA_INVALID.into(),
@@ -1131,6 +1132,10 @@ mod tests {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
+        // Other tests can first register these callsites on threads without a
+        // subscriber. Keep both dispatches registered so tracing computes their
+        // combined interest instead of its single-dispatch thread-local fast path.
+        let _quiet_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _log_guard = tracing::subscriber::set_default(subscriber);
         let mut object = TokenObject {
             slot_id: Some(7),
@@ -1195,6 +1200,16 @@ mod tests {
             written.get(u64::from(CKA_PRIVATE)),
             Some(&KeyAttributeValue::Boolean(false))
         );
+        // Reproduce first use on a different thread without the capture subscriber.
+        let uncaptured = FixedProvider {
+            reference: provider.reference.clone(),
+            object: provider.object.clone(),
+        };
+        std::thread::spawn(move || {
+            stored_objects(&uncaptured, 7, true).unwrap();
+        })
+        .join()
+        .unwrap();
         let restored = stored_objects(&provider, 7, true).unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);

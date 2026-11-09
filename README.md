@@ -1594,19 +1594,29 @@ the same derivation and signing paths as locally generated registrations. Only
 the original generating handle can delete the hardware parent credential;
 imported records affect host storage only. See [the import format](docs/preview-sign.md#browser-server-registration-import).
 
+YubiHSM native keys map usage flags and allowed mechanisms to hardware
+capabilities and report the effective permissions without permission-only
+companions. See the [mapping tables and behavioral tradeoffs](docs/yubihsm-capability-mapping.md).
+Native permission overrides in old companions are ignored with a diagnostic;
+projected public objects retain explicit restrictions relative to their
+algorithm-based defaults.
+
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct
 `pkcs11rs metadata ...` namespace. Legacy `MDB1` companions under Yubico's
 `Meta object for ...` namespace are read-only compatibility input, used only
 when no pkcs11rs metadata exists for the target; pkcs11rs never rewrites or
-deletes them. A YubiHSM public token object exists only when its canonical
-public aspect is explicitly present; linked public material comes from the
-native key and is not duplicated in metadata. `C_GenerateKeyPair`
-returns a session public key by default and persists it only when the public
-template explicitly sets `CKA_TOKEN=CK_TRUE`; the same choice is available
-through `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. Destroying that public object removes
-only the canonical public aspect. Destroying the hardware private object first
-morphs a surviving public aspect into a standalone public-key record. See
+deletes them. Generated YubiHSM asymmetric keys expose a public token half without metadata;
+non-generated imports default to private-only. Canonical aspects record
+exceptions to those defaults. Linked public material comes from the native
+key and is not duplicated in metadata. For native token-pair generation,
+`C_GenerateKeyPair` defaults the public half to a token object; an explicit
+`CKA_TOKEN=CK_FALSE` requests a session public key. Software session-key
+generation and `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` retain their session-object
+defaults. Destroying that public object removes
+only that aspect, retaining an absence marker when required. Destroying the
+hardware private object first preserves its public half as a standalone record;
+this requires storage headroom when no companion exists. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.

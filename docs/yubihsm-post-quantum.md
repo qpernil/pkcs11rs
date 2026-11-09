@@ -53,21 +53,24 @@ Update hashes each input part; Final sends only the digest to the device.
 Both prehash interfaces use the same device request and perform HashML-DSA's
 private-key operation inside the HSM.
 
-ML-KEM encapsulation uses command `0x0e`, whose fixed request is the key ID;
+PKCS #11 ML-KEM encapsulation runs locally using the public material. Native
 decapsulation uses command `0x0f`, whose request is the key ID followed by the
 ciphertext. The shared secret is published as the requested PKCS #11 session
 secret object; the ML-KEM private key never leaves the HSM.
 
-The virtual commands use capability bits `0x3a` for ML-DSA signing, `0x3b` for
-ML-KEM encapsulation, and `0x3c` for ML-KEM decapsulation. Key creation derives
-these bits from the private and public templates. Persisted PKCS #11 metadata
-may narrow the native permissions and allowed mechanisms but cannot grant a
-capability absent from the HSM object.
+The virtual protocol also offers encapsulation command `0x0e` with capability
+`0x3b`, but projected public operations do not use it. Native ML-DSA signing uses
+`0x3a`, and ML-KEM decapsulation uses `0x3c`. Private templates map through the
+[native capability mapping](yubihsm-capability-mapping.md) without permission-only
+metadata. Public encapsulation defaults to enabled and honors explicit public
+template restrictions independently. Stored native permission overrides are
+ignored; public restrictions remain effective.
 
 Algorithms 65–67 implement the exact specification profile in
 [Post-quantum hybrid key exchange](post-quantum-hybrid-key-exchange.md).
-They use `EncapsulateHybridKem` (`0x10`), `DecapsulateHybridKem` (`0x11`),
-and capability bits `0x3d` and `0x3e`. `PutAsymmetricKey` imports exactly the
+The protocol provides `EncapsulateHybridKem` (`0x10`), `DecapsulateHybridKem` (`0x11`),
+and capability bits `0x3d` and `0x3e`. PKCS #11 encapsulation runs locally; native
+decapsulation uses `0x11` with capability `0x3e`. `PutAsymmetricKey` imports exactly the
 draft's inseparable 32-byte seed; `GetPublicKey` returns the combined public
 encoding. Their construction-specific mechanisms appear only when the device
 reports the corresponding algorithm, so physical YubiHSM firmware retains its
