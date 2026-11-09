@@ -1616,7 +1616,8 @@ generation and `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` retain their session-object
 defaults. Destroying that public object removes
 only that aspect, retaining an absence marker when required. Destroying the
 hardware private object first preserves its public half as a standalone record;
-this requires storage headroom when no companion exists. See
+this requires storage headroom when no companion exists. See the measured
+[capacity and deletion constraints](docs/yubihsm-storage-capacity.md). See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.

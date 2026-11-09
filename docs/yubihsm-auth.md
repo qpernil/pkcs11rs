@@ -465,6 +465,9 @@ normalization instead. Metadata is not created when native attributes suffice, a
 setting the final override back to its native value deletes an otherwise empty
 record. A private and its linked public aspect share one record.
 
+See [storage capacity](yubihsm-storage-capacity.md) for measured record/page costs,
+capacity regressions, and native-default metadata cleanup.
+
 Each aspect stores its own `CKA_UNIQUE_ID` whenever its companion is written.
 An existing record without that attribute uses the same stable fallback as an
 object without metadata: native object type, object ID, and device sequence,
@@ -507,6 +510,7 @@ key. Identity, public material, and restrictions survive the transition, and the
 public handle is rebound to that record. Creating that record needs a free object
 slot and sufficient storage pages. At full capacity, failure preserves both
 halves rather than deleting the private key first and risking the public object.
+See [deletion headroom](yubihsm-storage-capacity.md#deletion-headroom).
 
 ### Native object IDs
 

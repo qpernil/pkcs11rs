@@ -82,6 +82,7 @@ impl VirtualHsmRuntime {
             let actors = virtual_hsm::VirtualHsmActors::start(
                 registry,
                 &args.virtual_yubihsms,
+                args.virtual_yubihsm_unlimited_storage,
                 args.virtual_yubihsm_persistence,
                 Duration::from_millis(args.virtual_yubihsm_batch_delay_ms),
             )
@@ -174,6 +175,10 @@ struct Args {
     /// Durability policy shared by configured embedded virtual YubiHSMs.
     #[arg(long, value_enum, default_value = "batched")]
     virtual_yubihsm_persistence: VirtualPersistence,
+
+    /// Disable hardware storage limits for all embedded virtual HSMs.
+    #[arg(long)]
+    virtual_yubihsm_unlimited_storage: bool,
 
     /// Maximum batching delay for embedded virtual YubiHSM persistence.
     #[arg(long, default_value_t = DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS)]
@@ -675,6 +680,7 @@ mod tests {
             i2c_yubihsms: Vec::new(),
             virtual_yubihsms: Vec::new(),
             virtual_yubihsm_persistence: VirtualPersistence::Batched,
+            virtual_yubihsm_unlimited_storage: false,
             virtual_yubihsm_batch_delay_ms: DEFAULT_VIRTUAL_YUBIHSM_BATCH_DELAY_MS,
         };
         assert!(validate_args(&args).is_err());
@@ -735,12 +741,21 @@ mod tests {
     }
 
     #[test]
+    fn unlimited_virtual_storage_requires_an_explicit_flag() {
+        let args =
+            Args::try_parse_from(["pkcs11rs-connector", "--virtual-yubihsm-unlimited-storage"])
+                .unwrap();
+        assert!(args.virtual_yubihsm_unlimited_storage);
+    }
+
+    #[test]
     fn i2c_response_timeout_defaults_to_one_minute() {
         let args = Args::try_parse_from(["pkcs11rs-connector"]).unwrap();
         assert_eq!(args.i2c_response_timeout_seconds, 60);
         assert_eq!(args.http_max_in_flight_requests, 64);
         assert!(args.hardware_discovery);
         assert!(args.i2c_yubihsms.is_empty());
+        assert!(!args.virtual_yubihsm_unlimited_storage);
         assert_eq!(
             args.virtual_yubihsm_persistence,
             VirtualPersistence::Batched

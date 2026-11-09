@@ -1,0 +1,95 @@
+{
+  "date": "2026-11-08",
+  "opaque_probe": [
+    {
+      "serial": "HSM_A_SERIAL",
+      "firmware": [
+        2,
+        4,
+        1
+      ],
+      "baseline": {
+        "total_records": 256,
+        "free_records": 253,
+        "total_pages": 1024,
+        "free_pages": 1019,
+        "page_size": 126
+      },
+      "samples": [
+        {
+          "payload_bytes": 1,
+          "reported_length": 1,
+          "pages": 1
+        },
+        {
+          "payload_bytes": 125,
+          "reported_length": 125,
+          "pages": 1
+        },
+        {
+          "payload_bytes": 126,
+          "reported_length": 126,
+          "pages": 1
+        },
+        {
+          "payload_bytes": 127,
+          "reported_length": 127,
+          "pages": 2
+        },
+        {
+          "payload_bytes": 166,
+          "reported_length": 166,
+          "pages": 2
+        },
+        {
+          "payload_bytes": 206,
+          "reported_length": 206,
+          "pages": 2
+        },
+        {
+          "payload_bytes": 251,
+          "reported_length": 251,
+          "pages": 2
+        },
+        {
+          "payload_bytes": 252,
+          "reported_length": 252,
+          "pages": 2
+        },
+        {
+          "payload_bytes": 253,
+          "reported_length": 253,
+          "pages": 3
+        }
+      ],
+      "inventory_and_storage_restored": true
+    }
+  ],
+  "read_only_inventory_checks": [
+    {
+      "serial": "HSM_B_SERIAL",
+      "firmware": [
+        2,
+        5,
+        0
+      ],
+      "objects": 26,
+      "pages_used": 70,
+      "sum_rounded_object_lengths": 70
+    },
+    {
+      "serial": "HSM_C_SERIAL",
+      "firmware": [
+        2,
+        5,
+        0
+      ],
+      "objects": 21,
+      "pages_used": 51,
+      "sum_rounded_object_lengths": 51
+    }
+  ],
+  "allocation_rule": "one object record plus ceil(GetObjectInfo.length / 126) pages; at least one page in virtual core",
+  "read_only_note": "Authentication Key 1 on build-host lacks PUT_OPAQUE and DELETE_OPAQUE; no objects were created there.",
+  "documentation_identifiers": "Hostnames and private device/account identifiers are anonymized; measurement values are unchanged."
+}

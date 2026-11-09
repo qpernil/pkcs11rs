@@ -57,6 +57,7 @@ struct ActorController {
 impl ActorController {
     async fn start(
         spec: VirtualYubiHsmSpec,
+        unlimited_storage: bool,
         persistence: PersistenceMode,
     ) -> io::Result<(Self, VirtualTransport, [u8; 3])> {
         let (requests, receiver) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
@@ -67,7 +68,7 @@ impl ActorController {
         let name = format!("virtual-yubihsm-{}", spec.serial);
         let actor_thread = thread::Builder::new()
             .name(name)
-            .spawn(move || actor_main(spec, persistence, receiver, ready))?;
+            .spawn(move || actor_main(spec, unlimited_storage, persistence, receiver, ready))?;
         match readiness.await {
             Ok(Ok(version)) => Ok((
                 Self {
@@ -103,6 +104,7 @@ impl VirtualHsmActors {
     pub(crate) async fn start(
         registry: &DeviceRegistry,
         specs: &[VirtualYubiHsmSpec],
+        unlimited_storage: bool,
         persistence: VirtualPersistence,
         batch_delay: Duration,
     ) -> Result<Self, BoxError> {
@@ -130,7 +132,7 @@ impl VirtualHsmActors {
                 continue;
             }
             let (actor, transport, version) =
-                match ActorController::start(spec.clone(), persistence).await {
+                match ActorController::start(spec.clone(), unlimited_storage, persistence).await {
                     Ok(started) => started,
                     Err(error) => {
                         let _ = actors.shutdown().await;
@@ -205,12 +207,13 @@ fn validate_specs(specs: &[VirtualYubiHsmSpec]) -> Result<(), BoxError> {
 
 fn actor_main(
     spec: VirtualYubiHsmSpec,
+    unlimited_storage: bool,
     persistence_mode: PersistenceMode,
     mut requests: mpsc::Receiver<ActorRequest>,
     ready: oneshot::Sender<io::Result<[u8; 3]>>,
 ) -> io::Result<()> {
     let serial = spec.serial;
-    match initialize(&spec, persistence_mode) {
+    match initialize(&spec, unlimited_storage, persistence_mode) {
         Ok((runtime, version)) => {
             let _ = ready.send(Ok(version));
             run_actor(serial, runtime, &mut requests)
@@ -225,10 +228,12 @@ fn actor_main(
 
 fn initialize(
     spec: &VirtualYubiHsmSpec,
+    unlimited_storage: bool,
     persistence_mode: PersistenceMode,
 ) -> io::Result<(PersistentDevice, [u8; 3])> {
     create_state_directory(&spec.state_directory)?;
     let config = DeviceConfig {
+        unlimited_storage,
         serial: spec.serial,
         ..DeviceConfig::default()
     };
@@ -422,6 +427,7 @@ mod tests {
                 serial: 12_345_678,
                 state_directory: directory.clone(),
             }],
+            false,
             VirtualPersistence::Immediate,
             Duration::from_millis(500),
         )
@@ -451,6 +457,7 @@ mod tests {
                 serial: 12_345_678,
                 state_directory: directory.clone(),
             }],
+            false,
             VirtualPersistence::Immediate,
             Duration::from_millis(500),
         )
@@ -481,6 +488,7 @@ mod tests {
         let actors = VirtualHsmActors::start(
             &registry,
             std::slice::from_ref(&spec),
+            false,
             VirtualPersistence::Immediate,
             Duration::from_millis(500),
         )
@@ -523,6 +531,7 @@ mod tests {
         let first = VirtualHsmActors::start(
             &first_registry,
             std::slice::from_ref(&spec),
+            false,
             VirtualPersistence::Batched,
             Duration::from_millis(10),
         )
@@ -532,6 +541,7 @@ mod tests {
         let error = match VirtualHsmActors::start(
             &second_registry,
             &[spec],
+            false,
             VirtualPersistence::Batched,
             Duration::from_millis(10),
         )
@@ -564,6 +574,7 @@ mod tests {
         let actors = VirtualHsmActors::start(
             &registry,
             &specs,
+            false,
             VirtualPersistence::Batched,
             Duration::from_millis(10),
         )
