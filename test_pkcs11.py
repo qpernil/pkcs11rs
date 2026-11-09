@@ -677,6 +677,8 @@ def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
         CK_BYTE,
     ]
     library.PKCS11RS_HsmAuthPutSymmetricCredential.restype = CK_RV
@@ -688,10 +690,14 @@ def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
         CK_BYTE,
     ]
     library.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.restype = CK_RV
     library.PKCS11RS_HsmAuthPutAsymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
@@ -712,12 +718,16 @@ def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
         CK_BYTE,
         ctypes.POINTER(CK_BYTE),
         ctypes.POINTER(CK_ULONG),
     ]
     library.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.restype = CK_RV
     library.PKCS11RS_HsmAuthGenerateAsymmetricCredential.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
@@ -732,6 +742,8 @@ def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
     ]
     library.PKCS11RS_HsmAuthDeleteCredential.restype = CK_RV
     library.PKCS11RS_HsmAuthChangeCredentialPassword.argtypes = [
@@ -740,9 +752,13 @@ def bind_hsmauth_exports(library: ctypes.CDLL) -> None:
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
+        CK_ULONG,
     ]
     library.PKCS11RS_HsmAuthChangeCredentialPassword.restype = CK_RV
     library.PKCS11RS_HsmAuthChangeManagementPassword.argtypes = [
+        CK_ULONG,
+        ctypes.POINTER(CK_BYTE),
         CK_ULONG,
         ctypes.POINTER(CK_BYTE),
         CK_ULONG,
@@ -811,29 +827,29 @@ class HsmAuthExportLifecycleMixin:
 
         label = buffer(b"explicit-symmetric")
         enc, mac, password = buffer(bytes(range(16))), buffer(bytes(range(16, 32))), buffer(b"access")
-        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
-            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_USER_NOT_LOGGED_IN)
         factory = buffer(b"00000000000000000000000000000000")
-        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_OK)
+        management = factory
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_USER_TYPE_INVALID)
         self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
-            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
+            session, management, len(management), label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
         self.assertGreater(find(label), 0)
         replacement = buffer(b"new-access")
         self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeCredentialPassword(
-            session, label, len(label), replacement, len(replacement)),
+            session, management, len(management), label, len(label), replacement, len(replacement)),
             getattr(self, "expected_hsmauth_password_change", CKR_OK))
-        management = buffer(b"new-admin")
+        new_management = buffer(b"new-admin")
         self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeManagementPassword(
-            session, management, len(management)), CKR_OK)
-        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label)), CKR_OK)
+            session, management, len(management), new_management, len(new_management)), CKR_OK)
+        management = new_management
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, management, len(management), label, len(label)), CKR_OK)
         self.assertEqual(find(label), 0)
-        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
-        self.assertEqual(self.lib.C_Login(session, CKU_SO, management, len(management)), CKR_OK)
+        self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, management, len(management)), CKR_USER_TYPE_INVALID)
 
         derived_label = buffer(b"derived-symmetric")
         derivation = buffer(b"derivation-password")
         self.assertEqual(self.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
-            session, derived_label, len(derived_label), derivation, len(derivation),
+            session, management, len(management), derived_label, len(derived_label), derivation, len(derivation),
             password, len(password), 0), CKR_OK)
         self.assertGreater(find(derived_label), 0)
         private = buffer(bytes(31) + b"\x01")
@@ -845,7 +861,7 @@ class HsmAuthExportLifecycleMixin:
         for name, function, key_args in imports:
             with self.subTest(operation=name):
                 asymmetric_label = buffer(name.encode())
-                arguments = [session, asymmetric_label, len(asymmetric_label), *key_args,
+                arguments = [session, management, len(management), asymmetric_label, len(asymmetric_label), *key_args,
                              password, len(password), 0]
                 public_len = CK_ULONG()
                 self.assertEqual(function(*arguments, None, ctypes.byref(public_len)), CKR_OK)
@@ -867,16 +883,17 @@ class HsmAuthExportLifecycleMixin:
                         "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"))
                 self.assertGreater(find(asymmetric_label), 0)
                 self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(
-                    session, asymmetric_label, len(asymmetric_label)), CKR_OK)
+                    session, management, len(management), asymmetric_label, len(asymmetric_label)), CKR_OK)
                 self.assertEqual(find(asymmetric_label), 0)
         self.assertEqual(self.lib.PKCS11RS_HsmAuthReset(session), CKR_OK)
         self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
         self.assertEqual(find(derived_label), 0)
-        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_OK)
+        management = factory
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, factory, len(factory)), CKR_USER_TYPE_INVALID)
         self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
-            session, label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
-        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label)), CKR_OK)
-        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+            session, management, len(management), label, len(label), enc, 16, mac, 16, password, len(password), 0), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(session, management, len(management), label, len(label)), CKR_OK)
+        self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
         self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
 
 
@@ -1015,7 +1032,7 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
         )
         return bytes(value)
 
-    def test_hsmauth_exports_complete_credential_and_management_lifecycles(self) -> None:
+    def open_hsmauth_session(self):
         configuration = ctypes.create_string_buffer(
             b'{"version":1,"hardware":{"discovery":false},'
             b'"software":{"slots":[]},"platform":{"enabled":false},'
@@ -1038,7 +1055,34 @@ class EmbeddedVirtualYubiKeyAbiTests(HsmAuthExportLifecycleMixin, unittest.TestC
             CKR_OK,
         )
 
-        self.assert_hsmauth_export_lifecycle(session)
+        return session
+
+    def test_hsmauth_exports_complete_credential_and_management_lifecycles(self) -> None:
+        self.assert_hsmauth_export_lifecycle(self.open_hsmauth_session())
+
+    def test_hsmauth_management_password_is_supplied_and_verified_per_operation(self) -> None:
+        session = self.open_hsmauth_session()
+        def buffer(value):
+            return (CK_BYTE * len(value)).from_buffer_copy(value)
+        factory = buffer(b"00000000000000000000000000000000")
+        replacement = buffer(b"replacement")
+        label = buffer(b"per-operation")
+        key = buffer(bytes(range(16)))
+        access = buffer(b"access")
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthPutSymmetricCredential(
+            session, factory, len(factory), label, len(label), key, 16, key, 16,
+            access, len(access), 0), CKR_OK)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeManagementPassword(
+            session, factory, len(factory), replacement, len(replacement)), CKR_OK)
+        # The old credential must reach the applet and fail; no successful
+        # previous command supplies authorization to the following call.
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(
+            session, factory, len(factory), label, len(label)), CKR_PIN_INCORRECT)
+        self.assertEqual(self.lib.C_Login(session, CKU_SO, replacement, len(replacement)), CKR_USER_TYPE_INVALID)
+        self.assertEqual(self.lib.PKCS11RS_HsmAuthDeleteCredential(
+            session, replacement, len(replacement), label, len(label)), CKR_OK)
+        self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
+        self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
 
     def test_resident_fido_assertion_requires_per_operation_login(self) -> None:
         configuration = ctypes.create_string_buffer(

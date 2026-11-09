@@ -958,10 +958,25 @@ fn authenticated_ccid_backends_follow_the_shared_selected_applet_guard() {
     let mut hsmauth =
         crate::HsmAuthSlot::new_with_device(connector, crate::hsmauth::AID.to_vec(), device);
     assert_eq!(token_label(&hsmauth), "HSM Auth #0");
-    crate::Slot::login_so(&mut hsmauth, Some(b"password"), &pinentry).unwrap();
-    crate::Slot::set_login_role(&hsmauth, Some(crate::LoginRole::So)).unwrap();
-    assert!(crate::Slot::login_is_active(&hsmauth));
+    assert_eq!(
+        CK_RV::from(crate::Slot::login_so(&mut hsmauth, Some(b"password"), &pinentry).unwrap_err()),
+        CKR_USER_TYPE_INVALID as CK_RV
+    );
+    crate::Slot::hsmauth_administration(
+        &mut hsmauth,
+        &[0; 16],
+        crate::HsmAuthAdministration::Delete { label: "entry" },
+    )
+    .unwrap();
+    assert!(!crate::Slot::login_is_active(&hsmauth));
     select_other(other.as_ref());
+    assert!(!crate::Slot::login_is_active(&hsmauth));
+    crate::Slot::hsmauth_administration(
+        &mut hsmauth,
+        &[1; 16],
+        crate::HsmAuthAdministration::Delete { label: "entry" },
+    )
+    .unwrap();
     assert!(!crate::Slot::login_is_active(&hsmauth));
 
     let aid = crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID;

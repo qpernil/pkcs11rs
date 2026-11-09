@@ -1683,26 +1683,24 @@ fn assert_short_tlv(command: &crate::CommandApdu, tag: u8, value: &[u8]) {
 
 #[cfg(unix)]
 #[test]
-fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
+fn hsmauth_administration_prompts_for_each_omitted_management_password() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    let _pinentry = TestPinentry::new("admin");
+    let pinentry = TestPinentry::new("admin");
     let (connector, session) = install_hsmauth_admin_slot();
 
-    assert_eq!(
-        crate::api::C_Login(session, CKU_SO as CK_USER_TYPE, ::std::ptr::null_mut(), 0,),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(connector.secure_channel_starts.get(), 1);
+    assert_eq!(connector.secure_channel_starts.get(), 0);
 
     let label = b"prompted";
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
+            std::ptr::null(),
+            0,
             label.as_ptr(),
             label.len() as CK_ULONG,
         ),
@@ -1715,7 +1713,35 @@ fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
     assert_short_tlv(delete, 0x7b, &management_key);
     drop(commands);
 
-    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    // Change the prompt response at the same configured executable path. A
+    // cached credential would still send "admin" on the following command.
+    let script = std::fs::read_to_string(&pinentry.path).unwrap();
+    std::fs::write(&pinentry.path, script.replace("D admin", "D replacement")).unwrap();
+    assert_eq!(
+        crate::api::PKCS11RS_HsmAuthDeleteCredential(
+            session,
+            std::ptr::null(),
+            0,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let commands = connector.commands.borrow();
+    let deletes: Vec<_> = commands
+        .iter()
+        .filter(|command| command.ins == 0x02)
+        .collect();
+    assert_eq!(deletes.len(), 2);
+    management_key.fill(0);
+    management_key[..11].copy_from_slice(b"replacement");
+    assert_short_tlv(deletes[1], 0x7b, &management_key);
+    drop(commands);
+
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
     finalize_for_test();
 }
 
@@ -1769,7 +1795,7 @@ fn hsmauth_user_login_is_unsupported_without_consuming_retries() {
 }
 
 #[test]
-fn hsmauth_so_login_authorizes_password_derived_administration() {
+fn hsmauth_administration_uses_only_each_calls_management_password() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -1778,17 +1804,7 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     );
     let (connector, session) = install_hsmauth_admin_slot();
 
-    let mut management_password = *b"admin";
-    assert_eq!(
-        crate::api::C_Login(
-            session,
-            CKU_SO as CK_USER_TYPE,
-            management_password.as_mut_ptr(),
-            management_password.len() as CK_ULONG,
-        ),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(connector.secure_channel_starts.get(), 1);
+    assert_eq!(connector.secure_channel_starts.get(), 0);
 
     let label = b"derived-symmetric";
     let derivation_password = "lösenord".as_bytes();
@@ -1796,6 +1812,8 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as CK_ULONG,
             derivation_password.as_ptr(),
@@ -1810,7 +1828,7 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     let commands = connector.commands.borrow();
     let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
     let mut management_key = [0; 16];
-    management_key[..management_password.len()].copy_from_slice(&management_password);
+    management_key[..5].copy_from_slice(b"admin");
     assert_short_tlv(put, 0x7b, &management_key);
     let keys = crate::yubico_password_kdf(derivation_password).unwrap();
     assert_short_tlv(put, 0x75, &keys[..16]);
@@ -1825,6 +1843,8 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthChangeManagementPassword(
             session,
+            b"admin".as_ptr(),
+            5,
             new_management_password.as_ptr(),
             new_management_password.len() as CK_ULONG,
         ),
@@ -1833,6 +1853,8 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
+            new_management_password.as_ptr(),
+            new_management_password.len() as _,
             label.as_ptr(),
             label.len() as CK_ULONG,
         ),
@@ -1849,15 +1871,19 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     assert_short_tlv(delete, 0x7b, &new_management_key);
     drop(commands);
 
-    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
-    assert!(connector.secure_channel_clears.get() >= 1);
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
+            new_management_password.as_ptr(),
+            new_management_password.len() as _,
             label.as_ptr(),
             label.len() as CK_ULONG,
         ),
-        CKR_USER_NOT_LOGGED_IN as CK_RV
+        CKR_OK as CK_RV
     );
     finalize_for_test();
 }
@@ -1871,16 +1897,6 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
         CKR_OK as CK_RV
     );
     let (connector, session) = install_hsmauth_admin_slot();
-    let mut management_password = *b"000102030405060708090a0b0c0d0e0f";
-    assert_eq!(
-        crate::api::C_Login(
-            session,
-            CKU_SO as CK_USER_TYPE,
-            management_password.as_mut_ptr(),
-            management_password.len() as CK_ULONG,
-        ),
-        CKR_OK as CK_RV
-    );
 
     let label = b"derived-asymmetric";
     let derivation_password = b"password";
@@ -1889,6 +1905,8 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as CK_ULONG,
             derivation_password.as_ptr(),
@@ -1908,6 +1926,8 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as CK_ULONG,
             derivation_password.as_ptr(),
@@ -1934,6 +1954,8 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as CK_ULONG,
         ),
@@ -1957,16 +1979,14 @@ fn hsmauth_explicit_symmetric_import_validates_inputs_and_encodes_policy() {
         CKR_OK as CK_RV
     );
     let (connector, session) = install_hsmauth_admin_slot();
-    let mut management_password = *b"admin";
-    assert_eq!(
-        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
-        CKR_OK as CK_RV
-    );
+
     let enc = [0x11; 16];
     let mac = [0x22; 16];
     let import = |label: &[u8], enc: &[u8], mac: &[u8], password: &[u8], touch| {
         crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             enc.as_ptr(),
@@ -2005,6 +2025,8 @@ fn hsmauth_explicit_symmetric_import_validates_inputs_and_encodes_policy() {
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             b"explicit".as_ptr(),
             8,
             std::ptr::null(),
@@ -2034,7 +2056,6 @@ fn hsmauth_explicit_symmetric_import_validates_inputs_and_encodes_policy() {
     assert_short_tlv(put, 0x7a, &[1]);
     // Successful administration refreshes the inventory without another login.
     assert!(commands.iter().any(|command| command.ins == 0x05));
-    assert_eq!(connector.secure_channel_starts.get(), 1);
     drop(commands);
     finalize_for_test();
 }
@@ -2048,11 +2069,7 @@ fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
         CKR_OK as CK_RV
     );
     let (connector, session) = install_hsmauth_admin_slot();
-    let mut management_password = *b"admin";
-    assert_eq!(
-        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
-        CKR_OK as CK_RV
-    );
+
     let mut private_key = [0; 32];
     private_key[31] = 1;
     for generated in [false, true] {
@@ -2061,6 +2078,8 @@ fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
             if generated {
                 crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
                     session,
+                    b"admin".as_ptr(),
+                    5,
                     label.as_ptr(),
                     label.len() as _,
                     password.as_ptr(),
@@ -2072,6 +2091,8 @@ fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
             } else {
                 crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
                     session,
+                    b"admin".as_ptr(),
+                    5,
                     label.as_ptr(),
                     label.len() as _,
                     private_key.as_ptr(),
@@ -2150,6 +2171,8 @@ fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
         assert_eq!(
             crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 b"asymmetric".as_ptr(),
                 10,
                 key,
@@ -2169,7 +2192,7 @@ fn hsmauth_asymmetric_import_and_generation_have_nonmutating_buffer_queries() {
 }
 
 #[test]
-fn hsmauth_credential_password_change_uses_admin_authorization_and_clears_rejected_login() {
+fn hsmauth_credential_password_change_requires_a_credential_for_each_command() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -2177,14 +2200,12 @@ fn hsmauth_credential_password_change_uses_admin_authorization_and_clears_reject
         CKR_OK as CK_RV
     );
     let (connector, session) = install_hsmauth_admin_slot();
-    let mut management_password = *b"admin";
-    assert_eq!(
-        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
-        CKR_OK as CK_RV
-    );
+
     let change = |label: &[u8], password: &[u8]| {
         crate::api::PKCS11RS_HsmAuthChangeCredentialPassword(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             password.as_ptr(),
@@ -2211,18 +2232,14 @@ fn hsmauth_credential_password_change_uses_admin_authorization_and_clears_reject
         CKR_OK as CK_RV
     );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
-    assert!(connector.secure_channel_clears.get() > 0);
     let command_count = connector.commands.borrow().len();
-    assert_eq!(
-        change(b"entry", b"replacement"),
-        CKR_USER_NOT_LOGGED_IN as CK_RV
-    );
-    assert_eq!(connector.commands.borrow().len(), command_count);
+    assert_eq!(change(b"entry", b"replacement"), CKR_OK as CK_RV);
+    assert!(connector.commands.borrow().len() > command_count);
     finalize_for_test();
 }
 
 #[test]
-fn hsmauth_reset_clears_so_authorization_and_secure_channel() {
+fn hsmauth_reset_clears_secure_channel_without_a_login() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -2230,15 +2247,11 @@ fn hsmauth_reset_clears_so_authorization_and_secure_channel() {
         CKR_OK as CK_RV
     );
     let (connector, session) = install_hsmauth_admin_slot();
-    let mut management_password = *b"admin";
-    assert_eq!(
-        crate::api::C_Login(session, CKU_SO as _, management_password.as_mut_ptr(), 5),
-        CKR_OK as CK_RV
-    );
+
     let clears_before_reset = connector.secure_channel_clears.get();
     assert_eq!(crate::api::PKCS11RS_HsmAuthReset(session), CKR_OK as CK_RV);
     let commands = connector.commands.borrow();
-    assert_eq!(commands.len(), 1);
+    assert_eq!(commands.iter().filter(|c| c.ins == 0x06).count(), 1);
     assert_eq!(
         (commands[0].ins, commands[0].p1, commands[0].p2),
         (0x06, 0xde, 0xad)
@@ -2252,11 +2265,16 @@ fn hsmauth_reset_clears_so_authorization_and_secure_channel() {
     );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
     assert!(connector.secure_channel_clears.get() > clears_before_reset);
+    assert_eq!(crate::api::PKCS11RS_HsmAuthReset(session), CKR_OK as CK_RV);
     assert_eq!(
-        crate::api::PKCS11RS_HsmAuthReset(session),
-        CKR_USER_NOT_LOGGED_IN as CK_RV
+        connector
+            .commands
+            .borrow()
+            .iter()
+            .filter(|c| c.ins == 0x06)
+            .count(),
+        2
     );
-    assert_eq!(connector.commands.borrow().len(), 1);
     assert_eq!(
         crate::api::C_Logout(session),
         CKR_USER_NOT_LOGGED_IN as CK_RV
@@ -2273,6 +2291,8 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
     let results = [
         crate::api::PKCS11RS_HsmAuthPutSymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             key.as_ptr(),
@@ -2285,6 +2305,8 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
         ),
         crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             key.as_ptr(),
@@ -2297,6 +2319,8 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
         ),
         crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             password.as_ptr(),
@@ -2307,6 +2331,8 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
         ),
         crate::api::PKCS11RS_HsmAuthChangeCredentialPassword(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             password.as_ptr(),
@@ -2316,10 +2342,12 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
     ];
     assert_eq!(results, [expected; 5]);
     assert_eq!(output, [0xa5; 65]);
-    // Length queries must enforce authorization as well as actual mutations.
+    // Length queries must validate the native read/write session too.
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthPutAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             key.as_ptr(),
@@ -2335,6 +2363,8 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
     assert_eq!(
         crate::api::PKCS11RS_HsmAuthGenerateAsymmetricCredential(
             session,
+            b"admin".as_ptr(),
+            5,
             label.as_ptr(),
             label.len() as _,
             password.as_ptr(),
@@ -2348,15 +2378,14 @@ fn assert_hsmauth_admin_exports_rejected(session: CK_SESSION_HANDLE, expected: C
 }
 
 #[test]
-fn hsmauth_admin_exports_require_a_valid_native_read_write_so_session() {
+fn hsmauth_admin_exports_require_a_valid_native_read_write_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    let (connector, session) = install_hsmauth_admin_slot();
-    assert_hsmauth_admin_exports_rejected(session, CKR_USER_NOT_LOGGED_IN as CK_RV);
+    let (connector, _session) = install_hsmauth_admin_slot();
     assert_hsmauth_admin_exports_rejected(
         CK_SESSION_HANDLE::MAX,
         CKR_SESSION_HANDLE_INVALID as CK_RV,
@@ -2426,6 +2455,8 @@ impl HsmAuthAdminExport {
         match self {
             Self::Symmetric => PKCS11RS_HsmAuthPutSymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 key.as_ptr(),
@@ -2438,6 +2469,8 @@ impl HsmAuthAdminExport {
             ),
             Self::DerivedSymmetric => PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 password.as_ptr(),
@@ -2448,6 +2481,8 @@ impl HsmAuthAdminExport {
             ),
             Self::Asymmetric => PKCS11RS_HsmAuthPutAsymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 key.as_ptr(),
@@ -2460,6 +2495,8 @@ impl HsmAuthAdminExport {
             ),
             Self::DerivedAsymmetric => PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 password.as_ptr(),
@@ -2472,6 +2509,8 @@ impl HsmAuthAdminExport {
             ),
             Self::Generate => PKCS11RS_HsmAuthGenerateAsymmetricCredential(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 password.as_ptr(),
@@ -2480,24 +2519,32 @@ impl HsmAuthAdminExport {
                 output,
                 len,
             ),
-            Self::Delete => PKCS11RS_HsmAuthDeleteCredential(session, label.as_ptr(), 5),
+            Self::Delete => {
+                PKCS11RS_HsmAuthDeleteCredential(session, b"admin".as_ptr(), 5, label.as_ptr(), 5)
+            }
             Self::CredentialPassword => PKCS11RS_HsmAuthChangeCredentialPassword(
                 session,
+                b"admin".as_ptr(),
+                5,
                 label.as_ptr(),
                 5,
                 password.as_ptr(),
                 6,
             ),
-            Self::ManagementPassword => {
-                PKCS11RS_HsmAuthChangeManagementPassword(session, password.as_ptr(), 6)
-            }
+            Self::ManagementPassword => PKCS11RS_HsmAuthChangeManagementPassword(
+                session,
+                b"admin".as_ptr(),
+                5,
+                password.as_ptr(),
+                6,
+            ),
             Self::Reset => PKCS11RS_HsmAuthReset(session),
         }
     }
 }
 
 #[test]
-fn hsmauth_admin_exports_clear_authorization_after_blocked_management_authentication() {
+fn hsmauth_admin_exports_report_blocked_management_authentication_without_replay() {
     let _guard = TEST_LOCK.lock().unwrap();
     for operation in HsmAuthAdminExport::ALL {
         for status in [0x63c0, 0x6983] {
@@ -2507,12 +2554,7 @@ fn hsmauth_admin_exports_clear_authorization_after_blocked_management_authentica
                 CKR_OK as CK_RV
             );
             let (connector, session) = install_hsmauth_admin_slot();
-            let mut password = *b"admin";
-            assert_eq!(
-                crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
-                CKR_OK as CK_RV
-            );
-            let clears = connector.secure_channel_clears.get();
+
             connector
                 .next_status
                 .set(Some((operation.instruction(), status)));
@@ -2530,13 +2572,16 @@ fn hsmauth_admin_exports_clear_authorization_after_blocked_management_authentica
                 CKR_OK as CK_RV
             );
             assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
-            assert!(connector.secure_channel_clears.get() > clears);
-            let count = connector.commands.borrow().len();
             assert_eq!(
-                operation.call(session, output.as_mut_ptr(), &mut len),
-                CKR_USER_NOT_LOGGED_IN as CK_RV
+                connector
+                    .commands
+                    .borrow()
+                    .iter()
+                    .filter(|c| c.ins == operation.instruction())
+                    .count(),
+                1,
+                "failed commands must not be replayed"
             );
-            assert_eq!(connector.commands.borrow().len(), count);
         }
     }
     finalize_for_test();
@@ -2552,11 +2597,7 @@ fn hsmauth_admin_exports_propagate_transport_failures_without_replaying_mutation
             CKR_OK as CK_RV
         );
         let (connector, session) = install_hsmauth_admin_slot();
-        let mut password = *b"admin";
-        assert_eq!(
-            crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
-            CKR_OK as CK_RV
-        );
+
         connector
             .fail_next_transport
             .set(Some(operation.instruction()));
@@ -2569,7 +2610,10 @@ fn hsmauth_admin_exports_propagate_transport_failures_without_replaying_mutation
         );
         assert_eq!(output, [0xa5; 65]);
         assert_eq!(connector.commands.borrow().len(), 1);
-        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Logout(session),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
     }
     finalize_for_test();
 }
@@ -2589,11 +2633,7 @@ fn hsmauth_asymmetric_exports_reject_malformed_device_public_keys_without_writin
                 CKR_OK as CK_RV
             );
             let (connector, session) = install_hsmauth_admin_slot();
-            let mut password = *b"admin";
-            assert_eq!(
-                crate::api::C_Login(session, CKU_SO as _, password.as_mut_ptr(), 5),
-                CKR_OK as CK_RV
-            );
+
             *connector.public_key_override.borrow_mut() = Some(response);
             let mut output = [0xa5; 65];
             let mut len = 65;

@@ -870,34 +870,32 @@ material. The authentication key used for login must grant the
 
 ## YubiHSM Auth administration
 
-The YubiHSM Auth slot uses `C_Login` roles as follows:
+The YubiHSM Auth slot has no PKCS #11 login role: `CKU_USER` and `CKU_SO`
+return `CKR_USER_TYPE_INVALID`. The slot clears `CKF_LOGIN_REQUIRED` and
+`CKF_USER_PIN_INITIALIZED`. A native authentication call takes the selected
+credential's password directly. Administration likewise supplies its management
+password with each vendor API call; the device verifies it as part of that
+command. No management password or derived key is retained between calls.
 
-- `CKU_USER` is unsupported (`CKR_USER_TYPE_INVALID`). The slot clears
-  `CKF_LOGIN_REQUIRED` and `CKF_USER_PIN_INITIALIZED`. A native authentication
-  call takes the selected credential's password directly; no dummy login or
-  software session-key authorization is involved.
-- `CKU_SO` establishes the same transport and interprets the supplied PIN as
-  the YubiHSM Auth management password. The resulting 16-byte management key
-  is retained in zeroizing per-slot memory until logout, device removal,
-  application reset, or module finalization.
+The administration functions take `pManagementPassword` and
+`ulManagementPasswordLen` immediately after the session handle. A null pointer
+with zero length requests fresh pinentry for that command. A non-null pointer
+with zero length explicitly supplies the empty password. Returned prompt values
+and derived management keys use zeroizing storage. There is no implicit replay
+after a failed command or a connection change. `PKCS11RS_HsmAuthReset` is the
+exception: the native reset command takes no management credential.
 
-`C_SetPIN` is intentionally unsupported on YubiHSM Auth slots. A slot can
-expose multiple credential labels, while the PKCS #11 operation is slot-wide
-and has no credential selector. Use the proprietary label-addressed
-administration functions below for credential passwords, or the management
-password function for the applet-wide management key.
-
-With pinentry configured, `C_Login` with `CKU_SO`, a null PIN pointer, and zero
-PIN length obtains the management password through pinentry. `CKU_USER` never
-prompts because it has no PIN of its own.
+`C_SetPIN` is unsupported because a slot can expose multiple credential labels,
+while that PKCS #11 operation is slot-wide and has no credential selector. Use
+the label-addressed administration functions for credential passwords, or the
+management-password function for the applet-wide management key.
 
 Yubico's password input convention is used for both management and credential
 passwords. A printable UTF-8 value of at most 16 bytes is padded on the right
 with zero bytes. Exactly 32 hexadecimal characters provide the raw 16-byte
 value. Other lengths and malformed hexadecimal values are rejected. The token
 reports the management-password envelope of 0 through 32 bytes, including
-the raw hexadecimal form. Each login role and
-administration call still enforces its own syntax.
+the raw hexadecimal form. Administration calls enforce this syntax.
 
 The YubiHSM Auth slot advertises no ordinary cryptographic mechanisms and rejects
 software private/secret key imports. Its public data and certificate backing
@@ -925,19 +923,20 @@ interactive prompting, and an empty value makes initialization return
 `CKR_ARGUMENTS_BAD`. Desktop builds use the configured external program. iOS
 builds do not include the process-based client and reject this setting; a
 native application prompt provider will implement the same backend-facing
-interface. When a provider is available, every backend that can use it reports
-`CKF_PROTECTED_AUTHENTICATION_PATH`.
+interface. Backends with protected PKCS #11 login report
+`CKF_PROTECTED_AUTHENTICATION_PATH`; the login-free HSM Auth administration
+API uses its documented null-pointer convention instead.
 
 The module starts one configured process per prompt and communicates through
 the Assuan protocol over pipes. Prompts are serialized, secrets are never
 placed in process arguments or environment variables, and returned passwords
-are held in zeroizing memory only for the login call. Pinentry cancellation
-returns `CKR_CANCEL`; startup or protocol failures return
+are held in zeroizing memory only for the login or administration call.
+Pinentry cancellation returns `CKR_CANCEL`; startup or protocol failures return
 `CKR_FUNCTION_FAILED`.
 
 `pkcs11rs.h` declares proprietary administration functions. Every function
-requires a read/write session on the YubiHSM Auth slot with an active `CKU_SO`
-login:
+requires a read/write session on the YubiHSM Auth slot. Each credential or
+management-password mutation supplies its management credential directly:
 
 - `PKCS11RS_HsmAuthPutSymmetricCredential` imports explicit 16-byte ENC and
   MAC keys.
@@ -953,12 +952,12 @@ login:
   the private key internally.
 - `PKCS11RS_HsmAuthDeleteCredential` deletes one credential by label.
 - `PKCS11RS_HsmAuthChangeCredentialPassword` changes one credential password
-  using the retained management key. This command requires YubiKey firmware
+  using the per-call management key. This command requires YubiKey firmware
   5.8.0 or later; firmware 5.7.4 returns `CKR_FUNCTION_NOT_SUPPORTED`.
 - `PKCS11RS_HsmAuthChangeManagementPassword` changes the applet management
-  key and updates the retained SO state.
+  key; later commands must supply the replacement password.
 - `PKCS11RS_HsmAuthReset` resets the complete YubiHSM Auth application and
-  ends the login.
+  clears the applet secure channel.
 
 Asymmetric creation functions return the 65-byte uncompressed SEC1 public
 point. Passing a null public-key pointer queries this fixed size without
@@ -968,10 +967,10 @@ metadata objects.
 The password KDF and its deterministic P-256 construction are used only for
 authentication to a YubiHSM. They are not used for YubiKey CCID SCP03 or
 SCP11, the applet management password, or credential access passwords.
-Management-key authentication is performed by the first mutating APDU rather
-than by `C_Login`; if the device rejects the retained key, the SO login is
-cleared so the caller can retry. Reset is destructive and removes every
-YubiHSM Auth credential.
+Management-key authentication is performed by each mutating APDU. A rejected
+key returns the corresponding PIN error for that operation; no login state or
+credential is retained. Reset is destructive and removes every YubiHSM Auth
+credential without management authentication, matching the native protocol.
 
 ## Platform-protected authentication credentials
 

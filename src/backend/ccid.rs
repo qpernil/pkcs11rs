@@ -98,22 +98,12 @@ pub(crate) fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol,
     }
 }
 
-pub(crate) struct HsmAuthManagementKey(Zeroizing<[u8; 16]>);
-
-impl std::fmt::Debug for HsmAuthManagementKey {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.write_str("HsmAuthManagementKey([REDACTED])")
-    }
-}
-
 pub(crate) struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
     device: Arc<DeviceContext>,
     serial: String,
     application_aid: Vec<u8>,
-    authenticated: Cell<bool>,
     public_certificate_storage_enabled: bool,
-    management_key: RefCell<Option<HsmAuthManagementKey>>,
     info: RefCell<Option<(u64, HsmAuthInfo)>>,
     #[cfg(test)]
     fixture_info: Option<HsmAuthInfo>,
@@ -124,8 +114,6 @@ impl std::fmt::Debug for HsmAuthSlot {
         fmt.debug_struct("HsmAuthSlot")
             .field("connector", &self.connector)
             .field("application_aid", &self.application_aid)
-            .field("authenticated", &self.authenticated)
-            .field("management_key", &self.management_key)
             .field("info", &self.info)
             .finish()
     }
@@ -155,9 +143,7 @@ impl HsmAuthSlot {
             device,
             serial,
             application_aid,
-            authenticated: Cell::new(false),
             public_certificate_storage_enabled: false,
-            management_key: RefCell::new(None),
             info: RefCell::new(None),
             #[cfg(test)]
             fixture_info: None,
@@ -322,37 +308,7 @@ impl Slot for HsmAuthSlot {
     fn login(&mut self, _pin: Option<&[u8]>, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         Err(CKR_USER_TYPE_INVALID.into())
     }
-    fn login_so(&mut self, pin: Option<&[u8]>, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
-        let prompted;
-        let pin = match pin {
-            Some(pin) => pin,
-            None => {
-                let title = self.label();
-                let description =
-                    format!("Enter the YubiHSM Auth management password for {title}.");
-                prompted = pinentry.request(pinentry::Prompt {
-                    title: &title,
-                    description: &description,
-                    label: "Management password:",
-                })?;
-                prompted.as_slice()
-            }
-        };
-        self.authenticated.set(false);
-        self.management_key.get_mut().take();
-        self.connector.clear_secure_channel();
-        let key = hsmauth::password_to_key(pin)?;
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
-        self.management_key
-            .get_mut()
-            .replace(HsmAuthManagementKey(key));
-        self.authenticated.set(true);
-        Ok(())
-    }
     fn logout(&mut self) -> Result<(), Error> {
-        self.authenticated.set(false);
-        self.management_key.get_mut().take();
         self.connector.clear_secure_channel();
         Ok(())
     }
@@ -392,15 +348,10 @@ impl Slot for HsmAuthSlot {
         Ok(())
     }
     fn clear_session(&mut self) {
-        self.authenticated.set(false);
-        self.management_key.get_mut().take();
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.connector.ccid_login_state().map_or_else(
-            || self.authenticated.get(),
-            |state| state != CcidLoginState::Public && self.authenticated.get(),
-        )
+        false
     }
     fn backend_session_is_active(&self) -> bool {
         false
@@ -409,8 +360,8 @@ impl Slot for HsmAuthSlot {
         Vec::new()
     }
 
-    fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
-        pinentry.is_configured()
+    fn supports_protected_authentication_path(&self, _pinentry: &pinentry::Pinentry) -> bool {
+        false
     }
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let info = self.discovered_info()?;
@@ -431,16 +382,11 @@ impl Slot for HsmAuthSlot {
     }
     fn hsmauth_administration(
         &mut self,
+        management_key: &[u8],
         operation: HsmAuthAdministration<'_>,
     ) -> Result<Vec<u8>, Error> {
-        let management_key = Zeroizing::new(
-            *self
-                .management_key
-                .get_mut()
-                .as_ref()
-                .ok_or(CKR_USER_NOT_LOGGED_IN)?
-                .0,
-        );
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
         let result = {
             match operation {
                 HsmAuthAdministration::PutSymmetric {
@@ -451,7 +397,7 @@ impl Slot for HsmAuthSlot {
                 } => HsmAuthClient
                     .put_symmetric_credential(
                         self.connector.as_ref(),
-                        management_key.as_slice(),
+                        management_key,
                         label,
                         keys,
                         credential_password,
@@ -466,7 +412,7 @@ impl Slot for HsmAuthSlot {
                 } => HsmAuthClient
                     .put_asymmetric_credential(
                         self.connector.as_ref(),
-                        management_key.as_slice(),
+                        management_key,
                         label,
                         private_key,
                         credential_password,
@@ -474,7 +420,7 @@ impl Slot for HsmAuthSlot {
                     )
                     .and_then(|_| HsmAuthClient.get_public_key(self.connector.as_ref(), label)),
                 HsmAuthAdministration::Delete { label } => HsmAuthClient
-                    .delete_credential(self.connector.as_ref(), management_key.as_slice(), label)
+                    .delete_credential(self.connector.as_ref(), management_key, label)
                     .map(|_| Vec::new()),
                 HsmAuthAdministration::ChangeCredentialPassword {
                     label,
@@ -483,14 +429,14 @@ impl Slot for HsmAuthSlot {
                     .change_credential_password_admin(
                         self.connector.as_ref(),
                         label,
-                        management_key.as_slice(),
+                        management_key,
                         new_credential_password,
                     )
                     .map(|_| Vec::new()),
                 HsmAuthAdministration::ChangeManagementKey { new_management_key } => HsmAuthClient
                     .change_management_key(
                         self.connector.as_ref(),
-                        management_key.as_slice(),
+                        management_key,
                         new_management_key,
                     )
                     .map(|_| Vec::new()),
@@ -500,40 +446,13 @@ impl Slot for HsmAuthSlot {
             }
         };
 
-        match result {
-            Ok(value) => {
-                match operation {
-                    HsmAuthAdministration::ChangeManagementKey { new_management_key } => {
-                        let key: [u8; 16] = new_management_key
-                            .try_into()
-                            .map_err(|_| CKR_ARGUMENTS_BAD)?;
-                        self.management_key
-                            .get_mut()
-                            .replace(HsmAuthManagementKey(Zeroizing::new(key)));
-                    }
-                    HsmAuthAdministration::Reset => {
-                        self.authenticated.set(false);
-                        self.management_key.get_mut().take();
-                        self.connector.clear_secure_channel();
-                    }
-                    _ => {}
-                }
-                self.invalidate_token_objects();
-                Ok(value)
-            }
-            Err(error) => {
-                if matches!(
-                    error,
-                    Error::Generic(rv)
-                        if rv == CKR_PIN_INCORRECT as CK_RV || rv == CKR_PIN_LOCKED as CK_RV
-                ) {
-                    self.authenticated.set(false);
-                    self.management_key.get_mut().take();
-                    self.connector.clear_secure_channel();
-                }
-                Err(error)
-            }
+        if matches!(operation, HsmAuthAdministration::Reset) {
+            self.connector.clear_secure_channel();
         }
+        // Every command supplies its credential directly. No authentication
+        // secret or logical SO authorization survives this call.
+        self.invalidate_token_objects();
+        result
     }
 }
 

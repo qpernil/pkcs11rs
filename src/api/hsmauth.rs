@@ -5,6 +5,8 @@ const HSMAUTH_P256_PUBLIC_KEY_LENGTH: usize = 65;
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthPutSymmetricCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         enc_key: *const CK_BYTE,
@@ -17,6 +19,8 @@ ffi_entry_point! {
     ) -> CK_RV {
         map(hsmauth_put_symmetric(
             session_handle,
+            management_password,
+            management_password_len,
             label,
             label_len,
             unsafe { from_raw_parts(enc_key, enc_key_len as usize) },
@@ -31,6 +35,8 @@ ffi_entry_point! {
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         derivation_password: *const CK_UTF8CHAR,
@@ -44,6 +50,8 @@ ffi_entry_point! {
             let keys = crate::yubico_password_kdf(derivation_password.as_bytes())?;
             hsmauth_put_symmetric(
                 session_handle,
+                management_password,
+                management_password_len,
                 label,
                 label_len,
                 Ok(&keys[..16]),
@@ -59,6 +67,8 @@ ffi_entry_point! {
 #[allow(clippy::too_many_arguments)]
 fn hsmauth_put_symmetric(
     session_handle: CK_SESSION_HANDLE,
+    management_password: *const CK_UTF8CHAR,
+    management_password_len: CK_ULONG,
     label: *const CK_UTF8CHAR,
     label_len: CK_ULONG,
     enc_key: Result<&[u8], Error>,
@@ -77,6 +87,8 @@ fn hsmauth_put_symmetric(
     let touch_required = hsmauth_bool(touch_required)?;
     hsmauth_mutation(
         session_handle,
+        management_password,
+        management_password_len,
         HsmAuthAdministration::PutSymmetric {
             label,
             keys: hsmauth::SymmetricCredentialKeys {
@@ -93,6 +105,8 @@ fn hsmauth_put_symmetric(
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthPutAsymmetricCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         private_key: *const CK_BYTE,
@@ -110,6 +124,8 @@ ffi_entry_point! {
             }
             hsmauth_put_asymmetric(
                 session_handle,
+                management_password,
+                management_password_len,
                 label,
                 label_len,
                 Some(private_key),
@@ -126,6 +142,8 @@ ffi_entry_point! {
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         derivation_password: *const CK_UTF8CHAR,
@@ -142,6 +160,8 @@ ffi_entry_point! {
             let private_key = key.serialized().map_err(|_| CKR_FUNCTION_FAILED)?;
             hsmauth_put_asymmetric(
                 session_handle,
+                management_password,
+                management_password_len,
                 label,
                 label_len,
                 Some(&private_key[..]),
@@ -158,6 +178,8 @@ ffi_entry_point! {
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthGenerateAsymmetricCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         credential_password: *const CK_UTF8CHAR,
@@ -168,6 +190,8 @@ ffi_entry_point! {
     ) -> CK_RV {
         map(hsmauth_put_asymmetric(
             session_handle,
+            management_password,
+            management_password_len,
             label,
             label_len,
             None,
@@ -183,6 +207,8 @@ ffi_entry_point! {
 #[allow(clippy::too_many_arguments)]
 fn hsmauth_put_asymmetric(
     session_handle: CK_SESSION_HANDLE,
+    management_password: *const CK_UTF8CHAR,
+    management_password_len: CK_ULONG,
     label: *const CK_UTF8CHAR,
     label_len: CK_ULONG,
     private_key: Option<&[u8]>,
@@ -208,6 +234,8 @@ fn hsmauth_put_asymmetric(
     let touch_required = hsmauth_bool(touch_required)?;
     let value = hsmauth_mutation(
         session_handle,
+        management_password,
+        management_password_len,
         HsmAuthAdministration::PutAsymmetric {
             label,
             private_key,
@@ -228,12 +256,19 @@ fn hsmauth_put_asymmetric(
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthDeleteCredential(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
     ) -> CK_RV {
         map((|| {
             let label = hsmauth_utf8(label, label_len)?;
-            hsmauth_mutation(session_handle, HsmAuthAdministration::Delete { label }).map(|_| ())
+            hsmauth_mutation(
+                session_handle,
+                management_password,
+                management_password_len,
+                HsmAuthAdministration::Delete { label },
+            ).map(|_| ())
         })())
     }
 }
@@ -241,6 +276,8 @@ ffi_entry_point! {
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthChangeCredentialPassword(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         label: *const CK_UTF8CHAR,
         label_len: CK_ULONG,
         new_credential_password: *const CK_UTF8CHAR,
@@ -251,6 +288,8 @@ ffi_entry_point! {
             let password = hsmauth_password(new_credential_password, new_credential_password_len)?;
             hsmauth_mutation(
                 session_handle,
+                management_password,
+                management_password_len,
                 HsmAuthAdministration::ChangeCredentialPassword {
                     label,
                     new_credential_password: password.as_slice(),
@@ -264,6 +303,8 @@ ffi_entry_point! {
 ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthChangeManagementPassword(
         session_handle: CK_SESSION_HANDLE,
+        management_password: *const CK_UTF8CHAR,
+        management_password_len: CK_ULONG,
         new_management_password: *const CK_UTF8CHAR,
         new_management_password_len: CK_ULONG,
     ) -> CK_RV {
@@ -271,6 +312,8 @@ ffi_entry_point! {
             let password = hsmauth_password(new_management_password, new_management_password_len)?;
             hsmauth_mutation(
                 session_handle,
+                management_password,
+                management_password_len,
                 HsmAuthAdministration::ChangeManagementKey {
                     new_management_key: password.as_slice(),
                 },
@@ -284,20 +327,37 @@ ffi_entry_point! {
     pub fn PKCS11RS_HsmAuthReset(
         session_handle: CK_SESSION_HANDLE,
     ) -> CK_RV {
-        map(hsmauth_mutation(session_handle, HsmAuthAdministration::Reset).map(|_| ()))
+        map(hsmauth_mutation(session_handle, std::ptr::null(), 0, HsmAuthAdministration::Reset).map(|_| ()))
     }
 }
 
 fn hsmauth_mutation(
     session_handle: CK_SESSION_HANDLE,
+    management_password: *const CK_UTF8CHAR,
+    management_password_len: CK_ULONG,
     operation: HsmAuthAdministration<'_>,
 ) -> Result<Vec<u8>, Error> {
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = validate_hsmauth_session(ctx, session_handle)?;
 
+        let management_key = if matches!(operation, HsmAuthAdministration::Reset) {
+            Zeroizing::new([0; 16])
+        } else if management_password.is_null() {
+            if management_password_len != 0 {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            let prompted = ctx.pinentry.request(pinentry::Prompt {
+                title: "YubiHSM Auth administration",
+                description: "Enter the management password for this operation.",
+                label: "Management password:",
+            })?;
+            hsmauth::password_to_key(prompted.as_slice())?
+        } else {
+            hsmauth_password(management_password, management_password_len)?
+        };
         let result = ctx
             ._get_slot_mut(slot_id)?
-            .hsmauth_administration(operation);
+            .hsmauth_administration(management_key.as_slice(), operation);
         let value = match result {
             Ok(value) => value,
             Err(error) => {
@@ -306,9 +366,7 @@ fn hsmauth_mutation(
             }
         };
         ctx.reconcile_login_state(slot_id);
-        if ctx.login_role(slot_id).is_some()
-            && let Err(error) = ctx.refresh_slot_token_objects(slot_id)
-        {
+        if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
             log!(
                 2,
                 "YubiHSM Auth object refresh after administration failed: {:?}",
@@ -335,10 +393,6 @@ fn validate_hsmauth_session(
     }
     if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
         return Err(CKR_SESSION_READ_ONLY.into());
-    }
-    ctx.reconcile_login_state(slot_id);
-    if ctx.login_role(slot_id) != Some(LoginRole::So) {
-        return Err(CKR_USER_NOT_LOGGED_IN.into());
     }
     Ok(slot_id)
 }

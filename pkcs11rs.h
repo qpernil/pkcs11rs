@@ -372,8 +372,15 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmUnprovisionPlatformCredential)(
 
 #define PKCS11RS_HSMAUTH_P256_PUBLIC_KEY_SIZE 65
 
+/* HSM Auth administration uses an RW session without C_Login. Each mutation
+ * supplies its management password: NULL/0 prompts for this call; non-NULL/0
+ * supplies an explicitly empty password. No management credential is cached.
+ * Reset follows the native protocol and takes no management credential. */
+
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutSymmetricCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_BYTE *pEncKey,
@@ -387,6 +394,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutSymmetricCredential)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedSymmetricCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_UTF8CHAR *pDerivationPassword,
@@ -398,6 +407,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedSymmetricCredential)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutAsymmetricCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_BYTE *pPrivateKey,
@@ -411,6 +422,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutAsymmetricCredential)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedAsymmetricCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_UTF8CHAR *pDerivationPassword,
@@ -424,6 +437,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedAsymmetricCredential)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthGenerateAsymmetricCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_UTF8CHAR *pCredentialPassword,
@@ -435,6 +450,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthGenerateAsymmetricCredential)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthDeleteCredential)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen
 );
@@ -442,6 +459,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthDeleteCredential)(
 /* Requires YubiKey firmware 5.8.0 or later. */
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeCredentialPassword)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pLabel,
   CK_ULONG ulLabelLen,
   const CK_UTF8CHAR *pNewCredentialPassword,
@@ -450,6 +469,8 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeCredentialPassword)(
 
 CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeManagementPassword)(
   CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pManagementPassword,
+  CK_ULONG ulManagementPasswordLen,
   const CK_UTF8CHAR *pNewManagementPassword,
   CK_ULONG ulNewManagementPasswordLen
 );

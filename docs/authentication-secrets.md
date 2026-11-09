@@ -42,6 +42,11 @@ lifetime is distinct from retaining the login secret to authenticate again.
   attempt, deleting all three original key objects, including the unused type.
   Transparent session recreation is an explicit exception
   described below.
+- YubiHSM Auth administration accepts a management password per vendor API
+  call, or prompts for that call. The derived management key exists only in
+  zeroizing call-local storage. Neither USER nor SO login is supported, and no
+  management credential is cached between commands. The native reset command
+  requires no management key. See [YubiHSM Auth administration](yubihsm-auth.md#yubihsm-auth-administration).
 - Card SCP03/SCP11 uses protected provider objects for establishment. Configured
   SCP03 inputs are imported per handshake; the static administration DEK remains
   a protected binding until the selected applet or card connection changes. A

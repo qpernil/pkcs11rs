@@ -807,6 +807,7 @@ pub(crate) trait Slot {
     }
     fn hsmauth_administration(
         &mut self,
+        _management_key: &[u8],
         _operation: HsmAuthAdministration<'_>,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())

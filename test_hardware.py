@@ -1057,15 +1057,15 @@ class HeaderExtensionHardwareTests(abi.HsmAuthExportLifecycleMixin, unittest.Tes
         old, new = self.buffer(b"old-test-access"), self.buffer(b"new-test-access")
         created = False
 
-        def login_management():
+        def management_call(function, *arguments):
             if os.environ.get("PKCS11RS_HEADER_TEST_HSMAUTH_FACTORY_MANAGEMENT") == "1":
                 factory = self.buffer(b"00000000000000000000000000000000")
                 try:
-                    self.assertEqual(self.lib.C_Login(session, abi.CKU_SO, factory, len(factory)), CKR_OK)
+                    return function(session, factory, len(factory), *arguments)
                 finally:
                     ctypes.memset(factory, 0, len(factory))
-            else:
-                self.assertEqual(self.lib.C_Login(session, abi.CKU_SO, None, 0), CKR_OK)
+            # Request fresh pinentry for this command only.
+            return function(session, None, 0, *arguments)
 
         def authenticate(password, expected):
             pin = self.buffer(b":0001" + label_bytes + b"@" + self.yubikey.encode() + b":" + bytes(password))
@@ -1079,23 +1079,17 @@ class HeaderExtensionHardwareTests(abi.HsmAuthExportLifecycleMixin, unittest.Tes
 
         try:
             # Fresh pinentry by default; the public factory key is an explicit opt-in.
-            login_management()
-            self.assertEqual(self.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
-                session, label, len(label), derivation, len(derivation), old, len(old), 0), CKR_OK)
+            self.assertEqual(management_call(self.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential, label, len(label), derivation, len(derivation), old, len(old), 0), CKR_OK)
             created = True
             authenticate(old, CKR_OK)
-            self.assertEqual(self.lib.PKCS11RS_HsmAuthChangeCredentialPassword(
-                session, label, len(label), new, len(new)), CKR_OK)
+            self.assertEqual(management_call(self.lib.PKCS11RS_HsmAuthChangeCredentialPassword, label, len(label), new, len(new)), CKR_OK)
             authenticate(old, abi.CKR_PIN_INCORRECT)
             authenticate(new, CKR_OK)
         finally:
             try:
                 self.lib.C_Logout(hsm_session)
                 if created:
-                    result = self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label))
-                    if result == abi.CKR_USER_NOT_LOGGED_IN:
-                        login_management()
-                        result = self.lib.PKCS11RS_HsmAuthDeleteCredential(session, label, len(label))
+                    result = management_call(self.lib.PKCS11RS_HsmAuthDeleteCredential, label, len(label))
                     self.assertEqual(result, CKR_OK, f"failed to remove disposable credential {label_bytes.decode()}")
             finally:
                 for value in (derivation, old, new):

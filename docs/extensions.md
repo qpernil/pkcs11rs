@@ -120,7 +120,9 @@ The nonstandard administration entry points are grouped by feature:
   or an explicit public-key pin. See
   [YubiHSM device trust](yubihsm-auth.md#asymmetric-device-key-trust).
 - `PKCS11RS_HsmAuth*` creates, updates, deletes, and resets credentials in the
-  YubiHSM Auth applet. See
+  YubiHSM Auth applet through read/write sessions. Credential mutations take
+  a management password per call; no SO login or credential cache is used.
+  Reset follows the native unauthenticated reset protocol. See
   [YubiHSM Auth administration](yubihsm-auth.md#yubihsm-auth-administration).
 - `PKCS11RS_PlatformCredential*` generates, lists, reads the public half of, and
   deletes credentials backed by the current platform's protected key store.
