@@ -1,10 +1,10 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    create_yubihsm_native_object, import_yubihsm_token_object_with_id_in_slot,
-    persist_software_private_object_in_slot, piv_key_object_handles_in_slot,
-    publish_software_secret_object, required_template_value, rollback_yubihsm_created_object,
+    import_yubihsm_token_object_with_id_in_slot, persist_software_private_object_in_slot,
+    piv_key_object_handles_in_slot, publish_software_secret_object, required_template_value,
     validate_mutation_template, yubihsm_hardware_import_object, yubihsm_object_parameters,
 };
+use super::yubihsm_object::{publish_yubihsm_created_object, rollback_yubihsm_created_object};
 use crate::software_key_ops::agreement::software_ecdh;
 use crate::*;
 use zeroize::Zeroize;
@@ -2704,59 +2704,25 @@ pub(crate) fn generate_yubihsm_token_key_in_slot<S: Slot + ?Sized>(
 
     let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
     validate_new_object_access(&object, flags, logged_in)?;
-    let response = create_yubihsm_native_object(
+    let object_type = if command.code() == YubiHsmCommandCode::GenerateSymmetricKey {
+        YUBIHSM_SYMMETRIC_KEY
+    } else {
+        YUBIHSM_HMAC_KEY
+    };
+    let response = ctx
+        ._get_session(slot, session_handle)?
+        .1
+        .yubihsm_command(&command)?;
+    let id = parse_yubihsm_object_id(&response)?;
+    publish_yubihsm_created_object(
         slot,
         ctx,
-        session_handle,
-        &command,
-        if command.code() == YubiHsmCommandCode::GenerateSymmetricKey {
-            YUBIHSM_SYMMETRIC_KEY
-        } else {
-            YUBIHSM_HMAC_KEY
-        },
-    )?;
-    let id = parse_yubihsm_object_id(&response)?;
-    let publish = (|| {
-        ctx.refresh_slot_token_objects(slot, slot_id)?;
-        let (handle, imported) = ctx.resolved_objects(slot)?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
-                        && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
-                })
-                .ok_or(CKR_DEVICE_ERROR)?;
-        let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
-            slot_id,
-            &imported.unique_id,
-            template_attribute(templ, CKA_ID as _)
-                .is_some()
-                .then_some(object.id.as_slice()),
-            (!object.label.is_empty()).then_some(object.label.as_str()),
-            Some(&object),
-        );
-        let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
-        if let Err(error) = metadata_result {
-            let _ = refresh;
-            return Err(error);
-        }
-        refresh?;
-        Ok(handle)
-    })();
-    if publish.is_err() {
-        rollback_yubihsm_created_object(
-            slot,
-            ctx,
-            slot_id,
-            id,
-            if command.code() == YubiHsmCommandCode::GenerateSymmetricKey {
-                YUBIHSM_SYMMETRIC_KEY
-            } else {
-                YUBIHSM_HMAC_KEY
-            },
-        );
-    }
-    publish
+        slot_id,
+        id,
+        object_type,
+        Some((&object, template_attribute(templ, CKA_ID as _).is_some())),
+    )
+    .map(|(handle, _)| handle)
 }
 
 pub(crate) fn generate_software_token_key_in_slot<S: Slot + ?Sized>(
@@ -2886,43 +2852,23 @@ pub(crate) fn generate_yubihsm_token_pair_in_slot<S: Slot + ?Sized>(
     };
     validate_new_object_access(&private_object, flags, logged_in)?;
     validate_new_object_access(&public_object, flags, logged_in)?;
-    let response =
-        create_yubihsm_native_object(slot, ctx, session_handle, &command, private_object_type)?;
+    let response = ctx
+        ._get_session(slot, session_handle)?
+        .1
+        .yubihsm_command(&command)?;
     let id = parse_yubihsm_object_id(&response)?;
+    let (private, imported_private) = publish_yubihsm_created_object(
+        slot,
+        ctx,
+        slot_id,
+        id,
+        private_object_type,
+        Some((
+            &private_object,
+            template_attribute(private_template, CKA_ID as _).is_some(),
+        )),
+    )?;
     let publish = (|| {
-        ctx.refresh_slot_token_objects(slot, slot_id)?;
-        let (private, imported_private) = ctx
-            .resolved_objects(slot)?
-            .into_iter()
-            .find(|(_, object)| {
-                object.slot_id == Some(slot_id)
-                    && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                    && matches!(
-                        &object.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type,
-                            ..
-                        } if *object_id == id && *object_type == private_object_type
-                    )
-            })
-            .ok_or(CKR_DEVICE_ERROR)?;
-        let private_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
-            slot_id,
-            &imported_private.unique_id,
-            template_attribute(private_template, CKA_ID as _)
-                .is_some()
-                .then_some(private_object.id.as_slice()),
-            (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
-            Some(&private_object),
-        );
-        let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
-        if let Err(error) = private_result {
-            let _ = refresh;
-            return Err(error);
-        }
-        refresh?;
-        let imported_private = ctx.resolve_object(slot, private)?.ok_or(CKR_DEVICE_ERROR)?;
         let mut projected = project_public_key_object(&imported_private, public_template, true)?;
         projected.local = true;
         projected.key_gen_mechanism = Some(mechanism.mechanism);

@@ -3,6 +3,7 @@ use super::key::{
     key_pair_object, openpgp_curve, openpgp_key_ref, piv_key_pair_object, piv_policy_attribute,
     template_attribute,
 };
+use super::yubihsm_object::{publish_yubihsm_created_object, set_yubihsm_attributes_and_refresh};
 use crate::key_metadata::{KeyAttributeValue, KeyAttributes};
 use crate::*;
 
@@ -953,38 +954,6 @@ pub(super) fn yubihsm_id(id: &[u8]) -> u16 {
         [high, low] if id != [0, 0] && id != [0xff, 0xff] => u16::from_be_bytes([*high, *low]),
         _ => 0,
     }
-}
-
-/// Check the type-specific native ID namespace before creation, preserving existing objects.
-/// All native create commands begin with the same two-byte object ID.
-pub(super) fn create_yubihsm_native_object<S: Slot + ?Sized>(
-    slot: &mut S,
-    ctx: &mut crate::context::SlotState,
-    session: CK_SESSION_HANDLE,
-    command: &YubiHsmCommand,
-    object_type: u8,
-) -> Result<Vec<u8>, Error> {
-    let bytes = command.data().get(..2).ok_or(CKR_ARGUMENTS_BAD)?;
-    let id = u16::from_be_bytes([bytes[0], bytes[1]]);
-    if id != 0 {
-        match ctx
-            ._get_session(slot, session)?
-            .1
-            .yubihsm_command(&YubiHsmCommand::get_object_info(id, object_type))
-        {
-            Ok(_) => {
-                let mut data = Zeroizing::new(command.data().to_vec());
-                data[..2].fill(0);
-                return ctx
-                    ._get_session(slot, session)?
-                    .1
-                    .yubihsm_command(&YubiHsmCommand::raw(command.code(), &data)?);
-            }
-            Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as CK_RV => {}
-            Err(error) => return Err(error),
-        }
-    }
-    ctx._get_session(slot, session)?.1.yubihsm_command(command)
 }
 
 pub(super) fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<TokenObject, Error> {
@@ -2444,20 +2413,15 @@ fn set_attribute_value(
             if !logged_in {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
-            let result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+            return set_yubihsm_attributes_and_refresh(
+                &mut *ctx.slot,
+                &mut ctx.state,
                 slot_id,
                 &stored_object.unique_id,
                 id.as_deref(),
                 label.as_deref(),
                 None,
             );
-            let refresh = ctx.refresh_slot_token_objects(slot_id);
-            if let Err(error) = result {
-                let _ = refresh;
-                return Err(error);
-            }
-            refresh?;
-            return Ok(());
         }
         let mut updated_object = stored_object.clone();
 
@@ -2964,81 +2928,21 @@ pub(super) fn import_yubihsm_token_object_with_id_in_slot<S: Slot + ?Sized>(
 ) -> Result<CK_OBJECT_HANDLE, Error> {
     let hardware_object = yubihsm_hardware_import_object(object)?;
     let (command, expected_class, expected_object_type) = yubihsm_import_command(&hardware_object)?;
-    let response =
-        create_yubihsm_native_object(slot, ctx, session_handle, &command, expected_object_type)?;
+    let response = ctx
+        ._get_session(slot, session_handle)?
+        .1
+        .yubihsm_command(&command)?;
     let id = parse_yubihsm_object_id(&response)?;
-    let publish = (|| -> Result<CK_OBJECT_HANDLE, Error> {
-        ctx.refresh_slot_token_objects(slot, slot_id)?;
-        let imported = ctx
-            .resolved_objects(slot)?
-            .into_iter()
-            .find_map(|(_, candidate)| {
-                (candidate.slot_id == Some(slot_id)
-                    && candidate.class == expected_class
-                    && matches!(
-                        candidate.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type,
-                            ..
-                        } if object_id == id && object_type == expected_object_type
-                    ))
-                .then_some(candidate)
-            })
-            .ok_or(CKR_DEVICE_ERROR)?;
-        let metadata_result = ctx.get_slot(slot, slot_id)?.yubihsm_set_attributes(
-            slot_id,
-            &imported.unique_id,
-            id_supplied.then_some(object.id.as_slice()),
-            (!object.label.is_empty()).then_some(object.label.as_str()),
-            Some(object),
-        );
-        let refresh = ctx.refresh_slot_token_objects(slot, slot_id);
-        if let Err(error) = metadata_result {
-            let _ = refresh;
-            return Err(error);
-        }
-        refresh?;
-        ctx.resolved_objects(slot)?
-            .into_iter()
-            .find_map(|(handle, candidate)| {
-                (candidate.slot_id == Some(slot_id)
-                    && candidate.class == expected_class
-                    && matches!(
-                        candidate.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type,
-                            ..
-                        } if object_id == id && object_type == expected_object_type
-                    ))
-                .then_some(handle)
-            })
-            .ok_or(CKR_DEVICE_ERROR.into())
-    })();
-    if publish.is_err() {
-        // A failed metadata/publication step must not leave an imported object
-        // behind when C_CreateObject has returned no handle to its caller.
-        rollback_yubihsm_created_object(slot, ctx, slot_id, id, expected_object_type);
-    }
-    publish
-}
-
-pub(super) fn rollback_yubihsm_created_object<S: Slot + ?Sized>(
-    slot: &mut S,
-    ctx: &mut crate::context::SlotState,
-    slot_id: CK_SLOT_ID,
-    id: u16,
-    object_type: u8,
-) {
-    if let Err(error) = ctx
-        .get_slot(slot, slot_id)
-        .and_then(|backend| backend.yubihsm_rollback_created_object(id, object_type))
-    {
-        tracing::warn!(target: "pkcs11rs::storage", ?error,
-            "Failed to roll back an unpublished YubiHSM object; reload required");
-    }
-    let _ = ctx.refresh_slot_token_objects(slot, slot_id);
+    debug_assert_eq!(object.class, expected_class);
+    publish_yubihsm_created_object(
+        slot,
+        ctx,
+        slot_id,
+        id,
+        expected_object_type,
+        Some((object, id_supplied)),
+    )
+    .map(|(handle, _)| handle)
 }
 
 pub(crate) fn persist_software_private_object_in_slot<S: Slot + ?Sized>(

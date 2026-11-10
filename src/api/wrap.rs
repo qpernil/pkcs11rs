@@ -1,3 +1,4 @@
+use super::yubihsm_object::{publish_yubihsm_created_object, rollback_yubihsm_created_object};
 use super::{
     crypt::{
         RsaOaepParameters, aes_key_wrap_transform, aes_kwp_transform, parse_key_wrap_iv,
@@ -7,8 +8,7 @@ use super::{
     key::yubihsm_ec_algorithm,
     object::{
         persist_software_private_object, publish_software_secret_object,
-        rollback_yubihsm_created_object, validate_mutation_template,
-        yubihsm_hardware_import_object, yubihsm_id,
+        validate_mutation_template, yubihsm_hardware_import_object, yubihsm_id,
     },
 };
 use crate::*;
@@ -1043,47 +1043,7 @@ fn unwrap_key(
             .1
             .yubihsm_command(&command)?;
         let (target_type, target_id) = parse_yubihsm_import_response(&response)?;
-        let publish = (|| -> Result<CK_OBJECT_HANDLE, Error> {
-            if expected_target_type.is_some_and(|expected| expected != target_type) {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            ctx.refresh_slot_token_objects(slot_id)?;
-            let (handle, imported) = ctx
-                .resolved_objects()?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && matches!(
-                            object.material,
-                            KeyMaterial::YubiHsm {
-                                id,
-                                object_type,
-                                ..
-                            } if id == target_id && object_type == target_type
-                        )
-                })
-                .ok_or(CKR_DEVICE_ERROR)?;
-
-            if let Some(requested) = requested_attributes {
-                let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-                    slot_id,
-                    &imported.unique_id,
-                    super::key::template_attribute(template, CKA_ID as _)
-                        .is_some()
-                        .then_some(requested.id.as_slice()),
-                    (!requested.label.is_empty()).then_some(requested.label.as_str()),
-                    Some(&requested),
-                );
-                let refresh = ctx.refresh_slot_token_objects(slot_id);
-                if let Err(error) = metadata_result {
-                    let _ = refresh;
-                    return Err(error);
-                }
-                refresh?;
-            }
-            Ok(handle)
-        })();
-        if publish.is_err() {
+        if expected_target_type.is_some_and(|expected| expected != target_type) {
             rollback_yubihsm_created_object(
                 &mut *ctx.slot,
                 &mut ctx.state,
@@ -1091,8 +1051,23 @@ fn unwrap_key(
                 target_id,
                 target_type,
             );
+            return Err(CKR_DEVICE_ERROR.into());
         }
-        *output_handle = publish?;
+        let attributes = requested_attributes.as_ref().map(|requested| {
+            (
+                requested,
+                super::key::template_attribute(template, CKA_ID as _).is_some(),
+            )
+        });
+        *output_handle = publish_yubihsm_created_object(
+            &mut *ctx.slot,
+            &mut ctx.state,
+            slot_id,
+            target_id,
+            target_type,
+            attributes,
+        )?
+        .0;
         Ok(())
     })
 }

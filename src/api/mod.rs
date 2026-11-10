@@ -22,6 +22,7 @@ mod session;
 mod software;
 mod wrap;
 mod yubihsm;
+mod yubihsm_object;
 
 pub use crypt::*;
 pub use general::*;

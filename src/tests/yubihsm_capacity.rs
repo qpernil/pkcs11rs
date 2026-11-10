@@ -363,10 +363,31 @@ fn yubihsm_native_ids_preserve_wire_bytes_empty_values_and_collisions() {
             Some(vec![0, 0]),
             Some(vec![0xff, 0xff]),
             Some(vec![0, 1, 2]),
-            Some(vec![0x56, 0x78]),
+            Some(if import {
+                vec![0x9a, 0xbc]
+            } else {
+                vec![0x56, 0x78]
+            }),
         ] {
             let before = peer.native_ids(crate::YUBIHSM_SYMMETRIC_KEY);
-            let before_metadata = peer.storage_usage().1.len();
+            let before_usage = peer.storage_usage();
+            let collision = requested.as_ref().and_then(|bytes| {
+                let native = match bytes.as_slice() {
+                    [high, low] => u16::from_be_bytes([*high, *low]),
+                    _ => 0,
+                };
+                if native == 0 || !before.contains(&native) {
+                    return None;
+                }
+                let handles =
+                    find_by_bytes_attribute(session, CKO_SECRET_KEY as _, CKA_ID as _, bytes);
+                assert_eq!(handles.len(), 1);
+                let handle = handles[0];
+                Some((
+                    handle,
+                    read_bytes_attribute(session, handle, CKA_UNIQUE_ID as _),
+                ))
+            });
             let mut yes = CK_TRUE as CK_BBOOL;
             let mut length = 16 as CK_ULONG;
             let mut id = requested.clone().unwrap_or_default();
@@ -377,8 +398,8 @@ fn yubihsm_native_ids_preserve_wire_bytes_empty_values_and_collisions() {
             if requested.is_some() {
                 template.push(bytes_attribute(CKA_ID as _, &mut id));
             }
-            let mut object = 0;
-            if import {
+            let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            let rv = if import {
                 let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
                 let mut key_type = CKK_AES as CK_KEY_TYPE;
                 let mut material = [0x42; 16];
@@ -388,15 +409,12 @@ fn yubihsm_native_ids_preserve_wire_bytes_empty_values_and_collisions() {
                     scalar_attribute(CKA_PRIVATE as _, &mut yes),
                     bytes_attribute(CKA_VALUE as _, &mut material),
                 ]);
-                assert_eq!(
-                    crate::api::C_CreateObject(
-                        session,
-                        template.as_mut_ptr(),
-                        template.len() as _,
-                        &mut object
-                    ),
-                    CKR_OK as CK_RV
-                );
+                crate::api::C_CreateObject(
+                    session,
+                    template.as_mut_ptr(),
+                    template.len() as _,
+                    &mut object,
+                )
             } else {
                 template.push(scalar_attribute(CKA_VALUE_LEN as _, &mut length));
                 let mut mechanism = CK_MECHANISM {
@@ -404,22 +422,31 @@ fn yubihsm_native_ids_preserve_wire_bytes_empty_values_and_collisions() {
                     pParameter: std::ptr::null_mut(),
                     ulParameterLen: 0,
                 };
+                crate::api::C_GenerateKey(
+                    session,
+                    &mut mechanism,
+                    template.as_mut_ptr(),
+                    template.len() as _,
+                    &mut object,
+                )
+            };
+            if let Some((existing, identity)) = collision {
+                assert_eq!(rv, CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+                assert_eq!(object, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+                assert_eq!(peer.native_ids(crate::YUBIHSM_SYMMETRIC_KEY), before);
+                assert_eq!(peer.storage_usage(), before_usage);
                 assert_eq!(
-                    crate::api::C_GenerateKey(
-                        session,
-                        &mut mechanism,
-                        template.as_mut_ptr(),
-                        template.len() as _,
-                        &mut object
-                    ),
-                    CKR_OK as CK_RV
+                    read_bytes_attribute(session, existing, CKA_UNIQUE_ID as _),
+                    identity
                 );
+                continue;
             }
+            assert_eq!(rv, CKR_OK as CK_RV);
             let after = peer.native_ids(crate::YUBIHSM_SYMMETRIC_KEY);
             assert_eq!(
                 after.len(),
                 before.len() + 1,
-                "collision must preserve the existing object"
+                "successful creation must add one native object"
             );
             let native = *after.iter().find(|id| !before.contains(id)).unwrap();
             assert!(native != 0 && native != 0xffff);
@@ -437,7 +464,7 @@ fn yubihsm_native_ids_preserve_wire_bytes_empty_values_and_collisions() {
             }
             assert_eq!(
                 peer.storage_usage().1.len(),
-                before_metadata + usize::from(expected != native.to_be_bytes())
+                before_usage.1.len() + usize::from(expected != native.to_be_bytes())
             );
         }
     }
@@ -502,6 +529,45 @@ fn yubihsm_generated_pairs_preserve_independent_template_ids() {
                 requested.unwrap_or_else(|| native_id.to_vec())
             );
         }
+        let baseline = peer.storage_usage();
+        let public_identity = read_bytes_attribute(session, public, CKA_UNIQUE_ID as _);
+        let private_identity = read_bytes_attribute(session, private, CKA_UNIQUE_ID as _);
+        let mut collision_id = native_id;
+        let mut collision_template = private_template.clone();
+        collision_template.retain(|attribute| attribute.type_ != CKA_ID as CK_ATTRIBUTE_TYPE);
+        collision_template.push(bytes_attribute(CKA_ID as _, &mut collision_id));
+        let (mut rejected_public, mut rejected_private) =
+            (CK_INVALID_HANDLE as _, CK_INVALID_HANDLE as _);
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as _,
+                collision_template.as_mut_ptr(),
+                collision_template.len() as _,
+                &mut rejected_public,
+                &mut rejected_private,
+            ),
+            CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+        );
+        assert_eq!(
+            (rejected_public, rejected_private),
+            (
+                CK_INVALID_HANDLE as CK_OBJECT_HANDLE,
+                CK_INVALID_HANDLE as CK_OBJECT_HANDLE
+            )
+        );
+        assert_eq!(peer.storage_usage(), baseline);
+        assert_eq!(peer.native_ids(crate::YUBIHSM_ASYMMETRIC_KEY), native_ids);
+        assert_eq!(
+            read_bytes_attribute(session, public, CKA_UNIQUE_ID as _),
+            public_identity
+        );
+        assert_eq!(
+            read_bytes_attribute(session, private, CKA_UNIQUE_ID as _),
+            private_identity
+        );
         assert_eq!(
             crate::api::C_DestroyObject(session, public),
             CKR_OK as CK_RV
@@ -684,6 +750,69 @@ fn yubihsm_unwrap_preserves_empty_ids_and_rolls_back_metadata_capacity_failure()
         CKR_OK as CK_RV
     );
     assert_eq!(peer.storage_usage(), baseline);
+    // Submit explicit native IDs unchanged. A collision must fail without
+    // allocating another object, writing metadata, or removing the original.
+    let mut original_id = read_bytes_attribute(session, original, CKA_ID as _);
+    let original_identity = read_bytes_attribute(session, original, CKA_UNIQUE_ID as _);
+    let mut collision_template = template.clone();
+    *collision_template.last_mut().unwrap() = bytes_attribute(CKA_ID as _, &mut original_id);
+    let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CKM_SHA256 as _,
+        mgf: CKG_MGF1_SHA256 as _,
+        source: CKZ_DATA_SPECIFIED as _,
+        pSourceData: std::ptr::null_mut(),
+        ulSourceDataLen: 0,
+    };
+    let mut rsa_aes_parameters = CK_RSA_AES_KEY_WRAP_PARAMS {
+        ulAESKeyBits: 256,
+        pOAEPParams: &mut oaep,
+    };
+    let mut rsa_aes = CK_MECHANISM {
+        mechanism: CKM_RSA_AES_KEY_WRAP as _,
+        pParameter: (&mut rsa_aes_parameters as *mut CK_RSA_AES_KEY_WRAP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as _,
+    };
+    for collision_mechanism in [&mut mechanism, &mut rsa_aes] {
+        let mut collision_wrapped = [0u8; 512];
+        let mut collision_len = collision_wrapped.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                collision_mechanism,
+                public,
+                original,
+                collision_wrapped.as_mut_ptr(),
+                &mut collision_len
+            ),
+            CKR_OK as CK_RV
+        );
+        imported = CK_INVALID_HANDLE as _;
+        let native_ids = peer.native_ids(crate::YUBIHSM_SYMMETRIC_KEY);
+        assert_eq!(
+            crate::api::C_UnwrapKey(
+                session,
+                collision_mechanism,
+                private,
+                collision_wrapped.as_mut_ptr(),
+                collision_len,
+                collision_template.as_mut_ptr(),
+                collision_template.len() as _,
+                &mut imported,
+            ),
+            CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+        );
+        assert_eq!(imported, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+        assert_eq!(peer.native_ids(crate::YUBIHSM_SYMMETRIC_KEY), native_ids);
+        assert_eq!(
+            read_bytes_attribute(session, original, CKA_ID as _),
+            original_id
+        );
+        assert_eq!(
+            read_bytes_attribute(session, original, CKA_UNIQUE_ID as _),
+            original_identity
+        );
+        assert_eq!(peer.storage_usage(), baseline);
+    }
     while peer.storage_usage().0 < OBJECT_BUDGET - 1 {
         create(session, Workload::Aes).unwrap();
     }

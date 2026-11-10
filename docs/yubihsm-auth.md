@@ -517,13 +517,18 @@ See [deletion headroom](yubihsm-storage-capacity.md#deletion-headroom).
 `CKA_ID` remains an arbitrary byte string. If it is omitted on native creation,
 ID zero requests device allocation and the returned attribute is the assigned
 two-byte ID. An explicit two-byte value from `0001` through `FFFE` uses those
-same wire bytes when free in the native object-type namespace. There is no
-padding, truncation, or host-endian interpretation.
+same wire bytes in the native object-type namespace. Generation, import, and
+template-based unwrap submit the creation command directly. An occupied ID of
+the same native type returns `CKR_ATTRIBUTE_VALUE_INVALID`, preserving the
+existing object without allocating another ID or creating metadata. There is
+no preliminary availability lookup, padding, truncation, or host-endian
+interpretation.
 
 Other explicit values—including empty, one-byte zero, `0000`, `FFFF`, and longer
-values—request native allocation and are preserved exactly in metadata. A
-collision in the same native object-type namespace also allocates another ID
-and preserves the requested `CKA_ID`; it never replaces the existing object.
+values—request native allocation and are preserved exactly in metadata.
+Full-object native unwrap preserves the native type and ID carried inside the
+encrypted blob and likewise rejects an occupied ID of the same type.
+
 Certificates and keys can use the same native ID because their native types
 have separate namespaces. Public and private template IDs can differ; their
 attribute overrides are independent. When only the public template supplies an
