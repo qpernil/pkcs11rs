@@ -1,0 +1,122 @@
+{
+  "date": "2026-11-10",
+  "host": "Apple M5 Pro, 48 GB RAM, aarch64-apple-darwin",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--offline",
+    "--timings"
+  ],
+  "candidate": "Move the YubiHSM typed command and response codec into a yubihsm-protocol workspace subcrate; leave transport, secure sessions, and PKCS #11 policy in pkcs11rs.",
+  "warm_method": "Touch src/lib.rs before each run; reuse dependency artifacts; release incremental compilation is disabled.",
+  "fresh_method": "Use a different empty CARGO_TARGET_DIR for every run; reuse downloaded dependency sources.",
+  "measurements": [
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 1,
+      "seconds": 8.999,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 2,
+      "seconds": 8.923,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 3,
+      "seconds": 8.991,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 4,
+      "seconds": 9.101,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 5,
+      "seconds": 9.165,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "fresh",
+      "iteration": 1,
+      "seconds": 27.156,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "fresh",
+      "iteration": 2,
+      "seconds": 26.485,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "warm",
+      "iteration": 1,
+      "seconds": 9.026,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "warm",
+      "iteration": 2,
+      "seconds": 9.01,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "warm",
+      "iteration": 3,
+      "seconds": 9.132,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "warm",
+      "iteration": 4,
+      "seconds": 9.125,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "warm",
+      "iteration": 5,
+      "seconds": 9.095,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "fresh",
+      "iteration": 1,
+      "seconds": 27.685,
+      "exit_code": 0
+    },
+    {
+      "stage": "after",
+      "kind": "fresh",
+      "iteration": 2,
+      "seconds": 27.463,
+      "exit_code": 0
+    }
+  ],
+  "result": "No observed build-time benefit. Extraction reverted; prior correctness fixes preserved.",
+  "benchmark_dependency_versions": {
+    "rsa": "0.9.10",
+    "ml-dsa": "0.1.1, upstream Git a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e"
+  },
+  "workspace_lockfile_sha256": "8e2030d76a47bf779077db7d1c04b564795d327dd0b775f66af233a6a21eb7ca"
+}

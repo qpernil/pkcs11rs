@@ -1,0 +1,156 @@
+{
+  "date": "2026-11-10",
+  "host": "Apple M5 Pro, 48 GB RAM, aarch64-apple-darwin",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--offline",
+    "--timings"
+  ],
+  "source_layout": "Original protocol layout; trial extraction reverted in both configurations. Pending correctness fixes are identical.",
+  "default_profile": "Cargo release defaults; optimization level 3, local ThinLTO, no cross-crate LTO.",
+  "lto_off_environment": {
+    "CARGO_PROFILE_RELEASE_LTO": "off"
+  },
+  "method": "Same fresh and main-crate rebuild methods as protocol-extraction-build-times.json; the LTO-off warm cache was prepared separately before measurement.",
+  "measurements": [
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 1,
+      "seconds": 8.999,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 2,
+      "seconds": 8.923,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 3,
+      "seconds": 8.991,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 4,
+      "seconds": 9.101,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "warm",
+      "iteration": 5,
+      "seconds": 9.165,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "fresh",
+      "iteration": 1,
+      "seconds": 27.156,
+      "exit_code": 0
+    },
+    {
+      "stage": "before",
+      "kind": "fresh",
+      "iteration": 2,
+      "seconds": 26.485,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "warm",
+      "iteration": 1,
+      "seconds": 7.838,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "warm",
+      "iteration": 2,
+      "seconds": 7.736,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "warm",
+      "iteration": 3,
+      "seconds": 7.635,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "warm",
+      "iteration": 4,
+      "seconds": 8.454,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "warm",
+      "iteration": 5,
+      "seconds": 7.69,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "fresh",
+      "iteration": 1,
+      "seconds": 23.194,
+      "exit_code": 0
+    },
+    {
+      "stage": "lto-off",
+      "kind": "fresh",
+      "iteration": 2,
+      "seconds": 24.027,
+      "exit_code": 0
+    }
+  ],
+  "library_bytes": {
+    "default": 12621536,
+    "lto_off": 14083968
+  },
+  "exported_symbols": {
+    "same_names": true,
+    "count": 141
+  },
+  "limitation": "Runtime throughput was not benchmarked. No persistent profile setting changed.",
+  "follow_up_default_control": [
+    {
+      "stage": "default-control",
+      "kind": "warm",
+      "iteration": 1,
+      "seconds": 9.069,
+      "exit_code": 0
+    },
+    {
+      "stage": "default-control",
+      "kind": "warm",
+      "iteration": 2,
+      "seconds": 8.856,
+      "exit_code": 0
+    },
+    {
+      "stage": "default-control",
+      "kind": "warm",
+      "iteration": 3,
+      "seconds": 8.724,
+      "exit_code": 0
+    }
+  ],
+  "benchmark_dependency_versions": {
+    "rsa": "0.9.10",
+    "ml-dsa": "0.1.1, upstream Git a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e"
+  },
+  "workspace_lockfile_sha256": "8e2030d76a47bf779077db7d1c04b564795d327dd0b775f66af233a6a21eb7ca"
+}
