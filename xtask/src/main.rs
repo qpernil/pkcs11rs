@@ -1,4 +1,5 @@
 use libloading::{Library, Symbol};
+mod dependencies;
 use std::{
     env,
     ffi::{OsString, c_ulong, c_void},
@@ -54,6 +55,7 @@ fn main() {
     let args = args.collect::<Vec<_>>();
     match command.as_deref() {
         Some("bindings") => bindings(&args),
+        Some("deps") => dependencies::check(&args),
         Some("ios") => ios(&args),
         Some("load-shared-library") => load_shared_library(&args),
         Some("macos-tool") => macos_tool(&args),
@@ -63,7 +65,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]\n       cargo xtask macos-tool [--release] [--team TEAM]"
+        "usage: cargo xtask bindings [--check]\n       cargo xtask deps [--check] [--all] [--manifest-path PATH]...\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]\n       cargo xtask macos-tool [--release] [--team TEAM]"
     );
     process::exit(2);
 }

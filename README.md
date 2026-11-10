@@ -388,6 +388,34 @@ cargo deny --workspace --all-features --locked check advisories licenses
 cargo deny --manifest-path xtask/Cargo.toml --workspace --all-features --locked check advisories licenses
 ```
 
+`cargo xtask deps` (or `deps --check`) reports available dependency updates and
+runs advisory and license checks for both workspaces. The same implementation
+can check the related projects or additional Cargo workspaces:
+
+```sh
+cargo xtask deps --all
+cargo xtask deps --manifest-path ../another-project/Cargo.toml
+cargo xtask deps --all --manifest-path ../another-project/Cargo.toml
+```
+
+`--all` includes pkcs11rs, its xtask workspace, and the sibling repositories
+`software-key-core`, `virtual-yubikey`, `virtual-yubihsm`,
+`usb-gadget-supervisor`, `display-backends`, `raspberry-pi-i2c-target`, and
+`swedish-tax`. Swedish Tax's xtask belongs to its main workspace and shares
+that lockfile; it is covered by the workspace check.
+Repeated `--manifest-path` options select additional workspaces; without
+`--all`, they replace the default selection. Paths are relative to the calling
+directory. Missing manifests are failures, and remaining checks still run.
+The command prints each result and an aggregate summary.
+
+The command requires `cargo-deny` and leaves manifests and lockfiles unchanged.
+It uses the nearest `deny.toml` in each selected manifest's directory or its
+ancestors, falling back to pkcs11rs's policy when none is present. The selected
+policy path is printed, and its exceptions apply. Available updates alone do
+not fail the command; failed checks do. Project-local `deny.exceptions.toml`
+files add crate-specific license exceptions to that base policy. Git revision
+pins, vendored dependencies, and non-Cargo projects require separate upstream review.
+
 ## Build
 
 The first-party `software-key-core`, `virtual-yubikey-core`, and
