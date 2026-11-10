@@ -19,7 +19,7 @@ use crate::{
     send_yubihsm_secure_command, yubihsm_capabilities_to_attributes, yubihsm_capability,
     yubihsm_ec_parameters,
 };
-use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
+use rsa::{PublicKey as RsaPublicKey, traits::PublicKeyParts};
 use software_key_core::{
     hybrid_kem::HybridKemConstruction,
     post_quantum::{
@@ -251,8 +251,8 @@ impl SoftwarePrivateKeyMaterialExt for SoftwarePrivateKey {
                 }),
                 SharedPublicKey::Rsa { modulus, exponent } => Ok(PublicKeyMaterial::Rsa(
                     RsaPublicKey::new(
-                        BigUint::from_bytes_be(&modulus),
-                        BigUint::from_bytes_be(&exponent),
+                        rsa::BoxedUint::from_be_slice_vartime(&modulus),
+                        rsa::BoxedUint::from_be_slice_vartime(&exponent),
                     )
                     .map_err(|_| Error::from(CKR_DATA_INVALID))?,
                 )),
@@ -1543,9 +1543,10 @@ impl TokenObject {
         }
         if let Ok(public_key) = self.projected_public_key() {
             return match &public_key {
-                PublicKeyMaterial::Rsa(key) => {
-                    rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
-                }
+                PublicKeyMaterial::Rsa(key) => rsa_public_key_info(
+                    &key.n().to_be_bytes_trimmed_vartime(),
+                    &key.e().to_be_bytes_trimmed_vartime(),
+                ),
                 PublicKeyMaterial::Ec {
                     parameters,
                     public_key,
@@ -1578,11 +1579,12 @@ impl TokenObject {
                 algorithm,
                 public_key,
                 ..
-            } if is_yubihsm_rsa(*algorithm) => {
-                RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
-                    .map(PublicKeyMaterial::Rsa)
-                    .map_err(|_| Error::from(CKR_DATA_INVALID))
-            }
+            } if is_yubihsm_rsa(*algorithm) => RsaPublicKey::new(
+                rsa::BoxedUint::from_be_slice_vartime(public_key),
+                rsa::BoxedUint::from(65537u32),
+            )
+            .map(PublicKeyMaterial::Rsa)
+            .map_err(|_| Error::from(CKR_DATA_INVALID)),
             KeyMaterial::YubiHsm {
                 algorithm,
                 public_key,
@@ -1945,7 +1947,9 @@ impl TokenObject {
             }
             x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE && self.is_key_object() => Some(Vec::new()),
             x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match self.projected_public_key().ok() {
-                Some(PublicKeyMaterial::Rsa(key)) => Some(key.n().to_bytes_be()),
+                Some(PublicKeyMaterial::Rsa(key)) => {
+                    Some(key.n().to_be_bytes_trimmed_vartime().into_vec())
+                }
                 _ => match &self.material {
                     KeyMaterial::YubiHsm {
                         algorithm,
@@ -1959,7 +1963,9 @@ impl TokenObject {
             },
             x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => {
                 match self.projected_public_key().ok() {
-                    Some(PublicKeyMaterial::Rsa(key)) => Some(key.e().to_bytes_be()),
+                    Some(PublicKeyMaterial::Rsa(key)) => {
+                        Some(key.e().to_be_bytes_trimmed_vartime().into_vec())
+                    }
                     _ => match &self.material {
                         KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                             Some(vec![0x01, 0x00, 0x01])
@@ -2434,11 +2440,12 @@ pub(crate) fn rsa_public_key_material(
             algorithm,
             public_key,
             ..
-        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
-            RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
-                .map(Some)
-                .map_err(|_| Error::from(CKR_DATA_INVALID))
-        }
+        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => RsaPublicKey::new(
+            rsa::BoxedUint::from_be_slice_vartime(public_key),
+            rsa::BoxedUint::from(65537u32),
+        )
+        .map(Some)
+        .map_err(|_| Error::from(CKR_DATA_INVALID)),
         _ => Ok(None),
     }
 }

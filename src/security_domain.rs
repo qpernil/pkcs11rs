@@ -618,8 +618,8 @@ fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>),
     }
     let scalar = key.private_key;
     let parameters = crate::ec_parameters(curve.ec_curve())?;
-    let scalar = rsa::BigUint::from_bytes_be(scalar);
-    if scalar == rsa::BigUint::from(0u8) || scalar >= parameters.n {
+    let scalar = num_bigint_dig::BigUint::from_bytes_be(scalar);
+    if scalar == num_bigint_dig::BigUint::from(0u8) || scalar >= parameters.n {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let scalar = scalar.to_bytes_be();

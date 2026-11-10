@@ -710,7 +710,7 @@ fn key_destructive_apdus_are_classified_before_transport() {
 
 #[test]
 fn public_key_reads_do_not_issue_key_mutation_commands() {
-    let mut public_key = encode_tlv(0x81, &[0x11; 128]).unwrap();
+    let mut public_key = encode_tlv(0x81, &[0x91; 128]).unwrap();
     public_key.extend_from_slice(&encode_tlv(0x82, &[0x01, 0x00, 0x01]).unwrap());
     let public_key = encode_tlv(0x7f49, &public_key).unwrap();
     let connector = ScriptedConnector::new(vec![

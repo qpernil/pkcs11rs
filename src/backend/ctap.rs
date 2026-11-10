@@ -736,8 +736,8 @@ pub(crate) fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey
                 key_type: CKK_RSA as CK_KEY_TYPE,
                 public_key: PublicKeyMaterial::Rsa(
                     RsaPublicKey::new(
-                        BigUint::from_bytes_be(&modulus),
-                        BigUint::from_bytes_be(&public_exponent),
+                        rsa::BoxedUint::from_be_slice_vartime(&modulus),
+                        rsa::BoxedUint::from_be_slice_vartime(&public_exponent),
                     )
                     .ok()?,
                 ),
@@ -2053,8 +2053,8 @@ mod tests {
         assert!(matches!(
             projected.public_key,
             PublicKeyMaterial::Rsa(public)
-                if public.n().to_bytes_be() == [0x67; 256]
-                    && public.e().to_bytes_be() == [0x01, 0x00, 0x01]
+                if public.n().to_be_bytes_trimmed_vartime().into_vec() == [0x67; 256]
+                    && public.e().to_be_bytes_trimmed_vartime().into_vec() == [0x01, 0x00, 0x01]
         ));
 
         assert!(project_cose_public_key(&[0xa2, 0x01, 0x02, 0x01, 0x02]).is_none());

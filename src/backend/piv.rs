@@ -104,8 +104,8 @@ pub(crate) fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
     let mut encoded = vec![key.algorithm as u8];
     match &key.public_key {
         PivPublicKey::Rsa(public_key) => {
-            encoded.extend(public_key.n().to_bytes_be());
-            encoded.extend(public_key.e().to_bytes_be());
+            encoded.extend(public_key.n().to_be_bytes_trimmed_vartime().into_vec());
+            encoded.extend(public_key.e().to_be_bytes_trimmed_vartime().into_vec());
         }
         PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
             encoded.extend_from_slice(public_key);
@@ -219,8 +219,8 @@ pub(crate) fn piv_public_key_from_metadata(
             MetadataPublicKey::Rsa { modulus, exponent },
         ) => {
             let public_key = RsaPublicKey::new(
-                BigUint::from_bytes_be(&modulus),
-                BigUint::from_bytes_be(&exponent),
+                rsa::BoxedUint::from_be_slice_vartime(&modulus),
+                rsa::BoxedUint::from_be_slice_vartime(&exponent),
             )
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
             if public_key.size() != algorithm.rsa_input_length().unwrap_or_default() {

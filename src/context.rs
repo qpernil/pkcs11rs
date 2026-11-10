@@ -35,7 +35,7 @@ use crate::{
 #[cfg(feature = "native-hardware")]
 use crate::{HidFidoEndpoint, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
-use rsa::RsaPublicKey;
+use rsa::PublicKey as RsaPublicKey;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,

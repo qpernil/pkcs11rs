@@ -630,7 +630,7 @@ pub fn piv_rsa_pss_hash_mapping_preserves_sha3_variants() {
 #[test]
 pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     let private = crate::certificate_builder::rsa_key();
-    let public = rsa::RsaPublicKey::from(&private);
+    let public = rsa::PublicKey::from(&private);
     let data = b"padding test";
     let digest = crate::MessageDigest::Sha256.digest(data);
     let pss = crate::encode_rsa_pss(
@@ -805,9 +805,9 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 policy_templates: crate::KeyPolicyTemplates::default(),
                 creator_session: None,
                 public_key: Some(crate::PublicKeyMaterial::Rsa(
-                    rsa::RsaPublicKey::new(
-                        rsa::BigUint::from_bytes_be(&[0x81; 128]),
-                        rsa::BigUint::from(65537u32),
+                    rsa::PublicKey::new(
+                        rsa::BoxedUint::from_be_slice_vartime(&[0x81; 128]),
+                        rsa::BoxedUint::from(65537u32),
                     )
                     .expect("test RSA public key"),
                 )),
@@ -1469,7 +1469,7 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
             domains: 1,
             capabilities: crate::yubihsm_capabilities(&[0x05]),
             delegated_capabilities: [0; 8],
-            public_key: public_key.n().to_bytes_be(),
+            public_key: public_key.n().to_be_bytes_trimmed_vartime().into_vec(),
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         };
     });
@@ -1670,7 +1670,7 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
 fn ecdsa_verifier_supports_every_advertised_prime_curve() {
     use num_bigint_dig::traits::ModInverse;
 
-    fn padded(value: &rsa::BigUint, length: usize) -> Vec<u8> {
+    fn padded(value: &num_bigint_dig::BigUint, length: usize) -> Vec<u8> {
         let encoded = value.to_bytes_be();
         let mut output = vec![0; length - encoded.len()];
         output.extend_from_slice(&encoded);
@@ -1691,10 +1691,10 @@ fn ecdsa_verifier_supports_every_advertised_prime_curve() {
         let generator = crate::EcPointValue {
             x: parameters.gx.clone(),
             y: parameters.gy.clone(),
-            z: rsa::BigUint::from(1u8),
+            z: num_bigint_dig::BigUint::from(1u8),
         };
         let digest = [0x42; 64];
-        let nonce = rsa::BigUint::from(2u8);
+        let nonce = num_bigint_dig::BigUint::from(2u8);
         let nonce_point = crate::ec_multiply(&nonce, &generator, &parameters);
         let inverse = nonce_point
             .z
@@ -1703,7 +1703,7 @@ fn ecdsa_verifier_supports_every_advertised_prime_curve() {
             .to_biguint()
             .unwrap();
         let r = (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
-        let mut z = rsa::BigUint::from_bytes_be(&digest);
+        let mut z = num_bigint_dig::BigUint::from_bytes_be(&digest);
         if digest.len() * 8 > parameters.n.bits() {
             z >>= digest.len() * 8 - parameters.n.bits();
         }

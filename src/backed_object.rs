@@ -4,7 +4,7 @@ use crate::key_metadata::{
 use crate::storage::{ContentReference, StorageError, StorageProvider};
 use crate::*;
 use minicbor::{Decoder, Encoder};
-use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
+use rsa::{PublicKey as RsaPublicKey, traits::PublicKeyParts};
 
 pub(crate) const PUBLIC_KEY_PROVIDER: &str = "pkcs11rs.public-key";
 const PREVIEW_SIGN_REGISTRATION_PROVIDER: &str = "pkcs11rs.preview-sign-registration";
@@ -151,8 +151,8 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
     let (kind, first, second, requires_uncompressed_prefix) = match &public_key {
         PublicKeyMaterial::Rsa(public) => (
             PUBLIC_KEY_KIND_RSA,
-            public.n().to_bytes_be(),
-            public.e().to_bytes_be(),
+            public.n().to_be_bytes_trimmed_vartime().into_vec(),
+            public.e().to_be_bytes_trimmed_vartime().into_vec(),
             false,
         ),
         PublicKeyMaterial::Ec {
@@ -646,8 +646,8 @@ fn decode_public_key_material(
         PUBLIC_KEY_KIND_RSA if key_type == CKK_RSA as CK_KEY_TYPE && !prefix => {
             KeyMaterial::Public(PublicKeyMaterial::Rsa(
                 RsaPublicKey::new(
-                    BigUint::from_bytes_be(&first),
-                    BigUint::from_bytes_be(&second),
+                    rsa::BoxedUint::from_be_slice_vartime(&first),
+                    rsa::BoxedUint::from_be_slice_vartime(&second),
                 )
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?,
             ))
@@ -1172,8 +1172,8 @@ mod tests {
             rp_id: None,
             material: KeyMaterial::Public(PublicKeyMaterial::Rsa(
                 RsaPublicKey::new(
-                    BigUint::from_bytes_be(&vec![0x11; 256]),
-                    BigUint::from(65537u32),
+                    rsa::BoxedUint::from_be_slice_vartime(&vec![0x11; 256]),
+                    rsa::BoxedUint::from(65537u32),
                 )
                 .unwrap(),
             )),

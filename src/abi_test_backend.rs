@@ -980,7 +980,7 @@ fn abi_test_yubihsm_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
             domains: 0xffff,
             capabilities: yubihsm_capabilities(&[5]),
             delegated_capabilities: [0; 8],
-            public_key: key.n().to_bytes_be(),
+            public_key: key.n().to_be_bytes_trimmed_vartime().into_vec(),
             value: Rc::new(RefCell::new(None)),
         },
     }

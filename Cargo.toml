@@ -47,6 +47,7 @@ native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+num-bigint-dig = { version = "0.8.6", features = ["zeroize"] }
 base64 = "0.22.1"
 getrandom = "0.4.3"
 hidapi = { version = "2.6.6", optional = true, default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
@@ -66,7 +67,7 @@ const-oid = "0.10.2"
 der = { version = "0.8.3", features = ["alloc", "derive", "std"] }
 p256 = { version = "0.14.0", optional = true, default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "std"] }
-rsa = { version = "0.9.10", default-features = false, features = ["std", "u64_digit"] }
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "getrandom", "pkcs1v15", "std"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.15.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -80,10 +81,7 @@ x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
-# Temporary pin for the matrix stack fix; switch to a crates.io release
-# once it includes the fix and passes the 512 KiB stack tests.
-ml-dsa = { git = "https://github.com/RustCrypto/signatures.git", rev = "a3690c4a0bd861fcf2bde0e38b3609e86c3fe89e", features = ["zeroize"] }
-num-bigint-dig = "0.8.6"
+ml-dsa = { version = "0.1.2", features = ["zeroize"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 signature = "3.0.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }

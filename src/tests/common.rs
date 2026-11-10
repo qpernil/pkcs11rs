@@ -5362,11 +5362,15 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut id = b"non-native-id".to_vec();
     let mut label = b"created YubiHSM private key with a label longer than forty bytes".to_vec();
-    let mut modulus = private_key.n().to_bytes_be();
-    let mut public_exponent = private_key.e().to_bytes_be();
-    let mut private_exponent = private_key.d().to_bytes_be();
-    let mut prime_1 = private_key.primes()[0].to_bytes_be();
-    let mut prime_2 = private_key.primes()[1].to_bytes_be();
+    let mut modulus = private_key.n().to_be_bytes_trimmed_vartime().into_vec();
+    let mut public_exponent = private_key.e().to_be_bytes_trimmed_vartime().into_vec();
+    let mut private_exponent = private_key.d().to_be_bytes_trimmed_vartime().into_vec();
+    let mut prime_1 = private_key.primes()[0]
+        .to_be_bytes_trimmed_vartime()
+        .into_vec();
+    let mut prime_2 = private_key.primes()[1]
+        .to_be_bytes_trimmed_vartime()
+        .into_vec();
     let mut template = [
         scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
@@ -9720,7 +9724,7 @@ struct PivSigningTestSession {
 #[derive(Debug)]
 struct CompositeHardwareSigningSession {
     slot_id: CK_SLOT_ID,
-    rsa: rsa::RsaPrivateKey,
+    rsa: rsa::PrivateKey,
     ec: p256::ecdsa::SigningKey,
 }
 
@@ -10959,7 +10963,7 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
                     domains: 0xffff,
                     capabilities: crate::yubihsm_capabilities(&[0x05, 0x06]),
                     delegated_capabilities: [0; 8],
-                    public_key: rsa_public.n().to_bytes_be(),
+                    public_key: rsa_public.n().to_be_bytes_trimmed_vartime().into_vec(),
                     value: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 },
                 crate::KeyMaterial::YubiHsm {
@@ -12157,7 +12161,10 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
             .set_token_storage_provider(Box::new(crate::storage::UnavailableStorageProvider))
             .unwrap();
     });
-    let mut matching_modulus = software_private.n().to_bytes_be();
+    let mut matching_modulus = software_private
+        .n()
+        .to_be_bytes_trimmed_vartime()
+        .into_vec();
     let mut intrinsic_template = bytes_attribute(
         CKA_MODULUS as CK_ATTRIBUTE_TYPE,
         matching_modulus.as_mut_slice(),

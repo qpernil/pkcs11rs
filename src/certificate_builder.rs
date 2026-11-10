@@ -4,9 +4,9 @@ use der::Encode;
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::Generate;
 #[cfg(any(test, feature = "abi-tests"))]
-use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
+use rsa::{PrivateKey as RsaPrivateKey, pkcs8::DecodePrivateKey};
 #[cfg(feature = "abi-tests")]
-use rsa::{RsaPublicKey, pkcs8::EncodePublicKey};
+use rsa::{PublicKey as RsaPublicKey, pkcs8::EncodePublicKey};
 use spki::{SubjectPublicKeyInfoOwned, SubjectPublicKeyInfoRef};
 #[cfg(any(test, feature = "abi-tests"))]
 use std::sync::OnceLock;
@@ -35,10 +35,13 @@ pub(crate) fn software_rsa_key() -> crate::SoftwareSigningKey {
     KEY.get_or_init(|| {
         let key = rsa_key();
         crate::SoftwareSigningKey::from_rsa_components(
-            key.n().clone(),
-            key.e().clone(),
-            key.d().clone(),
-            key.primes().to_vec(),
+            num_bigint_dig::BigUint::from_bytes_be(&key.n().to_be_bytes()),
+            num_bigint_dig::BigUint::from_bytes_be(&key.e().to_be_bytes()),
+            num_bigint_dig::BigUint::from_bytes_be(&key.d().to_be_bytes()),
+            key.primes()
+                .iter()
+                .map(|p| num_bigint_dig::BigUint::from_bytes_be(&p.to_be_bytes()))
+                .collect(),
         )
         .expect("validated RSA test fixture")
     })

@@ -7,7 +7,7 @@ use crate::{
     error::Error,
     scp03::{CommandApdu, select_application},
 };
-use rsa::{BigUint, RsaPublicKey};
+use rsa::PublicKey as RsaPublicKey;
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
 pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
@@ -1200,8 +1200,8 @@ fn parse_generated_public_key(algorithm: Algorithm, response: &[u8]) -> Result<P
             }
             Ok(PublicKey::Rsa(
                 RsaPublicKey::new(
-                    BigUint::from_bytes_be(modulus),
-                    BigUint::from_bytes_be(exponent),
+                    rsa::BoxedUint::from_be_slice_vartime(modulus),
+                    rsa::BoxedUint::from_be_slice_vartime(exponent),
                 )
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?,
             ))

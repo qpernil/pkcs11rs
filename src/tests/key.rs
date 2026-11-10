@@ -4347,9 +4347,9 @@ fn imported_key_history_stays_false_after_hardening_and_copying() {
             let mut sensitive = already_hardened as CK_BBOOL;
             let mut extractable = (!already_hardened) as CK_BBOOL;
             let mut value = [0x41; 16];
-            let mut modulus = rsa.n().to_bytes_be();
-            let mut exponent = rsa.e().to_bytes_be();
-            let mut private_exponent = rsa.d().to_bytes_be();
+            let mut modulus = rsa.n().to_be_bytes_trimmed_vartime().into_vec();
+            let mut exponent = rsa.e().to_be_bytes_trimmed_vartime().into_vec();
+            let mut private_exponent = rsa.d().to_be_bytes_trimmed_vartime().into_vec();
             let mut template = vec![
                 scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
                 scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),

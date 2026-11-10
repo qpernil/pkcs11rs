@@ -916,9 +916,9 @@ pub fn destroy_openpgp_objects_is_prohibited() {
     public.unique_id = "openpgp-01-public".to_owned();
     public.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     public.material = crate::KeyMaterial::Public(crate::PublicKeyMaterial::Rsa(
-        rsa::RsaPublicKey::new(
-            rsa::BigUint::from_bytes_be(&vec![0x11; 256]),
-            rsa::BigUint::from(65537u32),
+        rsa::PublicKey::new(
+            rsa::BoxedUint::from_be_slice_vartime(&vec![0x11; 256]),
+            rsa::BoxedUint::from(65537u32),
         )
         .expect("test RSA public key"),
     ));
@@ -1717,9 +1717,9 @@ pub fn create_object_requires_and_imports_real_key_material() {
     let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut private_class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
-    let mut modulus = rsa.n().to_bytes_be();
-    let mut public_exponent = rsa.e().to_bytes_be();
-    let mut private_exponent = rsa.d().to_bytes_be();
+    let mut modulus = rsa.n().to_be_bytes_trimmed_vartime().into_vec();
+    let mut public_exponent = rsa.e().to_be_bytes_trimmed_vartime().into_vec();
+    let mut private_exponent = rsa.d().to_be_bytes_trimmed_vartime().into_vec();
     let class_attribute = |class: &mut CK_OBJECT_CLASS| CK_ATTRIBUTE {
         type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
         pValue: class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,

@@ -692,31 +692,22 @@ pub(crate) fn ecdsa_der_to_raw(
         .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-pub(crate) fn rsa_operation(
-    input: &[u8],
-    exponent: &BigUint,
-    modulus: &BigUint,
-    size: usize,
-) -> Result<Vec<u8>, Error> {
-    if input.len() > size {
-        return Err(CKR_DATA_LEN_RANGE.into());
+fn raw_rsa_error(error: software_key_core::rsa_signing::RsaConstructionError) -> Error {
+    use software_key_core::rsa_signing::RsaConstructionError;
+    match error {
+        RsaConstructionError::InputTooLong => CKR_DATA_LEN_RANGE.into(),
+        RsaConstructionError::InputOutOfRange => CKR_DATA_INVALID.into(),
+        RsaConstructionError::RandomnessUnavailable => CKR_RANDOM_NO_RNG.into(),
+        _ => CKR_FUNCTION_FAILED.into(),
     }
-    let value = BigUint::from_bytes_be(input);
-    if &value >= modulus {
-        return Err(CKR_DATA_INVALID.into());
-    }
-    let encoded = value.modpow(exponent, modulus).to_bytes_be();
-    let mut output = vec![0; size];
-    output[size - encoded.len()..].copy_from_slice(&encoded);
-    Ok(output)
 }
 
 pub(crate) fn rsa_public_operation(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<u8>, Error> {
-    rsa_operation(input, key.e(), key.n(), key.size())
+    software_key_core::rsa_signing::rsa_public_raw(key, input).map_err(raw_rsa_error)
 }
 
 pub(crate) fn rsa_private_operation(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, Error> {
-    rsa_operation(input, key.d(), key.n(), key.size())
+    software_key_core::rsa_signing::rsa_sign_raw(key, input).map_err(raw_rsa_error)
 }
 
 pub(crate) fn rsa_pkcs1_encrypt(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<u8>, Error> {

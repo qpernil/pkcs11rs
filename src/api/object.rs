@@ -581,6 +581,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             512 => piv::Algorithm::Rsa4096,
             _ => return Err(CKR_KEY_SIZE_RANGE.into()),
         };
+        let qinv = Zeroizing::new(key.qinv().ok_or(CKR_TEMPLATE_INCOMPLETE)?.retrieve());
         piv::PrivateKeyImport {
             algorithm,
             components: vec![
@@ -590,7 +591,8 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
                         key.primes()
                             .first()
                             .ok_or(CKR_TEMPLATE_INCOMPLETE)?
-                            .to_bytes_be(),
+                            .to_be_bytes_trimmed_vartime()
+                            .into_vec(),
                     ),
                 ),
                 (
@@ -599,29 +601,36 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
                         key.primes()
                             .get(1)
                             .ok_or(CKR_TEMPLATE_INCOMPLETE)?
-                            .to_bytes_be(),
+                            .to_be_bytes_trimmed_vartime()
+                            .into_vec(),
                     ),
                 ),
                 (
                     0x03,
-                    Zeroizing::new(key.dp().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_bytes_be()),
+                    Zeroizing::new(
+                        key.dp()
+                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                            .to_be_bytes_trimmed_vartime()
+                            .into_vec(),
+                    ),
                 ),
                 (
                     0x04,
-                    Zeroizing::new(key.dq().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_bytes_be()),
+                    Zeroizing::new(
+                        key.dq()
+                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                            .to_be_bytes_trimmed_vartime()
+                            .into_vec(),
+                    ),
                 ),
                 (
                     0x05,
-                    Zeroizing::new(
-                        key.qinv()
-                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
-                            .to_signed_bytes_be(),
-                    ),
+                    Zeroizing::new(qinv.to_be_bytes_trimmed_vartime().into_vec()),
                 ),
             ],
             public_key: MetadataPublicKey::Rsa {
-                modulus: key.n().to_bytes_be(),
-                exponent: key.e().to_bytes_be(),
+                modulus: key.n().to_be_bytes_trimmed_vartime().into_vec(),
+                exponent: key.e().to_be_bytes_trimmed_vartime().into_vec(),
             },
         }
     } else if key_type == CKK_ML_DSA as CK_KEY_TYPE || key_type == CKK_ML_KEM as CK_KEY_TYPE {
@@ -1003,8 +1012,8 @@ pub(super) fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<Tok
     Ok(hardware)
 }
 
-fn padded_big_num(value: &BigUint, length: usize) -> Result<Vec<u8>, Error> {
-    let encoded = value.to_bytes_be();
+fn padded_big_num(value: &rsa::BoxedUint, length: usize) -> Result<Vec<u8>, Error> {
+    let encoded = value.to_be_bytes_trimmed_vartime();
     if encoded.len() > length {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
@@ -1193,7 +1202,7 @@ fn yubihsm_import_command(
                 || object.derive
                 || object.unwrap
                 || !object.extractable
-                || key.e() != &BigUint::from(65537u32)
+                || key.e().to_be_bytes_trimmed_vartime().as_ref() != [1, 0, 1]
             {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }

@@ -15,8 +15,9 @@
     )
 )]
 
+use num_bigint_dig::BigUint;
 use rsa::{
-    BigUint, RsaPrivateKey, RsaPublicKey,
+    PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey,
     traits::{PrivateKeyParts, PublicKeyParts},
 };
 #[cfg(test)]
