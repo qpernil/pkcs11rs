@@ -28,6 +28,10 @@ pub(crate) const PREVIEW_SIGN_RP_ID: &str = "preview-sign.pkcs11rs.invalid";
 
 pub(crate) const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
 pub(crate) const AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
+// The vendor assertion mechanism reports this accepted CBOR response limit
+// without executing GetAssertion, independent of the active HID/CCID route.
+pub(crate) const MAX_ASSERTION_RESPONSE_SIZE: usize = u16::MAX as usize;
+
 const PREVIEW_SIGN_ARKG_P256_ESP256: i64 = -65_539;
 const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
 const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
@@ -45,6 +49,13 @@ const PERMISSION_GET_ASSERTION: u8 = 0x02;
 const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
 const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
+
+pub(crate) fn minimum_assertion_response_size(credential_id: &[u8]) -> usize {
+    // Required maps/keys, the public-key descriptor, 37-byte authenticator data,
+    // and a nonempty signature need at least 66 bytes plus the credential ID.
+    // Longer IDs need larger CBOR headers; ignoring those keeps this conservative.
+    credential_id.len().saturating_add(66)
+}
 
 fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
     let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(data.as_ref());
@@ -1398,6 +1409,11 @@ fn validate_get_assertion_response(
     rp_id: &str,
     expected_credential_id: &[u8],
 ) -> Result<(), CtapError> {
+    if data.len() > MAX_ASSERTION_RESPONSE_SIZE {
+        return Err(CtapError::Malformed(
+            "getAssertion response exceeds size limit",
+        ));
+    }
     let mut decoder = Decoder::new(data);
     let count = definite_map(&mut decoder)?;
     let mut credential_id = None;
@@ -3354,9 +3370,23 @@ mod tests {
             .unwrap()
             .u8(3)
             .unwrap()
-            .bytes(&[0x30, 0x01])
+            .bytes(&[0x30])
             .unwrap();
         response
+    }
+
+    #[test]
+    fn assertion_minimum_fits_the_smallest_accepted_fields() {
+        for length in [0, 23, 24, 255, 256] {
+            let credential_id = vec![0x22; length];
+            let response = get_assertion_response("example.com", &credential_id);
+            validate_get_assertion_response(&response, "example.com", &credential_id).unwrap();
+            let minimum = minimum_assertion_response_size(&credential_id);
+            assert!(minimum <= response.len());
+            if length < 24 {
+                assert_eq!(minimum, response.len());
+            }
+        }
     }
 
     #[test]
@@ -3371,6 +3401,34 @@ mod tests {
             validate_get_assertion_response(&response, "example.com", &[0x23; 32]),
             Err(CtapError::Malformed("unexpected assertion credential ID"))
         ));
+    }
+
+    #[test]
+    fn get_assertion_response_size_limit_includes_firmware_fields() {
+        let credential_id = [0x22; 32];
+        for extra in [0, 1] {
+            let mut response = get_assertion_response("example.com", &credential_id);
+            response[0] = 0xa4;
+            // The extra field has a two-byte key and a three-byte bytes header.
+            let padding = vec![0; MAX_ASSERTION_RESPONSE_SIZE - response.len() - 5 + extra];
+            Encoder::new(&mut response)
+                .u8(99)
+                .unwrap()
+                .bytes(&padding)
+                .unwrap();
+            assert_eq!(response.len(), MAX_ASSERTION_RESPONSE_SIZE + extra);
+            let result = validate_get_assertion_response(&response, "example.com", &credential_id);
+            if extra == 0 {
+                result.unwrap();
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CtapError::Malformed(
+                        "getAssertion response exceeds size limit"
+                    ))
+                ));
+            }
+        }
     }
 
     #[test]

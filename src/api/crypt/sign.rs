@@ -684,7 +684,6 @@ fn sign_init(
                 _ => None,
             },
             buffer: Vec::new(),
-            result: None,
         });
         Ok(())
     })
@@ -803,50 +802,66 @@ fn sign_fido(
         .context_specific_rp_id
         .as_deref()
         .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-    if data.len() != 32 || (!operation.buffer.is_empty() && operation.buffer != data) {
+    if data.len() != 32 {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
-    if operation.result.is_none() {
-        let authorization = operation
-            .fido_authorization
-            .take()
-            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-        let client_data_hash: &[u8; 32] = data.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
-        let slot = ctx._get_slot_mut(operation.slot_id)?;
-        let response = match &operation.key {
-            KeyMaterial::FidoResidentPrivate { credential_id } => {
-                slot.fido_get_assertion(&authorization, rp_id, credential_id, client_data_hash)?
-            }
-            KeyMaterial::PreviewSignDerived {
-                registration,
-                derived,
-                ..
-            } => slot.fido_preview_sign(
-                &authorization,
-                registration,
-                data,
-                derived
-                    .additional_args_cbor()
-                    .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
-            )?,
-            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        };
-        if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && response.len() != 64 {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        operation.buffer = data.to_vec();
-        operation.result = Some(response);
+    if operation.fido_authorization.is_none() {
+        return Err(CKR_USER_NOT_LOGGED_IN.into());
     }
-    let response = operation
-        .result
-        .as_ref()
-        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-    let capacity = *signature_len;
-    *signature_len = response.len() as CK_ULONG;
+    let preview = matches!(operation.key, KeyMaterial::PreviewSignDerived { .. });
+    let required = if preview {
+        64
+    } else {
+        crate::ctap::MAX_ASSERTION_RESPONSE_SIZE
+    };
     if signature.is_null() {
+        *signature_len = required as CK_ULONG;
         return Ok(());
     }
+    let capacity = *signature_len;
+    let minimum = match &operation.key {
+        KeyMaterial::FidoResidentPrivate { credential_id } => {
+            crate::ctap::minimum_assertion_response_size(credential_id)
+        }
+        _ => required,
+    };
+    // Reject impossible capacities before consuming authorization. For variable
+    // CBOR responses, try capacities between the minimum and the reported bound.
+    if capacity < minimum as CK_ULONG {
+        *signature_len = required as CK_ULONG;
+        return Err(CKR_BUFFER_TOO_SMALL.into());
+    }
+    let authorization = operation
+        .fido_authorization
+        .take()
+        .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+    let client_data_hash: &[u8; 32] = data.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
+    let slot = ctx._get_slot_mut(operation.slot_id)?;
+    let response = match &operation.key {
+        KeyMaterial::FidoResidentPrivate { credential_id } => {
+            slot.fido_get_assertion(&authorization, rp_id, credential_id, client_data_hash)?
+        }
+        KeyMaterial::PreviewSignDerived {
+            registration,
+            derived,
+            ..
+        } => slot.fido_preview_sign(
+            &authorization,
+            registration,
+            data,
+            derived
+                .additional_args_cbor()
+                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+        )?,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    if response.len() > required || (preview && response.len() != required) {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    *signature_len = response.len() as CK_ULONG;
     if capacity < *signature_len {
+        // The assertion consumed its authorization. Keep no completed response;
+        // retrying this pending operation requires fresh context-specific login.
         return Err(CKR_BUFFER_TOO_SMALL.into());
     }
     unsafe { ptr::copy_nonoverlapping(response.as_ptr(), signature, response.len()) };

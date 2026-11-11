@@ -287,14 +287,39 @@ safely.
 GetAssertion response CBOR, not only its signature field. The `C_Sign` input
 must be the 32-byte `clientDataHash`. After `C_SignInit`, the application must
 call `C_Login(CKU_CONTEXT_SPECIFIC)` with the FIDO PIN; this obtains one
-RP-bound `ga` permission token. The next `C_Sign` sends an allow-list containing
-only that credential and requests user presence. The response validator
-requires the expected credential ID, RP ID hash, UP and UV flags, and a
-nonempty assertion signature. A size query executes the assertion once and
-caches the response so buffer sizing cannot cause a second touch. Successful
-return or any device/protocol failure destroys the operation and its
-authorization. Multipart signing is unsupported, and neither the PIN nor the
-PIN/UV token is retained for another assertion.
+RP-bound `ga` permission token. An output-producing `C_Sign` sends an allow-list
+containing only that credential and requests user presence. The response
+validator requires the expected credential ID, RP ID hash, UP and UV flags, and a
+nonempty assertion signature. After context-specific login, a size query
+returns the accepted CBOR response limit of 65,535 bytes without contacting the
+authenticator, consuming authorization, or binding the operation to that
+`clientDataHash`. The limit is independent of the active HID/CCID route.
+
+A buffer smaller than the known credential ID length plus 66 bytes cannot hold
+the mandatory response fields. Such capacities return `CKR_BUFFER_TOO_SMALL`
+with the upper bound before contacting the authenticator or consuming
+authorization. This minimum conservatively counts the credential descriptor,
+37-byte authenticator data, a nonempty signature, and CBOR framing; it does not
+assume a typical signature length.
+
+A non-null output buffer at least that minimum triggers the assertion even if
+its capacity is below the upper bound. On success, the returned length is the
+actual CBOR length; callers must use that length rather than the allocated
+capacity. If the result does not fit, `C_Sign` returns `CKR_BUFFER_TOO_SMALL`,
+reports the actual required length,
+and leaves the caller's buffer untouched. The completed response is discarded
+and its authorization has been consumed. The pending operation requires a fresh
+`C_Login(CKU_CONTEXT_SPECIFIC, PIN)` before another attempt, which can require
+another touch and produce a different response length. Allocating the reported
+upper bound avoids this case. Unlike ordinary PKCS #11 short-buffer retries,
+this vendor mechanism does not preserve authorization after an executed
+assertion. No completed assertion is cached.
+
+Successful return or any device/protocol failure destroys the operation and
+its authorization. Calling `C_Sign` without fresh authorization also terminates
+the operation; start again with `C_SignInit` in that case. Multipart signing is
+unsupported, and neither the PIN nor the PIN/UV token is retained for another
+assertion.
 
 The returned CBOR contains the authenticator data, ordinary WebAuthn signature,
 credential descriptor, and any firmware-defined fields. An application can

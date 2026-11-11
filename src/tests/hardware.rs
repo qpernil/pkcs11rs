@@ -4203,6 +4203,7 @@ mod fido2_hardware {
             ),
             CKR_OK as CK_RV
         );
+        response.truncate(response_len as usize);
         let mut decoder = minicbor::Decoder::new(&response);
         let fields = decoder
             .map()

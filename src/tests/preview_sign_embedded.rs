@@ -853,6 +853,19 @@ fn authorize_preview_operation(
     );
 }
 
+fn fido_sign_has_authorization(slot: CK_SLOT_ID, session: CK_SESSION_HANDLE) -> bool {
+    super::with_test_slot_context(slot, |context| {
+        context
+            .get_session_context(session)
+            .unwrap()
+            .sign_operation
+            .as_ref()
+            .unwrap()
+            .fido_authorization
+            .is_some()
+    })
+}
+
 #[test]
 fn embedded_fido_random_generation_in_public_and_user_ro_and_rw_sessions() {
     let _guard = super::TEST_LOCK.lock().unwrap();
@@ -1368,6 +1381,7 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
     assert_eq!(signature_len, 64);
+    assert!(fido_sign_has_authorization(slot, session));
     let mut short_signature = [0u8; 8];
     let mut short_len = short_signature.len() as CK_ULONG;
     assert_eq!(
@@ -1381,6 +1395,7 @@ fn pkcs11_preview_sign_embedded_registration_import_derivation_and_signing() {
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(short_len, 64);
+    assert!(fido_sign_has_authorization(slot, session));
     let mut signature = vec![0; signature_len as usize];
     assert_eq!(
         crate::api::C_Sign(
@@ -1942,18 +1957,46 @@ fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
         CKR_OK as CK_RV
     );
 
-    assert_eq!(
-        crate::api::C_Sign(
-            session,
-            client_data_hash.as_ptr() as *mut CK_BYTE,
-            client_data_hash.len() as CK_ULONG,
-            std::ptr::null_mut(),
-            &mut response_len,
-        ),
-        CKR_OK as CK_RV
-    );
-    let mut short = vec![0; response_len.saturating_sub(1) as usize];
-    let mut short_len = short.len() as CK_ULONG;
+    // Sizing neither consumes authorization nor binds the operation to this hash.
+    let sizing_hash = [0x5a; 32];
+    for _ in 0..2 {
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                sizing_hash.as_ptr().cast_mut(),
+                sizing_hash.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut response_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            response_len,
+            crate::ctap::MAX_ASSERTION_RESPONSE_SIZE as CK_ULONG
+        );
+        assert!(fido_sign_has_authorization(slot, session));
+    }
+    let minimum = crate::ctap::minimum_assertion_response_size(&credential_id);
+    let mut short = vec![0x5a; minimum];
+    let mut short_len;
+    for capacity in [0, minimum - 1] {
+        short_len = capacity as CK_ULONG;
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                client_data_hash.as_ptr().cast_mut(),
+                client_data_hash.len() as CK_ULONG,
+                short.as_mut_ptr(),
+                &mut short_len,
+            ),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(short_len, response_len);
+        assert!(short.iter().all(|byte| *byte == 0x5a));
+        assert!(fido_sign_has_authorization(slot, session));
+    }
+    // At the conservative minimum the result can still prove too large.
+    short_len = short.len() as CK_ULONG;
     assert_eq!(
         crate::api::C_Sign(
             session,
@@ -1964,8 +2007,22 @@ fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
         ),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
-    assert_eq!(short_len, response_len);
-    let mut response = vec![0; response_len as usize];
+    assert!(short.iter().all(|byte| *byte == 0x5a));
+    assert!(short_len > short.len() as CK_ULONG && short_len < response_len);
+    assert!(!fido_sign_has_authorization(slot, session));
+    // The operation is still pending, but the first assertion consumed its token.
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    // Accept a buffer below the reported bound when the actual result fits.
+    let mut response = vec![0; 512];
+    response_len = response.len() as CK_ULONG;
     assert_eq!(
         crate::api::C_Sign(
             session,
@@ -1976,6 +2033,7 @@ fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
         ),
         CKR_OK as CK_RV
     );
+    response.truncate(response_len as usize);
 
     let mut decoder = minicbor::Decoder::new(&response);
     let count = decoder.map().unwrap().unwrap();
@@ -2014,6 +2072,43 @@ fn pkcs11_embedded_resident_credential_assertion_is_one_shot_and_verifiable() {
             signature.len() as CK_ULONG,
         ),
         CKR_OK as CK_RV
+    );
+
+    // A failed delivery must not make the consumed token usable again.
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    short_len = short.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr().cast_mut(),
+            client_data_hash.len() as CK_ULONG,
+            short.as_mut_ptr(),
+            &mut short_len,
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    response_len = response.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr().cast_mut(),
+            client_data_hash.len() as CK_ULONG,
+            response.as_mut_ptr(),
+            &mut response_len,
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
     );
 
     let mut unused_len = 0;

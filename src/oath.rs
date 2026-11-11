@@ -561,7 +561,6 @@ pub(crate) fn sign_init(
         ml_dsa: None,
         piv_pin_policy: None,
         buffer: Vec::new(),
-        result: None,
     });
     Ok(())
 }
@@ -583,7 +582,7 @@ pub(crate) fn sign(
     };
     // Eight digits is a safe, side-effect-free bound even when LIST does not
     // reveal a pre-existing credential's configured digit count.
-    let needed = result_size(op.result.as_ref().map_or(8, Vec::len));
+    let needed = result_size(8);
     if output.is_null() {
         *length = needed as CK_ULONG;
         return Ok(());

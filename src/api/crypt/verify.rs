@@ -189,7 +189,6 @@ pub(crate) fn verify_init(
             ml_dsa,
             piv_pin_policy: None,
             buffer: Vec::new(),
-            result: None,
         });
         Ok(())
     })

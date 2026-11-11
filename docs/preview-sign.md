@@ -29,8 +29,11 @@ signing token can also invalidate that administration token.
 Derived signing keys report `CKA_ALWAYS_AUTHENTICATE = CK_TRUE`. Each signature
 uses `C_SignInit`, followed by `C_Login(CKU_CONTEXT_SPECIFIC, PIN)` and `C_Sign`,
 just like a regular FIDO assertion. Only the operation's scoped token is retained,
-not the PIN. Length queries and short-buffer retries reuse the pending signature
-result without another authenticator operation. Tokens are redacted from debug
+not the PIN. Length queries report the fixed 64-byte signature size without an
+authenticator operation. Buffers smaller than 64 bytes return
+`CKR_BUFFER_TOO_SMALL` before executing the signature. Both preserve the pending
+operation's authorization; the signature is produced only when the caller can
+receive it. No completed signature is cached. Tokens are redacted from debug
 output and cleared on logout or session cleanup; there is no automatic PIN-based
 token renewal.
 

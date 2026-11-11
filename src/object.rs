@@ -679,7 +679,6 @@ pub(crate) struct SignatureOperation {
     pub(crate) ml_dsa: Option<MlDsaSignatureParameters>,
     pub(crate) piv_pin_policy: Option<u8>,
     pub(crate) buffer: Vec<u8>,
-    pub(crate) result: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]

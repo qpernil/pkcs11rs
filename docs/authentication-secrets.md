@@ -27,8 +27,11 @@ lifetime is distinct from retaining the login secret to authenticate again.
   [OpenPGP authentication](openpgp.md).
 - FIDO assertions use an operation-scoped authorization token obtained by
   context-specific login. Neither the PIN nor the token is retained for another
-  assertion. Length queries and short-buffer retries reuse the completed
-  operation's buffered result. See [FIDO2](fido2.md).
+  assertion. Length queries preserve the pending operation's token without
+  executing an assertion. Buffers below the conservative minimum are rejected
+  without consuming it. An actual assertion consumes authorization even when
+  the output buffer proves too small; retry requires fresh context-specific
+  login. No completed response is cached. See [FIDO2](fido2.md).
 - FIDO previewSign uses the same per-operation signing authorization. User
   login may retain a one-shot administration token for registration or deletion,
   but not the PIN needed to obtain another token. See [previewSign](preview-sign.md).
