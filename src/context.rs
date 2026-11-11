@@ -36,6 +36,7 @@ use crate::{
 use crate::{HidFidoEndpoint, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::PublicKey as RsaPublicKey;
+use std::borrow::Cow;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -1425,6 +1426,13 @@ impl SlotContext {
         self.state.resolve_object(&*self.slot, handle)
     }
 
+    pub(crate) fn resolve_object_ref(
+        &self,
+        handle: CK_OBJECT_HANDLE,
+    ) -> Result<Option<Cow<'_, TokenObject>>, Error> {
+        self.state.resolve_object_ref(&*self.slot, handle)
+    }
+
     pub(crate) fn resolved_objects(&self) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
         self.state.resolved_objects(&*self.slot)
     }
@@ -1855,17 +1863,27 @@ impl SlotState {
         slot: &'a S,
         handle: CK_OBJECT_HANDLE,
     ) -> Result<Option<TokenObject>, Error> {
+        self.resolve_object_ref(slot, handle)
+            .map(|object| object.map(Cow::into_owned))
+    }
+
+    pub(crate) fn resolve_object_ref<'a, S: Slot + ?Sized>(
+        &'a self,
+        slot: &'a S,
+        handle: CK_OBJECT_HANDLE,
+    ) -> Result<Option<Cow<'a, TokenObject>>, Error> {
         if let Some(object) = self.memory_objects.get(&handle) {
-            return Ok(Some(object.clone()));
+            return Ok(Some(Cow::Borrowed(object)));
         }
         self.require_token_objects()?;
         let Some(locator) = self.token_object_handles.get(&handle) else {
             return Ok(None);
         };
         if let Some(object) = self.backed_token_objects.get(&locator.unique_id) {
-            return Ok(Some(object.clone()));
+            return Ok(Some(Cow::Borrowed(object)));
         }
         slot.token_object(self.slot_id, &locator.unique_id)
+            .map(|object| object.map(Cow::Owned))
     }
 
     /// Find an object in an inventory already reconciled by refresh. Resolving

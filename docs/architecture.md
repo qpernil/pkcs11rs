@@ -304,6 +304,21 @@ explicitly empty list permits no mechanisms. An explicit list can only narrow
 actual capabilities. Mechanism-specific parameter constraints and current
 session authorization remain checked when an operation is attempted.
 
+Attribute reads share a reader that borrows resident bytes and guarded lazy
+cache values, while derived encodings retain their existing parsing and error
+paths. `C_GetAttributeValue` performs visibility, supported-attribute, and
+sensitivity checks before selecting a length or value read. Lengths are exact:
+native YubiHSM opaque values use their recorded lengths without
+reading the payload, and mechanism arrays use their element count. Cached
+payload lengths take precedence over discovery metadata. Unknown-length lazy
+values are fetched once using the existing missing-value policy. Actual native
+reads still propagate backend errors. Volatile session-value queries retain
+their live read and length validation so expired sessions and stale native
+handles remain observable even during sizing.
+Attribute copying, object-size calculations, and search comparisons reuse the
+same byte views. Read-only object queries borrow memory and backed objects;
+native backends retain their existing object-resolution contracts.
+
 ## Module lifecycle and locking
 
 `MODULE_CONTEXT` is the lifecycle state. `None` means that Cryptoki is not

@@ -62,6 +62,8 @@ mod yubihsm_capacity;
 
 #[path = "api_contracts.rs"]
 mod api_contracts;
+#[path = "attribute_reader.rs"]
+mod attribute_reader;
 #[path = "crypto.rs"]
 mod crypto;
 #[path = "general.rs"]

@@ -32,7 +32,11 @@ use software_key_core::{
 };
 #[cfg(test)]
 use software_key_core::{post_quantum::MlKemPrivateKey, software_signing::SignatureScheme};
-use std::{cell::RefCell, rc::Rc, slice};
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+    slice,
+};
 use zeroize::Zeroizing;
 
 /// Object identity is independent of mutable attributes and storage addresses.
@@ -349,6 +353,42 @@ impl<T> LazyCache<T> {
 }
 
 pub(crate) type SharedLazyBytes = Rc<RefCell<LazyCache<Vec<u8>>>>;
+
+/// An attribute can borrow resident or cached bytes, or own a derived encoding.
+pub(crate) enum AttributeValue<'a> {
+    Borrowed(&'a [u8]),
+    Cached(Ref<'a, [u8]>),
+    Owned(Vec<u8>),
+}
+
+impl AsRef<[u8]> for AttributeValue<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Cached(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+impl AttributeValue<'_> {
+    pub(crate) fn into_owned(self) -> Vec<u8> {
+        match self {
+            Self::Owned(value) => value,
+            value => value.as_ref().to_vec(),
+        }
+    }
+}
+
+fn lazy_bytes(
+    cache: &RefCell<LazyCache<Vec<u8>>>,
+    load: impl FnOnce() -> Option<Vec<u8>>,
+) -> Ref<'_, LazyCache<Vec<u8>>> {
+    if cache.borrow().is_unattempted() {
+        *cache.borrow_mut() = load().map_or(LazyCache::Missing, LazyCache::Value);
+    }
+    cache.borrow()
+}
 
 #[derive(Clone)]
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
@@ -1240,54 +1280,50 @@ pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> boo
     )
 }
 
-pub(crate) fn lazy_piv_attestation_certificate(
+pub(crate) fn lazy_piv_attestation_certificate<'a>(
     connector: &dyn Connector,
     slot: piv::Slot,
     algorithm: piv::Algorithm,
-    cache: &RefCell<LazyCache<Vec<u8>>>,
-) -> Option<Vec<u8>> {
-    if !cache.borrow().is_unattempted() {
-        return cache.borrow().value().cloned();
-    }
-
-    let certificate = PivClient
-        .attestation(connector, slot)
-        .ok()
-        .filter(|certificate| piv_algorithm_from_certificate(certificate) == Some(algorithm))
-        .and_then(|certificate| {
-            piv_public_key_from_certificate(algorithm, &certificate)
+    cache: &'a RefCell<LazyCache<Vec<u8>>>,
+) -> Option<Ref<'a, [u8]>> {
+    Ref::filter_map(
+        lazy_bytes(cache, || {
+            PivClient
+                .attestation(connector, slot)
                 .ok()
-                .map(|_| certificate)
-        });
-    *cache.borrow_mut() = match certificate {
-        Some(ref certificate) => LazyCache::Value(certificate.clone()),
-        None => LazyCache::Missing,
-    };
-    certificate
+                .filter(|certificate| {
+                    piv_algorithm_from_certificate(certificate) == Some(algorithm)
+                })
+                .and_then(|certificate| {
+                    piv_public_key_from_certificate(algorithm, &certificate)
+                        .ok()
+                        .map(|_| certificate)
+                })
+        }),
+        |value| value.value().map(Vec::as_slice),
+    )
+    .ok()
 }
 
-pub(crate) fn lazy_yubihsm_attestation_certificate(
+pub(crate) fn lazy_yubihsm_attestation_certificate<'a>(
     connector: &dyn Connector,
     session: &RefCell<YubiHsmSessionState>,
     id: u16,
-    cache: &RefCell<LazyCache<Vec<u8>>>,
-) -> Option<Vec<u8>> {
-    if !cache.borrow().is_unattempted() {
-        return cache.borrow().value().cloned();
-    }
-
-    let certificate = send_yubihsm_secure_command(
-        connector,
-        session,
-        &YubiHsmCommand::sign_attestation_certificate(id, 0),
+    cache: &'a RefCell<LazyCache<Vec<u8>>>,
+) -> Option<Ref<'a, [u8]>> {
+    Ref::filter_map(
+        lazy_bytes(cache, || {
+            send_yubihsm_secure_command(
+                connector,
+                session,
+                &YubiHsmCommand::sign_attestation_certificate(id, 0),
+            )
+            .ok()
+            .filter(|certificate| crate::certificate_chain::validate(certificate).is_ok())
+        }),
+        |value| value.value().map(Vec::as_slice),
     )
     .ok()
-    .filter(|certificate| crate::certificate_chain::validate(certificate).is_ok());
-    *cache.borrow_mut() = match certificate {
-        Some(ref certificate) => LazyCache::Value(certificate.clone()),
-        None => LazyCache::Missing,
-    };
-    certificate
 }
 
 impl TokenObject {
@@ -1695,50 +1731,128 @@ impl TokenObject {
         attributes.saturating_add(deferred_native_value)
     }
 
-    /// Count borrowed byte attributes without copying their payload. Derived
-    /// encodings keep the same reader, including lazy-value and error behavior.
     fn attribute_value_length(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> usize {
-        if !matches!(self.material, KeyMaterial::OathCredential(_)) {
-            match attribute_type {
-                x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => return self.unique_id.len(),
-                x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => return self.label.len(),
-                x if x == CKA_ID as CK_ATTRIBUTE_TYPE => return self.id.len(),
-                x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => match &self.material {
-                    KeyMaterial::Data { value, .. }
-                    | KeyMaterial::Certificate { value, .. }
-                    | KeyMaterial::SoftwareSecret(value)
-                    | KeyMaterial::Secret(value) => return value.len(),
-                    KeyMaterial::PivCertificate { value, .. }
-                    | KeyMaterial::OpenPgpCertificate { value }
-                    | KeyMaterial::IssuerSecurityDomainCertificate { value }
-                    | KeyMaterial::IssuerSecurityDomainData { value, .. }
-                    | KeyMaterial::PivData { value, .. } => return value.len(),
-                    KeyMaterial::FidoCredential { response_cbor, .. } => {
-                        return response_cbor.len();
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        }
-        self.attribute_value(attribute_type)
-            .map_or(0, |value| value.len())
+        self.read_attribute(attribute_type)
+            .map_or(0, |value| value.as_ref().len())
     }
 
-    pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+    pub(crate) fn read_attribute(
+        &self,
+        attribute_type: CK_ATTRIBUTE_TYPE,
+    ) -> Option<AttributeValue<'_>> {
         if let KeyMaterial::OathCredential(credential) = &self.material
             && let Some(value) = crate::oath::attribute(credential, attribute_type)
         {
-            return Some(value);
+            return Some(AttributeValue::Owned(value));
         }
         if !self.supports_attribute(attribute_type) {
             return None;
         }
+        let bytes: Option<&[u8]> = match attribute_type {
+            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Some(self.unique_id.as_bytes()),
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes()),
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(&self.id),
+            x if x == CKA_PKCS11RS_FIDO_RP_ID => self.rp_id.as_deref().map(str::as_bytes),
+            x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Data { application, .. } => Some(application),
+                KeyMaterial::IssuerSecurityDomainData { application, .. } => {
+                    Some(application.as_bytes())
+                }
+                _ => None,
+            },
+            x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Data { object_id, .. }
+                | KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id),
+                KeyMaterial::FidoCredential { rp_id_hash, .. } => Some(rp_id_hash),
+                _ => None,
+            },
+            x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Data { value, .. }
+                | KeyMaterial::Certificate { value }
+                | KeyMaterial::SoftwareSecret(value)
+                | KeyMaterial::Secret(value) => Some(value),
+                KeyMaterial::PivCertificate { value, .. }
+                | KeyMaterial::OpenPgpCertificate { value }
+                | KeyMaterial::IssuerSecurityDomainCertificate { value }
+                | KeyMaterial::IssuerSecurityDomainData { value, .. }
+                | KeyMaterial::PivData { value, .. } => Some(value),
+                KeyMaterial::FidoCredential { response_cbor, .. } => Some(response_cbor),
+                KeyMaterial::Public(
+                    PublicKeyMaterial::MlDsa { public_key, .. }
+                    | PublicKeyMaterial::MlKem { public_key, .. }
+                    | PublicKeyMaterial::HybridKem { public_key, .. },
+                ) => Some(public_key),
+                KeyMaterial::YubiHsm {
+                    algorithm,
+                    public_key,
+                    ..
+                } if self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && (crate::yubihsm_ml_dsa(*algorithm).is_some()
+                        || crate::yubihsm_ml_kem(*algorithm).is_some()
+                        || crate::yubihsm_hybrid_kem(*algorithm).is_some()) =>
+                {
+                    Some(public_key)
+                }
+                KeyMaterial::OpenPgpData {
+                    connector,
+                    tag,
+                    cache,
+                } => {
+                    let cache = lazy_bytes(cache, || {
+                        OpenPgpClient.get_data(connector.as_ref(), *tag).ok()
+                    });
+                    return Some(AttributeValue::Cached(Ref::map(cache, |value| {
+                        value.value().map_or(&[][..], Vec::as_slice)
+                    })));
+                }
+                KeyMaterial::PivAttestation {
+                    connector,
+                    slot,
+                    algorithm,
+                    cache,
+                } => {
+                    return lazy_piv_attestation_certificate(
+                        connector.as_ref(),
+                        *slot,
+                        *algorithm,
+                        cache,
+                    )
+                    .map(AttributeValue::Cached);
+                }
+                KeyMaterial::YubiHsmAttestation {
+                    connector,
+                    session,
+                    id,
+                    cache,
+                    ..
+                } => {
+                    return lazy_yubihsm_attestation_certificate(
+                        connector.as_ref(),
+                        session,
+                        *id,
+                        cache,
+                    )
+                    .map(AttributeValue::Cached);
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(bytes) = bytes {
+            return Some(AttributeValue::Borrowed(bytes));
+        }
+        self.computed_attribute_value(attribute_type)
+            .map(AttributeValue::Owned)
+    }
+
+    pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+        self.read_attribute(attribute_type)
+            .map(AttributeValue::into_owned)
+    }
+
+    fn computed_attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
-            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => {
-                Some(self.unique_id.as_bytes().to_vec())
-            }
             x if x == CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE => match self.material {
                 KeyMaterial::Profile { profile_id } => Some(ulong_attribute(profile_id)),
                 _ => None,
@@ -1746,8 +1860,6 @@ impl TokenObject {
             x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(ulong_attribute(self.key_type))
             }
-            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes().to_vec()),
-            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
             x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
@@ -1848,7 +1960,6 @@ impl TokenObject {
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
             x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE => Some(bool_attribute(false)),
             x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Data { application, .. } => Some(application.clone()),
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => {
                     Some(b"Opaque object".to_vec())
                 }
@@ -1857,9 +1968,6 @@ impl TokenObject {
                     ..
                 } => Some(b"Template object".to_vec()),
                 KeyMaterial::YubiHsm { .. } => Some(b"YubiHSM object".to_vec()),
-                KeyMaterial::IssuerSecurityDomainData { application, .. } => {
-                    Some(application.as_bytes().to_vec())
-                }
                 KeyMaterial::PivData { .. } => Some(b"PIV".to_vec()),
                 KeyMaterial::OpenPgpData { .. } => Some(b"OpenPGP".to_vec()),
                 KeyMaterial::FidoCredential { .. } => {
@@ -1868,15 +1976,12 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Data { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
                 KeyMaterial::YubiHsm { .. } => Some(Vec::new()),
-                KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::PivData { object_id, .. } => {
                     piv::data_object_mapping(*object_id).and_then(piv::data_object_oid)
                 }
                 KeyMaterial::OpenPgpData { tag, .. } => Some(tag.to_be_bytes().to_vec()),
-                KeyMaterial::FidoCredential { rp_id_hash, .. } => Some(rp_id_hash.to_vec()),
                 _ => None,
             },
             x if x == CKA_PKCS11RS_PIV_OBJECT_TAG => match &self.material {
@@ -1894,9 +1999,6 @@ impl TokenObject {
                 KeyMaterial::PreviewSignDerived { derived, .. } => derived.to_cbor().ok(),
                 _ => None,
             },
-            x if x == CKA_PKCS11RS_FIDO_RP_ID => {
-                self.rp_id.as_ref().map(|rp_id| rp_id.as_bytes().to_vec())
-            }
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
@@ -2181,64 +2283,11 @@ impl TokenObject {
                     KeyMaterial::SoftwarePrivate(key) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         key.private_value()
                     }
-                    KeyMaterial::YubiHsm {
-                        algorithm,
-                        public_key,
-                        ..
-                    } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
-                        && self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                        && (crate::yubihsm_ml_dsa(*algorithm).is_some()
-                            || crate::yubihsm_ml_kem(*algorithm).is_some()
-                            || crate::yubihsm_hybrid_kem(*algorithm).is_some()) =>
-                    {
-                        Some(public_key.clone())
-                    }
-                    KeyMaterial::Public(PublicKeyMaterial::MlDsa { public_key, .. })
-                    | KeyMaterial::Public(PublicKeyMaterial::MlKem { public_key, .. })
-                    | KeyMaterial::Public(PublicKeyMaterial::HybridKem { public_key, .. })
-                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
-                    {
-                        Some(public_key.clone())
-                    }
-                    KeyMaterial::Data { value, .. }
-                    | KeyMaterial::SoftwareSecret(value)
-                    | KeyMaterial::Secret(value)
-                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
-                    {
-                        Some(value.to_vec())
-                    }
                     KeyMaterial::Certificate { value, .. } => piv_certificate_attribute(value, x),
                     KeyMaterial::PivCertificate { value, .. }
                     | KeyMaterial::OpenPgpCertificate { value }
                     | KeyMaterial::IssuerSecurityDomainCertificate { value } => {
                         piv_certificate_attribute(value, x)
-                    }
-                    KeyMaterial::IssuerSecurityDomainData { value, .. }
-                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
-                    {
-                        Some(value.clone())
-                    }
-                    KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
-                        Some(value.clone())
-                    }
-                    KeyMaterial::FidoCredential { response_cbor, .. }
-                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
-                    {
-                        Some(response_cbor.clone())
-                    }
-                    KeyMaterial::OpenPgpData {
-                        connector,
-                        tag,
-                        cache,
-                    } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
-                        if cache.borrow().is_unattempted() {
-                            *cache.borrow_mut() =
-                                match OpenPgpClient.get_data(connector.as_ref(), *tag) {
-                                    Ok(value) => LazyCache::Value(value),
-                                    Err(_) => LazyCache::Missing,
-                                };
-                        }
-                        Some(cache.borrow().value().cloned().unwrap_or_default())
                     }
                     KeyMaterial::PivAttestation {
                         connector,

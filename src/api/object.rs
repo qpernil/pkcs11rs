@@ -5,6 +5,7 @@ use super::key::{
 };
 use super::yubihsm_object::{publish_yubihsm_created_object, set_yubihsm_attributes_and_refresh};
 use crate::key_metadata::{KeyAttributeValue, KeyAttributes};
+use crate::object::AttributeValue;
 use crate::*;
 
 fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObject>, Error> {
@@ -2047,7 +2048,7 @@ fn get_object_size(
     with_session_context(session_handle, |ctx| {
         let (slot_id, _, _) = ctx.session_details(session_handle)?;
         let object = ctx
-            .resolve_object(object)?
+            .resolve_object_ref(object)?
             .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
@@ -2085,7 +2086,7 @@ pub(crate) fn get_attribute_value(
         let (slot_id, _, _) = ctx.session_details(session_handle)?;
         let object_handle = object;
         let object = ctx
-            .resolve_object(object)?
+            .resolve_object_ref(object)?
             .filter(|object| object.is_visible_for_management(ctx.login_role(slot_id)))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
@@ -2114,18 +2115,26 @@ pub(crate) fn get_attribute_value(
                 }
                 continue;
             }
-            match object_attribute_value(
+            let reader = ObjectAttributeReader {
                 ctx,
                 session_handle,
                 object_handle,
-                &object,
-                attribute.type_,
-            )? {
-                Some(value) => {
-                    if let Err(e) = write_attribute_value(attribute, &value) {
-                        rv = combine_attribute_rv(rv, e);
-                    }
-                }
+                object: &object,
+                attribute_type: attribute.type_,
+            };
+            let result = if attribute.pValue.is_null() {
+                reader.len()?.map(|length| {
+                    attribute.ulValueLen = length as CK_ULONG;
+                    Ok(())
+                })
+            } else {
+                reader
+                    .value()?
+                    .map(|value| write_attribute_value(attribute, value.as_ref()))
+            };
+            match result {
+                Some(Err(error)) => rv = combine_attribute_rv(rv, error),
+                Some(Ok(())) => {}
                 None => {
                     attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
                     rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
@@ -2179,13 +2188,13 @@ fn write_policy_template(
     }
 }
 
-fn yubihsm_object_value(
+fn yubihsm_object_value<'a>(
     ctx: &SlotContext,
     session_handle: CK_SESSION_HANDLE,
     id: u16,
     object_type: u8,
-    value: &Rc<RefCell<Option<Vec<u8>>>>,
-) -> Result<Vec<u8>, Error> {
+    value: &'a Rc<RefCell<Option<Vec<u8>>>>,
+) -> Result<std::cell::Ref<'a, [u8]>, Error> {
     if value
         .try_borrow()
         .map_err(|_| Error::from(CKR_CANT_LOCK))?
@@ -2197,11 +2206,11 @@ fn yubihsm_object_value(
             .yubihsm_read_object(id, object_type)?;
         *value.try_borrow_mut()? = Some(payload);
     }
-    value
-        .try_borrow()
-        .map_err(|_| Error::from(CKR_CANT_LOCK))?
-        .clone()
-        .ok_or(CKR_DEVICE_ERROR.into())
+    std::cell::Ref::filter_map(
+        value.try_borrow().map_err(|_| Error::from(CKR_CANT_LOCK))?,
+        |value| value.as_deref(),
+    )
+    .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 fn object_attribute_value(
@@ -2211,77 +2220,142 @@ fn object_attribute_value(
     object: &TokenObject,
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Result<Option<Vec<u8>>, Error> {
-    if attribute_type == CKA_PKCS11RS_URI {
-        return Ok(Some(
-            crate::pkcs11_uri::object_uri(ctx.slot.as_ref(), object).into_bytes(),
-        ));
+    ObjectAttributeReader {
+        ctx,
+        session_handle,
+        object_handle,
+        object,
+        attribute_type,
     }
-    if attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE && object.is_key_object() {
-        return Ok(Some(
-            ctx.slot
-                .allowed_key_mechanisms(object)
-                .iter()
-                .flat_map(|m| m.to_ne_bytes())
-                .collect(),
-        ));
-    }
-    if object.attribute_is_sensitive(attribute_type) {
-        return Ok(None);
-    }
-    if attribute_type == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
-        && !ctx.slot.token_objects_copyable()
-        && object.token
-    {
-        return Ok(Some(bool_attribute(false)));
-    }
-    if let KeyMaterial::YubiHsm {
-        id,
-        object_type: YUBIHSM_OPAQUE,
-        algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
-        value,
-        ..
-    } = &object.material
-        && is_certificate_attribute(attribute_type)
-    {
-        let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
-        return Ok(piv_certificate_attribute(&payload, attribute_type));
-    }
-    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
-        && let KeyMaterial::YubiHsmSessionObject { handle, length } = object.material
-    {
-        let value = ctx
-            ._get_session(session_handle)?
-            .1
-            .yubihsm_command(&YubiHsmCommand::read_session_object(handle))?;
-        if value.len() != length {
-            return Err(CKR_DEVICE_ERROR.into());
+    .value()
+    .map(|value| value.map(AttributeValue::into_owned))
+}
+
+struct ObjectAttributeReader<'a> {
+    ctx: &'a SlotContext,
+    session_handle: CK_SESSION_HANDLE,
+    object_handle: CK_OBJECT_HANDLE,
+    object: &'a TokenObject,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+}
+
+impl<'a> ObjectAttributeReader<'a> {
+    fn len(&self) -> Result<Option<usize>, Error> {
+        if self.attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
+            && self.object.is_key_object()
+        {
+            return Ok(Some(
+                self.ctx.slot.allowed_key_mechanisms(self.object).len()
+                    * std::mem::size_of::<CK_MECHANISM_TYPE>(),
+            ));
         }
-        return Ok(Some(value));
+        if self.attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            && let KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_OPAQUE,
+                length,
+                value,
+                ..
+            } = &self.object.material
+        {
+            return Ok(Some(
+                value
+                    .try_borrow()
+                    .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                    .as_ref()
+                    .map_or(*length, Vec::len),
+            ));
+        }
+        // Volatile session objects must still be read: a metadata-only answer
+        // would hide native-session expiry and stale-handle errors.
+        self.value()
+            .map(|value| value.map(|value| value.as_ref().len()))
     }
-    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
-        && let KeyMaterial::YubiHsm {
+
+    fn value(&self) -> Result<Option<AttributeValue<'a>>, Error> {
+        let Self {
+            ctx,
+            session_handle,
+            object_handle,
+            object,
+            attribute_type,
+        } = *self;
+        if attribute_type == CKA_PKCS11RS_URI {
+            return Ok(Some(AttributeValue::Owned(
+                crate::pkcs11_uri::object_uri(ctx.slot.as_ref(), object).into_bytes(),
+            )));
+        }
+        if attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE && object.is_key_object() {
+            return Ok(Some(AttributeValue::Owned(
+                ctx.slot
+                    .allowed_key_mechanisms(object)
+                    .iter()
+                    .flat_map(|m| m.to_ne_bytes())
+                    .collect(),
+            )));
+        }
+        if object.attribute_is_sensitive(attribute_type) {
+            return Ok(None);
+        }
+        if attribute_type == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+            && !ctx.slot.token_objects_copyable()
+            && object.token
+        {
+            return Ok(Some(AttributeValue::Borrowed(&[CK_FALSE as CK_BBOOL])));
+        }
+        if let KeyMaterial::YubiHsm {
             id,
-            object_type,
+            object_type: YUBIHSM_OPAQUE,
+            algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
             value,
             ..
         } = &object.material
-        && matches!(*object_type, YUBIHSM_OPAQUE | crate::YUBIHSM_TEMPLATE)
-    {
-        return yubihsm_object_value(ctx, session_handle, *id, *object_type, value).map(Some);
+            && is_certificate_attribute(attribute_type)
+        {
+            let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
+            return Ok(if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE {
+                Some(AttributeValue::Cached(payload))
+            } else {
+                piv_certificate_attribute(&payload, attribute_type).map(AttributeValue::Owned)
+            });
+        }
+        if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            && let KeyMaterial::YubiHsmSessionObject { handle, length } = object.material
+        {
+            let value = ctx
+                ._get_session(session_handle)?
+                .1
+                .yubihsm_command(&YubiHsmCommand::read_session_object(handle))?;
+            if value.len() != length {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            return Ok(Some(AttributeValue::Owned(value)));
+        }
+        if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            && let KeyMaterial::YubiHsm {
+                id,
+                object_type,
+                value,
+                ..
+            } = &object.material
+            && matches!(*object_type, YUBIHSM_OPAQUE | crate::YUBIHSM_TEMPLATE)
+        {
+            return yubihsm_object_value(ctx, session_handle, *id, *object_type, value)
+                .map(|value| Some(AttributeValue::Cached(value)));
+        }
+        if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && ctx.is_native_token_object_handle(object_handle)
+            && matches!(object.material, KeyMaterial::Public(_))
+            && matches!(
+                attribute_type,
+                x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                    || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                    || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+            )
+        {
+            return Ok(Some(AttributeValue::Borrowed(&[CK_FALSE as CK_BBOOL])));
+        }
+        Ok(object.read_attribute(attribute_type))
     }
-    if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-        && ctx.is_native_token_object_handle(object_handle)
-        && matches!(object.material, KeyMaterial::Public(_))
-        && matches!(
-            attribute_type,
-            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
-                || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
-                || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
-        )
-    {
-        return Ok(Some(bool_attribute(false)));
-    }
-    Ok(object.attribute_value(attribute_type))
 }
 
 fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
@@ -2557,9 +2631,17 @@ pub(crate) fn find_objects_init(
             }
             let mut matches = true;
             for (attribute_type, expected) in &templ {
-                if object_attribute_value(ctx, session_handle, handle, &object, *attribute_type)?
-                    .as_ref()
-                    != Some(expected)
+                if (ObjectAttributeReader {
+                    ctx,
+                    session_handle,
+                    object_handle: handle,
+                    object: &object,
+                    attribute_type: *attribute_type,
+                })
+                .value()?
+                .as_ref()
+                .map(AsRef::as_ref)
+                    != Some(expected.as_slice())
                 {
                     matches = false;
                     break;
