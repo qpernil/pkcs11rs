@@ -84,14 +84,21 @@ impl AuthSlots {
             .collect::<Vec<_>>();
         let mut entries = entries
             .into_iter()
-            .map(|(entry, slot)| {
+            .map(|(mut entry, slot)| {
                 // Slot capabilities can change after registration, for example
                 // when a retained remote slot reconnects to upgraded virtual
                 // hardware. A busy slot keeps its last known tier so a later
                 // source cannot block selection before it is reached.
                 let tier = slot
                     .try_lock()
-                    .map(|ctx| ctx.slot.client_auth_search_tier())
+                    .map(|ctx| {
+                        // Software-token initialization can change the label
+                        // without changing its configured storage identity.
+                        entry.token = ctx.slot.label();
+                        entry.uri_prefix =
+                            crate::pkcs11_uri::slot_uri_prefix(&entry.token, ctx.slot.serial());
+                        ctx.slot.client_auth_search_tier()
+                    })
                     .unwrap_or(entry.client_auth_search_tier);
                 (entry, slot, tier)
             })

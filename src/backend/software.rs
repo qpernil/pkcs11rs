@@ -264,16 +264,7 @@ impl Slot for SoftwareSlot {
     }
 
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        if let Some(label) = self
-            .store
-            .as_ref()
-            .and_then(|store| store.label().ok())
-            .flatten()
-        {
-            info.label = label;
-        } else {
-            str_pad(&self.name, &mut info.label);
-        }
+        str_pad(&self.label(), &mut info.label);
         str_pad(SOFTWARE_MANUFACTURER, &mut info.manufacturerID);
         str_pad(SOFTWARE_MODEL, &mut info.model);
         str_pad(&self.serial, &mut info.serialNumber);
@@ -436,9 +427,7 @@ impl Slot for SoftwareSlot {
     fn init_token(&mut self, so_pin: &[u8], label: [CK_UTF8CHAR; 32]) -> Result<(), Error> {
         self.clear_sensitive_state();
         let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
-        if store.is_initialized()? {
-            let _ = store.login_so(so_pin)?;
-        }
+        store.initialization_generation(so_pin)?;
         if let Some(provider) = &self.public_provider {
             provider.clear()?;
         }
@@ -463,7 +452,15 @@ impl Slot for SoftwareSlot {
     }
 
     fn label(&self) -> String {
-        self.name.clone()
+        self.store
+            .as_ref()
+            .and_then(|store| store.label().ok().flatten())
+            .map(|label| {
+                String::from_utf8_lossy(&label)
+                    .trim_end_matches(' ')
+                    .to_owned()
+            })
+            .unwrap_or_else(|| self.name.clone())
     }
 
     fn model(&self) -> &str {
@@ -492,6 +489,135 @@ impl BackendSession for SoftwareSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialized_labels_match_token_info_uris_and_credential_selection() {
+        use crate::pkcs11_auth::Pkcs11Auth;
+        use crate::pkcs11_provider::{Pkcs11Provider, ProviderSession};
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "pkcs11rs-label-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        )));
+        let configured_name = "configured name";
+        let provider = Pkcs11Provider::new(Box::new(
+            SoftwareSlot::new_with_storage(
+                configured_name.into(),
+                0,
+                Some(directory.0.clone()),
+                None,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        let (slot_id, source) = provider
+            .call(|| {
+                with_context(|ctx| {
+                    let slots = ctx.slot_contexts.read().unwrap();
+                    let (id, slot) = slots.iter().next().unwrap();
+                    Ok((*id, slot.clone()))
+                })
+            })
+            .unwrap();
+        let sources = crate::auth_slots::AuthSlots::default();
+        sources.register(&source).unwrap();
+        let device = Arc::new(crate::device::DeviceContext::new(
+            crate::device::DeviceIdentity::unknown("test", "target"),
+        ));
+        let select = |selector: &crate::pkcs11_uri::ClientAuthUri| {
+            sources
+                .find_card_credential(selector, &std::sync::Weak::new(), &device, |_| Ok(Some(())))
+                .unwrap()
+        };
+        let mut previous_label = configured_name.to_owned();
+        for current_label in ["initialized label", "renamed label"] {
+            let mut label = [b' '; 32];
+            label[..current_label.len()].copy_from_slice(current_label.as_bytes());
+            let mut officer_pin = *b"label officer PIN";
+            assert_eq!(
+                provider.call(|| crate::api::C_InitToken(
+                    slot_id,
+                    officer_pin.as_mut_ptr(),
+                    officer_pin.len() as _,
+                    label.as_mut_ptr(),
+                )),
+                CKR_OK as CK_RV
+            );
+            let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                provider.call(|| crate::api::C_GetTokenInfo(slot_id, &mut info)),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(info.label, label);
+            let session = ProviderSession::open(provider.clone()).unwrap();
+            assert_eq!(
+                session.call(|| crate::api::C_Login(
+                    session.handle,
+                    CKU_SO as _,
+                    officer_pin.as_mut_ptr(),
+                    officer_pin.len() as _,
+                )),
+                CKR_OK as CK_RV
+            );
+            let mut user_pin = *b"label user PIN";
+            assert_eq!(
+                session.call(|| crate::api::C_InitPIN(
+                    session.handle,
+                    user_pin.as_mut_ptr(),
+                    user_pin.len() as _,
+                )),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                session.call(|| crate::api::C_Logout(session.handle)),
+                CKR_OK as CK_RV
+            );
+            session.login(&user_pin).unwrap();
+            let mut class = CKO_DATA as CK_OBJECT_CLASS;
+            let mut template = [CK_ATTRIBUTE {
+                type_: CKA_CLASS as _,
+                pValue: (&mut class as *mut CK_OBJECT_CLASS).cast(),
+                ulValueLen: std::mem::size_of_val(&class) as _,
+            }];
+            let mut handle = 0;
+            assert_eq!(
+                session.call(|| crate::api::C_CreateObject(
+                    session.handle,
+                    template.as_mut_ptr(),
+                    template.len() as _,
+                    &mut handle,
+                )),
+                CKR_OK as CK_RV
+            );
+            let uri = session.attribute(handle, CKA_PKCS11RS_URI as _).unwrap();
+            let mut selector = crate::pkcs11_uri::ClientAuthUri::parse(&uri).unwrap();
+            assert_eq!(selector.token.as_deref(), Some(current_label.as_bytes()));
+            assert_eq!(select(&selector), Some(()));
+            selector.token = Some(previous_label.into_bytes());
+            assert_eq!(select(&selector), None);
+            previous_label = current_label.to_owned();
+            drop(session);
+        }
+        drop(source);
+        drop(provider);
+        let reopened = SoftwareSlot::new_with_storage(
+            configured_name.into(),
+            0,
+            Some(directory.0.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reopened.label(), "renamed label");
+        assert_eq!(
+            reopened.description(),
+            "pkcs11rs software slot: configured name"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

@@ -444,6 +444,36 @@ impl LocalStorageProvider {
         Ok(Some(object))
     }
 
+    fn visit_objects(
+        &self,
+        mut visit: impl FnMut(ContentReference, Vec<u8>),
+    ) -> Result<(), StorageError> {
+        for entry in fs::read_dir(&self.objects)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let filename = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| StorageError::InvalidReference)?;
+            if filename.starts_with(TEMPORARY_FILE_PREFIX)
+                && filename.ends_with(TEMPORARY_FILE_SUFFIX)
+            {
+                continue;
+            }
+            if !filename.ends_with(".cbor") {
+                continue;
+            }
+            let reference = ContentReference::from_filename(&filename)?;
+            let object = self
+                .read_verified(&reference)?
+                .ok_or(StorageError::Integrity)?;
+            visit(reference, object);
+        }
+        Ok(())
+    }
+
     fn temporary_file(&self) -> Result<(PathBuf, File), StorageError> {
         loop {
             let id = self.next_temporary_file.fetch_add(1, Ordering::Relaxed);
@@ -470,31 +500,18 @@ impl LocalStorageProvider {
 impl StorageProvider for LocalStorageProvider {
     fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
         let mut references = Vec::new();
-        for entry in fs::read_dir(&self.objects)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let filename = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| StorageError::InvalidReference)?;
-            if filename.starts_with(TEMPORARY_FILE_PREFIX)
-                && filename.ends_with(TEMPORARY_FILE_SUFFIX)
-            {
-                continue;
-            }
-            if !filename.ends_with(".cbor") {
-                continue;
-            }
-            let reference = ContentReference::from_filename(&filename)?;
-            self.read_verified(&reference)?
-                .ok_or(StorageError::Integrity)?;
-            references.push(reference);
-        }
+        self.visit_objects(|reference, _| references.push(reference))?;
         references.sort();
         references.dedup();
         Ok(references)
+    }
+
+    fn read_all(&self) -> Result<Vec<(ContentReference, Vec<u8>)>, StorageError> {
+        let mut objects = Vec::new();
+        self.visit_objects(|reference, object| objects.push((reference, object)))?;
+        objects.sort_by(|left, right| left.0.cmp(&right.0));
+        objects.dedup_by(|left, right| left.0 == right.0);
+        Ok(objects)
     }
 
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
@@ -735,6 +752,17 @@ mod tests {
         let mut expected = vec![first_reference.clone(), second_reference.clone()];
         expected.sort();
         assert_eq!(provider.list().unwrap(), expected);
+        let all = provider.read_all().unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|(reference, _)| reference.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for (reference, bytes) in all {
+            assert!(reference.matches(&bytes));
+            assert_eq!(provider.get(&reference).unwrap(), Some(bytes));
+        }
         assert_eq!(
             provider.get(&first_reference).unwrap(),
             Some(first.to_vec())
@@ -763,6 +791,7 @@ mod tests {
             Err(StorageError::Integrity)
         ));
         assert!(matches!(provider.list(), Err(StorageError::Integrity)));
+        assert!(matches!(provider.read_all(), Err(StorageError::Integrity)));
     }
 
     #[test]

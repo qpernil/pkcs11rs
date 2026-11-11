@@ -181,15 +181,11 @@ impl SoftwarePublicStorageProvider {
 
     fn logical_objects(
         &self,
+        key: &[u8; MASTER_KEY_LENGTH],
     ) -> Result<Vec<(ContentReference, ContentReference, Vec<u8>)>, StorageError> {
-        let key = self.public_key()?;
         let mut objects = Vec::new();
-        for physical in self.records.list()? {
-            let encoded = self
-                .records
-                .get(&physical)?
-                .ok_or(StorageError::Integrity)?;
-            let logical = decode_public_record(&self.store.name, &key, &encoded)
+        for (physical, encoded) in self.records.read_all()? {
+            let logical = decode_public_record(&self.store.name, key, &encoded)
                 .map_err(public_storage_error)?;
             objects.push((ContentReference::for_object(&logical), physical, logical));
         }
@@ -218,14 +214,17 @@ impl StorageProvider for SoftwarePublicStorageProvider {
         if !self.store.is_initialized().map_err(public_storage_error)? {
             return Ok(Vec::new());
         }
-        if let Err(error) = self.public_key() {
-            if !self.has_login_key()? {
-                return Ok(Vec::new());
+        let key = match self.public_key() {
+            Ok(key) => key,
+            Err(error) => {
+                if !self.has_login_key()? {
+                    return Ok(Vec::new());
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         let mut objects = self
-            .logical_objects()?
+            .logical_objects(&key)?
             .into_iter()
             .map(|(logical, _, object)| (logical, object))
             .collect::<Vec<_>>();
@@ -235,24 +234,31 @@ impl StorageProvider for SoftwarePublicStorageProvider {
     }
 
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
-        if let Err(error) = self.public_key() {
-            if !self.has_login_key()? {
-                return Ok(None);
+        let key = match self.public_key() {
+            Ok(key) => key,
+            Err(error) => {
+                if !self.has_login_key()? {
+                    return Ok(None);
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         Ok(self
-            .logical_objects()?
+            .logical_objects(&key)?
             .into_iter()
             .find_map(|(logical, _, object)| (&logical == reference).then_some(object)))
     }
 
     fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
         let logical = ContentReference::for_object(object);
-        if self.get(&logical)?.is_some() {
+        let key = self.public_key()?;
+        if self
+            .logical_objects(&key)?
+            .iter()
+            .any(|(reference, _, _)| *reference == logical)
+        {
             return Ok(logical);
         }
-        let key = self.public_key()?;
         let encoded =
             encode_public_record(&self.store.name, &key, object).map_err(public_storage_error)?;
         self.records.put(&encoded)?;
@@ -260,9 +266,9 @@ impl StorageProvider for SoftwarePublicStorageProvider {
     }
 
     fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError> {
-        self.public_key()?;
+        let key = self.public_key()?;
         let physical = self
-            .logical_objects()?
+            .logical_objects(&key)?
             .into_iter()
             .filter_map(|(logical, physical, _)| (&logical == reference).then_some(physical))
             .collect::<Vec<_>>();
@@ -460,21 +466,46 @@ impl SoftwareTokenStore {
         Ok(Zeroizing::new(master_key))
     }
 
+    /// Authorize a reset before either storage realm is cleared.
+    pub(crate) fn initialization_generation(&self, so_pin: &[u8]) -> Result<u64, Error> {
+        validate_software_pin(so_pin)?;
+        match self.read_current_header()? {
+            Some((generation, encoded)) => {
+                let header = decode_header(&encoded)?;
+                let _existing =
+                    self.unwrap_master_key(so_pin, PinRole::SoPublic, &header.so_public)?;
+                generation
+                    .checked_add(1)
+                    .ok_or_else(|| CKR_DEVICE_ERROR.into())
+            }
+            None => {
+                let public_records = LocalStorageProvider::open(
+                    self.root
+                        .parent()
+                        .ok_or(CKR_DEVICE_ERROR)?
+                        .join(PUBLIC_DIRECTORY),
+                )
+                .map_err(crate::backed_object::storage_error)?;
+                for records in [&self.records, &public_records] {
+                    if !records
+                        .list()
+                        .map_err(crate::backed_object::storage_error)?
+                        .is_empty()
+                    {
+                        return Err(CKR_DATA_INVALID.into());
+                    }
+                }
+                Ok(1)
+            }
+        }
+    }
+
     pub(crate) fn init_token(
         &self,
         so_pin: &[u8],
         label: [u8; 32],
     ) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
-        validate_software_pin(so_pin)?;
-        let generation = match self.read_current_header()? {
-            Some((generation, encoded)) => {
-                let header = decode_header(&encoded)?;
-                let _existing =
-                    self.unwrap_master_key(so_pin, PinRole::SoPublic, &header.so_public)?;
-                generation.checked_add(1).ok_or(CKR_DEVICE_ERROR)?
-            }
-            None => 1,
-        };
+        let generation = self.initialization_generation(so_pin)?;
         for reference in self
             .records
             .list()
@@ -611,16 +642,11 @@ impl SoftwareTokenStore {
     ) -> Result<(Vec<TokenObject>, HashMap<String, ContentReference>), Error> {
         let mut objects = Vec::new();
         let mut references = HashMap::new();
-        for reference in self
+        for (reference, encoded) in self
             .records
-            .list()
+            .read_all()
             .map_err(crate::backed_object::storage_error)?
         {
-            let encoded = self
-                .records
-                .get(&reference)
-                .map_err(crate::backed_object::storage_error)?
-                .ok_or(CKR_DEVICE_ERROR)?;
             if encoded.len() > MAX_RECORD_LENGTH {
                 return Err(CKR_DATA_INVALID.into());
             }
@@ -2307,6 +2333,69 @@ mod tests {
             public_key: None,
             rp_id: None,
             material: KeyMaterial::SoftwareSecret(Zeroizing::new((0u8..16).collect())),
+        }
+    }
+
+    #[test]
+    fn missing_header_blocks_reset_before_either_realm_is_cleared() {
+        for private in [false, true] {
+            let directory = TestDirectory::new();
+            let name = "missing-header";
+            let store = open_store(name, directory.0.clone());
+            let public = store
+                .init_token(b"original officer PIN", [b' '; 32])
+                .unwrap();
+            store.init_user_pin(b"original user PIN", &public).unwrap();
+            let provider = SoftwarePublicStorageProvider::open(
+                name.into(),
+                directory.0.clone(),
+                Some(b"software public discovery test pin".to_vec()),
+                Rc::new(RefCell::new(None)),
+            )
+            .unwrap();
+            let reference = if private {
+                let (_, key) = store.login(b"original user PIN").unwrap();
+                store.put_object(7, &key, &secret_object()).unwrap().1
+            } else {
+                provider
+                    .put(&minicbor::to_vec(("public marker", 7u8)).unwrap())
+                    .unwrap();
+                provider.records.list().unwrap().pop().unwrap()
+            };
+            let records = if private {
+                &store.records
+            } else {
+                &provider.records
+            };
+            let original = records.get(&reference).unwrap().unwrap();
+            let (_, header_path) = store.current_header_path().unwrap().unwrap();
+            let header = fs::read(&header_path).unwrap();
+            fs::remove_file(&header_path).unwrap();
+            assert!(matches!(
+                store.init_token(b"replacement officer PIN", [b' '; 32]),
+                Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
+            ));
+            let mut slot = crate::SoftwareSlot::new_with_storage(
+                name.into(),
+                0,
+                Some(directory.0.clone()),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(
+                crate::Slot::init_token(&mut slot, b"replacement officer PIN", [b' '; 32]),
+                Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
+            ));
+            assert!(store.read_current_header().unwrap().is_none());
+            assert_eq!(records.get(&reference).unwrap().unwrap(), original);
+            // Restoring the header remains sufficient to recover the old realm.
+            fs::write(header_path, header).unwrap();
+            let (_, key) = store.login(b"original user PIN").unwrap();
+            if private {
+                assert_eq!(store.load_objects(7, &key).unwrap().0.len(), 1);
+            } else {
+                assert_eq!(provider.read_all().unwrap().len(), 1);
+            }
         }
     }
 

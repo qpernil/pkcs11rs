@@ -25,10 +25,16 @@ additionally validate its own backing schema or translate a legacy physical
 representation to canonical logical bytes. Providers do not re-encode
 canonical records submitted to `put`.
 
-The default bulk read uses `list` and `get`. Software public storage and
-YubiHSM override it to traverse their records once, avoiding a complete store
-scan for each object during refresh. Decrypted software public records are
-held for that read only, without a persistent plaintext cache.
+The default bulk read uses `list` and `get`. Local storage overrides it with one
+directory traversal that reads and verifies each object once and returns the
+results in reference order. Software public storage and YubiHSM also provide
+bulk reads, avoiding a complete store scan for each object during refresh.
+Software public and private loaders consume the verified local bulk read.
+Public storage resolves its decryption key once per operation and releases the
+zeroizing call-local copy when the call ends. It retains no plaintext discovery
+cache; returned records follow their caller's object lifetime. Bulk reads do not
+provide an atomic filesystem snapshot; a concurrent deletion can still produce
+an integrity error.
 
 PKCS #11 object identity is distinct from content addressing. Persistent
 backed-key metadata stores `CKA_UNIQUE_ID`; new objects and copies receive

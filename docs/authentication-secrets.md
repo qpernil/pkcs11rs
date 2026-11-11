@@ -60,7 +60,9 @@ lifetime is distinct from retaining the login secret to authenticate again.
   remain in zeroizing local storage for the live card-channel lifetime.
 - Software-token login may retain unlocked key material for the authenticated
   session. Configured public-discovery credentials are a separate exception;
-  they are not a cache populated from ordinary user login.
+  they are not a cache populated from ordinary user login. Public discovery
+  unwraps its master key once per storage operation into zeroizing call-local
+  storage and does not retain that plaintext key between calls.
 - Platform USER login retains authorization state only. Apple Secure Enclave
   and Windows CNG/TPM credentials retain public identity and native-key bindings,
   without caching OS passwords or PINs. Windows operations reopen the current-user

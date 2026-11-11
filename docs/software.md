@@ -21,8 +21,12 @@ they are opt-in rather than locally discovered. The only accepted
 hardware-discovery values are `0` and `1`.
 
 Each entry creates a separate slot context with separate object handles and
-sessions. The name is reported as `CK_TOKEN_INFO.label`; the slot description
-is `pkcs11rs software slot: <name>`. The token model is `Software token`, the
+sessions. The configured name is the initial `CK_TOKEN_INFO.label` and the
+stable storage identity. An initialized persistent token reports the label
+supplied to `C_InitToken`, including after reopening the store. Generated object
+URIs and source-credential selectors use that current token label, with trailing
+space padding removed. The slot description remains
+`pkcs11rs software slot: <name>`. The token model is `Software token`, the
 manufacturer is `pkcs11rs`, and its deterministic serial is the decimal
 configuration-list ordinal (`0`, `1`, and so on).
 `CK_SLOT_INFO.flags` contains only `CKF_TOKEN_PRESENT`; it never contains
@@ -76,7 +80,9 @@ it, logout restores the encrypted public-object view. The credential must be
 configured when `C_InitToken` creates the token. Changing or adding it later
 cannot unwrap that token's public master key; reinitialize the token to adopt
 the new credential. A missing or incorrect discovery credential never blocks
-SO or USER login.
+SO or USER login. Each public-storage read or mutation resolves its public
+master key once and releases the zeroizing call-local copy when the call ends.
+Discovery does not populate a reusable plaintext-key cache.
 
 The internal direct YubiHSM authentication provider uses this same software-slot
 implementation with no backing store. It is hidden from the public slot registry
@@ -271,8 +277,11 @@ openssl pkey -inform DER -in imported-key.der -check -text -noout
 An incorrect login PIN, or corruption that prevents authentication of the
 wrapped master key, returns `CKR_PIN_INCORRECT` without exposing which case
 occurred. Structurally malformed headers and malformed or unauthentic private
-records fail closed with `CKR_DATA_INVALID`. If records exist but the header is
-missing, pkcs11rs refuses to initialize a replacement master key.
+records fail closed with `CKR_DATA_INVALID`. If records exist in either the
+public or private realm but the header is missing, `C_InitToken` returns
+`CKR_DATA_INVALID` before clearing either realm or creating a replacement
+header. Existing encrypted records remain available for recovery with the
+original header. A genuinely empty store can be initialized normally.
 
 ## Durability and concurrency
 
