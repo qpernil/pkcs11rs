@@ -482,6 +482,7 @@ impl Drop for TestTrustEntry {
 #[derive(Debug)]
 pub(crate) struct ProtocolPeer {
     device: RefCell<VirtualYubiHsm>,
+    device_public_key_override: RefCell<Option<Vec<u8>>>,
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
     native_session_commands: Cell<bool>,
@@ -561,6 +562,7 @@ impl ProtocolPeer {
         );
         let peer = Self {
             device: RefCell::new(Self::new_virtual_device()),
+            device_public_key_override: RefCell::new(None),
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             native_session_commands: Cell::new(false),
@@ -1007,7 +1009,11 @@ impl ProtocolPeer {
             }
             Some(value) if value == CommandCode::GetDevicePublicKey as u8 => {
                 let key = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
-                let mut public = p256_public_key(&key)?;
+                let mut public = self
+                    .device_public_key_override
+                    .borrow()
+                    .clone()
+                    .unwrap_or(p256_public_key(&key)?.to_vec());
                 public[0] = EC_P256_AUTHENTICATION_ALGORITHM;
                 Frame::new(
                     CommandCode::GetDevicePublicKey as u8 | RESPONSE_BIT,
@@ -2946,6 +2952,50 @@ fn cache_test_slot(peer: Rc<ProtocolPeer>, public_discovery: bool) -> YubiHsmSlo
             vec![YUBIHSM_ALGO_RSA_2048, crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256],
         )
     }
+}
+
+#[test]
+fn reconnect_refreshes_device_public_key_projection() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = cache_test_slot(peer.clone(), false);
+    login_slot(&mut slot, b"0001password").unwrap();
+    let device_point = |objects: Vec<TokenObject>| {
+        objects
+            .into_iter()
+            .find(|object| object.unique_id == "yubihsm-device-public")
+            .unwrap()
+            .attribute_value(crate::CKA_EC_POINT as _)
+            .unwrap()
+    };
+    let original = device_point(Slot::token_objects(&slot, 7).unwrap());
+    let reads = || {
+        peer.commands
+            .borrow()
+            .iter()
+            .filter(|frame| frame[0] == CommandCode::GetDevicePublicKey as u8)
+            .count()
+    };
+    let reads_before = reads();
+    assert_eq!(
+        device_point(Slot::token_objects(&slot, 7).unwrap()),
+        original
+    );
+    assert_eq!(reads(), reads_before);
+    let replacement = p256_public_key(&test_private_key(&[7; 32]).unwrap())
+        .unwrap()
+        .to_vec();
+    *peer.device_public_key_override.borrow_mut() = Some(replacement.clone());
+    peer.connection_epoch.set(1);
+    assert!(
+        Slot::backend_token_object(&slot, 7, "yubihsm-device-public")
+            .unwrap()
+            .is_none()
+    );
+    login_slot(&mut slot, b"0001password").unwrap();
+    let reconnected = device_point(Slot::token_objects(&slot, 7).unwrap());
+    assert_ne!(reconnected, original);
+    assert_eq!(reconnected, crate::der_octet_string(&replacement).unwrap());
+    assert_eq!(reads(), reads_before + 1);
 }
 
 fn inner_command_count(peer: &ProtocolPeer, command: CommandCode) -> usize {

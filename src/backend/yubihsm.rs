@@ -284,7 +284,6 @@ pub(crate) struct YubiHsmSlot {
         RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
     metadata_storage_writes: RefCell<HashMap<ContentReference, u16>>,
     pub(crate) next_object_generation: Cell<u64>,
-    pub(crate) device_public_key: OnceLock<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,6 +384,7 @@ impl YubiHsmPublicDiscoveryConfig {
 #[derive(Debug, Default)]
 pub(crate) struct YubiHsmObjectCache {
     pub(crate) connection_epoch: u64,
+    device_public_key: Option<Vec<u8>>,
     pub(crate) discovery: YubiHsmDiscoveryCache,
     pub(crate) native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
     pub(crate) objects: BTreeMap<String, TokenObject>,
@@ -1136,7 +1136,6 @@ impl YubiHsmSlot {
             attestation_cache: RefCell::new(HashMap::new()),
             metadata_storage_writes: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
-            device_public_key: OnceLock::new(),
         }
     }
 
@@ -1167,15 +1166,19 @@ impl YubiHsmSlot {
         self.pinentry = pinentry;
     }
 
-    fn device_public_key(&self) -> Result<&[u8], Error> {
-        if self.device_public_key.get().is_none() {
-            let public_key = get_yubihsm_device_public_key(self.connector.as_ref())?.to_vec();
-            let _ = self.device_public_key.set(public_key);
+    fn device_public_key(&self) -> Result<Vec<u8>, Error> {
+        self.synchronize_caches()?;
+        if let Some(public_key) = &self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .device_public_key
+        {
+            return Ok(public_key.clone());
         }
-        self.device_public_key
-            .get()
-            .map(Vec::as_slice)
-            .ok_or_else(|| CKR_DEVICE_ERROR.into())
+        let public_key = get_yubihsm_device_public_key(self.connector.as_ref())?.to_vec();
+        self.object_cache.try_borrow_mut()?.device_public_key = Some(public_key.clone());
+        Ok(public_key)
     }
 
     fn cache_object_info(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
@@ -4619,7 +4622,6 @@ impl Slot for YubiHsmSlot {
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let _ = self.close_active_session("slot initialization");
-        let _ = self.device_public_key.take();
         if let Ok(mut state) = self.object_cache.try_borrow_mut() {
             *state = YubiHsmObjectCache {
                 connection_epoch: self.connector.connection_epoch(),
@@ -4719,7 +4721,7 @@ impl Slot for YubiHsmSlot {
         generations.retain(|key, _| discovered_keys.contains(key));
 
         let mut objects = match self.device_public_key() {
-            Ok(public_key) => vec![yubihsm_device_public_key_object(slot_id, public_key)?],
+            Ok(public_key) => vec![yubihsm_device_public_key_object(slot_id, &public_key)?],
             Err(error) => {
                 log!(2, "YubiHSM GET DEVICE PUBLIC KEY: {:?}", error);
                 Vec::new()
@@ -4798,7 +4800,12 @@ impl Slot for YubiHsmSlot {
         {
             return Ok(Some(object));
         }
-        if let Some(public_key) = self.device_public_key.get() {
+        if let Some(public_key) = &self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .device_public_key
+        {
             let object = yubihsm_device_public_key_object(slot_id, public_key)?;
             if object.unique_id == unique_id {
                 return Ok(Some(object));

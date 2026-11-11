@@ -868,9 +868,11 @@ PKCS #11 discovery as a read-only `CKO_PUBLIC_KEY` named
 has an empty `CKA_ID`, returns the canonical DER SubjectPublicKeyInfo through
 `CKA_PUBLIC_KEY_INFO`, and uses `yubihsm-device-public` as `CKA_UNIQUE_ID`.
 `CKA_EC_PARAMS` and `CKA_EC_POINT` expose the standard P-256
-representation. Other YubiHSM objects retain their configured labels; an empty
-hardware label receives a deterministic description containing its object type
-and decimal ID.
+representation. This projection's cached key belongs to the connector's
+connection epoch. Reconnection discards it, so a replacement device using the
+same serial is read again before its key is projected. Other YubiHSM objects
+retain their configured labels; an empty hardware label receives a deterministic
+description containing its object type and decimal ID.
 
 Generated YubiHSM asymmetric keys also expose a non-token X.509 attestation
 certificate object with the same `CKA_ID`. The certificate is requested from

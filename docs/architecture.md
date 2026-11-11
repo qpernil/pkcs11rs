@@ -697,8 +697,9 @@ connection pool, while duplicate configuration entries remain independent.
 Endpoint transport recovery advances a shared connection epoch; individual
 device disappearance or version changes advance device state separately. The
 YubiHSM slot observes the combined epoch and clears device-bound object,
-metadata, attestation, inferred authentication-algorithm, and public-discovery
-state.
+metadata, attestation, inferred authentication-algorithm, public-discovery,
+and device-public-key state. The device-key projection is rebuilt from a fresh
+device read after reconnection; repeated enumeration within one epoch reuses it.
 
 A future applet cache-coherence extension should return a persistent,
 monotonic provisioning epoch in every successful `SELECT` response. Each
