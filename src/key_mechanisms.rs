@@ -5,7 +5,7 @@ use crate::*;
 pub(crate) fn allowed<S: Slot + ?Sized>(slot: &S, key: &TokenObject) -> Vec<CK_MECHANISM_TYPE> {
     let mut result: Vec<_> = slot
         .mechanisms()
-        .into_iter()
+        .iter()
         .filter(|m| {
             key.allows_mechanism(m.type_)
                 && slot.key_mechanism_operations(key, m.type_) & m.flags != 0

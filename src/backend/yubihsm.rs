@@ -5,6 +5,7 @@ use crate::key_metadata::{
 use crate::storage::{ContentReference, StorageError, StorageProvider};
 use crate::*;
 use minicbor::{Decoder, Encoder};
+use std::{borrow::Cow, cell::OnceCell, collections::BTreeMap};
 
 const YUBIHSM_BACKING_PROVIDER: &str = "pkcs11rs.yubihsm";
 const YUBIHSM_BACKING_SCHEMA: &str = "pkcs11rs.yubihsm.object";
@@ -271,6 +272,7 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) version: (u8, u8, u8),
     pub(crate) hardware_version: Option<(u8, u8)>,
     pub(crate) algorithms: Vec<u8>,
+    mechanisms: OnceCell<Vec<MechanismDetails>>,
     pub(crate) model: String,
     pub(crate) serial: String,
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
@@ -385,7 +387,7 @@ pub(crate) struct YubiHsmObjectCache {
     pub(crate) connection_epoch: u64,
     pub(crate) discovery: YubiHsmDiscoveryCache,
     pub(crate) native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
-    pub(crate) objects: Vec<TokenObject>,
+    pub(crate) objects: BTreeMap<String, TokenObject>,
     object_error: Option<CK_RV>,
 }
 
@@ -1123,6 +1125,7 @@ impl YubiHsmSlot {
             version,
             hardware_version,
             algorithms,
+            mechanisms: OnceCell::new(),
             model: String::from("YubiHSM"),
             serial: String::from("0"),
             trust_prefix: None,
@@ -2450,15 +2453,9 @@ impl YubiHsmSlot {
         match discovery {
             Ok((objects, authkey_domains)) => {
                 state.object_error = None;
-                let mut retained = state
-                    .objects
-                    .drain(..)
-                    .map(|object| (object.unique_id.clone(), object))
-                    .collect::<HashMap<_, _>>();
                 for object in objects {
-                    retained.insert(object.unique_id.clone(), object);
+                    state.objects.insert(object.unique_id.clone(), object);
                 }
-                state.objects = retained.into_values().collect();
                 state.discovery = YubiHsmDiscoveryCache::Available { authkey_domains };
                 drop(state);
                 let Some(retained_session) = session.into_inner() else {
@@ -2535,9 +2532,7 @@ impl YubiHsmSlot {
         let Ok(state) = self.object_cache.try_borrow() else {
             return Vec::new();
         };
-        let mut objects = state.objects.clone();
-        objects.sort_by(|left, right| left.unique_id.cmp(&right.unique_id));
-        objects
+        state.objects.values().cloned().collect()
     }
 
     fn update_cached_objects(&self, objects: &[TokenObject]) -> Result<(), Error> {
@@ -2551,23 +2546,19 @@ impl YubiHsmSlot {
                 _ => None,
             })
             .collect::<HashSet<_>>();
-        let mut retained = state
-            .objects
-            .drain(..)
-            .filter(|object| match object.material {
-                KeyMaterial::YubiHsm {
-                    id, object_type, ..
-                } => !updated_hardware_objects.contains(&(id, object_type & !0x80)),
-                _ => true,
-            })
-            .map(|object| (object.unique_id.clone(), object))
-            .collect::<HashMap<_, _>>();
+        state.objects.retain(|_, object| match object.material {
+            KeyMaterial::YubiHsm {
+                id, object_type, ..
+            } => !updated_hardware_objects.contains(&(id, object_type & !0x80)),
+            _ => true,
+        });
         for object in objects {
             if object.token && object.class != CKO_PROFILE as CK_OBJECT_CLASS {
-                retained.insert(object.unique_id.clone(), object.clone());
+                state
+                    .objects
+                    .insert(object.unique_id.clone(), object.clone());
             }
         }
-        state.objects = retained.into_values().collect();
         Ok(())
     }
 
@@ -2575,7 +2566,7 @@ impl YubiHsmSlot {
         let private_targets = {
             let mut state = self.object_cache.try_borrow_mut()?;
             let mut private_targets = HashSet::new();
-            state.objects.retain(|object| {
+            state.objects.retain(|_, object| {
                 if !object.private {
                     return true;
                 }
@@ -2634,7 +2625,7 @@ impl YubiHsmSlot {
         let key = YubiHsmObjectKey::new(object_type & !0x80, id);
         {
             let mut state = self.object_cache.try_borrow_mut()?;
-            state.objects.retain(|object| {
+            state.objects.retain(|_, object| {
                 !matches!(
                     object.material,
                     KeyMaterial::YubiHsm {
@@ -2709,6 +2700,19 @@ impl YubiHsmSlot {
             .object_metadata
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        if let Ok(cache) = self.object_cache.try_borrow()
+            && let Some(object) = cache.objects.get(unique_id)
+            && let KeyMaterial::YubiHsm {
+                id, object_type, ..
+            } = object.material
+            && let Some(target) = metadata.get(&YubiHsmObjectKey::new(object_type & !0x80, id))
+        {
+            return Ok((
+                target.info.clone(),
+                target.attributes.clone(),
+                object.is_yubihsm_public_projection(),
+            ));
+        }
         for metadata in metadata.values() {
             let objects = yubihsm_token_objects_with_metadata(
                 slot_id,
@@ -4632,6 +4636,7 @@ impl Slot for YubiHsmSlot {
             .set_yubihsm_device_info_version(self.version)?;
         self.serial = device_info.serial.to_string();
         self.algorithms = device_info.algorithms;
+        self.mechanisms.take();
         self.model = device_info
             .part_number
             .unwrap_or_else(|| String::from("YubiHSM"));
@@ -4786,9 +4791,10 @@ impl Slot for YubiHsmSlot {
     ) -> Result<Option<TokenObject>, Error> {
         self.synchronize_caches()?;
         if let Some(object) = self
-            .cached_objects()
-            .into_iter()
-            .find(|object| object.unique_id == unique_id)
+            .object_cache
+            .try_borrow()
+            .ok()
+            .and_then(|cache| cache.objects.get(unique_id).cloned())
         {
             return Ok(Some(object));
         }
@@ -4912,6 +4918,10 @@ impl Slot for YubiHsmSlot {
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
+    }
+    fn mechanisms(&self) -> Cow<'_, [MechanismDetails]> {
+        // Device algorithms and slot policy are immutable between init_slot calls.
+        Cow::Borrowed(self.mechanisms.get_or_init(|| self.build_mechanisms()))
     }
     fn supports_protected_authentication_path(&self, pinentry: &pinentry::Pinentry) -> bool {
         pinentry.is_configured()

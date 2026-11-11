@@ -1539,7 +1539,7 @@ pub(crate) fn get_mechanism_list(
         }
 
         let list = unsafe { crate::_from_raw_parts_mut(mechanism_list, mechanisms.len()) }?;
-        for (slot, mechanism) in list.iter_mut().zip(mechanisms) {
+        for (slot, mechanism) in list.iter_mut().zip(mechanisms.iter()) {
             *slot = mechanism.type_;
         }
         *count = required;

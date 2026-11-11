@@ -3227,6 +3227,14 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         pParameter: ::std::ptr::null_mut(),
         ulParameterLen: 0,
     };
+    let list_count = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(code, _)| *code == crate::yubihsm::CommandCode::ListObjects as u8)
+            .count()
+    };
+    let lists_before = list_count();
     let mut generated_public = 0;
     let mut generated_private = 0;
     assert_eq!(
@@ -3243,6 +3251,11 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_OK as CK_RV
     );
     assert_ne!(generated_public, generated_private);
+    assert_eq!(
+        list_count() - lists_before,
+        6,
+        "publication must keep three inventory/storage refreshes without extra handle-resolution scans"
+    );
     assert_eq!(
         find_yubihsm_object(
             session,
@@ -3429,6 +3442,21 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
     assert_eq!(peer.create_session_count(), 2);
     assert_eq!(peer.closed_session_count(), 2);
 
+    let command_count = commands.borrow().len();
+    assert_eq!(
+        crate::api::C_GenerateRandom(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        peer.create_session_count(),
+        2,
+        "empty random output must not reopen discovery"
+    );
+    assert_eq!(commands.borrow().len(), command_count);
+    assert_eq!(
+        crate::api::C_GenerateRandom(999999, std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
     let mut random = [0; 16];
     assert_eq!(
         crate::api::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
@@ -8643,9 +8671,11 @@ fn piv_and_openpgp_mechanisms_keep_native_ranges_without_unrelated_software_keys
         certificates: Vec::new(),
         data_objects: Vec::new(),
     };
-    let mechanism = |mechanisms: Vec<crate::MechanismDetails>, type_: CK_MECHANISM_TYPE| {
+    let mechanism = |mechanisms: std::borrow::Cow<'_, [crate::MechanismDetails]>,
+                     type_: CK_MECHANISM_TYPE| {
         mechanisms
-            .into_iter()
+            .iter()
+            .copied()
             .find(|mechanism| mechanism.type_ == type_)
             .unwrap()
     };

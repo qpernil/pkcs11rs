@@ -159,7 +159,7 @@ pub fn mechanism_list_reports_supported_mechanisms() {
     install_test_slot(TEST_SLOT_ID);
 
     let expected = crate::Slot::mechanisms(&test_slot(true))
-        .into_iter()
+        .iter()
         .map(|mechanism| mechanism.type_)
         .collect::<Vec<_>>();
     let mut count = 0;

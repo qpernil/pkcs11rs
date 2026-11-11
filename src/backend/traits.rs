@@ -546,7 +546,10 @@ pub(crate) trait Slot {
     fn allowed_key_mechanisms(&self, key: &TokenObject) -> Vec<CK_MECHANISM_TYPE> {
         crate::key_mechanisms::allowed(self, key)
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn mechanisms(&self) -> std::borrow::Cow<'_, [MechanismDetails]> {
+        std::borrow::Cow::Owned(self.build_mechanisms())
+    }
+    fn build_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
         let scope = self.software_mechanism_scope();
         if scope == SoftwareMechanismScope::None {

@@ -642,7 +642,30 @@ Each YubiHSM slot owns one secure-session role at a time: retained public
 discovery or ordinary PKCS #11 user login. Public and private enumeration
 enrich one native object cache rather than maintaining competing views.
 Object-type, ID, and sequence identify a native cache entry; sequence changes
-discard stale derived properties.
+discard stale derived properties. PKCS #11 projections are indexed by unique ID
+in an ordered map: a handle lookup clones only its selected object, while
+inventory enumeration preserves deterministic unique-ID ordering. Metadata
+updates reuse that index for primary/public aspect selection; hidden objects
+retain their reconstruction path.
+
+Native creation and metadata writes refresh the inventory at their existing
+publication boundaries. Handle resolution against that reconciled inventory
+does not issue another `LIST OBJECTS`. Refresh failures still block object
+access, and failed publication still rolls back the created native object.
+Ordinary searches retain their live discovery behavior.
+
+The merged YubiHSM mechanism table is borrowed from a per-slot cache. Slot
+initialization replaces the device algorithm inventory and invalidates the
+table; backends with changing capabilities retain dynamic table construction.
+Per-key permissions and authentication are evaluated separately from this cache.
+
+`C_GetObjectSize` retains its attribute-storage size definition and sensitivity
+rules. Resident byte values contribute their length without copying the
+payload; derived encodings and lazy values use their existing readers.
+`C_GenerateRandom` validates the session and output buffer before treating a
+zero-length output as a no-op, without reopening a backend read session.
+`C_GetSessionInfo` retains its authenticated backend liveness check so session
+expiry and secure-channel errors keep their existing reporting behavior.
 
 USB and HTTP are connector implementations behind the same backend boundary.
 Experimental I2C device access belongs to the Linux connector daemon; the PKCS #11 module

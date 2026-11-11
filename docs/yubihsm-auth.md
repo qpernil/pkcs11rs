@@ -402,7 +402,14 @@ attestation state that could reconstruct it. The next user login enumerates its
 private view again.
 
 Successful PKCS #11 mutations update or evict the corresponding cached
-objects. Module reinitialization clears the object, metadata, attestation, and
+objects. Native creation and metadata writes refresh at publication boundaries;
+resolving the new native object against that inventory does not enumerate it
+again. Single-object reads use a unique-ID index shared with metadata target
+selection. Session-info queries retain their secure-session liveness probe;
+empty random requests validate the PKCS #11 session but do not establish or
+reopen a backend session.
+
+Module reinitialization clears the object, metadata, attestation, and
 opaque-value caches and retries public discovery. Reinitialize the module after
 changing the domains visible to an authentication credential. Direct USB
 rediscovery of the same serial and remote transport recovery advance the

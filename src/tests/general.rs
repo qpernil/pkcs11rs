@@ -1514,7 +1514,11 @@ fn openpgp_mechanisms_keep_native_operations_and_selected_composition() {
 
 #[test]
 fn composite_signing_advertisement_is_exact_for_every_general_slot_family() {
-    fn assert_exact(mechanisms: Vec<crate::MechanismDetails>, expected: &[CK_MECHANISM_TYPE]) {
+    fn assert_exact(
+        mechanisms: impl AsRef<[crate::MechanismDetails]>,
+        expected: &[CK_MECHANISM_TYPE],
+    ) {
+        let mechanisms = mechanisms.as_ref();
         let candidates = crate::HASHED_RSA_PKCS_MECHANISMS
             .into_iter()
             .chain(crate::HASHED_RSA_PSS_MECHANISMS)

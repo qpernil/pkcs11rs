@@ -1868,6 +1868,24 @@ impl SlotState {
         slot.token_object(self.slot_id, &locator.unique_id)
     }
 
+    /// Find an object in an inventory already reconciled by refresh. Resolving
+    /// a newly created native ID must not perform another hardware enumeration.
+    pub(crate) fn find_token_object<S: Slot + ?Sized>(
+        &self,
+        slot: &S,
+        mut matches: impl FnMut(&TokenObject) -> bool,
+    ) -> Result<Option<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
+        self.require_token_objects()?;
+        for handle in self.token_object_handles.keys() {
+            if let Some(object) = self.resolve_object(slot, *handle)?
+                && matches(&object)
+            {
+                return Ok(Some((*handle, object)));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn is_native_token_object_handle(&self, handle: CK_OBJECT_HANDLE) -> bool {
         self.token_object_handles.contains_key(&handle)
             && !self.backed_object_handles.contains_key(&handle)
@@ -4238,7 +4256,7 @@ mod discovery_tests {
                 slot.lock().unwrap().slot.kind() == crate::SlotKind::Ccid(CcidApplication::Piv)
             })
             .unwrap();
-        let mechanisms = piv.lock().unwrap().slot.mechanisms();
+        let mechanisms = piv.lock().unwrap().slot.mechanisms().into_owned();
         for mechanism in [
             CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             CKM_ML_DSA as CK_MECHANISM_TYPE,

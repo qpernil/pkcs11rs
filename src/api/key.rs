@@ -2685,6 +2685,9 @@ ffi_entry_point! {
         let result: Result<(), Error> = with_session_context_mut(session, |ctx| {
             let random_data = unsafe { _from_raw_parts_mut(random_data, random_len as usize) }?;
             let slot_id = ctx._get_session(session)?.1.slotID();
+            if random_data.is_empty() {
+                return Ok(());
+            }
             ctx.reconcile_login_state(slot_id);
             ctx.get_slot(slot_id)?.ensure_backend_read_session()?;
             ctx._get_session(session)?.1.generate_random(random_data)
@@ -2889,26 +2892,24 @@ pub(crate) fn generate_yubihsm_token_pair_in_slot<S: Slot + ?Sized>(
                     &projected,
                 )?;
             ctx.refresh_slot_token_objects(slot, slot_id)?;
-            ctx.resolved_objects(slot)?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                        && matches!(
-                            object.material,
-                            KeyMaterial::YubiHsm {
-                                id: object_id,
-                                object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
-                                ..
-                            } if object_id == id
-                        )
-                })
-                .map(|(handle, _)| handle)
-                .ok_or(CKR_DEVICE_ERROR)?
+            ctx.find_token_object(slot, |object| {
+                object.slot_id == Some(slot_id)
+                    && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && matches!(
+                        object.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                            ..
+                        } if object_id == id
+                    )
+            })?
+            .map(|(handle, _)| handle)
+            .ok_or(CKR_DEVICE_ERROR)?
         } else {
-            let implicit = ctx.resolved_objects(slot)?.into_iter().find(|(_, object)| {
+            let implicit = ctx.find_token_object(slot, |object| {
                 matches!(object.material, KeyMaterial::YubiHsm { id: object_id, object_type: YUBIHSM_PUBLIC_KEY, .. } if object_id == id)
-            });
+            })?;
             if let Some((_, implicit)) = implicit {
                 ctx.get_slot(slot, slot_id)?
                     .yubihsm_destroy_public_projection(slot_id, &implicit.unique_id)?;

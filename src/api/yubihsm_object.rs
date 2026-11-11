@@ -14,16 +14,14 @@ pub(super) fn publish_yubihsm_created_object<S: Slot + ?Sized>(
     let result = (|| {
         ctx.refresh_slot_token_objects(slot, slot_id)?;
         let find = |ctx: &crate::context::SlotState, slot: &S| {
-            ctx.resolved_objects(slot)?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && attributes.is_none_or(|(requested, _)| requested.class == object.class)
-                        && matches!(object.material, KeyMaterial::YubiHsm {
+            ctx.find_token_object(slot, |object| {
+                object.slot_id == Some(slot_id)
+                    && attributes.is_none_or(|(requested, _)| requested.class == object.class)
+                    && matches!(object.material, KeyMaterial::YubiHsm {
                         id: candidate_id, object_type: candidate_type, ..
                     } if candidate_id == id && candidate_type == object_type)
-                })
-                .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
+            })?
+            .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
         };
         let published = find(ctx, slot)?;
         if let Some((requested, id_supplied)) = attributes {

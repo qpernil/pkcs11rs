@@ -2851,7 +2851,7 @@ pub(crate) fn make_yubihsm_hsmauth_wildcard_pinentry_test_slot() -> Box<dyn crat
     );
     let projection =
         install_hsmauth_public_projection(&mut slot, SLOT_ID, AUTHKEY_ID, &provider.credential);
-    slot.object_cache.get_mut().objects = vec![projection];
+    slot.object_cache.get_mut().objects = [(projection.unique_id.clone(), projection)].into();
     Box::new(slot)
 }
 
@@ -7547,4 +7547,32 @@ fn implicit_public_preservation_rolls_back_if_native_deletion_fails() {
         Some(public.unique_id.clone())
     );
     assert_eq!(peer.metadata_objects.borrow().len(), metadata_count + 1);
+}
+
+#[test]
+fn yubihsm_mechanism_inventory_is_reused_and_rebuilt_after_slot_initialization() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = crate::YubiHsmSlot::new(peer, (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048]);
+    let describe = |details: &[crate::MechanismDetails]| {
+        details
+            .iter()
+            .map(|m| (m.type_, m.min_key_size, m.max_key_size, m.flags))
+            .collect::<Vec<_>>()
+    };
+    let before = {
+        let first = slot.mechanisms();
+        let second = slot.mechanisms();
+        assert!(matches!(first, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        assert_eq!(describe(&first), describe(&slot.build_mechanisms()));
+        describe(&first)
+    };
+    slot.init_slot().unwrap();
+    let after = slot.mechanisms();
+    assert_eq!(describe(&after), describe(&slot.build_mechanisms()));
+    assert_ne!(
+        before,
+        describe(&after),
+        "device algorithms must replace the previous inventory"
+    );
 }

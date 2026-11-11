@@ -560,7 +560,7 @@ mod tests {
             .iter()
             .any(|mechanism| mechanism.type_ == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE));
 
-        for mechanism in mechanisms {
+        for mechanism in mechanisms.iter() {
             let (min, max, flags) = match mechanism.type_ {
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
                     (1024, 4096, CKF_GENERATE_KEY_PAIR)

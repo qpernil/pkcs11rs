@@ -1683,8 +1683,7 @@ impl TokenObject {
                 !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
             })
             .filter(|&attribute_type| !self.attribute_is_sensitive(attribute_type))
-            .filter_map(|attribute_type| self.attribute_value(attribute_type))
-            .map(|value| value.len() as CK_ULONG)
+            .map(|attribute_type| self.attribute_value_length(attribute_type) as CK_ULONG)
             .sum::<CK_ULONG>();
         let deferred_native_value = match self.material {
             KeyMaterial::YubiHsmSessionObject { length, .. }
@@ -1695,6 +1694,36 @@ impl TokenObject {
             _ => 0,
         };
         attributes.saturating_add(deferred_native_value)
+    }
+
+    /// Count borrowed byte attributes without copying their payload. Derived
+    /// encodings keep the same reader, including lazy-value and error behavior.
+    fn attribute_value_length(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> usize {
+        if !matches!(self.material, KeyMaterial::OathCredential(_)) {
+            match attribute_type {
+                x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => return self.unique_id.len(),
+                x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => return self.label.len(),
+                x if x == CKA_ID as CK_ATTRIBUTE_TYPE => return self.id.len(),
+                x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => match &self.material {
+                    KeyMaterial::Data { value, .. }
+                    | KeyMaterial::Certificate { value, .. }
+                    | KeyMaterial::SoftwareSecret(value)
+                    | KeyMaterial::Secret(value) => return value.len(),
+                    KeyMaterial::PivCertificate { value, .. }
+                    | KeyMaterial::OpenPgpCertificate { value }
+                    | KeyMaterial::IssuerSecurityDomainCertificate { value }
+                    | KeyMaterial::IssuerSecurityDomainData { value, .. }
+                    | KeyMaterial::PivData { value, .. } => return value.len(),
+                    KeyMaterial::FidoCredential { response_cbor, .. } => {
+                        return response_cbor.len();
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        self.attribute_value(attribute_type)
+            .map_or(0, |value| value.len())
     }
 
     pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
