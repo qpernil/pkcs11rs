@@ -275,8 +275,12 @@ devices while retaining a live connector endpoint. A featureless build always
 discovers physical devices.
 
 The per-device gate deliberately has no queue timeout: accepted requests wait
-until preceding commands for that device finish. A global Tower concurrency
-limit bounds the number of requests in all device queues and handlers. The
+until preceding commands for that device finish. A global semaphore bounds the
+number of requests in all device queues and handlers. Command tasks retain
+their admission reservation while queued and executing, including after their
+HTTP requester is cancelled. Capacity is released only after both the handler
+and its device work have ended; cancellation cannot admit an unbounded backlog.
+This applies to the serial-routed and legacy command APIs. The
 default is 64 requests and can be changed with
 `--http-max-in-flight-requests`; excess requests are rejected immediately with
 `503 Service Unavailable` without making an existing HTTP connection unusable.

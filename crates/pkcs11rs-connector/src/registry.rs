@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -371,13 +371,31 @@ impl DeviceEntry {
         self.id.map(|id| format!("{id:?}"))
     }
 
+    #[cfg(test)]
     pub async fn command(
         self: &Arc<Self>,
         request: &[u8],
     ) -> (Result<Vec<u8>, TransportError>, Duration) {
+        self.command_with_permit(request, None).await
+    }
+
+    pub async fn command_admitted(
+        self: &Arc<Self>,
+        request: &[u8],
+        permit: Arc<OwnedSemaphorePermit>,
+    ) -> (Result<Vec<u8>, TransportError>, Duration) {
+        self.command_with_permit(request, Some(permit)).await
+    }
+
+    async fn command_with_permit(
+        self: &Arc<Self>,
+        request: &[u8],
+        permit: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> (Result<Vec<u8>, TransportError>, Duration) {
         let entry = self.clone();
         let request = request.to_vec();
         tokio::spawn(async move {
+            let _request_permit = permit;
             let mut transport = entry.command_transport.lock().await;
             let started_at = Instant::now();
             let result = transport.command(request).await;
@@ -1329,6 +1347,99 @@ mod tests {
             ensure_single_response_frame(&[0x86, 0x00, 0x01, 0x00, 0x86, 0x00, 0x01, 0x00])
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_http_commands_retain_admission_while_queued_and_executing() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        for endpoint in ["/v1/devices/12345678/commands", "/connector/api"] {
+            for queue_second in [false, true] {
+                let registry = DeviceRegistry::new();
+                let executions = Arc::new(AtomicUsize::new(0));
+                let release_first = Arc::new(tokio::sync::Notify::new());
+                let (first_started, started) = tokio::sync::oneshot::channel();
+                registry
+                    .insert_test(
+                        "12345678",
+                        Box::new(CancellationProbe {
+                            executions: executions.clone(),
+                            first_started: Some(first_started),
+                            release_first: release_first.clone(),
+                        }),
+                    )
+                    .await;
+                registry.insert_test_echo("87654321").await;
+                let limit = if queue_second { 2 } else { 1 };
+                let app = crate::api::router(
+                    crate::api::AppState {
+                        registry,
+                        legacy_serial: Some("12345678".into()),
+                    },
+                    limit,
+                );
+                let request = |uri, body| {
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::from(body))
+                        .unwrap()
+                };
+                let mut first = Box::pin(app.clone().oneshot(request(endpoint, "first")));
+                assert!(futures_util::poll!(first.as_mut()).is_pending());
+                started.await.unwrap();
+                if queue_second {
+                    let mut second = Box::pin(app.clone().oneshot(request(endpoint, "second")));
+                    assert!(futures_util::poll!(second.as_mut()).is_pending());
+                    drop(second);
+                }
+                drop(first);
+                // Canceling both the active waiter and a queued waiter must
+                // leave the global limit full, including for another device.
+                for uri in [endpoint, "/v1/devices/87654321/commands"] {
+                    let response = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        app.clone().oneshot(request(uri, "excess")),
+                    )
+                    .await
+                    .expect("overload rejection must not wait for the device")
+                    .unwrap();
+                    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                }
+                assert_eq!(executions.load(Ordering::SeqCst), 1);
+                release_first.notify_one();
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while executions.load(Ordering::SeqCst) != limit {
+                        tokio::task::yield_now().await;
+                    }
+                    loop {
+                        let response = app
+                            .clone()
+                            .oneshot(
+                                Request::builder()
+                                    .uri("/connector/status")
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        if response.status() == StatusCode::OK {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("completed commands must release admission");
+                let response = app.oneshot(request(endpoint, "after")).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(executions.load(Ordering::SeqCst), limit + 1);
+            }
+        }
     }
 
     struct StressProbe {

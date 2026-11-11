@@ -1,18 +1,16 @@
 use crate::registry::{DeviceRegistry, LegacySelectionError, TransportError, TransportErrorKind};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
-    error_handling::HandleErrorLayer,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{StatusCode, header::CONTENT_TYPE},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::Serialize;
-use std::time::Duration;
-use tower::{
-    BoxError, ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer,
-};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     timeout::RequestBodyDeadlineLayer,
@@ -134,20 +132,31 @@ fn with_http_tracing(router: Router) -> Router {
 }
 
 fn with_global_request_limit(router: Router, max_in_flight_requests: usize) -> Router {
-    router.layer(
-        ServiceBuilder::new()
-            .layer(HandleErrorLayer::new(handle_overload))
-            .layer(LoadShedLayer::new())
-            .layer(GlobalConcurrencyLimitLayer::new(max_in_flight_requests)),
-    )
+    router.layer(middleware::from_fn_with_state(
+        Arc::new(Semaphore::new(max_in_flight_requests)),
+        admit_request,
+    ))
 }
 
-async fn handle_overload(_error: BoxError) -> Response {
-    problem(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "server_overloaded",
-        String::from("the connector is at its in-flight HTTP request limit"),
-    )
+async fn admit_request(
+    State(limit): State<Arc<Semaphore>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Ok(permit) = limit.try_acquire_owned() else {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_overloaded",
+            String::from("the connector is at its in-flight HTTP request limit"),
+        );
+    };
+    let permit = Arc::new(permit);
+    request.extensions_mut().insert(permit.clone());
+    // Device handlers transfer a shared reservation to their detached work.
+    // Cancellation releases capacity only when that work also completes.
+    let response = next.run(request).await;
+    drop(permit);
+    response
 }
 
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceList> {
@@ -170,6 +179,7 @@ async fn get_device(Path(serial): Path<String>, State(state): State<AppState>) -
 async fn device_command(
     Path(serial): Path<String>,
     State(state): State<AppState>,
+    Extension(permit): Extension<Arc<OwnedSemaphorePermit>>,
     body: Bytes,
 ) -> Response {
     let Some(entry) = state.registry.get(&serial).await else {
@@ -202,7 +212,11 @@ async fn device_command(
     };
     let view = entry.view();
     let usb_device_id = entry.usb_device_id();
-    command_response(view.serial, usb_device_id, entry.command(&body).await)
+    command_response(
+        view.serial,
+        usb_device_id,
+        entry.command_admitted(&body, permit).await,
+    )
 }
 
 async fn legacy_status(State(state): State<AppState>) -> Response {
@@ -225,7 +239,11 @@ async fn legacy_status(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response {
+async fn legacy_command(
+    State(state): State<AppState>,
+    Extension(permit): Extension<Arc<OwnedSemaphorePermit>>,
+    body: Bytes,
+) -> Response {
     match state
         .registry
         .select_legacy(state.legacy_serial.as_deref())
@@ -234,7 +252,11 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
         Ok(entry) => {
             let view = entry.view();
             let usb_device_id = entry.usb_device_id();
-            command_response(view.serial, usb_device_id, entry.command(&body).await)
+            command_response(
+                view.serial,
+                usb_device_id,
+                entry.command_admitted(&body, permit).await,
+            )
         }
         Err(LegacySelectionError::NoDevice) => problem(
             StatusCode::SERVICE_UNAVAILABLE,
