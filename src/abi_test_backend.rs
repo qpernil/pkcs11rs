@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::OnceLock;
 
 #[cfg(feature = "abi-tests")]
 mod yubihsm_connector;

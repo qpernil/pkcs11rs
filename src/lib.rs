@@ -35,7 +35,7 @@ use std::{
     ptr,
     rc::Rc,
     slice,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use zeroize::Zeroizing;
