@@ -697,7 +697,7 @@ fn scp03_put_key_command(
     replace_kvn: u8,
     keys: &Scp03ProvisioningKeys<'_>,
 ) -> Result<(CommandApdu, Vec<u8>), Error> {
-    if !(1..=254).contains(&new_kvn) {
+    if !(1..=0x7f).contains(&new_kvn) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     if wrapping_dek.len()? != AES_BLOCK_SIZE
@@ -1159,7 +1159,7 @@ mod tests {
             )
             .is_err()
         );
-        for reserved_kvn in [0, 255] {
+        for reserved_kvn in [0, 128, 254, 255] {
             assert!(
                 scp03_put_key_command(
                     &crate::scp_key_provider::CardDek::Session(Zeroizing::new(key.to_vec())),
@@ -1173,6 +1173,22 @@ mod tests {
                 )
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn scp03_upper_new_version_preserves_the_factory_replacement_selector() {
+        let key = [0; AES_BLOCK_SIZE];
+        let dek = crate::scp_key_provider::CardDek::Session(Zeroizing::new(key.to_vec()));
+        let keys = Scp03ProvisioningKeys {
+            enc: &key,
+            mac: &key,
+            dek: &key,
+        };
+        for new_kvn in [1, 127] {
+            let (command, _) = scp03_put_key_command(&dek, new_kvn, 0xff, &keys).unwrap();
+            assert_eq!(command.p1, 0xff);
+            assert_eq!(command.data[0], new_kvn);
         }
     }
 

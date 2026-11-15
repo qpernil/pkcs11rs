@@ -320,6 +320,26 @@ SCP03 and SCP11b sessions with three protected reads each. An attached USB
 virtual target must run a worker build with the CPLC handler. These tests do
 not provision or replace physical keys.
 
+### Issuer SD command-chaining probe
+
+Qualification with YubiKey firmware 5.7.4 and YubiKey Manager 5.9.2 uses a
+fresh SCP11b session for each trial. A 300-byte invalid DELETE payload contains
+no key selector, and SCP11b does not grant SD write authority. Encryption and
+C-MAC produce 312 protected bytes; chained trials split them into 255 and
+57 bytes. The Yubico client performs SCP independently of this provider.
+
+| Framing | First response | Completed-command response |
+| --- | --- | --- |
+| One extended APDU, `84 E4 00 00` | `6982`, no data | Same response |
+| ISO chain, `94 E4 00 00` then `84 E4 00 00` | `9000`, no data | `6982`, matching the control |
+| P1 chain, `84 E4 80 00` | `6982`, no data | No continuation sent |
+
+The public key inventory is identical before and after the probe. The result
+verifies ISO reassembly before SCP verification on this path. It does not
+establish whether P1 chaining is accepted under an authenticated administrative
+channel. The provider and virtual card implement ISO chaining and preserve
+P1/P2; they do not implement P1-based fragmentation.
+
 ### Public Issuer SD data objects
 
 `GET DATA` (`CA`) selects an object with the two-byte `P1-P2` value. For

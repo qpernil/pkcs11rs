@@ -30,8 +30,6 @@ const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
 #[cfg(test)]
 const MAX_RESPONSE_CHAIN_SEGMENTS: usize =
     MAX_EXTENDED_EXPECTED_LENGTH as usize / MAX_SHORT_EXPECTED_LENGTH as usize;
-#[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
-const MORE_COMMANDS: u8 = 0x80;
 const DERIVATION_CARD_CRYPTOGRAM: u8 = 0x00;
 const DERIVATION_HOST_CRYPTOGRAM: u8 = 0x01;
 const DERIVATION_CARD_CHALLENGE: u8 = 0x02;
@@ -147,6 +145,9 @@ impl CommandApdu {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         let data_len = u16::from_be_bytes([body[1], body[2]]) as usize;
+        if data_len == 0 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
         if body.len() == data_len + 3 {
             return Ok(Self {
                 cla,
@@ -766,45 +767,7 @@ impl Scp03Session {
         connector: &dyn Connector,
         command: &CommandApdu,
     ) -> Result<ResponseApdu, Error> {
-        if command.p1 & MORE_COMMANDS != 0
-            || command.le.is_some_and(|le| le > MAX_SHORT_EXPECTED_LENGTH)
-        {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-
-        let protected = self.protect_command(command)?;
-        if protected.data.len() <= MAX_SHORT_DATA_LENGTH {
-            let response =
-                Self::collect_response_chain(connector, transmit(connector, &protected)?)?;
-            return self.unprotect_response(response);
-        }
-
-        let segment_count = protected.data.len().div_ceil(MAX_SHORT_DATA_LENGTH);
-        for (index, data) in protected.data.chunks(MAX_SHORT_DATA_LENGTH).enumerate() {
-            let last = index + 1 == segment_count;
-            let segment = CommandApdu {
-                cla: protected.cla,
-                ins: protected.ins,
-                p1: if last {
-                    protected.p1
-                } else {
-                    protected.p1 | MORE_COMMANDS
-                },
-                p2: protected.p2,
-                data: data.to_vec(),
-                le: if last { protected.le } else { None },
-                extended: false,
-            };
-            let response = transmit(connector, &segment)?;
-            if last {
-                let response = Self::collect_response_chain(connector, response)?;
-                return self.unprotect_response(response);
-            }
-            if response.status != RESPONSE_OK || !response.data.is_empty() {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-        }
-        Err(CKR_DEVICE_ERROR.into())
+        self.transmit_short(connector, command)
     }
 
     #[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.

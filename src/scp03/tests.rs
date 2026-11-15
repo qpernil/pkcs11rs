@@ -277,6 +277,20 @@ fn decodes_apdu_forms_used_by_secure_channel_transport() {
 }
 
 #[test]
+fn generic_apdu_decoder_rejects_empty_extended_lc() {
+    // The nine-byte legacy U2F form is not a generic ISO Case 4 APDU.
+    assert!(CommandApdu::decode(&hex("00 03 00 00 00 00 00 00 00")).is_err());
+    assert!(CommandApdu::decode(&hex("00 CA 00 00 00 00 00 00 10")).is_err());
+    // The standard seven-byte Case 2 extended-Le form remains valid.
+    assert_eq!(
+        CommandApdu::decode(&hex("00 CA 00 00 00 00 10"))
+            .unwrap()
+            .le,
+        Some(16)
+    );
+}
+
+#[test]
 fn secure_channel_connector_wraps_encoded_apdus() {
     let base: crate::SharedConnector = std::sync::Arc::new(SharedScriptedConnector {
         responses: Mutex::new(vec![hex("90 00")].into()),
@@ -646,7 +660,7 @@ fn chains_after_protecting_the_complete_command() {
     let data: Vec<u8> = (0..300).map(|value| value as u8).collect();
     let command = CommandApdu {
         cla: 0x80,
-        ins: 0xe2,
+        ins: 0xd8,
         p1: 0x02,
         p2: 0x03,
         data: data.clone(),
@@ -655,14 +669,14 @@ fn chains_after_protecting_the_complete_command() {
     };
     let connector = ScriptedConnector::new(vec![hex("90 00"), hex("90 00")]);
     let response = test_session(0x01)
-        .transmit_chained(&connector, &command)
+        .transmit_short(&connector, &command)
         .unwrap();
     assert_eq!(response.status, RESPONSE_OK);
 
     let commands = connector.commands.into_inner();
     assert_eq!(commands.len(), 2);
-    assert_eq!(&commands[0][..5], &[0x84, 0xe2, 0x82, 0x03, 0xff]);
-    assert_eq!(&commands[1][..5], &[0x84, 0xe2, 0x02, 0x03, 0x35]);
+    assert_eq!(&commands[0][..5], &[0x94, 0xd8, 0x02, 0x03, 0xff]);
+    assert_eq!(&commands[1][..5], &[0x84, 0xd8, 0x02, 0x03, 0x35]);
     assert_eq!(commands[1].last(), Some(&0));
 
     let mut protected_data = commands[0][5..].to_vec();
@@ -670,7 +684,7 @@ fn chains_after_protecting_the_complete_command() {
     assert_eq!(&protected_data[..data.len()], data);
     assert_eq!(
         &protected_data[data.len()..],
-        &hex("6F CD 3B 5E DE 1D 71 78")
+        &hex("0D 34 08 B7 2D B8 95 42")
     );
 }
 
@@ -678,7 +692,7 @@ fn chains_after_protecting_the_complete_command() {
 fn encrypts_the_complete_command_before_chaining() {
     let command = CommandApdu {
         cla: 0x80,
-        ins: 0xe2,
+        ins: 0xd8,
         p1: 0,
         p2: 0,
         data: vec![0x5a; 300],
@@ -687,7 +701,7 @@ fn encrypts_the_complete_command_before_chaining() {
     };
     let connector = ScriptedConnector::new(vec![hex("90 00"), hex("90 00")]);
     test_session(0x03)
-        .transmit_chained(&connector, &command)
+        .transmit_short(&connector, &command)
         .unwrap();
 
     let commands = connector.commands.into_inner();
@@ -700,7 +714,7 @@ fn encrypts_the_complete_command_before_chaining() {
     );
     assert_eq!(
         &protected_data[protected_data.len() - MAC_LENGTH..],
-        &hex("EE CC BD 4C 2A 82 50 C9")
+        &hex("94 0A 3B 52 BE C9 56 2B")
     );
 }
 
@@ -708,7 +722,7 @@ fn encrypts_the_complete_command_before_chaining() {
 fn chained_intermediate_responses_omit_rmac() {
     let command = CommandApdu {
         cla: 0x80,
-        ins: 0xe2,
+        ins: 0xd8,
         p1: 0,
         p2: 0,
         data: vec![0x5a; 300],
@@ -725,7 +739,7 @@ fn chained_intermediate_responses_omit_rmac() {
     let connector = ScriptedConnector::new(vec![hex("90 00"), final_response]);
 
     let response = test_session(0x11)
-        .transmit_chained(&connector, &command)
+        .transmit_short(&connector, &command)
         .unwrap();
     assert_eq!(
         response,
@@ -768,7 +782,7 @@ fn collects_iso_response_chains() {
 #[test]
 fn collects_unprotected_iso_response_chains() {
     let connector = ScriptedConnector::new(vec![hex("BB CC 90 00")]);
-    let response = Scp03Session::collect_response_chain(
+    let response = crate::iso7816::collect_response_chain(
         &connector,
         ResponseApdu {
             data: hex("AA"),
@@ -863,7 +877,7 @@ fn response_chain_is_verified_and_decrypted_as_one_response() {
 fn chained_transfer_stops_on_invalid_intermediate_response() {
     let command = CommandApdu {
         cla: 0x80,
-        ins: 0xe2,
+        ins: 0xd8,
         p1: 0,
         p2: 0,
         data: vec![0x5a; 300],
@@ -874,7 +888,7 @@ fn chained_transfer_stops_on_invalid_intermediate_response() {
         let connector = ScriptedConnector::new(vec![response]);
         assert!(
             test_session(0x01)
-                .transmit_chained(&connector, &command)
+                .transmit_short(&connector, &command)
                 .is_err()
         );
         assert_eq!(connector.commands.into_inner().len(), 1);
@@ -882,25 +896,23 @@ fn chained_transfer_stops_on_invalid_intermediate_response() {
 }
 
 #[test]
-fn chained_transfer_rejects_ambiguous_header_inputs() {
-    let connector = ScriptedConnector::new(vec![]);
-    for (p1, le) in [(MORE_COMMANDS, None), (0, Some(65_536))] {
-        let mut session = test_session(0x01);
-        let result = session.transmit_chained(
-            &connector,
-            &CommandApdu {
-                cla: 0x80,
-                ins: 0xe2,
-                p1,
-                p2: 0,
-                data: vec![0; 300],
-                le,
-                extended: false,
-            },
-        );
-        assert!(result.is_err());
-        assert_eq!(session.encryption_counter, 0);
-    }
+fn iso_chaining_preserves_high_p1_parameters() {
+    let connector = ScriptedConnector::new(vec![hex("90 00"), hex("90 00")]);
+    let command = CommandApdu {
+        cla: 0,
+        ins: 0x2a,
+        p1: 0x9e,
+        p2: 0x9a,
+        data: vec![0; 300],
+        le: Some(256),
+        extended: false,
+    };
+    test_session(0x01)
+        .transmit_short(&connector, &command)
+        .unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(&commands[0][..4], &[0x14, 0x2a, 0x9e, 0x9a]);
+    assert_eq!(&commands[1][..4], &[0x04, 0x2a, 0x9e, 0x9a]);
 }
 
 #[test]

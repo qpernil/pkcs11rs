@@ -79,14 +79,14 @@ maximum response size.
 Secure messaging currently operates on basic logical channel 0; commands for
 other logical channels are rejected.
 
-GlobalPlatform command chaining is also supported for commands whose
-protected data exceeds the short APDU limit. Encryption and C-MAC are applied
-once to the complete logical command before it is split into 255-byte data
-fields. Intermediate commands set the `P1.b8` "more commands" bit, omit `Le`,
-and require an empty `9000` response without R-MAC. The C-MAC is carried only
-in the final command. The card command itself must support this chaining
-mechanism, as DELETE, INSTALL, and PUT KEY do in the GlobalPlatform Card
-Specification.
+Short-only transports use ISO command chaining. Encryption and C-MAC cover
+the complete logical command before it is split into 255-byte data fields.
+Intermediate fragments set CLA bit `10`, preserve P1/P2, and require an empty
+`9000` acknowledgement. The card reassembles the protected command before
+verifying its MAC and decrypting it. This matches Yubico's
+[SCP pipeline](https://github.com/Yubico/Yubico.NET.SDK/blob/53f2c7cbf1ae3175c41badfc211ef66e5a35d4b1/Yubico.YubiKey/src/Yubico/YubiKey/Scp/ScpConnection.cs)
+and [command chaining transform](https://github.com/Yubico/Yubico.NET.SDK/blob/53f2c7cbf1ae3175c41badfc211ef66e5a35d4b1/Yubico.YubiKey/src/Yubico/YubiKey/Pipelines/CommandChainingTransform.cs).
+The separate GlobalPlatform P1-based chaining mechanism is not implemented.
 
 ISO response chaining via `61xx` is collected with unprotected GET RESPONSE
 commands. SCP03 response decryption and R-MAC verification are then performed
@@ -121,8 +121,9 @@ OCE-authenticated administration.
 
 `replace_kvn` is zero when adding a key set and identifies the old KVN for an
 in-place replacement otherwise. New key sets must use a KVN from 1 through
-254; KVN 255 is reserved for the factory key set. Safer rotation adds a new
-KVN, reconnects and authenticates with it, and only then calls
+127; KVN 255 is reserved for the factory key set. The new-version bound follows Yubico's
+[key-set rules](https://docs.yubico.com/yesdk/users-manual/sdk-programming-guide/secure-channel-protocol.html#key-set-rules).
+Safer rotation adds a new KVN, reconnects and authenticates with it, and only then calls
 `PKCS11RS_SecurityDomainDeleteScp03KeySet` for the old KVN. The deletion API
 rejects KVN zero. Its `deleteLast` argument must be `CK_TRUE` to deliberately
 delete the final set and trigger the device's last-key behavior.
