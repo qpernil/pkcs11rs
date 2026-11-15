@@ -283,6 +283,11 @@ public or private realm but the header is missing, `C_InitToken` returns
 header. Existing encrypted records remain available for recovery with the
 original header. A genuinely empty store can be initialized normally.
 
+Encrypted private records are limited to 1 MiB, including the serialized
+attributes and encryption envelope. Creation or replacement exceeding that limit
+returns `CKR_DEVICE_MEMORY` before publishing a record. Rejection preserves the
+existing inventory and does not leave an object that a later login cannot load.
+
 ## Durability and concurrency
 
 The private directory and its subdirectories are mode `0700` on Unix; header

@@ -674,11 +674,14 @@ impl SoftwareTokenStore {
             object.unique_id = crate::object::new_object_id()?;
         }
         let encoded = encode_record(&self.name, master_key, &object)?;
+        if encoded.len() > MAX_RECORD_LENGTH {
+            return Err(crate::CKR_DEVICE_MEMORY.into());
+        }
+        let stored = decode_record(&self.name, slot_id, master_key, &encoded)?;
         let reference = self
             .records
             .put(&encoded)
             .map_err(crate::backed_object::storage_error)?;
-        let stored = decode_record(&self.name, slot_id, master_key, &encoded)?;
         Ok((stored, reference))
     }
 
@@ -2403,6 +2406,49 @@ mod tests {
         let mut scalar = vec![0; length];
         scalar[length - 1] = 7;
         scalar
+    }
+
+    #[test]
+    fn oversized_private_records_are_rejected_before_publication() {
+        let directory = TestDirectory::new();
+        let store = open_store("record size", directory.0.clone());
+        let public = store.init_token(b"record officer PIN", [b' '; 32]).unwrap();
+        store.init_user_pin(b"record user PIN", &public).unwrap();
+        let (_, private) = store.login(b"record user PIN").unwrap();
+        let mut data = crate::TokenObjectTemplate {
+            class: Some(crate::CKO_DATA as _),
+            key_type: Some(crate::CKK_GENERIC_SECRET as _),
+            token: true,
+            private: true,
+            ..Default::default()
+        }
+        .into_object()
+        .unwrap();
+        data.unique_id = "bounded data".into();
+        data.material = KeyMaterial::Data {
+            application: vec![],
+            object_id: vec![],
+            value: Zeroizing::new(vec![0x42; MAX_RECORD_LENGTH - 512]),
+        };
+        let (stored, reference) = store.put_object(7, &private, &data).unwrap();
+        let original = store.records.get(&reference).unwrap().unwrap();
+        for unique_id in [stored.unique_id.as_str(), "new oversized object"] {
+            data.unique_id = unique_id.to_owned();
+            let KeyMaterial::Data { value, .. } = &mut data.material else {
+                unreachable!()
+            };
+            value.resize(MAX_RECORD_LENGTH, 0x42);
+            assert!(
+                matches!(store.put_object(7, &private, &data), Err(Error::Generic(rv))
+                if rv == crate::CKR_DEVICE_MEMORY as crate::CK_RV)
+            );
+            assert_eq!(store.records.list().unwrap(), vec![reference.clone()]);
+            assert_eq!(store.records.get(&reference).unwrap().unwrap(), original);
+        }
+        let (_, private) = store.login(b"record user PIN").unwrap();
+        let (objects, _) = store.load_objects(7, &private).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].unique_id, stored.unique_id);
     }
 
     fn record_plaintext(
