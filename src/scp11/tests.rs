@@ -711,6 +711,9 @@ mod virtual_card {
             keys.upload_host_certificates(&connector).unwrap();
             final_upload.p2 = 0x10;
             final_upload.data = vec![0x30, 0];
+            // Reach the card's certificate parser through this short-only
+            // connector; a forced extended frame is rejected by the transport.
+            final_upload.extended = false;
             assert!(
                 connector
                     .send_apdu(&final_upload)
