@@ -194,6 +194,14 @@ credential also has a
 read-only `CKO_PUBLIC_KEY` object containing its P-256 public key. The source
 applet's token serial number identifies the YubiKey that owns these objects.
 
+Native credential use establishes the configured CCID SCP03/SCP11 channel
+before GET CHALLENGE or session-key calculation sends a credential password.
+It uses the configured source URI when SCP requires a provider credential.
+Channel-establishment failure stops authentication without a plaintext fallback.
+Closing the last source session releases its channel and any source binding;
+the ordinary YubiHSM session-recreation opt-in controls retention of that source
+session. Public credential discovery remains independent of SCP establishment.
+
 The following vendor attributes are available on credential objects:
 
 | Attribute | Value |

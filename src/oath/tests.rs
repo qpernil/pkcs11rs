@@ -346,6 +346,7 @@ fn passwordless_slot_requires_login_for_inventory_and_device_operations() {
     assert!(!slot.login_is_active());
     slot.login(Some(b""), &prompt).unwrap();
     slot.set_login_role(Some(LoginRole::User)).unwrap();
+    slot.refresh_token_objects(1).unwrap();
     let keys = slot.backend_token_objects(1).unwrap();
     assert_eq!(keys.len(), 2);
     assert!(
@@ -460,6 +461,7 @@ fn inventory_lookup_reuses_list_until_refresh_and_rejects_a_lost_login() {
     slot.login(Some(b""), &pinentry::Pinentry::unconfigured())
         .unwrap();
     slot.set_login_role(Some(LoginRole::User)).unwrap();
+    slot.refresh_token_objects(1).unwrap();
     let original = slot.backend_token_objects(1).unwrap();
     assert_eq!(original.len(), 2); // The two SHA1 HOTP views.
     let calls = c.calls.get();
@@ -471,6 +473,9 @@ fn inventory_lookup_reuses_list_until_refresh_and_rejects_a_lost_login() {
         );
     }
     assert_eq!(c.calls.get(), calls);
+    assert_eq!(slot.backend_token_objects(1).unwrap().len(), original.len());
+    assert_eq!(c.calls.get(), calls);
+    slot.refresh_token_objects(1).unwrap();
     let refreshed = slot.backend_token_objects(1).unwrap();
     assert_eq!(refreshed.len(), 1);
     for object in original {
@@ -813,7 +818,9 @@ fn sha1_hotp_discovery_offers_standard_and_extended_views_of_one_credential() {
     slot.login(Some(b""), &pinentry::Pinentry::unconfigured())
         .unwrap();
     slot.set_login_role(Some(LoginRole::User)).unwrap();
-    let objects = slot.backend_token_objects(1).unwrap();
+    slot.refresh_token_objects(1).unwrap();
+    let mut objects = slot.backend_token_objects(1).unwrap();
+    objects.sort_by_key(|object| object.key_type);
     assert_eq!(objects.len(), 2);
     assert_eq!(objects[0].id, objects[1].id);
     assert_eq!(objects[0].label, objects[1].label);

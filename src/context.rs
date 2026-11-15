@@ -30,7 +30,7 @@ use crate::{
     Slot, SoftwareSlot, SwitchableFidoEndpoint, TokenObject, YubiHsmPublicDiscoveryConfig,
     YubiHsmSlot, YubiKeyClient,
     backed_object::{put_backed_object, stored_objects},
-    ccid_application_label, pinentry, select_application, str_pad,
+    ccid_application_label, pinentry, str_pad,
 };
 #[cfg(feature = "native-hardware")]
 use crate::{HidFidoEndpoint, UsbConnector};
@@ -2062,7 +2062,7 @@ impl SlotState {
     ) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
         let result = (|| {
-            let mut objects = slot.token_objects(slot_id)?;
+            let mut objects = slot.refresh_token_objects(slot_id)?;
             let stored = self.stored_token_objects(slot)?;
             objects.extend(stored.iter().map(|(_, object)| object.clone()));
             self.reconcile_slot_token_objects_with_rebindings(slot_id, objects, rebindings)?;
@@ -2479,24 +2479,27 @@ impl ModuleContext {
                 .ccid_aids
                 .for_application(configuration.application)
                 .to_vec();
-            if let Err(error) = select_application(base_connector.as_ref(), &application_aid) {
-                tracing::debug!(
-                    target: "pkcs11rs::discovery",
-                    reader = %reader_name,
-                    application = application_label,
-                    outcome = "not present or unavailable",
-                    elapsed_us = applet_started.elapsed().as_micros() as u64,
-                    "CCID applet probe completed"
-                );
-                tracing::trace!(
-                    target: "pkcs11rs::discovery",
-                    reader = %reader_name,
-                    application = application_label,
-                    ?error,
-                    "CCID application not present"
-                );
-                continue;
-            }
+            let response = match base_connector.select_application(&application_aid) {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        reader = %reader_name,
+                        application = application_label,
+                        outcome = "not present or unavailable",
+                        elapsed_us = applet_started.elapsed().as_micros() as u64,
+                        "CCID applet probe completed"
+                    );
+                    tracing::trace!(
+                        target: "pkcs11rs::discovery",
+                        reader = %reader_name,
+                        application = application_label,
+                        ?error,
+                        "CCID application not present"
+                    );
+                    continue;
+                }
+            };
             tracing::debug!(
                 target: "pkcs11rs::discovery",
                 reader = %reader_name,
@@ -2506,7 +2509,11 @@ impl ModuleContext {
                 "CCID applet probe completed"
             );
             discovered_applications.push(application_label.to_owned());
-            reader_state.set_selected_application(&application_aid)?;
+            reader_state.set_selected_application(
+                &application_aid,
+                response,
+                base_connector.connection_epoch(),
+            )?;
             let application_connector = PcscAppletConnector::new_configured(
                 base_connector.clone(),
                 &application_aid,

@@ -119,7 +119,9 @@ use iso7816::ApduCapabilities;
 
 mod scp03;
 mod scp_key_provider;
-use scp03::{CommandApdu, ResponseApdu, Scp03KeySet, Scp03Session, parse_hex, select_application};
+#[cfg(test)]
+use scp03::select_application;
+use scp03::{CommandApdu, ResponseApdu, Scp03KeySet, Scp03Session, parse_hex};
 
 mod scp11;
 use scp11::{Scp11CertificateCacheKey, Scp11KeySet, Scp11Variant};

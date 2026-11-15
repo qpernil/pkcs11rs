@@ -472,6 +472,10 @@ pub(crate) trait Slot {
         objects.extend(self.backend_token_objects(slot_id)?);
         Ok(objects)
     }
+    /// Refresh the inventory used by subsequent object reads and searches.
+    fn refresh_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        self.token_objects(slot_id)
+    }
     fn invalidate_token_objects(&self) {}
     #[allow(dead_code)]
     fn backend_token_object(

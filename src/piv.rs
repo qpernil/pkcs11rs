@@ -20,7 +20,6 @@ pub(crate) const PIV_AID: [u8; 11] = [
 pub(crate) const ORIGIN_GENERATED: u8 = 1;
 pub(crate) const ORIGIN_IMPORTED: u8 = 2;
 
-const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE: u8 = 0x24;
 const INS_RESET_RETRY: u8 = 0x2c;
@@ -782,18 +781,7 @@ impl Client {
         connector: &dyn Connector,
         application_aid: &[u8],
     ) -> Result<DeviceInfo, Error> {
-        let response = self.transmit(
-            connector,
-            CommandApdu {
-                cla: 0,
-                ins: INS_SELECT,
-                p1: 0x04,
-                p2: 0,
-                data: application_aid.to_vec(),
-                le: Some(256),
-                extended: false,
-            },
-        )?;
+        let response = connector.select_application(application_aid)?;
         require_success(response.status)?;
 
         self.selected_info(connector)

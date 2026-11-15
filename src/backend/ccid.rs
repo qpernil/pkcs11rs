@@ -199,6 +199,9 @@ impl Slot for HsmAuthSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::HsmAuth)
     }
+    fn ccid_login_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn refresh_token_objects_before_find(&self) -> bool {
         true
     }
@@ -219,7 +222,14 @@ impl Slot for HsmAuthSlot {
             .into_iter()
             .find(|credential| hsmauth_credential_identity(credential) == object.unique_id)
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
-        NativeHsmAuth {
+        if self.connector.secure_channel_required()
+            && self.connector.secure_channel_protocol()?.is_none()
+        {
+            self.connector.prepare_secure_channel_login(&[])?;
+        }
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = NativeHsmAuth {
             connector: self.connector.clone(),
             credential,
             version: info.version,
@@ -227,7 +237,9 @@ impl Slot for HsmAuthSlot {
             #[cfg(test)]
             source: self.serial.clone(),
         }
-        .authenticate(target, authkey_id, password)
+        .authenticate(target, authkey_id, password);
+        self.connector.finish_secure_channel_login(result.is_ok());
+        result
     }
     fn supports_native_hsmauth(&self) -> bool {
         true
@@ -575,7 +587,7 @@ pub(crate) struct IssuerSecurityDomainSlot {
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
     public_certificate_storage_enabled: bool,
-    info: RefCell<Option<SecurityDomainInfo>>,
+    info: RefCell<Option<(u64, SecurityDomainInfo)>>,
 }
 
 impl IssuerSecurityDomainSlot {
@@ -604,10 +616,16 @@ impl IssuerSecurityDomainSlot {
 
     fn discovered_info(&self) -> Result<SecurityDomainInfo, Error> {
         let mut info = self.info.try_borrow_mut()?;
-        if info.is_none() {
-            *info = Some(SecurityDomainClient.discover(self.connector.as_ref())?);
+        if info
+            .as_ref()
+            .is_none_or(|(epoch, _)| *epoch != self.connector.connection_epoch())
+        {
+            let discovered = SecurityDomainClient.discover(self.connector.as_ref())?;
+            *info = Some((self.connector.connection_epoch(), discovered));
         }
-        info.clone().ok_or(CKR_DEVICE_ERROR.into())
+        info.as_ref()
+            .map(|(_, info)| info.clone())
+            .ok_or(CKR_DEVICE_ERROR.into())
     }
 }
 

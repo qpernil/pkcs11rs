@@ -549,20 +549,27 @@ and a slot-local connector facade, while all facades share:
 
 - the card connection, complete APDU-exchange lock, and APDU capabilities;
 - a connection-epoch-scoped physical `DeviceContext`;
-- validated SCP11 public-key caches that remain valid for that connection.
+- public certificate bundles and validated SCP11 public keys scoped to that connection.
 
 Calls on different applet slots may overlap while using their independent slot
 and session state, but their interactions with one physical reader are
 serialized for the complete device-backed PKCS #11 operation. The shared card
-state is either empty or contains one selected AID, its live SCP03/SCP11
-session, and a selected-applet guard. Repeated operations reuse that state.
+state is either empty or contains one selected AID, the response of the SELECT
+that selected it, its live SCP03/SCP11 session, and a selected-applet guard.
+Applet clients reuse that response; they do not select again merely to read
+selection metadata. Only the currently selected applet has a retained SELECT
+response. Raw SELECT commands replace that state and are sent once without
+wrapping them in the channel they invalidate.
 The authoritative logical PKCS #11 role belongs to each slot context, not to
 this guard. Selecting another applet discards the old live channel and can
 invalidate applet authorization; each backend reconciles its login state
 according to its own policy. PIV keeps its logical role separate from the
 card's authentication facts; see [PIV authentication](piv.md#pkcs-11-role-and-piv-authentication).
 Reconnection clears the card-wide state and the separately connection-scoped
-validated SCP11 public-key cache. A local operation guard covers the APDUs of
+certificate and validated SCP11 public-key caches. Issuer SD discovery shares
+its public certificate bundles with SCP11 establishment, which validates them
+against the selected trust policy. Security domain mutations invalidate the
+shared certificate caches. A local operation guard covers the APDUs of
 one device-backed PKCS #11 call, while native card ownership and applet state
 survive the call; see [operation granularity](ccid.md#applet-state-and-operation-granularity).
 

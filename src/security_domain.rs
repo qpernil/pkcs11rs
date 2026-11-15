@@ -342,6 +342,7 @@ impl Client {
             }
         }
 
+        connector.cache_security_domain_certificates(&certificate_bundles)?;
         Ok(SecurityDomainInfo {
             keys,
             card_recognition_data,

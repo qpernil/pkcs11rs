@@ -886,20 +886,26 @@ fn normalize_scp03_cla(cla: u8) -> Result<u8, Error> {
 }
 
 pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Result<(), Error> {
+    connector.select_application(aid).map(|_| ())
+}
+
+pub(crate) fn select_application_response<C: Connector + ?Sized>(
+    connector: &C,
+    aid: &[u8],
+) -> Result<ResponseApdu, Error> {
     if !(5..=16).contains(&aid.len()) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let select = CommandApdu {
-        cla: 0x00,
+        cla: 0,
         ins: 0xa4,
-        p1: 0x04,
-        p2: 0x00,
+        p1: 4,
+        p2: 0,
         data: aid.to_vec(),
         le: Some(256),
         extended: false,
     };
-    transmit(connector, &select)?.require_success(&select)?;
-    Ok(())
+    connector.send_apdu(&select)?.require_success(&select)
 }
 
 pub(crate) fn transmit<C: Connector + ?Sized>(

@@ -108,7 +108,9 @@ public-key or certificate counterpart to expose before login.
 
 Authenticated discovery refreshes the device credential list. Subsequent
 object resolution and attribute reads reuse that inventory rather than issuing
-LIST for each attribute. Find initialization, successful login, import, deletion,
+LIST for each attribute. A find refresh obtains one LIST snapshot and uses that
+same snapshot for matching handles and reading their attributes.
+Find initialization, successful login, import, deletion,
 and explicit inventory refresh obtain a fresh list. Logout, applet reselection,
 and loss of connection-bound authorization invalidate access to cached objects.
 The inventory contains credential metadata, never secret key values or OTPs.
@@ -127,6 +129,11 @@ bound to the current card connection and selected-applet authorization. Logout,
 deselection, connection loss, and closing the last session invalidate it;
 fresh authentication is required afterward. See
 [authentication secret retention](authentication-secrets.md).
+
+Each login obtains a fresh SELECT response. The backend parses the active
+selection response after secure-channel establishment so that an SCP11 visit
+to Issuer SD cannot leave it using a challenge from an earlier selection.
+Authentication attempts do not replay a consumed challenge.
 
 `C_CreateObject` requires an RW session, `CKO_OTP_KEY`, the appropriate key type,
 `CKA_TOKEN=true`, `CKA_VALUE`, and a nonempty `CKA_LABEL` or `CKA_ID`. If both

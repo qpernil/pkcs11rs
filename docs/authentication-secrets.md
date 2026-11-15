@@ -50,6 +50,12 @@ lifetime is distinct from retaining the login secret to authenticate again.
   zeroizing call-local storage. Neither USER nor SO login is supported, and no
   management credential is cached between commands. The native reset command
   requires no management key. See [YubiHSM Auth administration](yubihsm-auth.md#yubihsm-auth-administration).
+- Native YubiHSM Auth credential use establishes configured CCID secure messaging
+  before transmitting a credential password or receiving channel working keys.
+  Public SELECT responses are retained only for the currently selected applet;
+  fresh OATH authentication obtains a fresh selection challenge. Public security
+  domain certificate bundles are connection-scoped and validated against the
+  selected SCP11 trust policy before use.
 - Card SCP03/SCP11 uses protected provider objects for establishment. Configured
   SCP03 inputs are imported per handshake; the static administration DEK remains
   a protected binding until the selected applet or card connection changes. A

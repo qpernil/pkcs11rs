@@ -53,6 +53,9 @@ impl OathSlot {
         self.authenticated.set(None);
         self.inventory.borrow_mut().clear();
         self.connector.clear_secure_channel_for_login();
+        self.connector.establish_secure_channel(&self.aid)?;
+        // SCP11 can visit the security domain and reselect OATH. Parse the
+        // response of that final selection, after channel establishment.
         let info = oath::select(self.connector.as_ref(), &self.aid)?;
         *self.info.borrow_mut() = Some((self.connector.connection_epoch(), info.clone()));
         Ok(info)
@@ -137,10 +140,16 @@ impl Slot for OathSlot {
     fn refresh_token_objects_after_logout(&self) -> bool {
         true
     }
-    fn backend_token_objects(&self, slot: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        self.inventory.borrow_mut().clear();
+    fn backend_token_objects(&self, _slot: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         if !self.login_is_active() {
             return Ok(Vec::new());
+        }
+        Ok(self.inventory.borrow().values().cloned().collect())
+    }
+    fn refresh_token_objects(&self, slot: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        self.inventory.borrow_mut().clear();
+        if !self.login_is_active() {
+            return Ok(self.profile_objects(slot));
         }
         let objects: Vec<_> = oath::list(self.connector.as_ref())?
             .into_iter()
@@ -165,7 +174,9 @@ impl Slot for OathSlot {
             .iter()
             .map(|object| (object.unique_id.clone(), object.clone()))
             .collect();
-        Ok(objects)
+        let mut snapshot = self.profile_objects(slot);
+        snapshot.extend(objects);
+        Ok(snapshot)
     }
     fn backend_token_object(
         &self,
@@ -198,7 +209,6 @@ impl Slot for OathSlot {
                 prompted.as_slice()
             }
         };
-        self.connector.establish_secure_channel(&self.aid)?;
         if let Err(e) = oath::authenticate(self.connector.as_ref(), &info, pin) {
             self.connector.clear_secure_channel();
             return Err(e);
@@ -302,7 +312,6 @@ impl Slot for OathSlot {
             return Err(CKR_PIN_LEN_RANGE.into());
         }
         let info = self.reselect()?;
-        self.connector.establish_secure_channel(&self.aid)?;
         oath::authenticate(self.connector.as_ref(), &info, old)?;
         oath::change_password(self.connector.as_ref(), &info, new)?;
         self.logout()

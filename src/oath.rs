@@ -154,7 +154,7 @@ fn command(c: &dyn Connector, ins: u8, p1: u8, p2: u8, data: Vec<u8>) -> Result<
     }
 }
 pub(crate) fn select(c: &dyn Connector, aid: &[u8]) -> Result<Info, Error> {
-    let data = command(c, 0xa4, 4, 0, aid.to_vec())?;
+    let data = c.select_application(aid)?.data;
     let fields = parse(&data)?;
     let version = field(&fields, 0x79)?
         .ok_or(CKR_DEVICE_ERROR)?

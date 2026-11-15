@@ -291,3 +291,6 @@ fn oce_chain(leaf: Vec<u8>, intermediates: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, E
 
 #[cfg(all(test, feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
 mod tests;
+
+#[cfg(all(test, feature = "embedded-virtual-yubikey", not(feature = "abi-tests")))]
+mod selection_tests;

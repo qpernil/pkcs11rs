@@ -45,7 +45,9 @@ impl Source {
             std::env::temp_dir().join(format!("ccid-dynamic-{:x}", u64::from_ne_bytes(nonce)));
         std::fs::create_dir(&path).unwrap();
         let store = SoftwareTokenStore::open("card source".into(), path.clone(), None).unwrap();
-        let master = store.init_token(b"source SO password", [b' '; 32]).unwrap();
+        let mut label = [b' '; 32];
+        label[..11].copy_from_slice(b"card source");
+        let master = store.init_token(b"source SO password", label).unwrap();
         store
             .init_user_pin(b"source user password", &master)
             .unwrap();

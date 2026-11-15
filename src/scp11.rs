@@ -233,6 +233,16 @@ impl Scp11KeySet {
         })();
         crate::scp03::select_application(connector, application_aid)?;
         let certificates = certificates?;
+        let card_public_key = self.validate_card_certificates(&certificates)?;
+        let point = card_public_key.clone();
+        self.establish_with_card_key(connector, &card_public_key)
+            .map(|session| (session, Some(point)))
+    }
+
+    pub(crate) fn validate_card_certificates(
+        &self,
+        certificates: &[Vec<u8>],
+    ) -> Result<Vec<u8>, Error> {
         if certificates.is_empty() {
             tracing::warn!(
                 target: "pkcs11rs::scp11",
@@ -244,13 +254,11 @@ impl Scp11KeySet {
             return Err(CKR_FUNCTION_FAILED.into());
         }
         let card_public_key = card_public_key_from_certificates(
-            &certificates,
+            certificates,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )
         .map_err(|error| error.login_failure(crate::error::LoginStage::CardCertificate))?;
-        let point = card_public_key.clone();
-        self.establish_with_card_key(connector, &card_public_key)
-            .map(|session| (session, Some(point)))
+        Ok(card_public_key)
     }
 
     pub(crate) fn certificate_cache_key(&self) -> Option<Scp11CertificateCacheKey> {

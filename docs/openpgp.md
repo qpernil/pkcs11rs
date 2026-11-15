@@ -189,6 +189,9 @@ OpenPGP applet's DER form to PKCS #11's fixed-width `r || s` form.
 needed. `CKU_USER` verifies PW1, while `CKU_SO` verifies the OpenPGP
 administrator password PW3. SO can generate or import a key into an empty
 reference, inspect native private-key attributes, and change its touch policy.
+Provisioning and its metadata refresh reuse the current applet selection and
+live secure channel. Reading the applet's status does not reselect it or revoke
+the administrator's authorization.
 This deliberately extends PKCS #11 SO access to match the applet's administrator
 role. Private-key cryptographic operations still require USER authorization;
 private key material remains unreadable. Existing keys cannot be replaced or

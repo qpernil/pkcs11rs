@@ -109,14 +109,24 @@ the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 ## Applet state and operation granularity
 
 One card-wide state records either no selected applet or the selected AID with
-its live SCP03/SCP11 session and a selected-applet guard. The guard prevents
+the response of that SELECT, its live SCP03/SCP11 session, and a selected-applet guard. The guard prevents
 ordinary discovery from selecting another applet while a slot role is active;
 it is not the authoritative PKCS #11 login role. Each slot context owns that
 token-wide role, while each session owns its RO/RW flag. Repeated operations on
-the selected applet do not send another SELECT. Card removal, replacement, or
+the selected applet reuse its SELECT response without sending another SELECT.
+Only the active applet has a retained SELECT response; another selection replaces
+it. An explicit raw SELECT APDU performs one real selection, returns its response,
+and clears the previous channel and applet authorization. Fresh OATH login
+requests a fresh selection and reads the final response after SCP setup, including
+any return from an Issuer SD certificate lookup.
+Card removal, replacement, or
 transport reconnection clears the card-wide connector state. Validated SCP11
-public-key material is separately cached for the same connected card and is
-also discarded on reconnection. PIV's precise separation between the logical
+public-key material and public certificate bundles are separately cached for the
+same connected card. Issuer SD discovery supplies those bundles to SCP11 setup,
+avoiding a second applet visit to fetch the same certificates. Bundles still
+undergo validation against the configured trust policy. Reconnection and security
+domain key or certificate mutations invalidate these caches.
+PIV's precise separation between the logical
 role and applet authentication is documented in [YubiKey PIV client](piv.md#pkcs-11-role-and-piv-authentication).
 
 The local device-operation guard spans one device-backed PKCS #11 call and all
@@ -326,9 +336,12 @@ remain local to their applet slot and do not overwrite the physical identity.
 ## Secure channels
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, `scp11b`, or `scp11c`
-to use that transport for every selected CCID applet. Selecting an applet
-establishes the configured channel, and the live channel remains paired with
-that selected AID. Selecting another applet or reconnecting destroys it.
+to use that transport for authenticated CCID operations. Public discovery and
+cached inventory reads do not establish SCP. Login establishes the configured
+channel before applet authentication; native YubiHSM Auth credential use and
+administration establish it before sending sensitive commands. Establishment
+failure prevents those commands from being sent. The live channel remains
+paired with the selected AID. Selecting another applet or reconnecting destroys it.
 
 The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,

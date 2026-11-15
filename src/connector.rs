@@ -47,6 +47,17 @@ pub(crate) trait Connector {
     fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit_short(self, command)
     }
+    /// Select an application, reusing the response of its current selection.
+    /// Raw transports perform a SELECT; applet connectors own selection reuse.
+    fn select_application(&self, application_aid: &[u8]) -> Result<ResponseApdu, Error> {
+        crate::scp03::select_application_response(self, application_aid)
+    }
+    fn cache_security_domain_certificates(
+        &self,
+        _bundles: &[crate::security_domain::CertificateBundle],
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
@@ -174,6 +185,7 @@ pub(crate) enum CcidLoginState {
 #[derive(Debug)]
 struct SelectedApplet {
     application_aid: Vec<u8>,
+    response: ResponseApdu,
     session: Option<Scp03Session>,
     protocol: Option<SecureChannelProtocol>,
     credential_description: Option<String>,
@@ -184,10 +196,33 @@ struct SelectedApplet {
 pub(crate) struct SecureChannelState {
     selected_applet: Option<SelectedApplet>,
     pub(crate) validated_scp11_keys: HashMap<Scp11CertificateCacheKey, Vec<u8>>,
+    certificate_bundles: HashMap<(Vec<u8>, u8, u8), Vec<Vec<u8>>>,
     pub(crate) connection_epoch: u64,
 }
 
 impl SecureChannelState {
+    fn ensure_application_selected(
+        &mut self,
+        base: &dyn Connector,
+        application_aid: &[u8],
+        reason: &'static str,
+    ) -> Result<(), Error> {
+        self.synchronize_connection(base.connection_epoch());
+        if self
+            .selected_applet
+            .as_ref()
+            .is_some_and(|selected| selected.application_aid == application_aid)
+        {
+            return Ok(());
+        }
+        self.clear_selection(reason);
+        let response = base.select_application(application_aid)?;
+        // A SELECT may lazily acquire a native card and advance its epoch.
+        self.synchronize_connection(base.connection_epoch());
+        self.select(application_aid, response, reason);
+        Ok(())
+    }
+
     fn selected_applet(&self) -> Result<&SelectedApplet, Error> {
         self.selected_applet
             .as_ref()
@@ -215,7 +250,7 @@ impl SecureChannelState {
         self.selected_applet = None;
     }
 
-    fn select(&mut self, application_aid: &[u8], reason: &'static str) {
+    fn select(&mut self, application_aid: &[u8], response: ResponseApdu, reason: &'static str) {
         let old_application_aid = self
             .selected_applet
             .as_ref()
@@ -233,6 +268,7 @@ impl SecureChannelState {
         );
         self.selected_applet = Some(SelectedApplet {
             application_aid: application_aid.to_vec(),
+            response,
             session: None,
             protocol: None,
             credential_description: None,
@@ -251,12 +287,14 @@ impl SecureChannelState {
             );
             self.clear_selection("connection epoch changed");
             self.validated_scp11_keys.clear();
+            self.certificate_bundles.clear();
             self.connection_epoch = connection_epoch;
         }
     }
 
     fn invalidate_scp11_certificates(&mut self) {
         self.validated_scp11_keys.clear();
+        self.certificate_bundles.clear();
     }
 }
 
@@ -328,10 +366,20 @@ impl PcscReaderState {
         self.secure_channel.lock().map_err(|_| CKR_MUTEX_BAD.into())
     }
 
-    pub(crate) fn set_selected_application(&self, application_aid: &[u8]) -> Result<(), Error> {
+    pub(crate) fn set_selected_application(
+        &self,
+        application_aid: &[u8],
+        response: ResponseApdu,
+        connection_epoch: u64,
+    ) -> Result<(), Error> {
         self.with_operation(|| {
             let mut state = self.secure_channel()?;
-            state.select(application_aid, "selected application set explicitly");
+            state.synchronize_connection(connection_epoch);
+            state.select(
+                application_aid,
+                response,
+                "selected application set explicitly",
+            );
             Ok(())
         })
     }
@@ -345,6 +393,10 @@ impl PcscReaderState {
             secure_channel: Mutex::new(SecureChannelState {
                 selected_applet: Some(SelectedApplet {
                     application_aid,
+                    response: ResponseApdu {
+                        data: Vec::new(),
+                        status: 0x9000,
+                    },
                     session: Some(session),
                     protocol: Some(SecureChannelProtocol::Scp03),
                     credential_description: None,
@@ -796,21 +848,11 @@ impl PcscAppletConnector {
 
     fn ensure_selected_locked(&self) -> Result<(), Error> {
         let mut state = self.state.secure_channel()?;
-        let connection_epoch = self.base.connection_epoch();
-        state.synchronize_connection(connection_epoch);
-        if state
-            .selected_applet
-            .as_ref()
-            .is_none_or(|selected| selected.application_aid != self.application_aid)
-        {
-            state.clear_selection("another applet required selection");
-            select_application(self.base.as_ref(), &self.application_aid)?;
-            // The first APDU may lazily acquire or replace the native card and
-            // advance its connection generation. Record that generation before
-            // publishing the selection created by this APDU.
-            state.synchronize_connection(self.base.connection_epoch());
-            state.select(&self.application_aid, "applet selected for operation");
-        }
+        state.ensure_application_selected(
+            self.base.as_ref(),
+            &self.application_aid,
+            "applet selected for operation",
+        )?;
 
         let dynamic_missing = {
             let auth = self
@@ -927,29 +969,39 @@ impl PcscAppletConnector {
             source.as_ref(),
         )?;
         let cache_key = keys.certificate_cache_key();
-        let cached = cache_key
-            .as_ref()
-            .and_then(|key| state.validated_scp11_keys.get(key))
-            .cloned();
+        let reused = cache_key.as_ref().is_some_and(|key| {
+            state.validated_scp11_keys.contains_key(key)
+                || state.certificate_bundles.contains_key(&(
+                    self.secure_channels.scp11.issuer_sd_aid.clone(),
+                    key.0,
+                    key.1,
+                ))
+        });
+        let point = self.scp11_card_public_key(state, &keys, false)?;
         let first = keys.authenticate_application(
             self.base.as_ref(),
             &self.application_aid,
             &self.secure_channels.scp11.issuer_sd_aid,
-            cached.as_deref(),
+            point.as_deref(),
         );
         let (session, validated) = match first {
-            Err(_) if cached.is_some() => {
+            Err(_) if reused => {
                 if let Some(key) = cache_key.as_ref() {
                     state.validated_scp11_keys.remove(key);
                 }
-                keys.authenticate_application(
+                let point = self.scp11_card_public_key(state, &keys, true)?;
+                let (session, _) = keys.authenticate_application(
                     self.base.as_ref(),
                     &self.application_aid,
                     &self.secure_channels.scp11.issuer_sd_aid,
-                    None,
-                )?
+                    point.as_deref(),
+                )?;
+                (session, point)
             }
-            result => result?,
+            result => {
+                let (session, _) = result?;
+                (session, point)
+            }
         };
         if let (Some(key), Some(point)) = (cache_key, validated) {
             state.validated_scp11_keys.insert(key, point);
@@ -961,7 +1013,69 @@ impl PcscAppletConnector {
         Ok((session, description))
     }
 
+    fn scp11_card_public_key(
+        &self,
+        state: &mut SecureChannelState,
+        keys: &Scp11KeySet,
+        reload: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(key) = keys.certificate_cache_key() else {
+            return Ok(None);
+        };
+        if !reload && let Some(point) = state.validated_scp11_keys.get(&key) {
+            return Ok(Some(point.clone()));
+        }
+        let issuer = &self.secure_channels.scp11.issuer_sd_aid;
+        let bundle_key = (issuer.clone(), key.0, key.1);
+        let certificates =
+            if !reload && let Some(bundle) = state.certificate_bundles.get(&bundle_key) {
+                bundle.clone()
+            } else {
+                let certificates = (|| {
+                    state.ensure_application_selected(
+                        self.base.as_ref(),
+                        issuer,
+                        "SCP11 card certificate lookup",
+                    )?;
+                    SecurityDomainClient.get_certificate_bundle(
+                        self.base.as_ref(),
+                        crate::security_domain::KeyRef {
+                            kid: key.0,
+                            kvn: key.1,
+                        },
+                    )
+                })();
+                state.ensure_application_selected(
+                    self.base.as_ref(),
+                    &self.application_aid,
+                    "SCP11 returned to target applet",
+                )?;
+                let certificates = certificates?;
+                state
+                    .certificate_bundles
+                    .insert(bundle_key, certificates.clone());
+                certificates
+            };
+        keys.validate_card_certificates(&certificates).map(Some)
+    }
+
+    /// Explicit SELECT APDUs really reselect. They bypass automatic selection
+    /// and secure messaging, and replace the sole active selection response.
+    fn select_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        let mut state = self.state.secure_channel()?;
+        state.clear_selection("explicit SELECT APDU");
+        let response = self.base.send_apdu(command)?;
+        state.synchronize_connection(self.base.connection_epoch());
+        if response.status == 0x9000 {
+            state.select(&command.data, response.clone(), "explicit SELECT completed");
+        }
+        Ok(response)
+    }
+
     fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        if is_application_select(command) {
+            return self.select_apdu_locked(command);
+        }
         self.ensure_selected_locked()?;
         if self.active_protocol().is_none() || !self.enabled() {
             let result = self.base.send_apdu(command);
@@ -993,6 +1107,9 @@ impl PcscAppletConnector {
     }
 
     fn send_short_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        if is_application_select(command) {
+            return self.select_apdu_locked(command);
+        }
         self.ensure_selected_locked()?;
         if self.active_protocol().is_none() || !self.enabled() {
             let result = crate::iso7816::transmit_short(self.base.as_ref(), command);
@@ -1065,6 +1182,10 @@ impl PcscAppletConnector {
     }
 }
 
+fn is_application_select(command: &CommandApdu) -> bool {
+    command.cla == 0 && command.ins == 0xa4 && command.p1 == 4 && command.p2 == 0
+}
+
 impl Connector for PcscAppletConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -1118,8 +1239,49 @@ impl Connector for PcscAppletConnector {
         self.base.apdu_capabilities()
     }
 
+    fn select_application(&self, application_aid: &[u8]) -> Result<ResponseApdu, Error> {
+        if application_aid != self.application_aid {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.state.with_operation(|| {
+            self.ensure_selected_locked()?;
+            Ok(self
+                .state
+                .secure_channel()?
+                .selected_applet()?
+                .response
+                .clone())
+        })
+    }
+
+    fn cache_security_domain_certificates(
+        &self,
+        bundles: &[crate::security_domain::CertificateBundle],
+    ) -> Result<(), Error> {
+        let mut state = self.state.secure_channel()?;
+        state.synchronize_connection(self.base.connection_epoch());
+        state.validated_scp11_keys.clear();
+        state
+            .certificate_bundles
+            .retain(|(aid, _, _), _| aid != &self.application_aid);
+        for bundle in bundles {
+            state.certificate_bundles.insert(
+                (
+                    self.application_aid.clone(),
+                    bundle.key_ref.kid,
+                    bundle.key_ref.kvn,
+                ),
+                bundle.certificates.clone(),
+            );
+        }
+        Ok(())
+    }
+
     fn send_oath_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.state.with_operation(|| {
+            if is_application_select(command) {
+                return self.select_apdu_locked(command);
+            }
             self.ensure_selected_locked()?;
             if self.active_protocol().is_none() || !self.enabled() {
                 let result = crate::iso7816::transmit_oath(self.base.as_ref(), command);
@@ -1166,6 +1328,17 @@ impl Connector for PcscAppletConnector {
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         self.state.with_operation(|| {
+            let command = CommandApdu::decode(send_buffer);
+            if let Ok(command) = &command
+                && is_application_select(command)
+            {
+                let encoded = self.select_apdu_locked(command)?.encode();
+                if encoded.len() > receive_buffer.len() {
+                    return Err(CKR_DEVICE_ERROR.into());
+                }
+                receive_buffer[..encoded.len()].copy_from_slice(&encoded);
+                return Ok(&receive_buffer[..encoded.len()]);
+            }
             self.ensure_selected_locked()?;
             if self.active_protocol().is_none() || !self.enabled() {
                 let result = self.base.transmit(send_buffer, receive_buffer, timeout);
@@ -1176,8 +1349,7 @@ impl Connector for PcscAppletConnector {
                 }
                 return result;
             }
-            let command = CommandApdu::decode(send_buffer)?;
-            let encoded = self.send_apdu_locked(&command)?.encode();
+            let encoded = self.send_apdu_locked(&command?)?.encode();
             if encoded.len() > receive_buffer.len() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -1229,10 +1401,11 @@ impl Connector for PcscAppletConnector {
             }
             state.clear_selection("discovery is reselecting a public applet");
             drop(state);
-            match select_application(self.base.as_ref(), &self.application_aid) {
-                Ok(()) => {
+            match self.base.select_application(&self.application_aid) {
+                Ok(response) => {
                     let mut state = self.state.secure_channel()?;
-                    state.select(&self.application_aid, "discovery selected applet");
+                    state.synchronize_connection(self.base.connection_epoch());
+                    state.select(&self.application_aid, response, "discovery selected applet");
                     self.set_applet_presence(true);
                     self.forget_discovery_error();
                     Ok(())
@@ -1368,9 +1541,18 @@ impl Connector for PcscAppletConnector {
         }
     }
     fn clear_secure_channel_for_login(&self) {
-        let _ = self
-            .state
-            .with_operation(|| self.clear_secure_channel_locked());
+        let _ = self.state.with_operation(|| {
+            self.clear_secure_channel_locked()?;
+            let mut state = self.state.secure_channel()?;
+            if state
+                .selected_applet
+                .as_ref()
+                .is_some_and(|selected| selected.application_aid == self.application_aid)
+            {
+                state.clear_selection("fresh applet login requires selection");
+            }
+            Ok(())
+        });
         self.applet
             .channel_started
             .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -4011,7 +4193,16 @@ mod tests {
     fn applet_selection_persists_and_preserves_scp11_validation() {
         let state = PcscReaderState::default();
         let key = (0x13, 1, [0x55; 32]);
-        state.set_selected_application(&[1, 2, 3]).unwrap();
+        state
+            .set_selected_application(
+                &[1, 2, 3],
+                ResponseApdu {
+                    data: vec![0x42],
+                    status: 0x9000,
+                },
+                0,
+            )
+            .unwrap();
         {
             let mut secure_channel = state.secure_channel().unwrap();
             secure_channel
@@ -4024,6 +4215,10 @@ mod tests {
             secure_channel.selected_applet().unwrap().application_aid,
             [1, 2, 3]
         );
+        assert_eq!(
+            secure_channel.selected_applet().unwrap().response.data,
+            [0x42]
+        );
         assert!(secure_channel.validated_scp11_keys.contains_key(&key));
     }
 
@@ -4034,6 +4229,10 @@ mod tests {
             connection_epoch: 7,
             selected_applet: Some(SelectedApplet {
                 application_aid: vec![1, 2, 3],
+                response: ResponseApdu {
+                    data: vec![0x42],
+                    status: 0x9000,
+                },
                 session: None,
                 protocol: None,
                 credential_description: None,
@@ -4042,16 +4241,30 @@ mod tests {
             ..SecureChannelState::default()
         };
         state.validated_scp11_keys.insert(key, vec![0x04; 65]);
+        let bundle_key = (
+            crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
+            0x13,
+            1,
+        );
+        state
+            .certificate_bundles
+            .insert(bundle_key.clone(), vec![vec![0x30]]);
 
         state.synchronize_connection(7);
         assert!(state.validated_scp11_keys.contains_key(&key));
+        assert!(state.certificate_bundles.contains_key(&bundle_key));
 
         state.invalidate_scp11_certificates();
         assert!(state.validated_scp11_keys.is_empty());
+        assert!(state.certificate_bundles.is_empty());
         state.validated_scp11_keys.insert(key, vec![0x04; 65]);
+        state
+            .certificate_bundles
+            .insert(bundle_key, vec![vec![0x30]]);
 
         state.synchronize_connection(8);
         assert!(state.validated_scp11_keys.is_empty());
+        assert!(state.certificate_bundles.is_empty());
         assert!(state.selected_applet.is_none());
         assert_eq!(state.connection_epoch, 8);
     }
