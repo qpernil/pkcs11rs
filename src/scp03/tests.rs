@@ -1,6 +1,62 @@
 use super::*;
 use std::{cell::RefCell, collections::VecDeque, sync::Mutex};
 
+#[cfg(feature = "embedded-virtual-yubikey")]
+#[test]
+fn shared_specs_drive_host_commands_and_card_dispatch() {
+    use virtual_yubikey_core::{DeviceProfile, VirtualYubiKey};
+    use yubikey_apdu::{hsmauth, iso7816, oath, openpgp, piv};
+
+    let mut profile = DeviceProfile::yubikey_5_8_ccid(1);
+    profile.applets.openpgp = true;
+    let mut card = VirtualYubiKey::new(profile);
+    for (aid, spec, p1, data, expected_status, expected_data) in [
+        (
+            piv::AID.as_slice(),
+            &piv::VERSION,
+            0,
+            &[][..],
+            0x9000,
+            &[5, 8, 0][..],
+        ),
+        (
+            hsmauth::AID.as_slice(),
+            &hsmauth::VERSION,
+            0,
+            &[][..],
+            0x9000,
+            &[5, 8, 0][..],
+        ),
+        (
+            oath::AID.as_slice(),
+            &oath::LIST,
+            0,
+            &[][..],
+            0x9000,
+            &[][..],
+        ),
+        // P1=81 requests the public key; it must not become a fragment flag.
+        (
+            openpgp::AID.as_slice(),
+            &openpgp::GENERATE,
+            0x81,
+            &[0xb6, 0][..],
+            0x6a88,
+            &[][..],
+        ),
+    ] {
+        let select =
+            CommandApdu::from_spec(&iso7816::SELECT, 4, 0, aid.to_vec(), Some(256)).unwrap();
+        let selected = ResponseApdu::parse(&card.transmit(&select.encode().unwrap())).unwrap();
+        assert_eq!(selected.status, 0x9000);
+        let command = CommandApdu::from_spec(spec, p1, 0, data.to_vec(), Some(256)).unwrap();
+        let response = ResponseApdu::parse(&card.transmit(&command.encode().unwrap())).unwrap();
+        assert_eq!(response.status, expected_status, "{}", spec.name);
+        assert_eq!(response.data, expected_data, "{}", spec.name);
+        response.validate_spec(spec).unwrap();
+    }
+}
+
 #[derive(Debug)]
 struct ScriptedConnector {
     responses: RefCell<VecDeque<Vec<u8>>>,
@@ -996,7 +1052,9 @@ fn protected_ctap_keepalive_preserves_the_channel_for_polling() {
         let connector = ScriptedConnector::new(responses);
         let mut session = test_session(level);
         for (command, data, status) in exchanges {
-            let response = session.transmit(&connector, command).unwrap();
+            let response = session
+                .transmit_with_protected_status(&connector, command, Some(0x9100))
+                .unwrap();
             assert_eq!(response.status, status);
             assert_eq!(response.data, data);
         }
@@ -1026,11 +1084,38 @@ fn ctap_keepalive_still_requires_valid_response_protection() {
         for invalid in [hex("02 91 00"), bad_mac, changed_status] {
             let connector = ScriptedConnector::new(vec![invalid]);
             assert!(matches!(
-                test_session(level).transmit(&connector, &command),
+                test_session(level).transmit_with_protected_status(&connector, &command, Some(0x9100)),
                 Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV
             ));
         }
     }
+}
+
+#[test]
+fn ctap_keepalive_status_has_no_special_meaning_for_other_applets() {
+    let command = CommandApdu {
+        cla: 0,
+        ins: 0xca,
+        p1: 0,
+        p2: 0x6e,
+        data: Vec::new(),
+        le: Some(256),
+        extended: false,
+    };
+    let response = protected_test_response(&mut test_session(0x33), &command, &[2], 0x9100);
+    let connector = ScriptedConnector::new(vec![response]);
+    assert!(matches!(
+        test_session(0x33).transmit(&connector, &command),
+        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV
+    ));
+    let connector = ScriptedConnector::new(vec![hex("91 00")]);
+    assert_eq!(
+        test_session(0x33).transmit(&connector, &command).unwrap(),
+        ResponseApdu {
+            data: Vec::new(),
+            status: 0x9100
+        }
+    );
 }
 
 #[test]
@@ -1044,18 +1129,15 @@ fn yubikey_sessions_share_and_require_the_authenticated_channel() {
         session: shared.clone(),
     };
     let response = session
-        .send_apdu(
-            &CommandApdu {
-                cla: 0x80,
-                ins: 0xca,
-                p1: 0,
-                p2: 0,
-                data: Vec::new(),
-                le: Some(256),
-                extended: false,
-            },
-            false,
-        )
+        .send_apdu(&CommandApdu {
+            cla: 0x80,
+            ins: 0xca,
+            p1: 0,
+            p2: 0,
+            data: Vec::new(),
+            le: Some(256),
+            extended: false,
+        })
         .unwrap();
     assert_eq!(response.status, RESPONSE_OK);
     assert_eq!(connector.commands.borrow().len(), 1);
@@ -1065,18 +1147,15 @@ fn yubikey_sessions_share_and_require_the_authenticated_channel() {
     *shared.borrow_mut() = None;
     assert!(
         session
-            .send_apdu(
-                &CommandApdu {
-                    cla: 0,
-                    ins: 0x84,
-                    p1: 0,
-                    p2: 0,
-                    data: Vec::new(),
-                    le: Some(8),
-                    extended: false,
-                },
-                false,
-            )
+            .send_apdu(&CommandApdu {
+                cla: 0,
+                ins: 0x84,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: Some(8),
+                extended: false,
+            },)
             .is_err()
     );
     assert_eq!(connector.commands.borrow().len(), 1);
@@ -1094,18 +1173,15 @@ fn yubikey_sessions_discard_desynchronized_channels() {
     };
     assert!(
         session
-            .send_apdu(
-                &CommandApdu {
-                    cla: 0,
-                    ins: 0x84,
-                    p1: 0,
-                    p2: 0,
-                    data: Vec::new(),
-                    le: Some(8),
-                    extended: false,
-                },
-                false,
-            )
+            .send_apdu(&CommandApdu {
+                cla: 0,
+                ins: 0x84,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: Some(8),
+                extended: false,
+            },)
             .is_err()
     );
     assert!(shared.borrow().is_none());

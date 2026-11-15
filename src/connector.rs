@@ -40,9 +40,18 @@ pub(crate) trait Connector {
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit(self, command)
     }
+    /// An applet may define an additional status whose response is SCP protected.
+    fn send_apdu_with_protected_status(
+        &self,
+        command: &CommandApdu,
+        _protected_status: u16,
+    ) -> Result<ResponseApdu, Error> {
+        self.send_apdu(command)
+    }
     /// OATH uses SEND REMAINING rather than ISO GET RESPONSE.
     fn send_oath_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
-        crate::iso7816::transmit_oath(self, command)
+        let spec = command.spec(yubikey_apdu::oath::COMMANDS)?;
+        crate::iso7816::transmit_with_continuation(self, command, spec.response_continuation)
     }
     fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit_short(self, command)
@@ -1072,7 +1081,11 @@ impl PcscAppletConnector {
         Ok(response)
     }
 
-    fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+    fn send_apdu_locked(
+        &self,
+        command: &CommandApdu,
+        protected_status: Option<u16>,
+    ) -> Result<ResponseApdu, Error> {
         if is_application_select(command) {
             return self.select_apdu_locked(command);
         }
@@ -1092,7 +1105,8 @@ impl PcscAppletConnector {
             .session
             .as_mut()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-        let result = channel.transmit(self.base.as_ref(), command);
+        let result =
+            channel.transmit_with_protected_status(self.base.as_ref(), command, protected_status);
         if result.is_err() {
             state.clear_selection("secure APDU transport failed");
             self.set_enabled(false);
@@ -1284,7 +1298,12 @@ impl Connector for PcscAppletConnector {
             }
             self.ensure_selected_locked()?;
             if self.active_protocol().is_none() || !self.enabled() {
-                let result = crate::iso7816::transmit_oath(self.base.as_ref(), command);
+                let spec = command.spec(yubikey_apdu::oath::COMMANDS)?;
+                let result = crate::iso7816::transmit_with_continuation(
+                    self.base.as_ref(),
+                    command,
+                    spec.response_continuation,
+                );
                 if result.is_err() {
                     self.state
                         .secure_channel()?
@@ -1313,7 +1332,17 @@ impl Connector for PcscAppletConnector {
         })
     }
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
-        self.state.with_operation(|| self.send_apdu_locked(command))
+        self.state
+            .with_operation(|| self.send_apdu_locked(command, None))
+    }
+
+    fn send_apdu_with_protected_status(
+        &self,
+        command: &CommandApdu,
+        protected_status: u16,
+    ) -> Result<ResponseApdu, Error> {
+        self.state
+            .with_operation(|| self.send_apdu_locked(command, Some(protected_status)))
     }
 
     fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
@@ -1349,7 +1378,7 @@ impl Connector for PcscAppletConnector {
                 }
                 return result;
             }
-            let encoded = self.send_apdu_locked(&command?)?.encode();
+            let encoded = self.send_apdu_locked(&command?, None)?.encode();
             if encoded.len() > receive_buffer.len() {
                 return Err(CKR_DEVICE_ERROR.into());
             }

@@ -539,7 +539,14 @@ fn standard_password_commands_match_openpgp_card_encodings() {
 
 #[test]
 fn data_object_commands_cover_even_odd_and_repeated_objects() {
-    let connector = ScriptedConnector::new(vec![response(&[0xaa], STATUS_SUCCESS); 6]);
+    let connector = ScriptedConnector::new(vec![
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+    ]);
 
     assert_eq!(
         Client
@@ -587,7 +594,16 @@ fn data_object_commands_cover_even_odd_and_repeated_objects() {
 
 #[test]
 fn cryptographic_commands_cover_all_openpgp_security_operations() {
-    let connector = ScriptedConnector::new(vec![response(&[0xaa], STATUS_SUCCESS); 8]);
+    let connector = ScriptedConnector::new(vec![
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[0xaa], STATUS_SUCCESS),
+    ]);
 
     assert_eq!(
         Client
@@ -832,9 +848,9 @@ fn command_and_response_chaining_follow_iso_7816() {
             &connector,
             CommandApdu {
                 cla: 0,
-                ins: INS_PUT_DATA,
-                p1: 0,
-                p2: 0x5b,
+                ins: INS_PSO,
+                p1: 0x9e,
+                p2: 0x9a,
                 data,
                 le: Some(256),
                 extended: false,
@@ -844,9 +860,9 @@ fn command_and_response_chaining_follow_iso_7816() {
     assert_eq!(output, [1, 2, 3, 4]);
 
     let commands = connector.commands.borrow();
-    assert_eq!(&commands[0][..5], &[0x10, 0xda, 0, 0x5b, 255]);
+    assert_eq!(&commands[0][..5], &[0x10, 0x2a, 0x9e, 0x9a, 255]);
     assert_eq!(commands[0].len(), 260);
-    assert_eq!(&commands[1][..5], &[0, 0xda, 0, 0x5b, 45]);
+    assert_eq!(&commands[1][..5], &[0, 0x2a, 0x9e, 0x9a, 45]);
     assert_eq!(commands[1].len(), 51);
     assert_eq!(commands[2], [0, 0xc0, 0, 0, 2]);
 }

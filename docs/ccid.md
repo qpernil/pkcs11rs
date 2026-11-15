@@ -152,6 +152,16 @@ An established SCP channel is reused across calls; a missing channel is
 established only when the login and recreation policy permits it. Recreating
 SCP does not replay an applet PIN or restore lost applet authorization.
 
+The dependency-free `yubikey-apdu` crate supplies the ISO codec and applet-owned
+`ApduSpec` definitions to both pkcs11rs and virtual-yubikey. The shared codec
+handles ISO framing and preserves command parameters. Request validation and
+successful response envelope validation use the selected applet's command set;
+TLV contents and authentication/state policy remain with that applet.
+Applet clients choose protocol-specific behavior: OATH requests `A5` response
+continuation, and CTAP explicitly marks `9100` keepalive responses as protected
+by SCP. Other applets do not inherit those meanings. Empty extended `Lc` is
+rejected by the generic decoder.
+
 ## Login-selected secure channels
 
 PIV, OpenPGP, OATH, FIDO2 over CCID, and the Issuer Security Domain support two

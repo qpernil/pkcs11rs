@@ -543,6 +543,17 @@ test-slot branch.
 
 ## CCID applet topology
 
+The dependency-free `yubikey-apdu` crate in the sibling `virtual-yubikey`
+repository supplies the ISO command/response wire codec and `ApduSpec`
+definitions. Each applet owns a separate command set, including its CLA/INS,
+P1/P2 constraints, payload/response lengths, continuation instruction, and any
+additional SCP-protected response status. Host applet clients validate against
+the same definitions as the virtual card's applet handlers. The wire codec and
+ISO fragmentation layer preserve P1/P2 without interpreting them. TLV grammar,
+key support, authorization, and state transitions remain in the applet code;
+PKCS #11 error mapping remains in the host. A defined command envelope does not
+imply that every card profile implements that command.
+
 One physical native CCID reader has one shared `PcscReaderState`. Every
 selected applet gets a separate logical PKCS #11 slot
 and a slot-local connector facade, while all facades share:
@@ -725,8 +736,8 @@ object handle. Credential selectors identify the target YubiHSM authentication-k
 ID, source credential and token, and password separately; public-discovery runtime state is held by the target
 YubiHSM slot, not globally.
 
-The focused `yubihsm-auth-client` crate owns the transport-independent APDU and
-TLV exchange that produces YubiHSM session keys. PKCS11RS supplies its shared
+The focused `yubihsm-auth-client` crate uses the shared HSM Auth APDU definitions
+and owns the transport-independent TLV exchange that produces YubiHSM session keys. PKCS11RS supplies its shared
 CCID connector as the transport; external qualification tools can supply PC/SC
 without copying the credential protocol. Applet discovery, reader selection,
 PKCS #11 error mapping, and target-session policy remain in their respective

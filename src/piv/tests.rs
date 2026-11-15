@@ -309,18 +309,18 @@ fn rotates_the_management_key_without_changing_its_policy() {
 fn follows_response_chaining_and_retries_wrong_le() {
     let connector = ScriptedConnector::new(vec![
         response(&[], 0x6c03),
-        response(&[1, 2], 0x6102),
-        response(&[3, 4], STATUS_SUCCESS),
+        response(&[1, 2], 0x6101),
+        response(&[3], STATUS_SUCCESS),
     ]);
     let data = Client
         .command(&connector, INS_GET_VERSION, 0, 0, &[])
         .unwrap();
-    assert_eq!(data, [1, 2, 3, 4]);
+    assert_eq!(data, [1, 2, 3]);
     assert_eq!(
         connector.commands.borrow()[1],
         [0, INS_GET_VERSION, 0, 0, 3]
     );
-    assert_eq!(connector.commands.borrow()[2], [0, 0xc0, 0, 0, 2]);
+    assert_eq!(connector.commands.borrow()[2], [0, 0xc0, 0, 0, 1]);
 }
 
 #[test]

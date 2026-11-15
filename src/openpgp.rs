@@ -9,28 +9,28 @@ use crate::{
 };
 use rsa::PublicKey as RsaPublicKey;
 
-pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+pub(crate) const OPENPGP_AID: [u8; 6] = yubikey_apdu::openpgp::AID;
 pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
 pub(crate) const PW1_MULTIPLE_SIGNATURES: u8 = 0x01;
 
-const INS_VERIFY: u8 = 0x20;
-const INS_CHANGE_REFERENCE_DATA: u8 = 0x24;
-const INS_RESET_RETRY_COUNTER: u8 = 0x2c;
-const INS_PUT_DATA: u8 = 0xda;
-const INS_PUT_DATA_ODD: u8 = 0xdb;
-const INS_PSO: u8 = 0x2a;
-const INS_GET_DATA: u8 = 0xca;
-const INS_GET_DATA_ODD: u8 = 0xcb;
-const INS_GET_NEXT_DATA: u8 = 0xcc;
-const INS_INTERNAL_AUTHENTICATE: u8 = 0x88;
-const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
-const INS_GET_CHALLENGE: u8 = 0x84;
-const INS_ACTIVATE_FILE: u8 = 0x44;
-const INS_TERMINATE_DF: u8 = 0xe6;
-const INS_MANAGE_SECURITY_ENVIRONMENT: u8 = 0x22;
-const INS_GET_VERSION: u8 = 0xf1;
-const INS_SET_PIN_RETRIES: u8 = 0xf2;
-const INS_GET_ATTESTATION: u8 = 0xfb;
+const INS_VERIFY: u8 = yubikey_apdu::openpgp::VERIFY.ins;
+const INS_CHANGE_REFERENCE_DATA: u8 = yubikey_apdu::openpgp::CHANGE_REFERENCE.ins;
+const INS_RESET_RETRY_COUNTER: u8 = yubikey_apdu::openpgp::RESET_RETRY.ins;
+const INS_PUT_DATA: u8 = yubikey_apdu::openpgp::PUT_DATA.ins;
+const INS_PUT_DATA_ODD: u8 = yubikey_apdu::openpgp::IMPORT_KEY.ins;
+const INS_PSO: u8 = yubikey_apdu::openpgp::SIGN.ins;
+const INS_GET_DATA: u8 = yubikey_apdu::openpgp::GET_DATA.ins;
+const INS_GET_DATA_ODD: u8 = yubikey_apdu::openpgp::GET_DATA_ODD.ins;
+const INS_GET_NEXT_DATA: u8 = yubikey_apdu::openpgp::GET_NEXT_DATA.ins;
+const INS_INTERNAL_AUTHENTICATE: u8 = yubikey_apdu::openpgp::AUTHENTICATE.ins;
+const INS_GENERATE_ASYMMETRIC: u8 = yubikey_apdu::openpgp::GENERATE.ins;
+const INS_GET_CHALLENGE: u8 = yubikey_apdu::openpgp::CHALLENGE.ins;
+const INS_ACTIVATE_FILE: u8 = yubikey_apdu::openpgp::ACTIVATE.ins;
+const INS_TERMINATE_DF: u8 = yubikey_apdu::openpgp::TERMINATE.ins;
+const INS_MANAGE_SECURITY_ENVIRONMENT: u8 = yubikey_apdu::openpgp::MANAGE_SECURITY_ENVIRONMENT.ins;
+const INS_GET_VERSION: u8 = yubikey_apdu::openpgp::VERSION.ins;
+const INS_SET_PIN_RETRIES: u8 = yubikey_apdu::openpgp::SET_PIN_RETRIES.ins;
+const INS_GET_ATTESTATION: u8 = yubikey_apdu::openpgp::ATTEST.ins;
 const SELECT_CERTIFICATE_DATA: [u8; 6] = [0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21];
 const STATUS_SUCCESS: u16 = 0x9000;
 
@@ -1172,7 +1172,11 @@ impl Client {
             );
             return Err(CKR_ACTION_PROHIBITED.into());
         }
+        let spec = command.spec(yubikey_apdu::openpgp::COMMANDS)?;
         let response = connector.send_apdu(&command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
         require_success(response.status, &command)?;
         Ok(response.data)
     }
@@ -1182,7 +1186,11 @@ impl Client {
         connector: &dyn Connector,
         command: CommandApdu,
     ) -> Result<Vec<u8>, Error> {
+        let spec = command.spec(yubikey_apdu::openpgp::COMMANDS)?;
         let response = connector.send_apdu(&command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
         require_success(response.status, &command)?;
         Ok(response.data)
     }

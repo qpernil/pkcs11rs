@@ -47,6 +47,7 @@ native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+yubikey-apdu = { path = "../virtual-yubikey/crates/yubikey-apdu" }
 num-bigint-dig = { version = "0.8.6", features = ["zeroize"] }
 base64 = "0.22.1"
 getrandom = "0.4.3"

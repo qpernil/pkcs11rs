@@ -58,11 +58,10 @@ impl Scp11Variant {
         }
     }
 
-    fn instruction(self) -> u8 {
+    fn spec(self) -> &'static yubikey_apdu::ApduSpec {
         match self {
-            Self::A => 0x82,
-            Self::B => 0x88,
-            Self::C => 0x82,
+            Self::B => &yubikey_apdu::scp::INTERNAL_AUTHENTICATE,
+            Self::A | Self::C => &yubikey_apdu::scp::SCP11_AUTHENTICATE,
         }
     }
 }
@@ -311,15 +310,13 @@ impl Scp11KeySet {
         self.upload_host_certificates(connector)?;
         let host_ephemeral_point = scope.p256_public(&ephemeral)?;
         let request_data = authentication_data(&host_ephemeral_point, self.variant.parameter())?;
-        let authenticate = CommandApdu {
-            cla: 0x80,
-            ins: self.variant.instruction(),
-            p1: self.key_version,
-            p2: self.variant.key_id(),
-            data: request_data.clone(),
-            le: Some(256),
-            extended: false,
-        };
+        let authenticate = CommandApdu::from_spec(
+            self.variant.spec(),
+            self.key_version,
+            self.variant.key_id(),
+            request_data.clone(),
+            Some(256),
+        )?;
         let response = connector
             .send_apdu(&authenticate)?
             .require_success(&authenticate)?;
@@ -407,15 +404,13 @@ impl Scp11KeySet {
         };
         for (index, certificate) in host.certificates.iter().rev().enumerate() {
             let more = index + 1 < host.certificates.len();
-            let upload = CommandApdu {
-                cla: 0x80,
-                ins: 0x2a,
-                p1: host.key_version,
-                p2: host.key_id | if more { 0x80 } else { 0 },
-                data: certificate.clone(),
-                le: None,
-                extended: certificate.len() > u8::MAX as usize,
-            };
+            let upload = CommandApdu::from_spec(
+                &yubikey_apdu::scp::UPLOAD_CERTIFICATE,
+                host.key_version,
+                host.key_id | if more { 0x80 } else { 0 },
+                certificate.clone(),
+                None,
+            )?;
             connector.send_apdu(&upload)?.require_success(&upload)?;
         }
         Ok(())

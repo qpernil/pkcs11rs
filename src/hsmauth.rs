@@ -11,7 +11,7 @@ use yubihsm_auth_client::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub(crate) const AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01];
+pub(crate) const AID: [u8; 8] = yubikey_apdu::hsmauth::AID;
 
 const TAG_LABEL: u8 = 0x71;
 const TAG_LABEL_LIST: u8 = 0x72;
@@ -27,17 +27,17 @@ const TAG_MANAGEMENT_KEY: u8 = 0x7b;
 const TAG_PUBLIC_KEY: u8 = 0x7c;
 const TAG_PRIVATE_KEY: u8 = 0x7d;
 
-const INS_PUT: u8 = 0x01;
-const INS_DELETE: u8 = 0x02;
-const INS_CALCULATE: u8 = 0x03;
-const INS_GET_CHALLENGE: u8 = 0x04;
-const INS_LIST: u8 = 0x05;
-const INS_RESET: u8 = 0x06;
-const INS_GET_VERSION: u8 = 0x07;
-const INS_PUT_MANAGEMENT_KEY: u8 = 0x08;
-const INS_GET_MANAGEMENT_KEY_RETRIES: u8 = 0x09;
-const INS_GET_PUBLIC_KEY: u8 = 0x0a;
-const INS_CHANGE_CREDENTIAL_PASSWORD: u8 = 0x0b;
+const INS_PUT: u8 = yubikey_apdu::hsmauth::PUT.ins;
+const INS_DELETE: u8 = yubikey_apdu::hsmauth::DELETE.ins;
+const INS_CALCULATE: u8 = yubikey_apdu::hsmauth::CALCULATE.ins;
+const INS_GET_CHALLENGE: u8 = yubikey_apdu::hsmauth::CHALLENGE.ins;
+const INS_LIST: u8 = yubikey_apdu::hsmauth::LIST.ins;
+const INS_RESET: u8 = yubikey_apdu::hsmauth::RESET.ins;
+const INS_GET_VERSION: u8 = yubikey_apdu::hsmauth::VERSION.ins;
+const INS_PUT_MANAGEMENT_KEY: u8 = yubikey_apdu::hsmauth::SET_MANAGEMENT_KEY.ins;
+const INS_GET_MANAGEMENT_KEY_RETRIES: u8 = yubikey_apdu::hsmauth::RETRIES.ins;
+const INS_GET_PUBLIC_KEY: u8 = yubikey_apdu::hsmauth::PUBLIC_KEY.ins;
+const INS_CHANGE_CREDENTIAL_PASSWORD: u8 = yubikey_apdu::hsmauth::CHANGE_PASSWORD.ins;
 
 const STATUS_SUCCESS: u16 = 0x9000;
 const MANAGEMENT_KEY_LENGTH: usize = 16;
@@ -135,6 +135,7 @@ impl Transport for ConnectorTransport<'_> {
             le: None,
             extended: false,
         };
+        // ProtocolClient validates the shared envelope; this adapter owns transport.
         let response = self.0.send_short_apdu(&command);
         command.data.zeroize();
         let response = response?;
@@ -450,7 +451,15 @@ impl Client {
             le: None,
             extended: false,
         };
-        let response = connector.send_short_apdu(&command);
+        let response = command
+            .spec(yubikey_apdu::hsmauth::COMMANDS)
+            .and_then(|spec| {
+                let response = connector.send_short_apdu(&command)?;
+                response
+                    .validate_spec(spec)
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+                Ok(response)
+            });
         if sensitive {
             command.data.zeroize();
         }
@@ -504,6 +513,7 @@ fn map_protocol_error(error: ProtocolError<Error>) -> Error {
         ProtocolError::InvalidPassword => CKR_PIN_INCORRECT.into(),
         ProtocolError::InvalidPublicKey => CKR_DATA_INVALID.into(),
         ProtocolError::DataTooLong => CKR_DATA_LEN_RANGE.into(),
+        ProtocolError::InvalidCommand(_) => CKR_ARGUMENTS_BAD.into(),
         ProtocolError::MalformedResponse => CKR_DEVICE_ERROR.into(),
         ProtocolError::Status(status) => hsmauth_status_mapping(status).0.into(),
     }

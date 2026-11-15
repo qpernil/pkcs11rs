@@ -1,9 +1,10 @@
 use crate::*;
 use std::{collections::BTreeMap, fmt::Write};
 
-pub(crate) const MANAGEMENT_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x47, 0x11, 0x17];
+pub(crate) const MANAGEMENT_AID: [u8; 8] = yubikey_apdu::management::AID;
 
-const INS_READ_DEVICE_INFO: u8 = 0x1d;
+#[cfg(test)]
+const INS_READ_DEVICE_INFO: u8 = yubikey_apdu::management::READ_INFO.ins;
 const TAG_USB_SUPPORTED: u8 = 0x01;
 const TAG_SERIAL: u8 = 0x02;
 const TAG_USB_ENABLED: u8 = 0x03;
@@ -155,15 +156,13 @@ fn read_management_information(
     connector: &dyn Connector,
     mut stop_after_serial: impl FnMut(&str) -> bool,
 ) -> Result<ManagementInformation, Error> {
-    let select = CommandApdu {
-        cla: 0,
-        ins: 0xa4,
-        p1: 0x04,
-        p2: 0,
-        data: MANAGEMENT_AID.to_vec(),
-        le: Some(256),
-        extended: false,
-    };
+    let select = CommandApdu::from_spec(
+        &yubikey_apdu::iso7816::SELECT,
+        4,
+        0,
+        MANAGEMENT_AID.to_vec(),
+        Some(256),
+    )?;
     let mut selected = connector.send_apdu(&select)?.require_success(&select)?.data;
     if selected.ends_with(&[0x90, 0x00]) {
         selected.truncate(selected.len() - 2);
@@ -174,15 +173,13 @@ fn read_management_information(
     let mut page = 0u8;
     let mut serial_checked = false;
     loop {
-        let command = CommandApdu {
-            cla: 0,
-            ins: INS_READ_DEVICE_INFO,
-            p1: page,
-            p2: 0,
-            data: Vec::new(),
-            le: Some(256),
-            extended: false,
-        };
+        let command = CommandApdu::from_spec(
+            &yubikey_apdu::management::READ_INFO,
+            page,
+            0,
+            Vec::new(),
+            Some(256),
+        )?;
         let response = connector
             .send_apdu(&command)?
             .require_success(&command)?

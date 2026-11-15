@@ -1696,6 +1696,7 @@ dependencies = [
  "x25519-dalek",
  "x509-cert",
  "yubihsm-auth-client",
+ "yubikey-apdu",
  "zeroize",
 ]
 
@@ -2834,6 +2835,7 @@ dependencies = [
  "spki",
  "subtle",
  "x509-cert",
+ "yubikey-apdu",
  "zeroize",
 ]
 
@@ -3114,8 +3116,13 @@ dependencies = [
 name = "yubihsm-auth-client"
 version = "0.1.0"
 dependencies = [
+ "yubikey-apdu",
  "zeroize",
 ]
+
+[[package]]
+name = "yubikey-apdu"
+version = "0.1.0"
 
 [[package]]
 name = "zerocopy"

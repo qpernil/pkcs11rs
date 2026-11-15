@@ -149,13 +149,13 @@ fn encodes_scp11b_authentication_parameters() {
 fn scp11_variants_use_globalplatform_parameters_and_instructions() {
     assert_eq!(Scp11Variant::A.parameter(), 0x01);
     assert_eq!(Scp11Variant::A.key_id(), 0x11);
-    assert_eq!(Scp11Variant::A.instruction(), 0x82);
+    assert_eq!(Scp11Variant::A.spec().ins, 0x82);
     assert_eq!(Scp11Variant::B.parameter(), 0x00);
     assert_eq!(Scp11Variant::B.key_id(), 0x13);
-    assert_eq!(Scp11Variant::B.instruction(), 0x88);
+    assert_eq!(Scp11Variant::B.spec().ins, 0x88);
     assert_eq!(Scp11Variant::C.parameter(), 0x03);
     assert_eq!(Scp11Variant::C.key_id(), 0x15);
-    assert_eq!(Scp11Variant::C.instruction(), 0x82);
+    assert_eq!(Scp11Variant::C.spec().ins, 0x82);
 }
 
 #[test]
@@ -462,7 +462,7 @@ mod virtual_card {
     fn authenticate_command(keys: &Scp11KeySet) -> CommandApdu {
         CommandApdu {
             cla: 0x80,
-            ins: keys.variant.instruction(),
+            ins: keys.variant.spec().ins,
             p1: keys.key_version,
             p2: keys.variant.key_id(),
             data: authentication_data(

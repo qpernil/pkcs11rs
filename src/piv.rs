@@ -14,26 +14,24 @@ use std::io::{Read, Write};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-pub(crate) const PIV_AID: [u8; 11] = [
-    0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
-];
+pub(crate) const PIV_AID: [u8; 11] = yubikey_apdu::piv::AID;
 pub(crate) const ORIGIN_GENERATED: u8 = 1;
 pub(crate) const ORIGIN_IMPORTED: u8 = 2;
 
-const INS_VERIFY: u8 = 0x20;
-const INS_CHANGE_REFERENCE: u8 = 0x24;
-const INS_RESET_RETRY: u8 = 0x2c;
-const INS_AUTHENTICATE: u8 = 0x87;
-const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
-const INS_GET_DATA: u8 = 0xcb;
-const INS_PUT_DATA: u8 = 0xdb;
-const INS_IMPORT_KEY: u8 = 0xfe;
-const INS_GET_VERSION: u8 = 0xfd;
-const INS_GET_SERIAL: u8 = 0xf8;
-const INS_GET_METADATA: u8 = 0xf7;
-const INS_MOVE_KEY: u8 = 0xf6;
-const INS_ATTEST: u8 = 0xf9;
-const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
+const INS_VERIFY: u8 = yubikey_apdu::piv::VERIFY.ins;
+const INS_CHANGE_REFERENCE: u8 = yubikey_apdu::piv::CHANGE_REFERENCE.ins;
+const INS_RESET_RETRY: u8 = yubikey_apdu::piv::RESET_RETRY.ins;
+const INS_AUTHENTICATE: u8 = yubikey_apdu::piv::AUTHENTICATE.ins;
+const INS_GENERATE_ASYMMETRIC: u8 = yubikey_apdu::piv::GENERATE.ins;
+const INS_GET_DATA: u8 = yubikey_apdu::piv::GET_DATA.ins;
+const INS_PUT_DATA: u8 = yubikey_apdu::piv::PUT_DATA.ins;
+const INS_IMPORT_KEY: u8 = yubikey_apdu::piv::IMPORT_KEY.ins;
+const INS_GET_VERSION: u8 = yubikey_apdu::piv::VERSION.ins;
+const INS_GET_SERIAL: u8 = yubikey_apdu::piv::SERIAL.ins;
+const INS_GET_METADATA: u8 = yubikey_apdu::piv::METADATA.ins;
+const INS_MOVE_KEY: u8 = yubikey_apdu::piv::MOVE_KEY.ins;
+const INS_ATTEST: u8 = yubikey_apdu::piv::ATTEST.ins;
+const INS_SET_MANAGEMENT_KEY: u8 = yubikey_apdu::piv::SET_MANAGEMENT_KEY.ins;
 const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
 const CERTIFICATE_UNCOMPRESSED: u8 = 0;
@@ -1422,7 +1420,12 @@ impl Client {
         connector: &dyn Connector,
         command: CommandApdu,
     ) -> Result<ResponseApdu, Error> {
-        connector.send_apdu(&command)
+        let spec = command.spec(yubikey_apdu::piv::COMMANDS)?;
+        let response = connector.send_apdu(&command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(response)
     }
 }
 

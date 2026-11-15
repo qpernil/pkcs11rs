@@ -4,7 +4,7 @@ use crate::{
 };
 
 const COMMAND_CHAINING_CLA: u8 = 0x10;
-const GET_RESPONSE: u8 = 0xc0;
+const GET_RESPONSE: u8 = yubikey_apdu::iso7816::GET_RESPONSE.ins;
 const MAX_SHORT_DATA_LENGTH: usize = u8::MAX as usize;
 const MAX_SHORT_RESPONSE_LENGTH: u32 = 1 << 8;
 const MAX_RESPONSE_LENGTH: usize = 1 << 16;
@@ -124,14 +124,15 @@ fn transmit_command<C: Connector + ?Sized>(
     Err(CKR_DEVICE_ERROR.into())
 }
 
-/// OATH response chaining uses INS A5. Under SCP this collects the protected
-/// response before MAC verification/decryption, matching Yubico's protocol.
-pub(crate) fn transmit_oath<C: Connector + ?Sized>(
+/// Collect with the continuation instruction supplied by the owning protocol.
+/// Under SCP, collect the envelope before MAC verification/decryption.
+pub(crate) fn transmit_with_continuation<C: Connector + ?Sized>(
     connector: &C,
     command: &CommandApdu,
+    instruction: u8,
 ) -> Result<ResponseApdu, Error> {
     let response = scp03::transmit(connector, command)?;
-    collect_response_chain_with_instruction(connector, response, 0xa5)
+    collect_response_chain_with_instruction(connector, response, instruction)
 }
 
 pub(crate) fn collect_response_chain<C: Connector + ?Sized>(

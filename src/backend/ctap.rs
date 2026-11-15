@@ -7,9 +7,9 @@ use crate::*;
 use minicbor::Encoder;
 use std::time::Duration;
 
-const NFCCTAP_MSG: u8 = 0x10;
-const NFCCTAP_GETRESPONSE: u8 = 0x11;
-const NFCCTAP_KEEPALIVE_STATUS: u16 = 0x9100;
+const NFCCTAP_MSG: u8 = yubikey_apdu::fido::MESSAGE.ins;
+const NFCCTAP_GETRESPONSE: u8 = yubikey_apdu::fido::POLL.ins;
+const NFCCTAP_KEEPALIVE_STATUS: u16 = yubikey_apdu::fido::KEEPALIVE_STATUS;
 const ISO7816_SUCCESS: u16 = 0x9000;
 const MAX_KEEPALIVE_RESPONSES: usize = 600;
 const KEEPALIVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -41,7 +41,14 @@ impl CtapTransport for CcidCtapTransport {
             extended: false,
         };
         for _ in 0..=MAX_KEEPALIVE_RESPONSES {
-            let response = self.connector.send_apdu(&command)?;
+            let spec = command.spec(yubikey_apdu::fido::COMMANDS)?;
+            let response = self.connector.send_apdu_with_protected_status(
+                &command,
+                spec.protected_status.ok_or(CKR_DEVICE_ERROR)?,
+            )?;
+            response
+                .validate_spec(spec)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
             match response.status {
                 ISO7816_SUCCESS => return Ok(response.data),
                 NFCCTAP_KEEPALIVE_STATUS if matches!(response.data.as_slice(), [0x01] | [0x02]) => {

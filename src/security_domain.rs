@@ -9,11 +9,10 @@ use zeroize::Zeroizing;
 
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 
-const INS_GET_DATA: u8 = 0xca;
-const INS_PUT_KEY: u8 = 0xd8;
-const INS_STORE_DATA: u8 = 0xe2;
-const INS_DELETE: u8 = 0xe4;
-const INS_GENERATE_KEY: u8 = 0xf1;
+const INS_PUT_KEY: u8 = yubikey_apdu::security_domain::PUT_KEY.ins;
+const INS_STORE_DATA: u8 = yubikey_apdu::security_domain::STORE_DATA.ins;
+const INS_DELETE: u8 = yubikey_apdu::security_domain::DELETE.ins;
+const INS_GENERATE_KEY: u8 = yubikey_apdu::security_domain::GENERATE.ins;
 const KEY_TYPE_AES: u32 = 0x88;
 const KEY_TYPE_ECC_PUBLIC: u32 = 0xb0;
 const KEY_TYPE_ECC_PRIVATE: u32 = 0xb1;
@@ -150,7 +149,11 @@ impl Client {
     ) -> Result<(), Error> {
         let (command, expected) =
             scp03_put_key_command(session.static_dek()?, new_kvn, replace_kvn, keys)?;
+        let spec = command.spec(yubikey_apdu::security_domain::COMMANDS)?;
         let response = session.transmit(connector, &command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         require_success(&response)?;
         if response.data != expected {
             return Err(CKR_DEVICE_ERROR.into());
@@ -167,7 +170,11 @@ impl Client {
     ) -> Result<(), Error> {
         session.require_oce_authentication()?;
         let command = scp03_delete_key_command(kvn, delete_last)?;
+        let spec = command.spec(yubikey_apdu::security_domain::COMMANDS)?;
         let response = session.transmit(connector, &command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         require_success(&response)?;
         if !response.data.is_empty() {
             return Err(CKR_DEVICE_ERROR.into());
@@ -310,7 +317,13 @@ impl Client {
         session: &mut Scp03Session,
         prepared: PreparedScp11Administration,
     ) -> Result<Vec<u8>, Error> {
+        let spec = prepared
+            .command
+            .spec(yubikey_apdu::security_domain::COMMANDS)?;
         let response = session.transmit(connector, &prepared.command)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         require_success(&response)?;
         match prepared.response {
             Scp11Response::Empty if response.data.is_empty() => Ok(Vec::new()),
@@ -453,15 +466,18 @@ impl Client {
             return Err(CKR_DATA_INVALID.into());
         }
         let le = data.is_empty().then_some(256);
-        connector.send_apdu(&CommandApdu {
-            cla: 0,
-            ins: INS_GET_DATA,
-            p1: (tag >> 8) as u8,
-            p2: tag as u8,
+        let command = CommandApdu::from_spec(
+            &yubikey_apdu::security_domain::GET_DATA,
+            (tag >> 8) as u8,
+            tag as u8,
             data,
             le,
-            extended: false,
-        })
+        )?;
+        let response = connector.send_apdu(&command)?;
+        response
+            .validate_spec(&yubikey_apdu::security_domain::GET_DATA)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(response)
     }
 }
 

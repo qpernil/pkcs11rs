@@ -1,13 +1,13 @@
 //! Transport-independent YubiHSM Auth session-key operations.
 //!
-//! This crate owns the APDU and TLV vocabulary shared by PKCS #11 and
+//! This crate uses `yubikey-apdu` envelopes and owns the TLV exchanges shared by PKCS #11 and
 //! qualification clients. Hardware discovery and transport policy remain in
 //! their callers.
 
 use std::{error::Error as StdError, fmt};
 use zeroize::{Zeroize, Zeroizing};
 
-pub const APPLICATION_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01];
+pub const APPLICATION_AID: [u8; 8] = yubikey_apdu::hsmauth::AID;
 
 const TAG_LABEL: u8 = 0x71;
 const TAG_CREDENTIAL_PASSWORD: u8 = 0x73;
@@ -15,8 +15,8 @@ const TAG_CONTEXT: u8 = 0x77;
 const TAG_RESPONSE: u8 = 0x78;
 const TAG_PUBLIC_KEY: u8 = 0x7c;
 
-const INS_CALCULATE: u8 = 0x03;
-const INS_GET_CHALLENGE: u8 = 0x04;
+const INS_CALCULATE: u8 = yubikey_apdu::hsmauth::CALCULATE.ins;
+const INS_GET_CHALLENGE: u8 = yubikey_apdu::hsmauth::CHALLENGE.ins;
 const STATUS_SUCCESS: u16 = 0x9000;
 const MAX_LABEL_LENGTH: usize = 64;
 const CREDENTIAL_PASSWORD_LENGTH: usize = 16;
@@ -83,6 +83,7 @@ pub enum Error<E> {
     InvalidPassword,
     InvalidPublicKey,
     DataTooLong,
+    InvalidCommand(yubikey_apdu::SpecError),
     MalformedResponse,
     Status(u16),
 }
@@ -97,6 +98,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             }
             Self::InvalidPublicKey => formatter.write_str("invalid P-256 public key"),
             Self::DataTooLong => formatter.write_str("YubiHSM Auth APDU data is too long"),
+            Self::InvalidCommand(error) => error.fmt(formatter),
             Self::MalformedResponse => formatter.write_str("malformed YubiHSM Auth response"),
             Self::Status(status) => write!(formatter, "YubiHSM Auth status {status:04x}"),
         }
@@ -132,8 +134,8 @@ pub struct Client;
 impl Client {
     pub fn select<T: Transport>(&self, transport: &T) -> Result<(), Error<T::Error>> {
         let command = Command {
-            cla: 0,
-            instruction: 0xa4,
+            cla: yubikey_apdu::iso7816::SELECT.cla,
+            instruction: yubikey_apdu::iso7816::SELECT.ins,
             p1: 0x04,
             p2: 0,
             data: APPLICATION_AID.to_vec(),
@@ -248,11 +250,32 @@ impl Client {
         transport: &T,
         command: &Command,
     ) -> Result<Vec<u8>, Error<T::Error>> {
+        let envelope = yubikey_apdu::CommandApdu {
+            cla: command.cla,
+            ins: command.instruction,
+            p1: command.p1,
+            p2: command.p2,
+            data: &command.data,
+            le: None,
+            extended: false,
+        };
+        let specs = if command.instruction == yubikey_apdu::iso7816::SELECT.ins {
+            yubikey_apdu::iso7816::COMMANDS
+        } else {
+            yubikey_apdu::hsmauth::COMMANDS
+        };
+        let spec = yubikey_apdu::find(specs, &envelope).map_err(Error::InvalidCommand)?;
         let response = transport.exchange(command).map_err(Error::Transport)?;
+        let mut data = Zeroizing::new(response.data);
         if response.status != STATUS_SUCCESS {
             return Err(Error::Status(response.status));
         }
-        Ok(response.data)
+        spec.validate_response(&yubikey_apdu::ResponseApdu {
+            data: &data,
+            status: response.status,
+        })
+        .map_err(|_| Error::MalformedResponse)?;
+        Ok(std::mem::take(&mut *data))
     }
 }
 
@@ -342,6 +365,26 @@ mod tests {
         assert_eq!(commands[0].data.len(), 30);
         assert_eq!(commands[1].instruction, INS_CALCULATE);
         assert_eq!(commands[1].data.len(), 248);
+    }
+
+    #[test]
+    fn malformed_session_key_response_is_rejected() {
+        let transport = ScriptedTransport {
+            commands: RefCell::new(Vec::new()),
+            responses: RefCell::new(vec![Response {
+                data: vec![0x55; 47],
+                status: 0x9000,
+            }]),
+        };
+        assert!(matches!(
+            Client.calculate_session_keys_symmetric(
+                &transport,
+                "credential",
+                &[0; 16],
+                b"password"
+            ),
+            Err(Error::MalformedResponse)
+        ));
     }
 
     #[test]

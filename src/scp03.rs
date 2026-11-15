@@ -23,9 +23,10 @@ pub(crate) const YUBIKEY_FACTORY_KEY: [u8; 16] = [
 pub(crate) const YUBIKEY_SECURITY_LEVEL: u8 = 0x33;
 
 const MAC_LENGTH: usize = 8;
-const MAX_SHORT_DATA_LENGTH: usize = u8::MAX as usize;
 const MAX_EXTENDED_DATA_LENGTH: usize = u16::MAX as usize;
+#[cfg(test)]
 const MAX_SHORT_EXPECTED_LENGTH: u32 = 1 << 8;
+#[cfg(test)]
 const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
 #[cfg(test)]
 const MAX_RESPONSE_CHAIN_SEGMENTS: usize =
@@ -68,175 +69,75 @@ pub(crate) struct CommandApdu {
 }
 
 impl CommandApdu {
+    pub(crate) fn as_shared(&self) -> yubikey_apdu::CommandApdu<'_> {
+        yubikey_apdu::CommandApdu {
+            cla: self.cla,
+            ins: self.ins,
+            p1: self.p1,
+            p2: self.p2,
+            data: &self.data,
+            le: self.le,
+            extended: self.extended,
+        }
+    }
+
+    pub(crate) fn from_spec(
+        spec: &yubikey_apdu::ApduSpec,
+        p1: u8,
+        p2: u8,
+        data: Vec<u8>,
+        le: Option<u32>,
+    ) -> Result<Self, Error> {
+        spec.command(p1, p2, &data, le)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        Ok(Self {
+            cla: spec.cla,
+            ins: spec.ins,
+            p1,
+            p2,
+            data,
+            le,
+            extended: false,
+        })
+    }
+
+    pub(crate) fn spec<'a>(
+        &self,
+        specs: &'a [yubikey_apdu::ApduSpec],
+    ) -> Result<&'a yubikey_apdu::ApduSpec, Error> {
+        yubikey_apdu::find(specs, &self.as_shared()).map_err(|_| CKR_ARGUMENTS_BAD.into())
+    }
+
     pub(crate) fn decode(encoded: &[u8]) -> Result<Self, Error> {
-        if encoded.len() < 4 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let cla = encoded[0];
-        let ins = encoded[1];
-        let p1 = encoded[2];
-        let p2 = encoded[3];
-        let body = &encoded[4..];
-        if body.is_empty() {
-            return Ok(Self {
-                cla,
-                ins,
-                p1,
-                p2,
-                data: Vec::new(),
-                le: None,
-                extended: false,
-            });
-        }
-        if body.len() == 1 {
-            return Ok(Self {
-                cla,
-                ins,
-                p1,
-                p2,
-                data: Vec::new(),
-                le: Some(if body[0] == 0 { 256 } else { body[0] as u32 }),
-                extended: false,
-            });
-        }
-        if body[0] != 0 {
-            let data_len = body[0] as usize;
-            if body.len() == data_len + 1 {
-                return Ok(Self {
-                    cla,
-                    ins,
-                    p1,
-                    p2,
-                    data: body[1..].to_vec(),
-                    le: None,
-                    extended: false,
-                });
-            }
-            if body.len() == data_len + 2 {
-                return Ok(Self {
-                    cla,
-                    ins,
-                    p1,
-                    p2,
-                    data: body[1..1 + data_len].to_vec(),
-                    le: Some(if body[1 + data_len] == 0 {
-                        256
-                    } else {
-                        body[1 + data_len] as u32
-                    }),
-                    extended: false,
-                });
-            }
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        if body.len() == 3 {
-            let le = u16::from_be_bytes([body[1], body[2]]) as u32;
-            return Ok(Self {
-                cla,
-                ins,
-                p1,
-                p2,
-                data: Vec::new(),
-                le: Some(if le == 0 { 65_536 } else { le }),
-                extended: true,
-            });
-        }
-        if body.len() < 3 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let data_len = u16::from_be_bytes([body[1], body[2]]) as usize;
-        if data_len == 0 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        if body.len() == data_len + 3 {
-            return Ok(Self {
-                cla,
-                ins,
-                p1,
-                p2,
-                data: body[3..].to_vec(),
-                le: None,
-                extended: true,
-            });
-        }
-        if body.len() == data_len + 5 {
-            let le_offset = 3 + data_len;
-            let le = u16::from_be_bytes([body[le_offset], body[le_offset + 1]]) as u32;
-            return Ok(Self {
-                cla,
-                ins,
-                p1,
-                p2,
-                data: body[3..le_offset].to_vec(),
-                le: Some(if le == 0 { 65_536 } else { le }),
-                extended: true,
-            });
-        }
-        Err(CKR_ARGUMENTS_BAD.into())
+        let command = yubikey_apdu::CommandApdu::decode(encoded)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        Ok(Self {
+            cla: command.cla,
+            ins: command.ins,
+            p1: command.p1,
+            p2: command.p2,
+            data: command.data.to_vec(),
+            le: command.le,
+            extended: command.extended,
+        })
     }
 
     pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
-        let extended = self.uses_extended_length(self.data.len())?;
-        let mut encoded = self.encode_header_and_data(self.data.len())?;
-        if let Some(le) = self.le {
-            if extended {
-                if self.data.is_empty() {
-                    encoded.push(0);
-                }
-                let encoded_le = if le == MAX_EXTENDED_EXPECTED_LENGTH {
-                    0
-                } else {
-                    le as u16
-                };
-                encoded.extend_from_slice(&encoded_le.to_be_bytes());
-            } else {
-                encoded.push(if le == MAX_SHORT_EXPECTED_LENGTH {
-                    0
-                } else {
-                    le as u8
-                });
-            }
-        }
-        Ok(encoded)
+        self.as_shared()
+            .encode()
+            .map_err(|_| CKR_DATA_LEN_RANGE.into())
     }
 
     fn encode_header_and_data(&self, encoded_data_len: usize) -> Result<Vec<u8>, Error> {
-        if encoded_data_len < self.data.len() || encoded_data_len > MAX_EXTENDED_DATA_LENGTH {
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        let extended = self.uses_extended_length(encoded_data_len)?;
-        let length_bytes = if encoded_data_len == 0 {
-            0
-        } else if extended {
-            3
-        } else {
-            1
-        };
-        let mut encoded = Vec::with_capacity(4 + length_bytes + self.data.len());
-        encoded.extend([self.cla, self.ins, self.p1, self.p2]);
-        if encoded_data_len != 0 {
-            if extended {
-                encoded.push(0);
-                encoded.extend_from_slice(&(encoded_data_len as u16).to_be_bytes());
-            } else {
-                encoded.push(encoded_data_len as u8);
-            }
-            encoded.extend_from_slice(&self.data);
-        }
-        Ok(encoded)
+        self.as_shared()
+            .encode_header_and_data(encoded_data_len)
+            .map_err(|_| CKR_DATA_LEN_RANGE.into())
     }
 
     fn uses_extended_length(&self, data_len: usize) -> Result<bool, Error> {
-        if data_len > MAX_EXTENDED_DATA_LENGTH
-            || self
-                .le
-                .is_some_and(|le| le == 0 || le > MAX_EXTENDED_EXPECTED_LENGTH)
-        {
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        Ok(self.extended
-            || data_len > MAX_SHORT_DATA_LENGTH
-            || self.le.is_some_and(|le| le > MAX_SHORT_EXPECTED_LENGTH))
+        self.as_shared()
+            .uses_extended_length(data_len)
+            .map_err(|_| CKR_DATA_LEN_RANGE.into())
     }
 }
 
@@ -248,19 +149,29 @@ pub(crate) struct ResponseApdu {
 
 impl ResponseApdu {
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut encoded = self.data.clone();
-        encoded.extend_from_slice(&self.status.to_be_bytes());
-        encoded
+        yubikey_apdu::ResponseApdu {
+            data: &self.data,
+            status: self.status,
+        }
+        .encode()
     }
 
     pub(crate) fn parse(encoded: &[u8]) -> Result<Self, Error> {
-        if encoded.len() < 2 {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let data_len = encoded.len() - 2;
+        let response = yubikey_apdu::ResponseApdu::decode(encoded)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         Ok(Self {
-            data: encoded[..data_len].to_vec(),
-            status: u16::from_be_bytes([encoded[data_len], encoded[data_len + 1]]),
+            data: response.data.to_vec(),
+            status: response.status,
+        })
+    }
+
+    pub(crate) fn validate_spec(
+        &self,
+        spec: &yubikey_apdu::ApduSpec,
+    ) -> Result<(), yubikey_apdu::SpecError> {
+        spec.validate_response(&yubikey_apdu::ResponseApdu {
+            data: &self.data,
+            status: self.status,
         })
     }
 
@@ -615,15 +526,13 @@ impl Scp03Session {
         resolve: impl FnOnce(&[u8; 10]) -> Result<Scp03Keys, Error>,
     ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
-        let initialize = CommandApdu {
-            cla: 0x80,
-            ins: 0x50,
-            p1: key_version,
-            p2: key_id,
-            data: host_challenge.to_vec(),
-            le: Some(256),
-            extended: false,
-        };
+        let initialize = CommandApdu::from_spec(
+            &yubikey_apdu::scp::INITIALIZE_UPDATE,
+            key_version,
+            key_id,
+            host_challenge.to_vec(),
+            Some(256),
+        )?;
         let initialize_response = transmit(connector, &initialize)?.require_success(&initialize)?;
         let update = InitializeUpdate::parse(&initialize_response.data)?;
         if update.scp_id != 0x03 || (key_version != 0 && update.key_version != key_version) {
@@ -720,15 +629,13 @@ impl Scp03Session {
 
         let mut data = host_cryptogram.to_vec();
         data.extend_from_slice(&mac[..MAC_LENGTH]);
-        Ok(CommandApdu {
-            cla: 0x84,
-            ins: 0x82,
-            p1: self.security_level,
-            p2: 0,
+        CommandApdu::from_spec(
+            &yubikey_apdu::scp::EXTERNAL_AUTHENTICATE,
+            self.security_level,
+            0,
             data,
-            le: None,
-            extended: false,
-        })
+            None,
+        )
     }
 
     pub(crate) fn transmit(
@@ -736,9 +643,18 @@ impl Scp03Session {
         connector: &dyn Connector,
         command: &CommandApdu,
     ) -> Result<ResponseApdu, Error> {
+        self.transmit_with_protected_status(connector, command, None)
+    }
+
+    pub(crate) fn transmit_with_protected_status(
+        &mut self,
+        connector: &dyn Connector,
+        command: &CommandApdu,
+        protected_status: Option<u16>,
+    ) -> Result<ResponseApdu, Error> {
         let protected = self.protect_command(command)?;
         let response = crate::iso7816::transmit(connector, &protected)?;
-        self.unprotect_response(response)
+        self.unprotect_response_with_status(response, protected_status)
     }
 
     pub(crate) fn transmit_oath(
@@ -746,8 +662,13 @@ impl Scp03Session {
         connector: &dyn Connector,
         command: &CommandApdu,
     ) -> Result<ResponseApdu, Error> {
+        let spec = command.spec(yubikey_apdu::oath::COMMANDS)?;
         let protected = self.protect_command(command)?;
-        let response = crate::iso7816::transmit_oath(connector, &protected)?;
+        let response = crate::iso7816::transmit_with_continuation(
+            connector,
+            &protected,
+            spec.response_continuation,
+        )?;
         self.unprotect_response(response)
     }
 
@@ -759,23 +680,6 @@ impl Scp03Session {
         let protected = self.protect_command(command)?;
         let response = crate::iso7816::transmit_short(connector, &protected)?;
         self.unprotect_response(response)
-    }
-
-    #[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
-    pub(crate) fn transmit_chained(
-        &mut self,
-        connector: &dyn Connector,
-        command: &CommandApdu,
-    ) -> Result<ResponseApdu, Error> {
-        self.transmit_short(connector, command)
-    }
-
-    #[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
-    pub(crate) fn collect_response_chain(
-        connector: &dyn Connector,
-        response: ResponseApdu,
-    ) -> Result<ResponseApdu, Error> {
-        crate::iso7816::collect_response_chain(connector, response)
     }
 
     fn protect_command(&mut self, command: &CommandApdu) -> Result<CommandApdu, Error> {
@@ -828,10 +732,16 @@ impl Scp03Session {
     }
 
     fn unprotect_response(&self, response: ResponseApdu) -> Result<ResponseApdu, Error> {
+        self.unprotect_response_with_status(response, None)
+    }
+
+    fn unprotect_response_with_status(
+        &self,
+        response: ResponseApdu,
+        protected_status: Option<u16>,
+    ) -> Result<ResponseApdu, Error> {
         if response.status != RESPONSE_OK
-            // CTAP's processing/user-presence notification is a protected
-            // continuation response, not an ISO 7816 error response.
-            && response.status != 0x9100
+            && Some(response.status) != protected_status
             && response.status & 0xff00 != 0x6200
             && response.status & 0xff00 != 0x6300
         {
@@ -896,15 +806,13 @@ pub(crate) fn select_application_response<C: Connector + ?Sized>(
     if !(5..=16).contains(&aid.len()) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    let select = CommandApdu {
-        cla: 0,
-        ins: 0xa4,
-        p1: 4,
-        p2: 0,
-        data: aid.to_vec(),
-        le: Some(256),
-        extended: false,
-    };
+    let select = CommandApdu::from_spec(
+        &yubikey_apdu::iso7816::SELECT,
+        4,
+        0,
+        aid.to_vec(),
+        Some(256),
+    )?;
     connector.send_apdu(&select)?.require_success(&select)
 }
 

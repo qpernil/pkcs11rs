@@ -3,7 +3,7 @@
 use crate::*;
 use subtle::ConstantTimeEq;
 
-pub(crate) const AID: [u8; 7] = [0xa0, 0, 0, 5, 0x27, 0x21, 1];
+pub(crate) const AID: [u8; 7] = yubikey_apdu::oath::AID;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Credential {
@@ -133,7 +133,13 @@ fn command(c: &dyn Connector, ins: u8, p1: u8, p2: u8, data: Vec<u8>) -> Result<
         le: Some(256),
         extended: false,
     };
-    let result = c.send_oath_apdu(&apdu);
+    let result = apdu.spec(yubikey_apdu::oath::COMMANDS).and_then(|spec| {
+        let response = c.send_oath_apdu(&apdu)?;
+        response
+            .validate_spec(spec)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(response)
+    });
     zeroize::Zeroize::zeroize(&mut apdu.data);
     let response = result?;
     log!(
@@ -198,15 +204,11 @@ pub(crate) fn authenticate(c: &dyn Connector, info: &Info, password: &[u8]) -> R
     tlv(0x75, &mac(&key, challenge)?, &mut data)?;
     tlv(0x74, &host, &mut data)?;
     // VALIDATE's failure status is deliberately mapped to a PIN error here.
-    let response = c.send_oath_apdu(&CommandApdu {
-        cla: 0,
-        ins: 0xa3,
-        p1: 0,
-        p2: 0,
-        data,
-        le: Some(256),
-        extended: false,
-    })?;
+    let command = CommandApdu::from_spec(&yubikey_apdu::oath::VALIDATE, 0, 0, data, Some(256))?;
+    let response = c.send_oath_apdu(&command)?;
+    response
+        .validate_spec(&yubikey_apdu::oath::VALIDATE)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     if response.status == 0x6a80 || response.status == 0x6984 {
         return Err(CKR_PIN_INCORRECT.into());
     }

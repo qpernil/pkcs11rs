@@ -1092,18 +1092,15 @@ impl BackendSession for IssuerSecurityDomainSession {
 
     fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
         for chunk in output.chunks_mut(256) {
-            let response = self.send_apdu(
-                &CommandApdu {
-                    cla: 0x00,
-                    ins: 0x84,
-                    p1: 0x00,
-                    p2: 0x00,
-                    data: Vec::new(),
-                    le: Some(chunk.len() as u32),
-                    extended: false,
-                },
-                false,
-            )?;
+            let response = self.send_apdu(&CommandApdu {
+                cla: 0x00,
+                ins: 0x84,
+                p1: 0x00,
+                p2: 0x00,
+                data: Vec::new(),
+                le: Some(chunk.len() as u32),
+                extended: false,
+            })?;
             if response.data.len() != chunk.len() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -1175,19 +1172,11 @@ impl BackendSession for IssuerSecurityDomainSession {
 
 impl IssuerSecurityDomainSession {
     #[allow(dead_code)] // Used by the ABI backend and SCP03 tests.
-    pub(crate) fn send_apdu(
-        &self,
-        command: &CommandApdu,
-        chained: bool,
-    ) -> Result<ResponseApdu, Error> {
+    pub(crate) fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
         let result = {
             let session = session_guard.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
-            if chained {
-                session.transmit_chained(self.connector.as_ref(), command)
-            } else {
-                session.transmit(self.connector.as_ref(), command)
-            }
+            session.transmit(self.connector.as_ref(), command)
         };
         if result.is_err() {
             *session_guard = None;

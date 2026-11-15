@@ -71,7 +71,10 @@ R-MAC or response-encryption levels that the card does not advertise. S16
 mode is rejected until its 16-byte challenge, cryptogram, and MAC framing is
 implemented.
 
-The APDU codec supports short and extended Case 2, 3, and 4 commands. It
+The `yubikey-apdu` wire codec is shared by the host and virtual card. SCP
+establishment commands have their own specifications alongside the applet
+command sets; the codec itself gives P1/P2 no protocol-specific meaning.
+It supports short and extended Case 2, 3, and 4 commands and
 automatically uses extended encoding when command data exceeds 255 bytes or
 when SCP03 encryption, padding, and C-MAC increase the protected data beyond
 that boundary. Extended responses use the reader transport's advertised
