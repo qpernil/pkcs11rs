@@ -327,10 +327,18 @@ impl Connector for CcidConnector {
     fn apdu_capabilities(&self) -> ApduCapabilities {
         let card = crate::iso7816::atr_apdu_capabilities(&self.atr)
             .unwrap_or(ApduCapabilities::SHORT_ONLY);
-        ApduCapabilities {
-            command_chaining: card.command_chaining,
-            extended: card.extended && self.max_input_length > 261,
-        }
+        let mut limits = if card.extended && self.max_input_length > 261 {
+            ApduCapabilities::EXTENDED
+        } else {
+            ApduCapabilities::SHORT_ONLY
+        };
+        limits.command_chaining = card.command_chaining;
+        limits.max_command_bytes = limits.max_command_bytes.min(self.max_input_length);
+        // CryptoTokenKit reports complete response APDUs, including SW1/SW2.
+        limits.max_response_data = limits
+            .max_response_data
+            .min(u32::try_from(self.max_output_length.saturating_sub(2)).unwrap_or(u32::MAX));
+        limits
     }
 
     fn begin_transport_operation(&self, message: &str) -> Result<(), Error> {

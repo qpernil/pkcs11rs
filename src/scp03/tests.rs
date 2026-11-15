@@ -59,6 +59,7 @@ fn shared_specs_drive_host_commands_and_card_dispatch() {
 
 #[derive(Debug)]
 struct ScriptedConnector {
+    capabilities: crate::iso7816::ApduCapabilities,
     responses: RefCell<VecDeque<Vec<u8>>>,
     commands: RefCell<Vec<Vec<u8>>>,
 }
@@ -66,6 +67,7 @@ struct ScriptedConnector {
 impl ScriptedConnector {
     fn new(responses: Vec<Vec<u8>>) -> Self {
         Self {
+            capabilities: crate::iso7816::ApduCapabilities::EXTENDED,
             responses: RefCell::new(responses.into()),
             commands: RefCell::new(Vec::new()),
         }
@@ -93,6 +95,9 @@ impl Connector for ScriptedConnector {
     }
     fn buffer_size(&self) -> usize {
         4096
+    }
+    fn apdu_capabilities(&self) -> crate::iso7816::ApduCapabilities {
+        self.capabilities
     }
     fn transmit<'a>(
         &self,
@@ -1017,6 +1022,94 @@ fn protected_test_response(
     data.extend_from_slice(&mac[..MAC_LENGTH]);
     data.extend_from_slice(&status.to_be_bytes());
     data
+}
+
+#[test]
+fn transport_length_correction_does_not_advance_scp_state_again() {
+    // These scripted responses check host framing/state only. They make no
+    // claim about the point at which physical firmware produces a 6Cxx.
+    for level in [0x11, 0x33] {
+        for send in [
+            Scp03Session::transmit,
+            Scp03Session::transmit_short,
+            Scp03Session::transmit_oath,
+        ] {
+            let command = CommandApdu::from_spec(
+                &yubikey_apdu::oath::CALCULATE,
+                0,
+                0,
+                vec![0x5a; 16],
+                Some(1),
+            )
+            .unwrap();
+            let mut preview = test_session(level);
+            let first = protected_test_response(&mut preview, &command, &[1, 2], 0x9000);
+            let first_chain = preview.mac_chaining_value;
+            let next = protected_test_response(&mut preview, &command, &[3, 4], 0x9000);
+            let connector = ScriptedConnector::new(vec![hex("6c08"), first, next]);
+            let mut session = test_session(level);
+            assert_eq!(
+                send(&mut session, &connector, &command).unwrap().data,
+                [1, 2]
+            );
+            assert_eq!(session.encryption_counter, 1);
+            assert_eq!(session.mac_chaining_value, first_chain);
+            assert_eq!(
+                send(&mut session, &connector, &command).unwrap().data,
+                [3, 4]
+            );
+            assert_eq!(session.encryption_counter, 2);
+            assert_eq!(session.mac_chaining_value, preview.mac_chaining_value);
+            let commands = connector.commands.borrow();
+            assert_eq!(commands.len(), 3);
+            let mut corrected = commands[0].clone();
+            *corrected.last_mut().unwrap() = 8;
+            assert_eq!(commands[1], corrected);
+            assert_ne!(commands[2], commands[0]);
+        }
+    }
+}
+
+#[test]
+fn reader_limits_fragment_protected_commands_without_another_scp_state_advance() {
+    let command = CommandApdu::from_spec(
+        &yubikey_apdu::oath::CALCULATE,
+        0,
+        0,
+        vec![0x5a; 600],
+        Some(65536),
+    )
+    .unwrap();
+    let protected = test_session(0x33).protect_command(&command).unwrap();
+    let mut preview = test_session(0x33);
+    let first = protected_test_response(&mut preview, &command, &[1, 2], 0x9000);
+    let next = protected_test_response(&mut preview, &command, &[3, 4], 0x9000);
+    let mut connector = ScriptedConnector::new(vec![
+        hex("9000"),
+        hex("9000"),
+        first,
+        hex("9000"),
+        hex("9000"),
+        next,
+    ]);
+    connector.capabilities.max_command_data = 512;
+    connector.capabilities.max_command_bytes = 300;
+    connector.capabilities.max_response_data = 512;
+    let mut session = test_session(0x33);
+    assert_eq!(session.transmit(&connector, &command).unwrap().data, [1, 2]);
+    assert_eq!(session.encryption_counter, 1);
+    assert_eq!(session.transmit(&connector, &command).unwrap().data, [3, 4]);
+    assert_eq!(session.encryption_counter, 2);
+    assert_eq!(session.mac_chaining_value, preview.mac_chaining_value);
+    let commands = connector.commands.borrow();
+    assert_eq!(commands.len(), 6);
+    let mut data = Vec::new();
+    for raw in &commands[..3] {
+        assert!(raw.len() <= 300);
+        data.extend_from_slice(&CommandApdu::decode(raw).unwrap().data);
+    }
+    assert_eq!(data, protected.data);
+    assert_eq!(CommandApdu::decode(&commands[2]).unwrap().le, Some(256));
 }
 
 #[test]

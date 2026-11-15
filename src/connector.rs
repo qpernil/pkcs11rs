@@ -2246,26 +2246,86 @@ fn detect_pcsc_apdu_capabilities(card: &pcsc::Card) -> ApduCapabilities {
     let Ok(status) = card.status2_owned() else {
         return ApduCapabilities::SHORT_ONLY;
     };
-    if pcsc_transport_is_nfc(card, status.atr()) {
-        tracing::debug!(
-            target: "pkcs11rs::discovery",
-            "PCSC transport detected as NFC; using short APDUs"
-        );
-        return ApduCapabilities::SHORT_ONLY;
-    }
-    let card_capabilities = crate::iso7816::atr_apdu_capabilities(status.atr());
     let max_input = card
         .get_attribute_owned(pcsc::Attribute::Maxinput)
         .ok()
         .and_then(|encoded| pcsc_dword(&encoded))
+        .filter(|length| *length != 0)
         .map(|length| length as usize);
-    let reader_supports_extended = status.protocol2() == Some(pcsc::Protocol::T1)
-        && max_input.is_none_or(|length| length > 261);
-    let capabilities = card_capabilities.unwrap_or(ApduCapabilities::SHORT_ONLY);
-    ApduCapabilities {
-        command_chaining: capabilities.command_chaining,
-        extended: capabilities.extended && reader_supports_extended,
+    let max_data = pcsc_max_apdu_data(card);
+    pcsc_apdu_capabilities(
+        crate::iso7816::atr_apdu_capabilities(status.atr()),
+        status.protocol2() == Some(pcsc::Protocol::T1),
+        pcsc_transport_is_nfc(card, status.atr()),
+        max_input,
+        max_data,
+    )
+}
+
+#[cfg(any(test, feature = "native-hardware"))]
+fn pcsc_apdu_capabilities(
+    card: Option<ApduCapabilities>,
+    t1: bool,
+    nfc: bool,
+    max_input: Option<usize>,
+    max_data: Option<u32>,
+) -> ApduCapabilities {
+    let card = card.unwrap_or(ApduCapabilities::SHORT_ONLY);
+    let extended = card.extended
+        && t1
+        && !nfc
+        && max_input.is_none_or(|length| length > 261)
+        && max_data != Some(0);
+    let mut limits = if extended {
+        ApduCapabilities::EXTENDED
+    } else {
+        ApduCapabilities::SHORT_ONLY
+    };
+    limits.command_chaining = card.command_chaining;
+    if let Some(length) = max_input {
+        limits.max_command_bytes = limits.max_command_bytes.min(length);
     }
+    if let Some(length) = max_data.filter(|length| (257..=65536).contains(length)) {
+        limits.max_command_data = limits.max_command_data.min(length as usize);
+        limits.max_response_data = limits.max_response_data.min(length);
+    }
+    limits
+}
+
+// PC/SC Part 10: feature control codes are big-endian, property integers
+// are little-endian. Neither uses the native-endian attribute DWORD codec.
+#[cfg(feature = "native-hardware")]
+fn pcsc_max_apdu_data(card: &pcsc::Card) -> Option<u32> {
+    let mut buffer = [0; 4096];
+    let features = card.control(pcsc::ctl_code(3400), &[], &mut buffer).ok()?;
+    let code = pcsc_tlv_value(features, 0x12)?.try_into().ok()?;
+    // PC/SC DWORD is 32 bits on macOS/Windows and native unsigned long on Linux.
+    let properties = card
+        .control(u32::from_be_bytes(code) as _, &[], &mut buffer)
+        .ok()?;
+    pcsc_max_apdu_data_property(properties)
+}
+
+#[cfg(any(test, feature = "native-hardware"))]
+fn pcsc_max_apdu_data_property(properties: &[u8]) -> Option<u32> {
+    let encoded = pcsc_tlv_value(properties, 0x0a)?.try_into().ok()?;
+    let length = u32::from_le_bytes(encoded);
+    (length == 0 || (257..=65536).contains(&length)).then_some(length)
+}
+
+#[cfg(any(test, feature = "native-hardware"))]
+fn pcsc_tlv_value(mut encoded: &[u8], wanted: u8) -> Option<&[u8]> {
+    let mut result = None;
+    while !encoded.is_empty() {
+        let tag = *encoded.first()?;
+        let length = usize::from(*encoded.get(1)?);
+        let value = encoded.get(2..2 + length)?;
+        if tag == wanted && result.replace(value).is_some() {
+            return None;
+        }
+        encoded = &encoded[2 + length..];
+    }
+    result
 }
 
 const PCSC_CHANNEL_TYPE_NFC: u16 = 0x0100;
@@ -2416,6 +2476,13 @@ impl PcscWorker {
 }
 
 #[cfg(feature = "native-hardware")]
+struct PcscCard {
+    card: pcsc::Card,
+    capabilities: ApduCapabilities,
+    t0: bool,
+}
+
+#[cfg(feature = "native-hardware")]
 fn run_pcsc_worker(
     reader: std::ffi::CString,
     context: pcsc::Context,
@@ -2449,7 +2516,7 @@ fn run_pcsc_worker(
                     let _ = reply.try_send(Err(pcsc::Error::NoSmartcard));
                     continue;
                 };
-                let _ = reply.try_send(transmit_pcsc(current, &command));
+                let _ = reply.try_send(transmit_pcsc(&current.card, &command, current.t0));
             }
         }
     }
@@ -2457,16 +2524,16 @@ fn run_pcsc_worker(
 
 #[cfg(feature = "native-hardware")]
 fn refresh_pcsc_card(
-    card: &mut Option<pcsc::Card>,
+    card: &mut Option<PcscCard>,
     context: &pcsc::Context,
     reader: &std::ffi::CStr,
     connection_epoch: &mut u64,
 ) -> Result<PcscRefresh, pcsc::Error> {
     if let Some(current) = card.as_ref()
-        && current.status2_owned().is_ok()
+        && current.card.status2_owned().is_ok()
     {
         return Ok(PcscRefresh {
-            apdu_capabilities: detect_pcsc_apdu_capabilities(current),
+            apdu_capabilities: current.capabilities,
             connection_epoch: *connection_epoch,
         });
     }
@@ -2482,17 +2549,42 @@ fn refresh_pcsc_card(
         apdu_capabilities: detect_pcsc_apdu_capabilities(&connected),
         connection_epoch: *connection_epoch,
     };
-    *card = Some(connected);
+    let t0 = connected.status2_owned()?.protocol2() == Some(pcsc::Protocol::T0);
+    *card = Some(PcscCard {
+        card: connected,
+        capabilities: refreshed.apdu_capabilities,
+        t0,
+    });
     Ok(refreshed)
 }
 
 #[cfg(feature = "native-hardware")]
-fn transmit_pcsc(card: &pcsc::Card, command: &[u8]) -> Result<Vec<u8>, pcsc::Error> {
+fn transmit_pcsc(card: &pcsc::Card, command: &[u8], t0: bool) -> Result<Vec<u8>, pcsc::Error> {
+    let command = if t0 {
+        pcsc_t0_command(command).ok_or(pcsc::Error::InvalidValue)?
+    } else {
+        command
+    };
     let mut response = vec![0u8; pcsc::MAX_BUFFER_SIZE_EXTENDED];
     let received = card.transmit(command, &mut response)?;
     let length = received.len();
     response.truncate(length);
     Ok(response)
+}
+
+// Native PC/SC T=0 transmits a case 4 command as case 3. Response retrieval
+// remains above this boundary; removing Le cannot change an SCP command MAC.
+#[cfg(any(test, feature = "native-hardware"))]
+fn pcsc_t0_command(encoded: &[u8]) -> Option<&[u8]> {
+    let command = yubikey_apdu::CommandApdu::decode(encoded).ok()?;
+    if command.extended {
+        return None;
+    }
+    Some(if !command.data.is_empty() && command.le.is_some() {
+        &encoded[..encoded.len() - 1]
+    } else {
+        encoded
+    })
 }
 
 const YUBIHSM_MAX_MESSAGE_SIZE: usize = 8192;
@@ -4181,6 +4273,81 @@ mod tests {
         assert_eq!(connector.connection_epoch(), 2);
         assert_eq!(connector.serial, "11111111");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn pcsc_t0_strips_only_case4_le_and_rejects_extended_commands() {
+        for encoded in [
+            vec![0, 0x84, 0, 0],
+            vec![0, 0x84, 0, 0, 8],
+            vec![4, 0x84, 0, 0, 2, 0x11, 0x22],
+        ] {
+            assert_eq!(pcsc_t0_command(&encoded), Some(encoded.as_slice()));
+        }
+        let case4 = [4, 0x84, 0, 0, 2, 0x11, 0x22, 8];
+        assert_eq!(pcsc_t0_command(&case4), Some(&case4[..7]));
+        assert_eq!(pcsc_t0_command(&[0, 0x84, 0, 0, 0, 0, 8]), None);
+        assert_eq!(pcsc_t0_command(&[0, 0x84, 0]), None);
+    }
+
+    #[test]
+    fn pcsc_part10_uses_distinct_feature_and_property_byte_orders() {
+        let features = [0x12, 4, 0x42, 0, 0, 1];
+        assert_eq!(
+            u32::from_be_bytes(pcsc_tlv_value(&features, 0x12).unwrap().try_into().unwrap()),
+            0x42000001
+        );
+        assert_eq!(
+            pcsc_max_apdu_data_property(&[0x0a, 4, 0, 4, 0, 0]),
+            Some(1024)
+        );
+        assert_eq!(pcsc_max_apdu_data_property(&[0x0a, 4, 0, 0, 0, 0]), Some(0));
+        for value in [1u32, 256, 65537] {
+            let mut property = vec![0x0a, 4];
+            property.extend_from_slice(&value.to_le_bytes());
+            assert_eq!(pcsc_max_apdu_data_property(&property), None);
+        }
+    }
+
+    #[test]
+    fn pcsc_part10_rejects_truncated_duplicate_and_wrong_length_properties() {
+        for property in [
+            vec![],
+            vec![0x0a],
+            vec![0x0a, 4, 0],
+            vec![0x0a, 1, 0],
+            vec![0x0a, 4, 0, 4, 0, 0, 0x0a, 4, 0, 8, 0, 0],
+            vec![0x0a, 4, 0, 4, 0, 0, 0x08],
+        ] {
+            assert_eq!(pcsc_max_apdu_data_property(&property), None);
+        }
+        assert_eq!(
+            pcsc_max_apdu_data_property(&[0x08, 1, 0x55, 0x0a, 4, 0, 4, 0, 0]),
+            Some(1024)
+        );
+    }
+
+    #[test]
+    fn pcsc_apdu_limits_combine_card_protocol_and_reader_capabilities() {
+        let card = Some(ApduCapabilities::EXTENDED);
+        let limits = pcsc_apdu_capabilities(card, true, false, Some(3062), Some(1024));
+        assert!(limits.extended);
+        assert_eq!(limits.max_command_bytes, 3062);
+        assert_eq!(limits.max_command_data, 1024);
+        assert_eq!(limits.max_response_data, 1024);
+        assert_eq!(
+            pcsc_apdu_capabilities(card, true, false, None, None),
+            ApduCapabilities::EXTENDED
+        );
+        for (t1, nfc, max_input, max_data) in [
+            (false, false, None, None),
+            (true, true, None, None),
+            (true, false, Some(261), None),
+            (true, false, None, Some(0)),
+        ] {
+            assert!(!pcsc_apdu_capabilities(card, t1, nfc, max_input, max_data).extended);
+        }
+        assert!(!pcsc_apdu_capabilities(None, true, false, None, Some(65536)).extended);
     }
 
     #[test]

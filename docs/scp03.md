@@ -91,6 +91,61 @@ verifying its MAC and decrypting it. This matches Yubico's
 and [command chaining transform](https://github.com/Yubico/Yubico.NET.SDK/blob/53f2c7cbf1ae3175c41badfc211ef66e5a35d4b1/Yubico.YubiKey/src/Yubico/YubiKey/Pipelines/CommandChainingTransform.cs).
 The separate GlobalPlatform P1-based chaining mechanism is not implemented.
 
+ISO `6Cxx` length correction belongs to the transport below SCP. A bare
+`6Cxx` permits one retransmission of the wire APDU with corrected `Le`
+(`00` means 256). The header, Lc encoding, ciphertext, and command MAC remain
+unchanged. The SCP session protects the logical command once; length correction
+does not encrypt again, advance its counter or MAC chain again, or negotiate a
+new channel. `Le` itself is neither encrypted nor included in the C-MAC.
+A second `6Cxx` is returned without further correction. Commands without Le,
+intermediate chained commands, transport failures, and malformed error payloads
+do not trigger correction. Response authentication failures are not retried.
+Error statuses such as `6Cxx` carry neither response data nor R-MAC, as required
+by [SCP03 section 6.2.5](https://globalplatform.org/wp-content/uploads/2014/07/GPC_2.2_D_SCP03_v1.1.1.pdf).
+
+Both `61xx` response continuation and `6Cxx` length correction are independent
+of T=0/T=1 in [ISO 7816-4:2005 section 5.1.3](https://www.freecalypso.org/pub/GSM/ISO7816/ISO_7816-4_2005.pdf). Their additional role in T=0
+APDU-to-TPDU mapping does not restrict their use to T=0. A reader or driver may
+perform that mapping internally; pkcs11rs handles statuses that reach its ISO
+transport. See [APDU, TPDU and PC/SC protocols](ccid.md#apdu-tpdu-and-pcsc-protocols).
+A status alone does not establish where a card checked Le or whether SCP state
+was consumed. [GlobalPlatform v2.3 Appendix A.1, p. 213](https://globalplatform.org/wp-content/uploads/2018/03/GPC_Specification_v2.3.pdf#page=213) explicitly describes a
+T=0 case 2 command whose prepared response is stored before `6Cxx`; the
+corrected command retrieves the stored response through the runtime. Treating
+every `6Cxx` as a new logical SCP command is therefore unsupported.
+
+Correction applies to the individual wire exchange. A `6Cxx` from GET RESPONSE
+or OATH SEND REMAINING corrects that continuation's Le; it does not resubmit the
+application command. A correction on the final command fragment does not repeat
+preceding fragments. Extended length encoding is retained when Le shrinks,
+preserving any MAC-covered Lc bytes. Advertised reader limits can reduce outer
+Le or require ISO command fragmentation, but do not cause new SCP protection.
+Explicit extended commands retain their length form; an unsupported form is
+rejected rather than silently changing MAC input. T=0 case 4's trailing Le is
+removed only at the native PC/SC boundary, below SCP and ISO response handling.
+Host regression tests check unchanged
+protected bytes, bounded correction, continuations, and a single SCP state
+advance followed by a normally authenticated next response. Scripted responses
+check host behavior; they do not establish physical card processing order.
+
+Physical qualification on 2026-11-15 used a T=1 YubiKey 5.7.4 with factory
+SCP03 and SCP11b for public reads from PIV, OpenPGP, HSM Auth, OATH, Management,
+and the Issuer SD with `Le` 1, 2, and 8. All 72 supported logical trials and
+their following requests returned `9000`; no `6Cxx` was produced. These trials
+verify those reads and channel continuity, but do not qualify length correction
+on physical firmware. FIDO selection was unavailable in that configuration.
+The SCP key inventory was preserved. Raw wire capture covered 36 trials across
+those six applets and both SCP protocols. Every initial response contained
+exactly the requested 1, 2, or 8 protected bytes and a `61xx` continuation.
+For example, PIV GET VERSION returns three plaintext bytes: R-ENC pads/encrypts
+them to 16 bytes and R-MAC adds eight bytes, giving 24 protected response bytes.
+With `Le=1`, the card returns one byte plus `6117`, then 23 bytes through GET
+RESPONSE. This firmware honors Le as a limit on protected response data; SDK
+response collection produces the complete logical response. The two status
+bytes are excluded from Le. Command encryption alone does not imply response
+encryption: the counted field includes whichever response protection is enabled
+by the channel's security level.
+
 ISO response chaining via `61xx` is collected with unprotected GET RESPONSE
 commands. SCP03 response decryption and R-MAC verification are then performed
 once over the reassembled non-segmented response. A chain is limited to 256

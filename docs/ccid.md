@@ -64,6 +64,12 @@ returns.
 Objective-C objects retained for card I/O stay confined to the worker that
 created them.
 
+The connector combines the card's ATR APDU capabilities with CryptoTokenKit's
+`maxInputLength` and `maxOutputLength`. These slot limits cover complete APDUs;
+the response-data limit excludes the two status bytes. Each command stays
+within the slot's input limit, and outer Le is bounded by its response-data
+limit before the shared ISO transport collects any `61xx` continuations.
+
 CryptoTokenKit has no PC/SC-style exclusive reader-open mode. `makeSmartCard()`
 creates an ordinary card object; exclusivity begins with `beginSession()`.
 While pkcs11rs retains that session, CryptoTokenKit queues session requests
@@ -160,7 +166,94 @@ TLV contents and authentication/state policy remain with that applet.
 Applet clients choose protocol-specific behavior: OATH requests `A5` response
 continuation, and CTAP explicitly marks `9100` keepalive responses as protected
 by SCP. Other applets do not inherit those meanings. Empty extended `Lc` is
-rejected by the generic decoder.
+rejected by the generic decoder. The ISO transport permits one bare `6Cxx`
+length correction per wire APDU, including protected commands and response
+continuations. It changes only Le, retaining the existing header, length form,
+ciphertext and MAC. SCP state advances once per logical command, with no
+additional protection step for length correction. Continuation correction and
+correction of a final command fragment do not resubmit the complete application
+operation. See [SCP length correction](scp03.md).
+
+## APDU, TPDU and PC/SC protocols
+
+An APDU is the application command (`CLA INS P1 P2 [Lc data] [Le]`) or its
+response (`[data] SW1 SW2`). A TPDU is a transmission-protocol unit used to carry
+that application exchange. T=0 and T=1 describe the card transmission protocol;
+APDU versus TPDU exchange describes how much of that protocol a reader handles.
+These are separate properties, specified in
+[CCID sections 3.2 and 5.1](https://www.usb.org/sites/default/files/DWG_Smart-Card_CCID_Rev110.pdf).
+
+T=0 is a byte-oriented protocol with a single P3 length/direction in each
+command TPDU. A case 2 command requests data and can receive it directly. A
+case 4 command sends data and requests response data; mapping it onto T=0
+requires a separate response retrieval exchange, commonly `61xx` followed by
+GET RESPONSE. T=1 carries APDUs in blocks and can transport both command and
+response data without that T=0 mapping. T=1 block chaining and link retries are
+handled below the application and are distinct from CLA command chaining and
+`61xx` APDU response continuation.
+
+A CCID reader advertises character, TPDU, short APDU, or short-and-extended APDU
+exchange in its USB `dwFeatures` descriptor. At TPDU level the host driver does
+more protocol work; at APDU level the reader performs the APDU-to-TPDU mapping.
+For example, CCID section 7.3 shows a T=0 reader consuming `6Cxx` and resending
+the corrected header before returning the response to the host. Short-APDU-only
+reader limits are independent of whether the card supports T=1.
+
+[PC/SC Part 10, `dwMaxAPDUDataSize`](https://pcscworkgroup.com/Download/Specifications/pcsc10_v2.02.09.pdf)
+provides the reader-and-driver APDU data limit through `FEATURE_GET_TLV_PROPERTIES`
+when supported: zero means short APDUs only, and 257 through 65536 indicate an
+extended data limit. It excludes APDU headers. CCID's `dwMaxCCIDMessageLength`
+instead limits one CCID message, including its ten-byte header; exchange level
+and CCID message chaining affect how that relates to a complete APDU. USB
+endpoint packet size and T=1 IFSC/IFSD block sizes are not maximum APDU sizes.
+
+PC/SC exposes the negotiated protocol through `SCardConnect`/card status and
+uses the matching T=0/T=1 PCI for
+[`SCardTransmit`](https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardtransmit).
+This does not expose individual T=1 blocks or guarantee that every T=0 mapping
+step is hidden. The reader, driver, and any higher-level client library determine
+which procedure exchanges reach the caller. pkcs11rs queries the negotiated
+protocol, card ATR capabilities, `SCARD_ATTR_MAXINPUT`, and Part 10's optional
+`dwMaxAPDUDataSize`. Reader properties are cached for the connection and
+queried again after reconnecting. Missing or malformed optional properties
+fall back to the ATR/protocol and available Maxinput information; they do not
+establish a precise reader limit.
+
+T=0 and NFC use short APDUs. T=1 permits extended encoding only when the card
+advertises it and the available reader properties do not prohibit it. Advertised
+command-data and complete-command limits bound each wire APDU. Oversized
+commands use short ISO CLA chaining when the card supports it; unsupported
+shapes fail before transmission. The transport reduces outer Le to the reader's
+response-data limit and collects `61xx` continuations. It preserves explicit
+extended encoding and any MAC-covered Lc bytes rather than silently converting
+a protected command to another length form. Forced-short calls retain the
+reader's size and command-chaining constraints.
+
+At the native PC/SC boundary, T=0 case 4 omits trailing Le while preserving
+the header, Lc, command data and MAC. Case 1/2/3 commands retain their encoding;
+extended commands are rejected under T=0.
+[PC/SC Part 3 sections 3.1.2.1.2 and 4.3.2.1](https://pcscworkgroup.com/Download/Specifications/pcsc3_v2.01.09.pdf)
+require support for short cases 1/2/3 under T=0, with response retrieval owned
+by the application/service provider. Direct case 4 support is not required.
+[OpenJDK's PC/SC adapter](https://github.com/openjdk/jdk/blob/master/src/java.smartcardio/share/classes/sun/security/smartcardio/ChannelImpl.java)
+implements the same case 4 adaptation. Visible `61xx`/`6Cxx` processing remains
+in the ISO transport above that boundary, without another SCP protection step.
+The local receive buffer uses `pcsc::MAX_BUFFER_SIZE_EXTENDED`; that allocation
+is not evidence of the reader or card's response capacity. Full T=0
+interoperability has not been hardware-qualified here.
+
+A read-only PC/SC capability query on the connected YubiKey reader on
+2026-11-15 reported T=1 and `dwMaxAPDUDataSize=3062`; `SCARD_ATTR_MAXINPUT`
+was unsupported. This qualifies the optional property-discovery path, not the
+card/applet's maximum accepted command size. Reader/driver limits do not
+supersede smaller application or card limits.
+
+[ISO 7816-4:2005 section 5.1.3](https://www.freecalypso.org/pub/GSM/ISO7816/ISO_7816-4_2005.pdf) defines `61xx` and `6Cxx` independently of the
+transmission protocol. Both are accepted under T=0 and T=1: `61xx` requests
+retrieval of remaining response data, whereas `6Cxx` permits the same command
+with corrected Le. Neither reports reader buffer capacity or establishes SCP
+processing order. The qualified physical YubiKey 5.7.4 connection used T=1 and
+returned `61xx` for small Le on protected public reads; no `6Cxx` was observed.
 
 ## Login-selected secure channels
 
