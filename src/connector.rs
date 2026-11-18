@@ -2299,8 +2299,9 @@ fn pcsc_max_apdu_data(card: &pcsc::Card) -> Option<u32> {
     let mut buffer = [0; 4096];
     let features = card.control(pcsc::ctl_code(3400), &[], &mut buffer).ok()?;
     let code = pcsc_tlv_value(features, 0x12)?.try_into().ok()?;
+    // PC/SC DWORD is 32 bits on macOS/Windows and native unsigned long on Linux.
     let properties = card
-        .control(u32::from_be_bytes(code), &[], &mut buffer)
+        .control(u32::from_be_bytes(code) as _, &[], &mut buffer)
         .ok()?;
     pcsc_max_apdu_data_property(properties)
 }
