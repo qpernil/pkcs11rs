@@ -55,30 +55,30 @@ hidapi = { version = "2.6.6", optional = true, default-features = false, feature
 minicbor = { version = "2.3.1", features = ["alloc"] }
 pcsc = { version = "2.9.0", optional = true }
 pkcs11rs-local-hardware = { path = "crates/pkcs11rs-local-hardware", optional = true }
-ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
-flate2 = "1.1.9"
+ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+flate2 = "1.1.11"
 unicode-normalization = "0.1.26"
 virtual-yubikey-core = { path = "../virtual-yubikey/crates/virtual-yubikey-core", optional = true }
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core", optional = true }
 software-key-core = { path = "../software-key-core", features = ["x509-validation"] }
 platform-credential = { path = "crates/platform-credential" }
 yubihsm-auth-client = { path = "crates/yubihsm-auth-client" }
-zeroize = "1.9.0"
-const-oid = "0.10.2"
+zeroize = "1.9.2"
+const-oid = "0.10.3"
 der = { version = "0.8.3", features = ["alloc", "derive", "std"] }
 p256 = { version = "0.14.0", optional = true, default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "std"] }
 rsa = { version = "0.10.0", default-features = false, features = ["encoding", "getrandom", "pkcs1v15", "std"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pki-types = "1.15.1"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+rustls-pki-types = "1.16.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 sec1 = { version = "0.8.1", features = ["alloc", "std"] }
-spki = { version = "0.8.0", features = ["alloc", "std"] }
+spki = { version = "0.8.1", features = ["alloc", "std"] }
 subtle = "2.6.1"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.22"
-x509-cert = { version = "0.3.0", default-features = false, features = ["std"] }
+tracing-subscriber = "0.3.23"
+x509-cert = { version = "0.3.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 ed25519-dalek = "3.0.0"
@@ -86,12 +86,12 @@ ml-dsa = { version = "0.1.2", features = ["zeroize"] }
 p256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "pkcs8", "precomputed-tables", "std"] }
 signature = "3.0.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
-x509-cert = { version = "0.3.0", default-features = false, features = ["builder", "std"] }
+x509-cert = { version = "0.3.1", default-features = false, features = ["builder", "std"] }
 virtual-yubihsm-core = { path = "../virtual-yubihsm/crates/virtual-yubihsm-core" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 block2 = "0.6.2"
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-crypto-token-kit = { version = "0.3.2", default-features = false, features = ["TKError", "TKSmartCard", "TKSmartCardATR", "TKSmartCardSlotNFCSession", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSError", "NSString"] }
 

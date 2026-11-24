@@ -9,4 +9,4 @@ publish = false
 
 [dependencies]
 yubikey-apdu = { path = "../../../virtual-yubikey/crates/yubikey-apdu" }
-zeroize = "1.9.0"
+zeroize = "1.9.2"
