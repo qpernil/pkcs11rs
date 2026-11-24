@@ -608,6 +608,7 @@ jobs:
       - name: Install native dependencies
         run: |
           brew install pkg-config opensc libp11 openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
 
       - name: Run OpenSC and OpenSSL provider integration tests
         run: |
